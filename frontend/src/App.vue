@@ -15,6 +15,9 @@
       <History v-else-if="page === 'history'" />
       <Groups v-else />
     </main>
+    <div class="toast-container">
+      <div v-for="t in toasts" :key="t.id" :class="['toast', t.type]">{{ t.message }}</div>
+    </div>
   </div>
 </template>
 
@@ -23,7 +26,9 @@ import { ref } from 'vue'
 import Dashboard from './views/Dashboard.vue'
 import History from './views/History.vue'
 import Groups from './views/Groups.vue'
+import { useToast } from './composables/toast.js'
 const page = ref('dashboard')
+const { toasts } = useToast()
 </script>
 
 <style>
@@ -38,4 +43,10 @@ nav { display: flex; gap: 8px; }
 .nav-btn:hover { background: #333; color: #fff; }
 .nav-btn.active { background: #fe2c55; color: #fff; }
 .main { max-width: 1200px; margin: 0 auto; padding: 24px; }
+.toast-container { position: fixed; bottom: 24px; right: 24px; display: flex; flex-direction: column; gap: 8px; z-index: 200; }
+.toast { padding: 10px 18px; border-radius: 8px; font-size: 13px; color: #fff; max-width: 320px; animation: toast-in 0.2s ease; }
+.toast.info    { background: #2a2a2a; border: 1px solid #444; }
+.toast.success { background: rgba(52,211,153,0.2); border: 1px solid rgba(52,211,153,0.4); color: #34d399; }
+.toast.error   { background: rgba(254,44,85,0.2);  border: 1px solid rgba(254,44,85,0.4);  color: #fe2c55; }
+@keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 </style>

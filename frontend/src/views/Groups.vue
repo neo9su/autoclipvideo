@@ -150,22 +150,21 @@
       <div v-if="publishModal.loading" class="modal-loading">生成中，请稍候…</div>
       <template v-else>
         <div class="modal-field">
-          <label>标题</label>
-          <div class="modal-text">{{ publishModal.title }}</div>
+          <label>标题 <span class="field-hint">≤20字</span></label>
+          <input v-model="publishModal.title" maxlength="20" class="modal-input" />
         </div>
         <div class="modal-field">
-          <label>文案</label>
-          <div class="modal-text">{{ publishModal.caption }}</div>
+          <label>文案 <span class="field-hint">≤150字</span></label>
+          <textarea v-model="publishModal.caption" maxlength="150" rows="4" class="modal-input" />
         </div>
         <div class="modal-field">
-          <label>话题标签</label>
-          <div class="modal-tags">
-            <span v-for="tag in publishModal.hashtags" :key="tag" class="tag">#{{ tag }}</span>
-          </div>
+          <label>话题标签 <span class="field-hint">用逗号分隔</span></label>
+          <input v-model="publishModal.hashtagsText" class="modal-input" />
         </div>
         <div class="modal-footer">
           <button class="btn-action" @click="publishModal = null">关闭</button>
           <button class="btn-action teal" @click="doPreparePublish({ id: publishModal.groupId })">重新生成</button>
+          <button class="btn-action" @click="doSaveDraft">保存修改</button>
           <button class="btn-action purple" @click="copyPublishText(publishModal)">复制文案</button>
         </div>
       </template>
@@ -175,7 +174,8 @@
 
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
-import { getGroups, getGroup, getRooms, mergeGroup, createGroup, updateGroup, reassignRecording, preparePublish, createWS } from '../api.js'
+import { getGroups, getGroup, getRooms, mergeGroup, createGroup, updateGroup, reassignRecording, preparePublish, savePublishDraft, createWS } from '../api.js'
+import { useToast } from '../composables/toast.js'
 
 const groups = ref([])
 const rooms = ref([])
@@ -184,6 +184,8 @@ const detail = ref(null)
 const detailLoading = ref(false)
 const apiBase = import.meta.env.DEV ? 'http://localhost:8899' : ''
 let ws = null
+
+const { show } = useToast()
 
 // Group create/edit modal: { mode: 'create'|'edit', id?, room_id, label, wig_model, wig_color }
 const groupModal = ref(null)
@@ -215,9 +217,10 @@ async function toggleDetail(id) {
 async function doMerge(g) {
   try {
     await mergeGroup(g.id)
+    show('合并任务已提交', 'info')
     await load()
   } catch (e) {
-    alert(e.message || '合并失败')
+    show(e.message || '合并失败', 'error')
   }
 }
 
@@ -256,7 +259,7 @@ async function saveGroupModal() {
     groupModal.value = null
     await load()
   } catch (e) {
-    alert(e.message || '保存失败')
+    show(e.message || '保存失败', 'error')
   } finally {
     groupModalSaving.value = false
   }
@@ -272,7 +275,7 @@ async function doReassign(recordingId, newGroupId) {
 }
 
 async function doPreparePublish(g) {
-  publishModal.value = { groupId: g.id, title: '', caption: '', hashtags: [], loading: true }
+  publishModal.value = { groupId: g.id, title: '', caption: '', hashtagsText: '', loading: true }
   try {
     const data = await preparePublish(g.id)
     publishModal.value = {
@@ -282,33 +285,54 @@ async function doPreparePublish(g) {
       hashtagsText: (data.hashtags || []).join(', '),
       loading: false,
     }
+    show('发布文案生成完成', 'success')
     await load()
   } catch (e) {
-    alert(e.message || '生成内容失败')
+    show(e.message || '生成内容失败', 'error')
     publishModal.value = null
   }
 }
 
 function openPublishModal(g) {
+  const tags = g.post_hashtags ? JSON.parse(g.post_hashtags) : []
   publishModal.value = {
     groupId: g.id,
     title: g.post_title || '',
     caption: g.post_caption || '',
-    hashtags: g.post_hashtags ? JSON.parse(g.post_hashtags) : [],
+    hashtagsText: tags.join(', '),
     loading: false,
   }
 }
 
 function copyPublishText(m) {
-  const tags = (m.hashtags || []).map(t => `#${t}`).join(' ')
+  const tags = m.hashtagsText.split(',').map(s => s.trim()).filter(Boolean).map(t => `#${t}`).join(' ')
   const text = `${m.title}\n\n${m.caption}\n\n${tags}`
   navigator.clipboard.writeText(text)
+  show('文案已复制到剪贴板', 'success')
+}
+
+async function doSaveDraft() {
+  const m = publishModal.value
+  if (!m) return
+  try {
+    const hashtags = m.hashtagsText.split(',').map(s => s.trim()).filter(Boolean)
+    await savePublishDraft(m.groupId, { title: m.title, caption: m.caption, hashtags })
+    show('文案已保存', 'success')
+    await load()
+  } catch (e) {
+    show(e.message || '保存失败', 'error')
+  }
 }
 
 onMounted(() => {
   load()
   ws = createWS((msg) => {
-    if (['transcribed', 'clipped', 'merged'].includes(msg.type)) load()
+    if (msg.type === 'merged') {
+      show('视频合并完成', 'success')
+      load()
+    } else if (['transcribed', 'clipped'].includes(msg.type)) {
+      load()
+    }
   })
   // Poll every 15s for merge status updates
   const t = setInterval(load, 15000)
@@ -369,7 +393,7 @@ onUnmounted(() => ws?.close())
 .modal-field { margin-bottom: 16px; }
 .modal-field label { display: block; font-size: 12px; color: #888; margin-bottom: 6px; }
 .field-hint { color: #555; margin-left: 4px; }
-.modal-text { background: #111; border: 1px solid #2a2a2a; border-radius: 6px; padding: 10px 12px; font-size: 13px; color: #ccc; line-height: 1.6; white-space: pre-wrap; }
-.modal-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.modal-input { width: 100%; background: #111; border: 1px solid #333; color: #ccc; border-radius: 6px; padding: 8px 10px; font-size: 13px; box-sizing: border-box; resize: vertical; font-family: inherit; }
+.modal-input:focus { outline: none; border-color: #555; }
 .modal-footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
 </style>

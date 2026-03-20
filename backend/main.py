@@ -150,18 +150,26 @@ async def list_recordings(room_id: int):
 
 
 @app.get("/api/recordings")
-async def list_all_recordings():
+async def list_all_recordings(page: int = 1, limit: int = 50):
+    offset = (page - 1) * limit
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT COUNT(*) FROM recordings") as cur:
+            (total,) = await cur.fetchone()
         async with db.execute("""
             SELECT r.*, rm.name as room_name
             FROM recordings r
             JOIN rooms rm ON r.room_id = rm.id
             ORDER BY r.start_time DESC
-            LIMIT 100
-        """) as cur:
+            LIMIT ? OFFSET ?
+        """, (limit, offset)) as cur:
             rows = await cur.fetchall()
-    return [dict(r) for r in rows]
+    return {
+        "items": [dict(r) for r in rows],
+        "total": total,
+        "page": page,
+        "pages": max(1, (total + limit - 1) // limit),
+    }
 
 
 # ── Subtitles ────────────────────────────────────────────────────────────────
@@ -399,6 +407,75 @@ async def update_group(group_id: int, body: GroupUpdate):
         await db.commit()
     return {"id": group_id, "label": body.label,
             "wig_model": body.wig_model, "wig_color": body.wig_color}
+
+
+class PublishDraft(BaseModel):
+    title: str
+    caption: str
+    hashtags: list[str]
+
+
+@app.patch("/api/groups/{group_id}/publish-draft")
+async def save_publish_draft(group_id: int, body: PublishDraft):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT id FROM clip_groups WHERE id = ?", (group_id,)) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(status_code=404, detail="Group not found")
+        await db.execute(
+            """UPDATE clip_groups SET
+               post_title = ?, post_caption = ?, post_hashtags = ?,
+               publish_status = MAX(publish_status, 1)
+               WHERE id = ?""",
+            (body.title[:20], body.caption[:150],
+             json.dumps(body.hashtags, ensure_ascii=False), group_id),
+        )
+        await db.commit()
+    return {"group_id": group_id, "saved": True}
+
+
+@app.delete("/api/recordings/{recording_id}/local-file", status_code=204)
+async def delete_local_file(recording_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM recordings WHERE id = ?", (recording_id,)) as cur:
+            rec = await cur.fetchone()
+    if not rec:
+        raise HTTPException(status_code=404, detail="Recording not found")
+    if rec["synced"] != 1:
+        raise HTTPException(status_code=409, detail="Not synced yet")
+    if rec["transcribed"] == 1 or rec["clipped"] == 1:
+        raise HTTPException(status_code=409, detail="Processing in progress")
+    filepath = os.path.join(os.path.dirname(__file__), "..", "recordings", rec["filename"])
+    if os.path.exists(filepath):
+        os.unlink(filepath)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE recordings SET local_deleted = 1 WHERE id = ?", (recording_id,))
+        await db.commit()
+
+
+@app.post("/api/cleanup/local-files")
+async def bulk_cleanup_local_files():
+    """Delete local MP4s for recordings that are fully processed."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT * FROM recordings
+            WHERE synced = 1
+              AND transcribed IN (2, -1)
+              AND clipped IN (2, -1)
+              AND local_deleted = 0
+        """) as cur:
+            candidates = await cur.fetchall()
+    deleted = 0
+    for rec in candidates:
+        filepath = os.path.join(os.path.dirname(__file__), "..", "recordings", rec["filename"])
+        if os.path.exists(filepath):
+            os.unlink(filepath)
+            deleted += 1
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("UPDATE recordings SET local_deleted = 1 WHERE id = ?", (rec["id"],))
+            await db.commit()
+    return {"deleted": deleted, "total_eligible": len(candidates)}
 
 
 @app.patch("/api/recordings/{recording_id}/group")
