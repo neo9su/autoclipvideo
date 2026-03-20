@@ -4,7 +4,7 @@ import aiosqlite
 from datetime import datetime
 from typing import Dict
 
-from recorder import RoomRecorder, check_live_status, get_stream_url
+from recorder import RoomRecorder, get_stream_url
 from sync import sync_file
 from db import DB_PATH
 
@@ -57,6 +57,7 @@ class MonitorManager:
             "recording": recorder.recording if recorder else False,
             "current_segment": recorder.current_file if recorder else None,
             "segment_start": recorder.segment_start.isoformat() if (recorder and recorder.segment_start) else None,
+            "session_start": recorder.session_start.isoformat() if (recorder and recorder.session_start) else None,
         }
 
     async def _on_segment_start(self, room_id: int, filename: str, segment_index: int):
@@ -104,30 +105,27 @@ class MonitorManager:
         logger.info(f"[{name}] Monitor started")
         while True:
             try:
-                is_live = await check_live_status(url)
+                stream_url = await get_stream_url(url)
+                is_live = stream_url is not None
                 prev_status = self._room_status.get(room_id, "unknown")
 
                 if is_live:
                     self._room_status[room_id] = "live"
                     recorder = self._recorders.get(room_id)
                     if not recorder or not recorder.recording:
-                        # Start recording
-                        stream_url = await get_stream_url(url)
-                        if stream_url:
-                            recorder = RoomRecorder(
-                                room_id, name, url,
-                                on_segment_done=self._on_segment_done,
-                                on_segment_start=self._on_segment_start,
-                            )
-                            self._recorders[room_id] = recorder
-                            await recorder.start(stream_url)
-                            logger.info(f"[{name}] Recording started")
+                        recorder = RoomRecorder(
+                            room_id, name, url,
+                            on_segment_done=self._on_segment_done,
+                            on_segment_start=self._on_segment_start,
+                        )
+                        self._recorders[room_id] = recorder
+                        await recorder.start(stream_url)
+                        logger.info(f"[{name}] Recording started")
                 else:
                     self._room_status[room_id] = "offline"
-                    recorder = self._recorders.get(room_id)
+                    recorder = self._recorders.pop(room_id, None)
                     if recorder and recorder.recording:
                         await recorder.stop()
-                        self._recorders.pop(room_id, None)
                         logger.info(f"[{name}] Stream ended, recording stopped")
 
                 if prev_status != self._room_status[room_id]:

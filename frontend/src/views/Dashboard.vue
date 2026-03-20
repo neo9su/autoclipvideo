@@ -44,7 +44,7 @@
             <span class="dot"></span> 录制中
           </div>
           <div class="segment-name">{{ room.current_segment }}</div>
-          <div class="segment-dur">已录 {{ formatDuration(room.segment_start, null) }}</div>
+          <div class="segment-dur">已录 {{ formatDuration(room.session_start, null) }}</div>
         </div>
         <div class="room-info" v-else>
           <div class="offline-info">未在录制</div>

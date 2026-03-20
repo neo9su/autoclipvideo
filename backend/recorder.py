@@ -22,6 +22,7 @@ class RoomRecorder:
         self.on_segment_start = on_segment_start  # async callback(room_id, filename, segment_index)
         self.recording = False
         self.current_file: Optional[str] = None
+        self.session_start: Optional[datetime] = None
         self.segment_start: Optional[datetime] = None
         self.segment_index = 0
         self._proc: Optional[asyncio.subprocess.Process] = None
@@ -35,6 +36,7 @@ class RoomRecorder:
         if self.recording:
             return
         self.recording = True
+        self.session_start = datetime.now()
         self._task = asyncio.create_task(self._record_loop(stream_url))
 
     async def stop(self):
@@ -54,6 +56,7 @@ class RoomRecorder:
         self._proc = None
         self._task = None
         self.current_file = None
+        self.session_start = None
         self.segment_start = None
 
     async def _record_loop(self, stream_url: str):
