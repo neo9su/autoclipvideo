@@ -3,10 +3,11 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
-from typing import Set
+from typing import Optional, Set
 
 import aiosqlite
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -14,9 +15,10 @@ from fastapi.staticfiles import StaticFiles
 from db import init_db, DB_PATH
 from models import RoomCreate, Room, Recording
 from monitor import MonitorManager
-from transcribe import poll_transcriptions
+from transcribe import poll_transcriptions, _run_editor
 from analyzer import merge_group
 from publisher import generate_publish_content
+from sync import sync_file
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -297,6 +299,119 @@ async def download_merged(group_id: int):
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="File missing")
     return FileResponse(path, media_type="video/mp4", filename=group["merged_filename"])
+
+
+# ── Retry ────────────────────────────────────────────────────────────────────
+
+@app.post("/api/recordings/{recording_id}/retry-transcribe")
+async def retry_transcribe(recording_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM recordings WHERE id = ?", (recording_id,)) as cur:
+            rec = await cur.fetchone()
+    if not rec:
+        raise HTTPException(status_code=404, detail="Recording not found")
+    filepath = os.path.join(os.path.dirname(__file__), "..", "recordings", rec["filename"])
+    if not os.path.exists(filepath):
+        raise HTTPException(status_code=404, detail="Recording file missing on disk")
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE recordings SET transcribed = 0, gpu_job_id = NULL WHERE id = ?",
+            (recording_id,)
+        )
+        await db.commit()
+    job_id = await sync_file(filepath, rec["room_id"])
+    if job_id:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE recordings SET transcribed = 1, synced = 1, gpu_job_id = ? WHERE id = ?",
+                (job_id, recording_id)
+            )
+            await db.commit()
+        return {"recording_id": recording_id, "transcribed": 1}
+    raise HTTPException(status_code=500, detail="Failed to submit transcription job")
+
+
+@app.post("/api/recordings/{recording_id}/retry-clip")
+async def retry_clip(recording_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM recordings WHERE id = ?", (recording_id,)) as cur:
+            rec = await cur.fetchone()
+    if not rec:
+        raise HTTPException(status_code=404, detail="Recording not found")
+    if rec["transcribed"] != 2:
+        raise HTTPException(status_code=409, detail="Transcription not complete")
+    mp4_path = os.path.join(os.path.dirname(__file__), "..", "recordings", rec["filename"])
+    srt_path = os.path.join(
+        os.path.dirname(__file__), "..", "recordings",
+        os.path.splitext(rec["filename"])[0] + ".srt"
+    )
+    if not os.path.exists(mp4_path):
+        raise HTTPException(status_code=404, detail="Recording file missing")
+    if not os.path.exists(srt_path):
+        raise HTTPException(status_code=404, detail="SRT file missing")
+    asyncio.create_task(_run_editor(recording_id, mp4_path, srt_path))
+    return {"recording_id": recording_id, "clipped": 1}
+
+
+# ── Group management ──────────────────────────────────────────────────────────
+
+class GroupCreate(BaseModel):
+    room_id: int
+    label: str
+    wig_model: Optional[str] = None
+    wig_color: Optional[str] = None
+
+
+class GroupUpdate(BaseModel):
+    label: str
+    wig_model: Optional[str] = None
+    wig_color: Optional[str] = None
+
+
+class RecordingGroupUpdate(BaseModel):
+    group_id: Optional[int] = None
+
+
+@app.post("/api/groups", status_code=201)
+async def create_group(body: GroupCreate):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO clip_groups (room_id, label, wig_model, wig_color) VALUES (?, ?, ?, ?)",
+            (body.room_id, body.label, body.wig_model or None, body.wig_color or None),
+        )
+        await db.commit()
+        return {"id": cur.lastrowid, "label": body.label,
+                "wig_model": body.wig_model, "wig_color": body.wig_color}
+
+
+@app.patch("/api/groups/{group_id}")
+async def update_group(group_id: int, body: GroupUpdate):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT id FROM clip_groups WHERE id = ?", (group_id,)) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(status_code=404, detail="Group not found")
+        await db.execute(
+            "UPDATE clip_groups SET label = ?, wig_model = ?, wig_color = ? WHERE id = ?",
+            (body.label, body.wig_model or None, body.wig_color or None, group_id),
+        )
+        await db.commit()
+    return {"id": group_id, "label": body.label,
+            "wig_model": body.wig_model, "wig_color": body.wig_color}
+
+
+@app.patch("/api/recordings/{recording_id}/group")
+async def reassign_recording_group(recording_id: int, body: RecordingGroupUpdate):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT id FROM recordings WHERE id = ?", (recording_id,)) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(status_code=404, detail="Recording not found")
+        await db.execute(
+            "UPDATE recordings SET group_id = ? WHERE id = ?", (body.group_id, recording_id)
+        )
+        await db.commit()
+    return {"recording_id": recording_id, "group_id": body.group_id}
 
 
 # ── Status ───────────────────────────────────────────────────────────────────

@@ -2,6 +2,7 @@
   <div>
     <div class="toolbar">
       <h2>分组管理</h2>
+      <button class="btn-primary" @click="openCreateGroupModal">+ 新建分组</button>
     </div>
 
     <div v-if="groups.length === 0" class="empty-tip">
@@ -22,6 +23,7 @@
           </div>
           <div class="group-stats">
             <span class="stat-item">{{ g.ready_count }} / {{ g.clip_count }} 条剪辑</span>
+            <button class="btn-edit" @click="openEditGroupModal(g)" title="编辑分组">✎</button>
           </div>
           <div class="group-actions">
             <template v-if="g.merge_status === 2">
@@ -67,6 +69,7 @@
                 <th>内容摘要</th>
                 <th>标签</th>
                 <th>剪辑</th>
+                <th>移至分组</th>
               </tr>
             </thead>
             <tbody>
@@ -84,13 +87,55 @@
                   <span v-else-if="r.clipped === 1" class="badge yellow">剪辑中</span>
                   <span v-else class="badge dim">—</span>
                 </td>
+                <td>
+                  <select class="reassign-select"
+                          :value="r.group_id"
+                          @change="doReassign(r.id, $event.target.value)">
+                    <option value="">— 不分组 —</option>
+                    <option v-for="g in groups" :key="g.id" :value="g.id">{{ g.label }}</option>
+                  </select>
+                </td>
               </tr>
               <tr v-if="detail.recordings.length === 0">
-                <td colspan="4" class="empty">此分组暂无录像</td>
+                <td colspan="5" class="empty">此分组暂无录像</td>
               </tr>
             </tbody>
           </table>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Group Create / Edit Modal -->
+  <div v-if="groupModal" class="modal-backdrop" @click.self="groupModal = null">
+    <div class="modal">
+      <div class="modal-header">
+        <span>{{ groupModal.mode === 'create' ? '新建分组' : '编辑分组' }}</span>
+        <button class="modal-close" @click="groupModal = null">✕</button>
+      </div>
+      <div class="modal-field" v-if="groupModal.mode === 'create'">
+        <label>直播间</label>
+        <select v-model="groupModal.room_id" class="modal-input">
+          <option v-for="r in rooms" :key="r.id" :value="r.id">{{ r.name }}</option>
+        </select>
+      </div>
+      <div class="modal-field">
+        <label>分组标签</label>
+        <input v-model="groupModal.label" class="modal-input" placeholder="例：大波浪 自然黑" />
+      </div>
+      <div class="modal-field">
+        <label>款式 <span class="field-hint">可留空</span></label>
+        <input v-model="groupModal.wig_model" class="modal-input" placeholder="例：大波浪卷发" />
+      </div>
+      <div class="modal-field">
+        <label>颜色 <span class="field-hint">可留空</span></label>
+        <input v-model="groupModal.wig_color" class="modal-input" placeholder="例：自然黑" />
+      </div>
+      <div class="modal-footer">
+        <button class="btn-action" @click="groupModal = null">取消</button>
+        <button class="btn-action purple" :disabled="groupModalSaving || !groupModal.label.trim()" @click="saveGroupModal">
+          {{ groupModalSaving ? '保存中…' : '保存' }}
+        </button>
       </div>
     </div>
   </div>
@@ -130,21 +175,25 @@
 
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
-import { getGroups, getGroup, mergeGroup, preparePublish, createWS } from '../api.js'
+import { getGroups, getGroup, getRooms, mergeGroup, createGroup, updateGroup, reassignRecording, preparePublish, createWS } from '../api.js'
 
 const groups = ref([])
+const rooms = ref([])
 const openId = ref(null)
 const detail = ref(null)
 const detailLoading = ref(false)
 const apiBase = import.meta.env.DEV ? 'http://localhost:8899' : ''
 let ws = null
 
+// Group create/edit modal: { mode: 'create'|'edit', id?, room_id, label, wig_model, wig_color }
+const groupModal = ref(null)
+const groupModalSaving = ref(false)
+
 // Publish content modal state
 const publishModal = ref(null)  // { groupId, title, caption, hashtags, loading }
 
 async function load() {
-  groups.value = await getGroups()
-  // Refresh open detail if any
+  ;[groups.value, rooms.value] = await Promise.all([getGroups(), getRooms()])
   if (openId.value) {
     detail.value = await getGroup(openId.value)
   }
@@ -169,6 +218,56 @@ async function doMerge(g) {
     await load()
   } catch (e) {
     alert(e.message || '合并失败')
+  }
+}
+
+function openCreateGroupModal() {
+  groupModal.value = {
+    mode: 'create',
+    room_id: rooms.value[0]?.id ?? '',
+    label: '',
+    wig_model: '',
+    wig_color: '',
+  }
+}
+
+function openEditGroupModal(g) {
+  groupModal.value = {
+    mode: 'edit',
+    id: g.id,
+    room_id: g.room_id,
+    label: g.label,
+    wig_model: g.wig_model || '',
+    wig_color: g.wig_color || '',
+  }
+}
+
+async function saveGroupModal() {
+  const m = groupModal.value
+  if (!m || !m.label.trim()) return
+  groupModalSaving.value = true
+  try {
+    const body = { label: m.label.trim(), wig_model: m.wig_model.trim() || null, wig_color: m.wig_color.trim() || null }
+    if (m.mode === 'create') {
+      await createGroup({ ...body, room_id: Number(m.room_id) })
+    } else {
+      await updateGroup(m.id, body)
+    }
+    groupModal.value = null
+    await load()
+  } catch (e) {
+    alert(e.message || '保存失败')
+  } finally {
+    groupModalSaving.value = false
+  }
+}
+
+async function doReassign(recordingId, newGroupId) {
+  try {
+    await reassignRecording(recordingId, newGroupId ? Number(newGroupId) : null)
+    await load()
+  } catch (e) {
+    alert(e.message || '移动失败')
   }
 }
 
@@ -222,6 +321,10 @@ onUnmounted(() => ws?.close())
 <style scoped>
 .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
 .toolbar h2 { font-size: 16px; font-weight: 600; }
+.btn-primary { background: #fe2c55; color: #fff; border: none; padding: 7px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+.btn-primary:hover { background: #e0203d; }
+.btn-edit { background: none; border: none; color: #555; cursor: pointer; font-size: 15px; padding: 0 4px; margin-left: 8px; }
+.btn-edit:hover { color: #ccc; }
 .empty-tip { color: #444; text-align: center; padding: 60px; }
 .groups-list { display: flex; flex-direction: column; gap: 12px; }
 .group-card { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 12px; padding: 18px; }
@@ -254,6 +357,8 @@ onUnmounted(() => ws?.close())
 .badge.yellow { background: rgba(251,191,36,0.12); color: #fbbf24; }
 .badge.dim { background: #2a2a2a; color: #555; }
 .empty { text-align: center; color: #444; padding: 20px; }
+.reassign-select { background: #1a1a1a; border: 1px solid #333; color: #888; padding: 3px 6px; border-radius: 4px; font-size: 11px; cursor: pointer; max-width: 130px; }
+.reassign-select:focus { outline: none; border-color: #555; }
 /* Publish Modal */
 .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 100; }
 .modal { background: #1a1a1a; border: 1px solid #333; border-radius: 12px; padding: 24px; width: 480px; max-width: 92vw; }

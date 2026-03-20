@@ -40,7 +40,7 @@
               下载 SRT
             </a>
             <span v-else-if="rec.transcribed === 1" class="badge yellow">转录中</span>
-            <span v-else-if="rec.transcribed === -1" class="badge red">出错</span>
+            <button v-else-if="rec.transcribed === -1" class="badge red btn-retry" @click="doRetryTranscribe(rec)">重试</button>
             <span v-else class="badge dim">待转录</span>
           </td>
           <td>
@@ -50,7 +50,7 @@
               下载剪辑
             </a>
             <span v-else-if="rec.clipped === 1" class="badge yellow">剪辑中</span>
-            <span v-else-if="rec.clipped === -1" class="badge red">剪辑失败</span>
+            <button v-else-if="rec.clipped === -1" class="badge red btn-retry" @click="doRetryClip(rec)">重试</button>
             <span v-else class="badge dim">—</span>
           </td>
         </tr>
@@ -64,13 +64,31 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { getAllRecordings, getRooms, formatBytes, formatDuration, createWS } from '../api.js'
+import { getAllRecordings, getRooms, retryTranscribe, retryClip, formatBytes, formatDuration, createWS } from '../api.js'
 
 const recordings = ref([])
 const rooms = ref([])
 const filterRoom = ref('')
 const apiBase = import.meta.env.DEV ? 'http://localhost:8899' : ''
 let ws = null
+
+async function doRetryTranscribe(rec) {
+  try {
+    await retryTranscribe(rec.id)
+    await load()
+  } catch (e) {
+    alert(e.message || '重试失败')
+  }
+}
+
+async function doRetryClip(rec) {
+  try {
+    await retryClip(rec.id)
+    await load()
+  } catch (e) {
+    alert(e.message || '重试失败')
+  }
+}
 
 const filtered = computed(() =>
   filterRoom.value
@@ -111,5 +129,6 @@ onUnmounted(() => ws?.close())
 .badge.purple { background: rgba(168,85,247,0.15); color: #c084fc; }
 .badge.dim    { background: #2a2a2a; color: #555; }
 .badge.blue:hover, .badge.purple:hover { filter: brightness(1.3); }
+.btn-retry { cursor: pointer; border: none; font-family: inherit; }
 .empty { text-align: center; color: #444; padding: 40px; }
 </style>

@@ -63,6 +63,48 @@ export async function mergeGroup(id) {
   return res.json()
 }
 
+export async function retryTranscribe(id) {
+  const res = await fetch(`${BASE}/api/recordings/${id}/retry-transcribe`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function retryClip(id) {
+  const res = await fetch(`${BASE}/api/recordings/${id}/retry-clip`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function createGroup(body) {
+  const res = await fetch(`${BASE}/api/groups`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function updateGroup(id, body) {
+  const res = await fetch(`${BASE}/api/groups/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function reassignRecording(recordingId, groupId) {
+  const res = await fetch(`${BASE}/api/recordings/${recordingId}/group`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group_id: groupId ?? null }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
 export async function preparePublish(id) {
   const res = await fetch(`${BASE}/api/groups/${id}/prepare-publish`, { method: 'POST' })
   if (!res.ok) throw new Error(await res.text())
