@@ -54,6 +54,10 @@
           <button class="btn-sm" @click="toggle(room)">
             {{ room.enabled ? '停用监控' : '启用监控' }}
           </button>
+          <label class="btn-sm upload-btn" :class="{ uploading: uploadingRooms.has(room.id) }">
+            {{ uploadingRooms.has(room.id) ? '上传中…' : '上传视频' }}
+            <input type="file" accept="video/*" style="display:none" @change="e => uploadVideo(room, e)" :disabled="uploadingRooms.has(room.id)" />
+          </label>
           <button class="btn-sm danger" @click="remove(room)">删除</button>
         </div>
       </div>
@@ -83,7 +87,7 @@
 
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
-import { getRooms, addRoom, deleteRoom, toggleRoom, getStatus, createWS, formatBytes, formatDuration } from '../api.js'
+import { getRooms, addRoom, deleteRoom, toggleRoom, getStatus, createWS, formatBytes, formatDuration, uploadRecording } from '../api.js'
 
 const rooms = ref([])
 const status = ref({})
@@ -91,6 +95,7 @@ const showAdd = ref(false)
 const newName = ref('')
 const newUrl = ref('')
 const addError = ref('')
+const uploadingRooms = ref(new Set())
 let ws = null
 let timer = null
 
@@ -116,6 +121,21 @@ async function submit() {
 async function toggle(room) {
   await toggleRoom(room.id)
   await load()
+}
+
+async function uploadVideo(room, event) {
+  const file = event.target.files[0]
+  if (!file) return
+  event.target.value = ''
+  uploadingRooms.value = new Set([...uploadingRooms.value, room.id])
+  try {
+    await uploadRecording(room.id, file)
+    await load()
+  } catch (e) {
+    alert(`上传失败: ${e.message}`)
+  } finally {
+    uploadingRooms.value = new Set([...uploadingRooms.value].filter(id => id !== room.id))
+  }
 }
 
 async function remove(room) {
@@ -167,6 +187,8 @@ onUnmounted(() => {
 .btn-sm { background: #2a2a2a; border: 1px solid #333; color: #ccc; padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
 .btn-sm:hover { background: #333; }
 .btn-sm.danger:hover { background: rgba(254,44,85,0.2); color: #fe2c55; border-color: #fe2c55; }
+.upload-btn { cursor: pointer; }
+.upload-btn.uploading { opacity: 0.5; cursor: not-allowed; }
 .empty { color: #444; text-align: center; padding: 60px; grid-column: 1/-1; }
 .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 100; }
 .modal { background: #1e1e1e; border: 1px solid #333; border-radius: 14px; padding: 28px; width: 440px; }

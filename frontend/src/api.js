@@ -63,6 +63,14 @@ export async function mergeGroup(id) {
   return res.json()
 }
 
+export async function uploadRecording(roomId, file) {
+  const form = new FormData()
+  form.append('file', file)
+  const res = await fetch(`${BASE}/api/rooms/${roomId}/upload`, { method: 'POST', body: form })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
 export async function retryTranscribe(id) {
   const res = await fetch(`${BASE}/api/recordings/${id}/retry-transcribe`, { method: 'POST' })
   if (!res.ok) throw new Error(await res.text())
@@ -114,6 +122,10 @@ export async function bulkCleanup() {
   const res = await fetch(`${BASE}/api/cleanup/local-files`, { method: 'POST' })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
+}
+
+export function getThumbnailUrl(recordingId) {
+  return `${BASE}/api/recordings/${recordingId}/thumbnail`
 }
 
 export function formatBytes(bytes) {

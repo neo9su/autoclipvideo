@@ -16,6 +16,7 @@
     <table class="recordings-table">
       <thead>
         <tr>
+          <th></th>
           <th>文件名</th>
           <th>房间</th>
           <th>开始时间</th>
@@ -29,6 +30,13 @@
       </thead>
       <tbody>
         <tr v-for="rec in filtered" :key="rec.id">
+          <td class="thumb-cell">
+            <img v-if="rec.thumbnail"
+                 :src="getThumbnailUrl(rec.id)"
+                 class="thumb-img"
+                 @error="e => e.target.style.display='none'" />
+            <div v-else class="thumb-placeholder"></div>
+          </td>
           <td class="filename">{{ rec.filename }}</td>
           <td>{{ rec.room_name }}</td>
           <td>{{ fmtTime(rec.start_time) }}</td>
@@ -66,7 +74,7 @@
           </td>
         </tr>
         <tr v-if="filtered.length === 0">
-          <td colspan="9" class="empty">暂无录像记录</td>
+          <td colspan="10" class="empty">暂无录像记录</td>
         </tr>
       </tbody>
     </table>
@@ -89,7 +97,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { getAllRecordings, getRooms, retryTranscribe, retryClip,
-         deleteLocalFile, bulkCleanup, formatBytes, formatDuration, createWS } from '../api.js'
+         deleteLocalFile, bulkCleanup, formatBytes, formatDuration, createWS, getThumbnailUrl } from '../api.js'
 import { useToast } from '../composables/toast.js'
 
 const { show } = useToast()
@@ -222,4 +230,7 @@ onUnmounted(() => ws?.close())
 .page-btn.active { background: #fe2c55; color: #fff; border-color: #fe2c55; }
 .page-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 .page-info { font-size: 12px; color: #555; margin-left: 8px; }
+.thumb-cell { width: 88px; padding: 8px 14px; }
+.thumb-img { width: 80px; height: 45px; object-fit: cover; border-radius: 4px; display: block; }
+.thumb-placeholder { width: 80px; height: 45px; background: #1e1e1e; border-radius: 4px; }
 </style>

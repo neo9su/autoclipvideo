@@ -9,6 +9,7 @@ import httpx
 from db import DB_PATH
 from editor import edit_recording
 from analyzer import analyze_recording
+from thumbnail import generate_thumbnail
 
 logger = logging.getLogger(__name__)
 
@@ -106,10 +107,12 @@ async def _run_editor(recording_id: int, mp4_path: str, srt_path: str):
         clip_path = await edit_recording(mp4_path, srt_path)
         if clip_path:
             clip_filename = os.path.basename(clip_path)
+            thumb = await generate_thumbnail(clip_path, offset=1.0)
+            thumb_basename = os.path.basename(thumb) if thumb else None
             async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute(
-                    "UPDATE recordings SET clipped = 2, clip_filename = ? WHERE id = ?",
-                    (clip_filename, recording_id),
+                    "UPDATE recordings SET clipped = 2, clip_filename = ?, thumbnail = ? WHERE id = ?",
+                    (clip_filename, thumb_basename, recording_id),
                 )
                 # Get room_id for analysis
                 db.row_factory = aiosqlite.Row

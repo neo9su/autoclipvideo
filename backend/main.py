@@ -2,11 +2,14 @@ import asyncio
 import json
 import logging
 import os
+import re
 from contextlib import asynccontextmanager
 from typing import Optional, Set
 
 import aiosqlite
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from datetime import datetime
+
+from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -18,6 +21,7 @@ from monitor import MonitorManager
 from transcribe import poll_transcriptions, _run_editor
 from analyzer import merge_group
 from sync import sync_file
+from thumbnail import generate_thumbnail
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -136,6 +140,63 @@ async def toggle_room(room_id: int):
 
 # ── Recordings ───────────────────────────────────────────────────────────────
 
+@app.post("/api/rooms/{room_id}/upload", status_code=201)
+async def upload_recording(room_id: int, file: UploadFile = File(...)):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT id FROM rooms WHERE id = ?", (room_id,)) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(status_code=404, detail="Room not found")
+
+    now = datetime.utcnow()
+    ts = now.strftime("%Y%m%d_%H%M%S")
+    safe_name = re.sub(r"[^\w\-.]", "_", file.filename or "upload.mp4")
+    filename = f"{ts}_{safe_name}"
+    recordings_dir = os.path.join(os.path.dirname(__file__), "..", "recordings")
+    os.makedirs(recordings_dir, exist_ok=True)
+    filepath = os.path.join(recordings_dir, filename)
+
+    content = await file.read()
+    with open(filepath, "wb") as f:
+        f.write(content)
+    size_bytes = len(content)
+
+    start_time = now.isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO recordings (room_id, filename, start_time, end_time, size_bytes, synced) VALUES (?, ?, ?, ?, ?, 0)",
+            (room_id, filename, start_time, start_time, size_bytes),
+        )
+        await db.commit()
+        recording_id = cur.lastrowid
+
+    asyncio.create_task(_generate_upload_thumb(recording_id, filepath))
+
+    job_id = await sync_file(filepath, room_id)
+    if job_id:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE recordings SET transcribed = 1, synced = 1, gpu_job_id = ? WHERE id = ?",
+                (job_id, recording_id),
+            )
+            await db.commit()
+    else:
+        logger.warning(f"Upload accepted but GPU sync failed for {filename}")
+
+    return {"id": recording_id, "filename": filename, "size_bytes": size_bytes, "gpu_job_id": job_id}
+
+
+async def _generate_upload_thumb(recording_id: int, mp4_path: str):
+    thumb = await generate_thumbnail(mp4_path, offset=5.0)
+    if thumb:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE recordings SET thumbnail = ? WHERE id = ?",
+                (os.path.basename(thumb), recording_id),
+            )
+            await db.commit()
+
+
 @app.get("/api/rooms/{room_id}/recordings")
 async def list_recordings(room_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -187,6 +248,22 @@ async def download_clip(recording_id: int):
     if not os.path.exists(clip_path):
         raise HTTPException(status_code=404, detail="Clip file missing")
     return FileResponse(clip_path, media_type="video/mp4", filename=rec["clip_filename"])
+
+
+@app.get("/api/recordings/{recording_id}/thumbnail")
+async def get_thumbnail(recording_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT thumbnail FROM recordings WHERE id = ?", (recording_id,)) as cur:
+            rec = await cur.fetchone()
+    if not rec:
+        raise HTTPException(status_code=404, detail="Recording not found")
+    if not rec["thumbnail"]:
+        raise HTTPException(status_code=404, detail="Thumbnail not available")
+    thumb_path = os.path.join(os.path.dirname(__file__), "..", "recordings", rec["thumbnail"])
+    if not os.path.exists(thumb_path):
+        raise HTTPException(status_code=404, detail="Thumbnail file missing")
+    return FileResponse(thumb_path, media_type="image/jpeg")
 
 
 @app.get("/api/recordings/{recording_id}/srt")

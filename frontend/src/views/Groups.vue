@@ -58,6 +58,7 @@
           <table v-else class="detail-table">
             <thead>
               <tr>
+                <th></th>
                 <th>文件名</th>
                 <th>内容摘要</th>
                 <th>标签</th>
@@ -67,6 +68,13 @@
             </thead>
             <tbody>
               <tr v-for="r in detail.recordings" :key="r.id">
+                <td class="thumb-cell">
+                  <img v-if="r.clipped === 2"
+                       :src="getThumbnailUrl(r.id)"
+                       class="thumb-img"
+                       @error="e => e.target.style.display='none'" />
+                  <div v-else class="thumb-placeholder"></div>
+                </td>
                 <td class="filename">{{ r.filename }}</td>
                 <td>{{ r.session_label || '—' }}</td>
                 <td>
@@ -90,7 +98,7 @@
                 </td>
               </tr>
               <tr v-if="detail.recordings.length === 0">
-                <td colspan="5" class="empty">此分组暂无录像</td>
+                <td colspan="6" class="empty">此分组暂无录像</td>
               </tr>
             </tbody>
           </table>
@@ -137,7 +145,7 @@
 
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
-import { getGroups, getGroup, getRooms, mergeGroup, createGroup, updateGroup, reassignRecording, createWS } from '../api.js'
+import { getGroups, getGroup, getRooms, mergeGroup, createGroup, updateGroup, reassignRecording, createWS, getThumbnailUrl } from '../api.js'
 import { useToast } from '../composables/toast.js'
 
 const groups = ref([])
@@ -293,6 +301,9 @@ onUnmounted(() => ws?.close())
 .empty { text-align: center; color: #444; padding: 20px; }
 .reassign-select { background: #1a1a1a; border: 1px solid #333; color: #888; padding: 3px 6px; border-radius: 4px; font-size: 11px; cursor: pointer; max-width: 130px; }
 .reassign-select:focus { outline: none; border-color: #555; }
+.thumb-cell { width: 70px; padding: 6px 12px; }
+.thumb-img { width: 60px; height: 34px; object-fit: cover; border-radius: 4px; display: block; }
+.thumb-placeholder { width: 60px; height: 34px; background: #111; border-radius: 4px; }
 /* Publish Modal */
 .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 100; }
 .modal { background: #1a1a1a; border: 1px solid #333; border-radius: 12px; padding: 24px; width: 480px; max-width: 92vw; }
