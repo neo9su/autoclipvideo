@@ -17,7 +17,6 @@ from models import RoomCreate, Room, Recording
 from monitor import MonitorManager
 from transcribe import poll_transcriptions, _run_editor
 from analyzer import merge_group
-from publisher import generate_publish_content
 from sync import sync_file
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -263,38 +262,6 @@ async def trigger_merge(group_id: int):
     return {"group_id": group_id, "merge_status": 1}
 
 
-@app.post("/api/groups/{group_id}/prepare-publish")
-async def prepare_publish(group_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM clip_groups WHERE id = ?", (group_id,)) as cur:
-            group = await cur.fetchone()
-    if not group:
-        raise HTTPException(status_code=404, detail="Group not found")
-    if group["merge_status"] != 2:
-        raise HTTPException(status_code=409, detail="Merged video not ready")
-
-    result = await generate_publish_content(group_id)
-    if not result:
-        raise HTTPException(status_code=500, detail="Failed to generate publish content")
-
-    title = result.get("title", "")[:20]
-    caption = result.get("caption", "")[:150]
-    hashtags = result.get("hashtags", [])
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            """UPDATE clip_groups SET
-               publish_status = 1, post_title = ?, post_caption = ?, post_hashtags = ?
-               WHERE id = ?""",
-            (title, caption, json.dumps(hashtags, ensure_ascii=False), group_id),
-        )
-        await db.commit()
-
-    return {"title": title, "caption": caption, "hashtags": hashtags}
-
-
-
 @app.get("/api/groups/{group_id}/download")
 async def download_merged(group_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -407,30 +374,6 @@ async def update_group(group_id: int, body: GroupUpdate):
         await db.commit()
     return {"id": group_id, "label": body.label,
             "wig_model": body.wig_model, "wig_color": body.wig_color}
-
-
-class PublishDraft(BaseModel):
-    title: str
-    caption: str
-    hashtags: list[str]
-
-
-@app.patch("/api/groups/{group_id}/publish-draft")
-async def save_publish_draft(group_id: int, body: PublishDraft):
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT id FROM clip_groups WHERE id = ?", (group_id,)) as cur:
-            if not await cur.fetchone():
-                raise HTTPException(status_code=404, detail="Group not found")
-        await db.execute(
-            """UPDATE clip_groups SET
-               post_title = ?, post_caption = ?, post_hashtags = ?,
-               publish_status = MAX(publish_status, 1)
-               WHERE id = ?""",
-            (body.title[:20], body.caption[:150],
-             json.dumps(body.hashtags, ensure_ascii=False), group_id),
-        )
-        await db.commit()
-    return {"group_id": group_id, "saved": True}
 
 
 @app.delete("/api/recordings/{recording_id}/local-file", status_code=204)

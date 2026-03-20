@@ -30,13 +30,6 @@
               <a :href="`${apiBase}/api/groups/${g.id}/download`" class="btn-action purple">
                 下载合并视频
               </a>
-              <!-- Publish content generation -->
-              <button v-if="g.publish_status === 1" class="btn-action teal" @click="openPublishModal(g)">
-                查看发布文案
-              </button>
-              <button v-else class="btn-action" @click="doPreparePublish(g)">
-                生成发布文案
-              </button>
             </template>
             <button
               v-else-if="g.merge_status === 1"
@@ -140,41 +133,11 @@
     </div>
   </div>
 
-  <!-- Publish Modal -->
-  <div v-if="publishModal" class="modal-backdrop" @click.self="publishModal = null">
-    <div class="modal">
-      <div class="modal-header">
-        <span>审核发布内容</span>
-        <button class="modal-close" @click="publishModal = null">✕</button>
-      </div>
-      <div v-if="publishModal.loading" class="modal-loading">生成中，请稍候…</div>
-      <template v-else>
-        <div class="modal-field">
-          <label>标题 <span class="field-hint">≤20字</span></label>
-          <input v-model="publishModal.title" maxlength="20" class="modal-input" />
-        </div>
-        <div class="modal-field">
-          <label>文案 <span class="field-hint">≤150字</span></label>
-          <textarea v-model="publishModal.caption" maxlength="150" rows="4" class="modal-input" />
-        </div>
-        <div class="modal-field">
-          <label>话题标签 <span class="field-hint">用逗号分隔</span></label>
-          <input v-model="publishModal.hashtagsText" class="modal-input" />
-        </div>
-        <div class="modal-footer">
-          <button class="btn-action" @click="publishModal = null">关闭</button>
-          <button class="btn-action teal" @click="doPreparePublish({ id: publishModal.groupId })">重新生成</button>
-          <button class="btn-action" @click="doSaveDraft">保存修改</button>
-          <button class="btn-action purple" @click="copyPublishText(publishModal)">复制文案</button>
-        </div>
-      </template>
-    </div>
-  </div>
 </template>
 
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
-import { getGroups, getGroup, getRooms, mergeGroup, createGroup, updateGroup, reassignRecording, preparePublish, savePublishDraft, createWS } from '../api.js'
+import { getGroups, getGroup, getRooms, mergeGroup, createGroup, updateGroup, reassignRecording, createWS } from '../api.js'
 import { useToast } from '../composables/toast.js'
 
 const groups = ref([])
@@ -190,9 +153,6 @@ const { show } = useToast()
 // Group create/edit modal: { mode: 'create'|'edit', id?, room_id, label, wig_model, wig_color }
 const groupModal = ref(null)
 const groupModalSaving = ref(false)
-
-// Publish content modal state
-const publishModal = ref(null)  // { groupId, title, caption, hashtags, loading }
 
 async function load() {
   ;[groups.value, rooms.value] = await Promise.all([getGroups(), getRooms()])
@@ -271,56 +231,6 @@ async function doReassign(recordingId, newGroupId) {
     await load()
   } catch (e) {
     alert(e.message || '移动失败')
-  }
-}
-
-async function doPreparePublish(g) {
-  publishModal.value = { groupId: g.id, title: '', caption: '', hashtagsText: '', loading: true }
-  try {
-    const data = await preparePublish(g.id)
-    publishModal.value = {
-      groupId: g.id,
-      title: data.title || '',
-      caption: data.caption || '',
-      hashtagsText: (data.hashtags || []).join(', '),
-      loading: false,
-    }
-    show('发布文案生成完成', 'success')
-    await load()
-  } catch (e) {
-    show(e.message || '生成内容失败', 'error')
-    publishModal.value = null
-  }
-}
-
-function openPublishModal(g) {
-  const tags = g.post_hashtags ? JSON.parse(g.post_hashtags) : []
-  publishModal.value = {
-    groupId: g.id,
-    title: g.post_title || '',
-    caption: g.post_caption || '',
-    hashtagsText: tags.join(', '),
-    loading: false,
-  }
-}
-
-function copyPublishText(m) {
-  const tags = m.hashtagsText.split(',').map(s => s.trim()).filter(Boolean).map(t => `#${t}`).join(' ')
-  const text = `${m.title}\n\n${m.caption}\n\n${tags}`
-  navigator.clipboard.writeText(text)
-  show('文案已复制到剪贴板', 'success')
-}
-
-async function doSaveDraft() {
-  const m = publishModal.value
-  if (!m) return
-  try {
-    const hashtags = m.hashtagsText.split(',').map(s => s.trim()).filter(Boolean)
-    await savePublishDraft(m.groupId, { title: m.title, caption: m.caption, hashtags })
-    show('文案已保存', 'success')
-    await load()
-  } catch (e) {
-    show(e.message || '保存失败', 'error')
   }
 }
 

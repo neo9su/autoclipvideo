@@ -105,16 +105,6 @@ export async function reassignRecording(recordingId, groupId) {
   return res.json()
 }
 
-export async function savePublishDraft(id, { title, caption, hashtags }) {
-  const res = await fetch(`${BASE}/api/groups/${id}/publish-draft`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ title, caption, hashtags }),
-  })
-  if (!res.ok) throw new Error(await res.text())
-  return res.json()
-}
-
 export async function deleteLocalFile(id) {
   const res = await fetch(`${BASE}/api/recordings/${id}/local-file`, { method: 'DELETE' })
   if (!res.ok) throw new Error(await res.text())
@@ -122,12 +112,6 @@ export async function deleteLocalFile(id) {
 
 export async function bulkCleanup() {
   const res = await fetch(`${BASE}/api/cleanup/local-files`, { method: 'POST' })
-  if (!res.ok) throw new Error(await res.text())
-  return res.json()
-}
-
-export async function preparePublish(id) {
-  const res = await fetch(`${BASE}/api/groups/${id}/prepare-publish`, { method: 'POST' })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }

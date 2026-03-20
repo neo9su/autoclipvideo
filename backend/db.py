@@ -57,13 +57,6 @@ async def init_db():
             "ALTER TABLE recordings ADD COLUMN has_promotion INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE recordings ADD COLUMN group_id INTEGER",
             "ALTER TABLE recordings ADD COLUMN local_deleted INTEGER NOT NULL DEFAULT 0",
-            # publish columns
-            "ALTER TABLE clip_groups ADD COLUMN publish_status INTEGER NOT NULL DEFAULT 0",
-            "ALTER TABLE clip_groups ADD COLUMN post_title TEXT",
-            "ALTER TABLE clip_groups ADD COLUMN post_caption TEXT",
-            "ALTER TABLE clip_groups ADD COLUMN post_hashtags TEXT",
-            "ALTER TABLE clip_groups ADD COLUMN published_url TEXT",
-            "ALTER TABLE clip_groups ADD COLUMN published_at TEXT",
         ]:
             try:
                 await db.execute(migration)
