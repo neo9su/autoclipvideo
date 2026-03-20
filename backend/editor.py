@@ -11,6 +11,7 @@ import asyncio
 import logging
 import os
 import re
+import shutil
 import tempfile
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
@@ -69,6 +70,119 @@ _PROBLEM_KW   = {'发缝宽', '秃头', '发量少', '扁头', '显脸大', '贴
 _SOLUTION_KW  = {'真人发丝', '递针', '无痕', '不掉色', '免打理', '仿真', '一梳到底'}
 _RESULT_KW    = {'秒变', '小V脸', '变身', '高颅顶', '头包脸', '背影杀', '氛围感', '变美'}
 _CONVERT_KW   = {'最后', '炸福利', '上车', '运费险', '包退'}
+
+
+# ── ASS subtitle generation ────────────────────────────────────────────────────
+
+# Map each keyword to its semantic category
+_KW_TO_CAT: dict[str, str] = {}
+for _kw in _PROBLEM_KW:   _KW_TO_CAT[_kw] = "problem"
+for _kw in _RESULT_KW:    _KW_TO_CAT[_kw] = "result"
+for _kw in _CONVERT_KW:   _KW_TO_CAT[_kw] = "convert"
+for _kw in _SOLUTION_KW:  _KW_TO_CAT[_kw] = "solution"
+for _kw in _SCORES:
+    if _kw not in _KW_TO_CAT:
+        _KW_TO_CAT[_kw] = "neutral"
+
+# ASS colors: &HAABBGGRR& (AA=00 opaque; bytes in Blue-Green-Red order)
+_KW_COLORS: dict[str, str] = {
+    "problem":  "&H000055FF&",   # orange-red  #FF5500
+    "result":   "&H0000D7FF&",   # gold        #FFD700
+    "convert":  "&H0044FF00&",   # lime green  #00FF44
+    "solution": "&H00FFDD00&",   # cyan        #00DDFF
+    "neutral":  "&H0000CCFF&",   # yellow      #FFCC00
+}
+
+_ASS_HEADER = """\
+[Script Info]
+ScriptType: v4.00+
+WrapStyle: 0
+ScaledBorderAndShadow: yes
+PlayResX: 720
+PlayResY: 1280
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Microsoft YaHei,58,&H00FFFFFF,&H000000FF,&H00141414,&H80000000,0,0,0,0,100,100,1,0,1,4,1.5,2,40,40,60,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+
+def _sec_to_ass(s: float) -> str:
+    s = max(0.0, s)
+    h = int(s // 3600)
+    m = int((s % 3600) // 60)
+    sec = s % 60
+    return f"{h}:{m:02d}:{sec:05.2f}"
+
+
+def _annotate_text(text: str) -> tuple[str, bool]:
+    """Wrap scoring keywords in ASS color+bold tags. Returns (tagged_text, had_keyword)."""
+    kws = sorted(_KW_TO_CAT.keys(), key=len, reverse=True)
+    has_kw = False
+    for kw in kws:
+        if kw in text:
+            color = _KW_COLORS[_KW_TO_CAT[kw]]
+            open_tag  = "{" + "\\c" + color + "\\b1" + "}"
+            close_tag = "{\\r}"
+            text = text.replace(kw, open_tag + kw + close_tag, 1)
+            has_kw = True
+    return text, has_kw
+
+
+def build_ass(selected: List[Seg], all_segs: List[Seg]) -> str:
+    """
+    Generate ASS subtitle string with keyword highlights.
+    Remaps SRT timestamps to the clip's output timeline.
+    Keyword lines get a scale-bounce entry animation; all lines fade in/out.
+    """
+    dialogue: list[str] = []
+    cursor = 0.0
+    for sel_seg in selected:
+        offset = cursor
+        cursor += sel_seg.duration
+        for srt in all_segs:
+            ov_start = max(srt.start, sel_seg.start)
+            ov_end   = min(srt.end,   sel_seg.end)
+            if ov_end - ov_start < 0.1:
+                continue
+            t0 = offset + (ov_start - sel_seg.start)
+            t1 = offset + (ov_end   - sel_seg.start)
+            annotated, has_kw = _annotate_text(srt.text)
+            if has_kw:
+                # Fade + scale-bounce for the whole line when it contains a keyword
+                prefix = r"{\fad(150,100)\t(0,180,\fscx107\fscy107)\t(180,360,\fscx100\fscy100)}"
+            else:
+                prefix = r"{\fad(100,80)}"
+            dialogue.append(
+                f"Dialogue: 0,{_sec_to_ass(t0)},{_sec_to_ass(t1)},"
+                f"Default,,0,0,0,,{prefix}{annotated}"
+            )
+    return _ASS_HEADER + "\n".join(dialogue) + "\n"
+
+
+async def _burn_subtitles(mp4: str, ass_path: str, out: str) -> bool:
+    """Re-encode mp4 burning in the ASS subtitle file. Returns True on success."""
+    escaped = ass_path.replace("'", r"\'")
+    cmd = [
+        "ffmpeg", "-y", "-i", mp4,
+        "-vf", f"ass='{escaped}'",
+        "-c:v", "libx264", "-crf", "22", "-preset", "fast",
+        "-c:a", "copy",
+        out,
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    ok = proc.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 0
+    if not ok:
+        logger.warning(f"Subtitle burn failed (rc={proc.returncode}): {stderr.decode()[-200:]}")
+    return ok
 
 
 @dataclass
@@ -355,7 +469,7 @@ async def edit_recording(mp4_path: str, srt_path: str) -> Optional[str]:
         f"[{', '.join(s.category for s in selected)}]"
     )
 
-    # Cut + concat in temp dir
+    # Cut → concat → burn subtitles in temp dir
     tmp_dir = tempfile.mkdtemp()
     parts = []
     try:
@@ -371,21 +485,30 @@ async def edit_recording(mp4_path: str, srt_path: str) -> Optional[str]:
             logger.error("All cuts failed")
             return None
 
-        base = os.path.splitext(os.path.basename(mp4_path))[0]
-        out_path = os.path.join(RECORDINGS_DIR, f"{base}_clip.mp4")
-        success = await _concat(parts, out_path)
-        if success:
-            size_mb = os.path.getsize(out_path) / 1024 / 1024
-            logger.info(f"Clip ready: {out_path} ({size_mb:.1f} MB, {total_dur:.1f}s)")
-            return out_path
-        return None
+        base        = os.path.splitext(os.path.basename(mp4_path))[0]
+        out_path    = os.path.join(RECORDINGS_DIR, f"{base}_clip.mp4")
+        concat_path = os.path.join(tmp_dir, "concat.mp4")
+        ass_path    = os.path.join(tmp_dir, "subs.ass")
+
+        if not await _concat(parts, concat_path):
+            return None
+
+        ass_content = build_ass(selected, segs)
+        with open(ass_path, "w", encoding="utf-8") as f:
+            f.write(ass_content)
+
+        has_subs = "Dialogue:" in ass_content
+        if has_subs and await _burn_subtitles(concat_path, ass_path, out_path):
+            logger.info(
+                f"Clip with subtitles ready: {out_path} "
+                f"({os.path.getsize(out_path)/1024/1024:.1f} MB, {total_dur:.1f}s)"
+            )
+        else:
+            shutil.move(concat_path, out_path)
+            logger.info(
+                f"Clip ready: {out_path} "
+                f"({os.path.getsize(out_path)/1024/1024:.1f} MB, {total_dur:.1f}s)"
+            )
+        return out_path
     finally:
-        for p in parts:
-            try:
-                os.unlink(p)
-            except OSError:
-                pass
-        try:
-            os.rmdir(tmp_dir)
-        except OSError:
-            pass
+        shutil.rmtree(tmp_dir, ignore_errors=True)
