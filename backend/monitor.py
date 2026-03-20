@@ -59,6 +59,16 @@ class MonitorManager:
             "segment_start": recorder.segment_start.isoformat() if (recorder and recorder.segment_start) else None,
         }
 
+    async def _on_segment_start(self, room_id: int, filename: str, segment_index: int):
+        """Called by recorder at the start of each segment — insert DB row with correct filename."""
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                """INSERT OR IGNORE INTO recordings (room_id, filename, start_time, segment_index)
+                   VALUES (?, ?, ?, ?)""",
+                (room_id, filename, datetime.now().isoformat(), segment_index),
+            )
+            await db.commit()
+
     async def _on_segment_done(self, room_id: int, filepath: str, segment_index: int):
         """Called when a recording segment completes."""
         filename = filepath.split("/")[-1]
@@ -106,20 +116,10 @@ class MonitorManager:
                         if stream_url:
                             recorder = RoomRecorder(
                                 room_id, name, url,
-                                on_segment_done=self._on_segment_done
+                                on_segment_done=self._on_segment_done,
+                                on_segment_start=self._on_segment_start,
                             )
                             self._recorders[room_id] = recorder
-
-                            # Insert recording entry to DB
-                            filename = recorder.get_segment_filename()
-                            async with aiosqlite.connect(DB_PATH) as db:
-                                await db.execute(
-                                    """INSERT INTO recordings (room_id, filename, start_time, segment_index)
-                                       VALUES (?, ?, ?, ?)""",
-                                    (room_id, filename, datetime.now().isoformat(), recorder.segment_index)
-                                )
-                                await db.commit()
-
                             await recorder.start(stream_url)
                             logger.info(f"[{name}] Recording started")
                 else:

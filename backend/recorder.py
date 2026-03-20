@@ -14,11 +14,12 @@ from douyin_live import get_stream_url, check_live_status  # noqa: F401
 
 
 class RoomRecorder:
-    def __init__(self, room_id: int, room_name: str, room_url: str, on_segment_done=None):
+    def __init__(self, room_id: int, room_name: str, room_url: str, on_segment_done=None, on_segment_start=None):
         self.room_id = room_id
         self.room_name = room_name
         self.room_url = room_url
-        self.on_segment_done = on_segment_done  # async callback(room_id, filepath)
+        self.on_segment_done = on_segment_done    # async callback(room_id, filepath, segment_index)
+        self.on_segment_start = on_segment_start  # async callback(room_id, filename, segment_index)
         self.recording = False
         self.current_file: Optional[str] = None
         self.segment_start: Optional[datetime] = None
@@ -61,6 +62,11 @@ class RoomRecorder:
             filepath = os.path.join(RECORDINGS_DIR, filename)
             self.current_file = filename
             self.segment_start = datetime.now()
+
+            if self.on_segment_start:
+                asyncio.create_task(
+                    self.on_segment_start(self.room_id, filename, self.segment_index)
+                )
 
             logger.info(f"[{self.room_name}] Recording segment {self.segment_index}: {filename}")
 

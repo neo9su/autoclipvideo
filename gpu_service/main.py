@@ -1,20 +1,69 @@
 """
 Douyin GPU Transcription Service
-Run on Windows GPU server: uvicorn main:app --host 0.0.0.0 --port 8877
+Run on GPU server: uvicorn main:app --host 0.0.0.0 --port 8877
 """
 import asyncio
 import os
+import sqlite3
 
 import aiofiles
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
-STORAGE_DIR = os.environ.get("STORAGE_DIR", r"C:\data\douyin-recordings")
+STORAGE_DIR = os.environ.get("STORAGE_DIR", "/data/douyin-recordings")
 os.makedirs(STORAGE_DIR, exist_ok=True)
+
+DB_PATH = os.path.join(STORAGE_DIR, "jobs.db")
 
 # In-memory job store: job_id -> {status, mp4_path, srt_path, error}
 _jobs: dict = {}
 _model = None  # Singleton WhisperModel
+
+
+def _init_db():
+    """Create jobs table and reset any interrupted jobs from a previous run."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS jobs (
+                job_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'processing',
+                mp4_path TEXT NOT NULL,
+                srt_path TEXT NOT NULL,
+                error TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        # Jobs that were processing when the service last died will never complete — mark as error
+        conn.execute(
+            "UPDATE jobs SET status = 'error', error = 'service restarted' WHERE status = 'processing'"
+        )
+        conn.commit()
+
+
+def _load_jobs() -> dict:
+    """Restore job state from DB into memory."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT * FROM jobs").fetchall()
+    return {r["job_id"]: dict(r) for r in rows}
+
+
+def _db_insert_job(job_id: str, mp4_path: str, srt_path: str):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "INSERT INTO jobs (job_id, mp4_path, srt_path, status) VALUES (?, ?, ?, 'processing')",
+            (job_id, mp4_path, srt_path),
+        )
+        conn.commit()
+
+
+def _db_update_job(job_id: str, status: str, error: str = None):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE jobs SET status = ?, error = ? WHERE job_id = ?",
+            (status, error, job_id),
+        )
+        conn.commit()
 
 
 def _get_model():
@@ -52,10 +101,15 @@ def _do_transcribe(job_id: str):
                 f.write(f"{_fmt_ts(seg.start)} --> {_fmt_ts(seg.end)}\n")
                 f.write(f"{seg.text.strip()}\n\n")
         job["status"] = "done"
+        _db_update_job(job_id, "done")
     except Exception as e:
         job["status"] = "error"
         job["error"] = str(e)
+        _db_update_job(job_id, "error", str(e))
 
+
+_init_db()
+_jobs = _load_jobs()
 
 app = FastAPI(title="Douyin GPU Transcription Service")
 
@@ -89,6 +143,7 @@ async def create_job(
         "srt_path": srt_path,
         "error": None,
     }
+    _db_insert_job(job_id, mp4_path, srt_path)
 
     asyncio.create_task(asyncio.to_thread(_do_transcribe, job_id))
     return {"job_id": job_id, "status": "processing"}
