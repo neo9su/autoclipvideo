@@ -7,7 +7,6 @@ from typing import Set
 
 import aiosqlite
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -17,7 +16,7 @@ from models import RoomCreate, Room, Recording
 from monitor import MonitorManager
 from transcribe import poll_transcriptions
 from analyzer import merge_group
-from publisher import generate_publish_content, upload_to_douyin, cookie_file_exists
+from publisher import generate_publish_content
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -285,44 +284,6 @@ async def prepare_publish(group_id: int):
     return {"title": title, "caption": caption, "hashtags": hashtags}
 
 
-class PublishBody(BaseModel):
-    title: str
-    caption: str
-    hashtags: list[str]
-
-
-@app.post("/api/groups/{group_id}/publish")
-async def publish_group(group_id: int, body: PublishBody):
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM clip_groups WHERE id = ?", (group_id,)) as cur:
-            group = await cur.fetchone()
-    if not group:
-        raise HTTPException(status_code=404, detail="Group not found")
-    if group["merge_status"] != 2 or not group["merged_filename"]:
-        raise HTTPException(status_code=409, detail="Merged video not ready")
-    if group["publish_status"] == 2:
-        raise HTTPException(status_code=409, detail="Publish already in progress")
-
-    video_path = os.path.join(os.path.dirname(__file__), "..", "recordings", group["merged_filename"])
-    if not os.path.exists(video_path):
-        raise HTTPException(status_code=404, detail="Merged video file missing")
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            """UPDATE clip_groups SET
-               publish_status = 2, post_title = ?, post_caption = ?, post_hashtags = ?
-               WHERE id = ?""",
-            (body.title[:20], body.caption[:150],
-             json.dumps(body.hashtags, ensure_ascii=False), group_id),
-        )
-        await db.commit()
-
-    asyncio.create_task(
-        upload_to_douyin(group_id, video_path, body.title, body.caption, body.hashtags)
-    )
-    return {"publish_status": 2}
-
 
 @app.get("/api/groups/{group_id}/download")
 async def download_merged(group_id: int):
@@ -359,7 +320,6 @@ async def system_status():
         "total_recordings": total_recordings,
         "total_bytes": total_bytes or 0,
         "local_files": local_files,
-        "douyin_cookie_ready": cookie_file_exists(),
     }
 
 

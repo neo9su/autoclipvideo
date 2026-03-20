@@ -69,16 +69,6 @@ export async function preparePublish(id) {
   return res.json()
 }
 
-export async function publishGroup(id, { title, caption, hashtags }) {
-  const res = await fetch(`${BASE}/api/groups/${id}/publish`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ title, caption, hashtags }),
-  })
-  if (!res.ok) throw new Error(await res.text())
-  return res.json()
-}
-
 export function formatBytes(bytes) {
   if (!bytes) return '—'
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`

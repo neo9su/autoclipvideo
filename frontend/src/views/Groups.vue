@@ -28,21 +28,12 @@
               <a :href="`${apiBase}/api/groups/${g.id}/download`" class="btn-action purple">
                 下载合并视频
               </a>
-              <!-- Publish actions -->
-              <template v-if="g.publish_status === 3">
-                <a :href="g.published_url" target="_blank" class="btn-action green">已发布 →</a>
-              </template>
-              <button v-else-if="g.publish_status === 2" class="btn-action yellow" disabled>
-                发布中…
-              </button>
-              <button v-else-if="g.publish_status === 1" class="btn-action teal" @click="openPublishModal(g)">
-                审核发布
-              </button>
-              <button v-else-if="g.publish_status === -1" class="btn-action red" @click="doPreparePublish(g)">
-                发布失败，重试
+              <!-- Publish content generation -->
+              <button v-if="g.publish_status === 1" class="btn-action teal" @click="openPublishModal(g)">
+                查看发布文案
               </button>
               <button v-else class="btn-action" @click="doPreparePublish(g)">
-                准备发布
+                生成发布文案
               </button>
             </template>
             <button
@@ -114,22 +105,23 @@
       <div v-if="publishModal.loading" class="modal-loading">生成中，请稍候…</div>
       <template v-else>
         <div class="modal-field">
-          <label>标题 <span class="field-hint">≤20字</span></label>
-          <input v-model="publishModal.title" maxlength="20" class="modal-input" />
+          <label>标题</label>
+          <div class="modal-text">{{ publishModal.title }}</div>
         </div>
         <div class="modal-field">
-          <label>文案 <span class="field-hint">≤150字</span></label>
-          <textarea v-model="publishModal.caption" maxlength="150" rows="4" class="modal-input" />
+          <label>文案</label>
+          <div class="modal-text">{{ publishModal.caption }}</div>
         </div>
         <div class="modal-field">
-          <label>话题标签 <span class="field-hint">用逗号分隔</span></label>
-          <input v-model="publishModal.hashtagsText" class="modal-input" placeholder="假发, 变美日记, ..." />
+          <label>话题标签</label>
+          <div class="modal-tags">
+            <span v-for="tag in publishModal.hashtags" :key="tag" class="tag">#{{ tag }}</span>
+          </div>
         </div>
         <div class="modal-footer">
-          <button class="btn-action" @click="publishModal = null">取消</button>
-          <button class="btn-action purple" :disabled="publishLoading" @click="doPublish">
-            {{ publishLoading ? '发布中…' : '确认发布' }}
-          </button>
+          <button class="btn-action" @click="publishModal = null">关闭</button>
+          <button class="btn-action teal" @click="doPreparePublish({ id: publishModal.groupId })">重新生成</button>
+          <button class="btn-action purple" @click="copyPublishText(publishModal)">复制文案</button>
         </div>
       </template>
     </div>
@@ -138,7 +130,7 @@
 
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
-import { getGroups, getGroup, mergeGroup, preparePublish, publishGroup, createWS } from '../api.js'
+import { getGroups, getGroup, mergeGroup, preparePublish, createWS } from '../api.js'
 
 const groups = ref([])
 const openId = ref(null)
@@ -147,9 +139,8 @@ const detailLoading = ref(false)
 const apiBase = import.meta.env.DEV ? 'http://localhost:8899' : ''
 let ws = null
 
-// Publish modal state
+// Publish content modal state
 const publishModal = ref(null)  // { groupId, title, caption, hashtags, loading }
-const publishLoading = ref(false)
 
 async function load() {
   groups.value = await getGroups()
@@ -204,31 +195,21 @@ function openPublishModal(g) {
     groupId: g.id,
     title: g.post_title || '',
     caption: g.post_caption || '',
-    hashtagsText: g.post_hashtags ? JSON.parse(g.post_hashtags).join(', ') : '',
+    hashtags: g.post_hashtags ? JSON.parse(g.post_hashtags) : [],
     loading: false,
   }
 }
 
-async function doPublish() {
-  const m = publishModal.value
-  if (!m) return
-  publishLoading.value = true
-  try {
-    const hashtags = m.hashtagsText.split(',').map(s => s.trim()).filter(Boolean)
-    await publishGroup(m.groupId, { title: m.title, caption: m.caption, hashtags })
-    publishModal.value = null
-    await load()
-  } catch (e) {
-    alert(e.message || '发布失败')
-  } finally {
-    publishLoading.value = false
-  }
+function copyPublishText(m) {
+  const tags = (m.hashtags || []).map(t => `#${t}`).join(' ')
+  const text = `${m.title}\n\n${m.caption}\n\n${tags}`
+  navigator.clipboard.writeText(text)
 }
 
 onMounted(() => {
   load()
   ws = createWS((msg) => {
-    if (['transcribed', 'clipped', 'merged', 'published'].includes(msg.type)) load()
+    if (['transcribed', 'clipped', 'merged'].includes(msg.type)) load()
   })
   // Poll every 15s for merge status updates
   const t = setInterval(load, 15000)
@@ -259,9 +240,7 @@ onUnmounted(() => ws?.close())
 .btn-action:disabled { opacity: 0.4; cursor: not-allowed; }
 .btn-action.purple { background: rgba(168,85,247,0.15); color: #c084fc; border-color: rgba(168,85,247,0.3); }
 .btn-action.yellow { background: rgba(251,191,36,0.12); color: #fbbf24; border-color: transparent; }
-.btn-action.green { background: rgba(52,211,153,0.15); color: #34d399; border-color: rgba(52,211,153,0.3); text-decoration: none; }
 .btn-action.teal { background: rgba(45,212,191,0.12); color: #2dd4bf; border-color: rgba(45,212,191,0.3); }
-.btn-action.red { background: rgba(254,44,85,0.12); color: #fe2c55; border-color: rgba(254,44,85,0.3); }
 .btn-sm { background: #222; border: 1px solid #333; color: #888; padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
 .btn-sm:hover { background: #2a2a2a; color: #ccc; }
 .merge-error { font-size: 12px; color: #fe2c55; margin-top: 8px; }
@@ -285,7 +264,7 @@ onUnmounted(() => ws?.close())
 .modal-field { margin-bottom: 16px; }
 .modal-field label { display: block; font-size: 12px; color: #888; margin-bottom: 6px; }
 .field-hint { color: #555; margin-left: 4px; }
-.modal-input { width: 100%; background: #111; border: 1px solid #333; color: #ccc; border-radius: 6px; padding: 8px 10px; font-size: 13px; box-sizing: border-box; resize: vertical; font-family: inherit; }
-.modal-input:focus { outline: none; border-color: #555; }
+.modal-text { background: #111; border: 1px solid #2a2a2a; border-radius: 6px; padding: 10px 12px; font-size: 13px; color: #ccc; line-height: 1.6; white-space: pre-wrap; }
+.modal-tags { display: flex; flex-wrap: wrap; gap: 6px; }
 .modal-footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
 </style>
