@@ -7,7 +7,7 @@ the embedded FLV/HLS stream URLs.
 
 Flow:
   1. GET https://live.douyin.com/{room_id}  → get ttwid cookie + HTML
-  2. Parse window.__INIT_PROPS__ JSON for explicit room status (0/1/2)
+  2. Parse self.__pace_f escaped JSON for explicit room status (0/1/2)
   3. Regex-extract flv_pull_url from embedded JSON
   4. Return stream URL (or None if room is offline)
 """
@@ -42,21 +42,27 @@ def _extract_room_id(url: str) -> Optional[str]:
 
 def _parse_live_status(html: str) -> Optional[int]:
     """
-    Extract explicit room status from window.__INIT_PROPS__ JSON.
+    Extract explicit room status from page state.
     Returns 0 (offline/not started), 1 (live), 2 (ended), or None if not found.
     """
-    m = re.search(r'window\.__INIT_PROPS__\s*=\s*(\{.*?\});', html)
-    if not m:
-        return None
-    try:
-        data = json.loads(m.group(1))
-        status = (data.get("roomStore", {})
-                      .get("roomInfo", {})
-                      .get("status"))
-        if status is not None:
-            return int(status)
-    except (json.JSONDecodeError, ValueError, AttributeError):
-        pass
+    # Current Douyin format: self.__pace_f stores state as escaped JSON.
+    # Room status is always paired with status_str field.
+    m = re.search(r'\\"status\\":(\d+),\\"status_str\\":\\"', html)
+    if m:
+        return int(m.group(1))
+    # Legacy fallback: window.__INIT_PROPS__ (older Douyin page format)
+    m2 = re.search(r'window\.__INIT_PROPS__\s*=\s*(\{.*?\});', html, re.DOTALL)
+    if m2:
+        try:
+            data = json.loads(m2.group(1))
+            status = (data.get("roomStore", {})
+                          .get("roomInfo", {})
+                          .get("room", {})
+                          .get("status"))
+            if status is not None:
+                return int(status)
+        except (json.JSONDecodeError, ValueError, AttributeError):
+            pass
     return None
 
 
