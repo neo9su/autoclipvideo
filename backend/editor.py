@@ -8,8 +8,10 @@ Pipeline:
   4. Cut + concat via ffmpeg → output _clip.mp4
 """
 import asyncio
+import glob as _glob
 import logging
 import os
+import random
 import re
 import tempfile
 from dataclasses import dataclass, field
@@ -18,6 +20,13 @@ from typing import List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 RECORDINGS_DIR = os.path.join(os.path.dirname(__file__), "..", "recordings")
+MUSIC_DIR = os.path.join(os.path.dirname(__file__), "assets", "music")
+
+
+def _pick_music() -> Optional[str]:
+    tracks = _glob.glob(os.path.join(MUSIC_DIR, "*.mp3")) + \
+             _glob.glob(os.path.join(MUSIC_DIR, "*.wav"))
+    return random.choice(tracks) if tracks else None
 CLIP_MIN = 15.0   # seconds
 CLIP_MAX = 30.0   # seconds
 MAX_CLIP_SEGMENTS = 50  # cap to avoid ffmpeg resource exhaustion
@@ -224,10 +233,15 @@ async def _build_clip(mp4: str, selected: List[Seg], segs: List[Seg], out: str) 
         with open(ass_path, "w", encoding="utf-8") as f:
             f.write(ass_content)
 
+        music_path = _pick_music()
+
         cmd = ["ffmpeg", "-y"]
         for seg in selected:
             pre = max(0.0, seg.start - 3.0)
             cmd += ["-ss", f"{pre:.3f}", "-i", mp4]
+
+        if music_path:
+            cmd += ["-stream_loop", "-1", "-i", music_path]
 
         parts = []
         for i, seg in enumerate(selected):
@@ -250,6 +264,12 @@ async def _build_clip(mp4: str, selected: List[Seg], segs: List[Seg], out: str) 
                 cur_v, cur_a = f"xfv{i}", f"xfa{i}"
             parts += [f"[{cur_v}]copy[vcat]", f"[{cur_a}]acopy[acat]"]
 
+        if music_path:
+            parts.append(f"[{n}:a]volume=0.15[bgm];[acat][bgm]amix=inputs=2:duration=first[aout]")
+            audio_map = "[aout]"
+        else:
+            audio_map = "[acat]"
+
         if has_subs:
             # filter_complex uses backslash escaping, not shell quotes
             escaped = ass_path.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
@@ -260,7 +280,7 @@ async def _build_clip(mp4: str, selected: List[Seg], segs: List[Seg], out: str) 
 
         cmd += [
             "-filter_complex", ";".join(parts),
-            "-map", vmap, "-map", "[acat]",
+            "-map", vmap, "-map", audio_map,
             "-c:v", "libx264", "-crf", "22", "-preset", "veryfast",
             "-c:a", "aac", "-b:a", "128k",
             out,
