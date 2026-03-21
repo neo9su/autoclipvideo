@@ -104,11 +104,29 @@ async def _run_editor(recording_id: int, mp4_path: str, srt_path: str):
         )
         await db.commit()
     try:
-        clip_path = await edit_recording(mp4_path, srt_path)
+        # Fetch room name and recording date for organised output path
+        room_name = "unknown"
+        date_str = ""
+        try:
+            async with aiosqlite.connect(DB_PATH) as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute(
+                    "SELECT r.start_time, rm.name as room_name "
+                    "FROM recordings r JOIN rooms rm ON r.room_id = rm.id WHERE r.id = ?",
+                    (recording_id,)
+                ) as cur:
+                    info = await cur.fetchone()
+            if info:
+                room_name = info["room_name"] or "unknown"
+                date_str = (info["start_time"] or "")[:10].replace("-", "")
+        except Exception as e:
+            logger.warning(f"Could not fetch room info for recording {recording_id}: {e}")
+
+        clip_path = await edit_recording(mp4_path, srt_path, room_name=room_name, record_date=date_str)
         if clip_path:
-            clip_filename = os.path.basename(clip_path)
-            thumb = await generate_thumbnail(clip_path, offset=1.0)
-            thumb_basename = os.path.basename(thumb) if thumb else None
+            clip_filename = os.path.relpath(clip_path, RECORDINGS_DIR)
+            thumb = await generate_thumbnail(clip_path)
+            thumb_basename = os.path.relpath(thumb, RECORDINGS_DIR) if thumb else None
             async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute(
                     "UPDATE recordings SET clipped = 2, clip_filename = ?, thumbnail = ? WHERE id = ?",

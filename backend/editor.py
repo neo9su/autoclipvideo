@@ -11,7 +11,6 @@ import asyncio
 import logging
 import os
 import re
-import shutil
 import tempfile
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
@@ -42,6 +41,17 @@ _REMOVE_PATTERNS = [
     r'后台(操作|看[一下]?)',
     r'(尖锐|嘈杂)噪.?音',
     r'回声',
+    # 催单
+    r'最后\d+[百千]?单',
+    r'抢最后',
+    r'就剩\d+[百千]?单',
+    r'仅剩\d+[百千]?单',
+    r'秒没',
+    # 时间词
+    r'这周|上周|下周',
+    r'年前|年后',
+    r'今天|明天|昨天',
+    r'这个月|下个月|上个月',
 ]
 
 # ── Keyword scoring (higher = more valuable to keep) ─────────────────────────
@@ -57,7 +67,7 @@ _SCORES: dict[str, float] = {
     '真人发丝': 8, '递针': 8, '无痕': 8, '不掉色': 7,
     '免打理': 7, '仿真': 8,
     # Conversion urgency
-    '最后': 9, '炸福利': 10, '上车': 9, '运费险': 8,
+    '炸福利': 10, '上车': 9, '运费险': 8,
     '不满意包退': 9, '包退': 7,
     # Contrast / before-after
     '戴上': 7, '戴之前': 8, '戴之后': 8, '对比': 8,
@@ -69,7 +79,22 @@ _SCORES: dict[str, float] = {
 _PROBLEM_KW   = {'发缝宽', '秃头', '发量少', '扁头', '显脸大', '贴头皮', '头型不好看'}
 _SOLUTION_KW  = {'真人发丝', '递针', '无痕', '不掉色', '免打理', '仿真', '一梳到底'}
 _RESULT_KW    = {'秒变', '小V脸', '变身', '高颅顶', '头包脸', '背影杀', '氛围感', '变美'}
-_CONVERT_KW   = {'最后', '炸福利', '上车', '运费险', '包退'}
+_CONVERT_KW   = {'炸福利', '上车', '运费险', '包退'}
+
+
+@dataclass
+class Seg:
+    idx: int
+    start: float
+    end: float
+    text: str
+    score: float = 0.0
+    valid: bool = True
+    category: str = "neutral"   # problem / solution / result / convert / neutral
+
+    @property
+    def duration(self) -> float:
+        return self.end - self.start
 
 
 # ── ASS subtitle generation ────────────────────────────────────────────────────
@@ -132,14 +157,28 @@ def _annotate_text(text: str) -> tuple[str, bool]:
     return text, has_kw
 
 
+_ANIM_STYLES = [
+    # style 1: gentle scale pulse
+    r"{\fad(120,80)\t(0,300,\fscx105\fscy105)\t(300,600,\fscx100\fscy100)}",
+    # style 2: slide up from below (approximate via pos)
+    r"{\fad(100,80)\t(0,200,\fscx102\fscy102)\t(200,400,\fscx100\fscy100)}",
+    # style 3: bounce
+    r"{\fad(80,60)\t(0,150,\fscx108\fscy108)\t(150,300,\fscx97\fscy97)\t(300,450,\fscx103\fscy103)\t(450,600,\fscx100\fscy100)}",
+    # style 4: color pulse (yellow → white)
+    r"{\fad(100,80)\t(0,300,\c&H00FFFF44&)\t(300,600,\c&H00FFFFFF&)}",
+]
+_ANIM_KW = r"{\fad(150,100)\t(0,200,\fscx112\fscy112)\t(200,400,\fscx100\fscy100)}"
+
+
 def build_ass(selected: List[Seg], all_segs: List[Seg]) -> str:
     """
     Generate ASS subtitle string with keyword highlights.
     Remaps SRT timestamps to the clip's output timeline.
-    Keyword lines get a scale-bounce entry animation; all lines fade in/out.
+    Keyword lines get a scale-bounce entry animation; plain lines cycle 4 styles.
     """
     dialogue: list[str] = []
     cursor = 0.0
+    line_idx = 0
     for sel_seg in selected:
         offset = cursor
         cursor += sel_seg.duration
@@ -152,10 +191,10 @@ def build_ass(selected: List[Seg], all_segs: List[Seg]) -> str:
             t1 = offset + (ov_end   - sel_seg.start)
             annotated, has_kw = _annotate_text(srt.text)
             if has_kw:
-                # Fade + scale-bounce for the whole line when it contains a keyword
-                prefix = r"{\fad(150,100)\t(0,180,\fscx107\fscy107)\t(180,360,\fscx100\fscy100)}"
+                prefix = _ANIM_KW
             else:
-                prefix = r"{\fad(100,80)}"
+                prefix = _ANIM_STYLES[line_idx % len(_ANIM_STYLES)]
+            line_idx += 1
             dialogue.append(
                 f"Dialogue: 0,{_sec_to_ass(t0)},{_sec_to_ass(t1)},"
                 f"Default,,0,0,0,,{prefix}{annotated}"
@@ -163,41 +202,70 @@ def build_ass(selected: List[Seg], all_segs: List[Seg]) -> str:
     return _ASS_HEADER + "\n".join(dialogue) + "\n"
 
 
-async def _burn_subtitles(mp4: str, ass_path: str, out: str) -> bool:
-    """Re-encode mp4 burning in the ASS subtitle file. Returns True on success."""
-    escaped = ass_path.replace("'", r"\'")
-    cmd = [
-        "ffmpeg", "-y", "-i", mp4,
-        "-vf", f"ass='{escaped}'",
-        "-c:v", "libx264", "-crf", "22", "-preset", "fast",
-        "-c:a", "copy",
-        out,
-    ]
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _, stderr = await proc.communicate()
-    ok = proc.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 0
-    if not ok:
-        logger.warning(f"Subtitle burn failed (rc={proc.returncode}): {stderr.decode()[-200:]}")
-    return ok
+FADE_DUR = 0.3
+TRANSITIONS = ["fade", "slideright", "slideleft", "dissolve"]
 
 
-@dataclass
-class Seg:
-    idx: int
-    start: float
-    end: float
-    text: str
-    score: float = 0.0
-    valid: bool = True
-    category: str = "neutral"   # problem / solution / result / convert / neutral
+async def _build_clip(mp4: str, selected: List[Seg], segs: List[Seg], out: str) -> bool:
+    """Single-pass ffmpeg: fast-seek N inputs + trim filter (frame-accurate) + xfade + ass burn."""
+    n = len(selected)
+    ass_content = build_ass(selected, segs)
+    has_subs = "Dialogue:" in ass_content
 
-    @property
-    def duration(self) -> float:
-        return self.end - self.start
+    with tempfile.TemporaryDirectory() as tmp:
+        ass_path = os.path.join(tmp, "subs.ass")
+        with open(ass_path, "w", encoding="utf-8") as f:
+            f.write(ass_content)
+
+        cmd = ["ffmpeg", "-y"]
+        for seg in selected:
+            pre = max(0.0, seg.start - 3.0)
+            cmd += ["-ss", f"{pre:.3f}", "-i", mp4]
+
+        parts = []
+        for i, seg in enumerate(selected):
+            pre = max(0.0, seg.start - 3.0)
+            fs  = seg.start - pre           # fine_start ≤ 3.0
+            fe  = fs + (seg.end - seg.start)
+            parts.append(f"[{i}:v]trim={fs:.3f}:{fe:.3f},setpts=PTS-STARTPTS,scale=-2:720[v{i}]")
+            parts.append(f"[{i}:a]atrim={fs:.3f}:{fe:.3f},asetpts=PTS-STARTPTS[a{i}]")
+
+        # xfade chain instead of concat
+        if n == 1:
+            parts += ["[v0]copy[vcat]", "[a0]acopy[acat]"]
+        else:
+            cur_v, cur_a, v_off = "v0", "a0", 0.0
+            for i in range(1, n):
+                tr = TRANSITIONS[(i - 1) % len(TRANSITIONS)]
+                v_off += selected[i - 1].duration - FADE_DUR
+                parts.append(f"[{cur_v}][v{i}]xfade=transition={tr}:duration={FADE_DUR}:offset={v_off:.3f}[xfv{i}]")
+                parts.append(f"[{cur_a}][a{i}]acrossfade=d={FADE_DUR}[xfa{i}]")
+                cur_v, cur_a = f"xfv{i}", f"xfa{i}"
+            parts += [f"[{cur_v}]copy[vcat]", f"[{cur_a}]acopy[acat]"]
+
+        if has_subs:
+            # filter_complex uses backslash escaping, not shell quotes
+            escaped = ass_path.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+            parts.append(f"[vcat]ass={escaped}[vout]")
+            vmap = "[vout]"
+        else:
+            vmap = "[vcat]"
+
+        cmd += [
+            "-filter_complex", ";".join(parts),
+            "-map", vmap, "-map", "[acat]",
+            "-c:v", "libx264", "-crf", "22", "-preset", "veryfast",
+            "-c:a", "aac", "-b:a", "128k",
+            out,
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+        )
+        _, stderr = await proc.communicate()
+        ok = proc.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 0
+        if not ok:
+            logger.error(f"_build_clip failed: {stderr.decode()[-300:]}")
+        return ok
 
 
 # ── SRT parsing ───────────────────────────────────────────────────────────────
@@ -383,54 +451,13 @@ def select_clips(segs: List[Seg]) -> List[Seg]:
     return final
 
 
-# ── ffmpeg operations ─────────────────────────────────────────────────────────
-
-async def _cut(mp4: str, start: float, end: float, out: str) -> bool:
-    cmd = [
-        "ffmpeg", "-y",
-        "-ss", f"{start:.3f}",
-        "-to", f"{end:.3f}",
-        "-i", mp4,
-        "-c", "copy",
-        "-avoid_negative_ts", "make_zero",
-        out,
-    ]
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
-    )
-    await proc.communicate()
-    return os.path.exists(out) and os.path.getsize(out) > 0
-
-
-async def _concat(parts: List[str], out: str) -> bool:
-    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as f:
-        for p in parts:
-            f.write(f"file '{p}'\n")
-        list_file = f.name
-    cmd = [
-        "ffmpeg", "-y",
-        "-f", "concat", "-safe", "0",
-        "-i", list_file,
-        "-c", "copy",
-        out,
-    ]
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
-    )
-    _, stderr = await proc.communicate()
-    os.unlink(list_file)
-    ok = proc.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 0
-    if not ok:
-        logger.error(f"concat failed: {stderr.decode()[-300:]}")
-    return ok
-
-
 # ── Main entry ────────────────────────────────────────────────────────────────
 
-async def edit_recording(mp4_path: str, srt_path: str) -> Optional[str]:
+async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown", record_date: str = "") -> Optional[str]:
     """
     Produce a 15-30s highlight clip from a recording + its SRT.
     Returns local path to the output _clip.mp4, or None on failure.
+    Output is organised as recordings/{room_name}/{date}/{room}_{date}_{seq}_clip.mp4.
     """
     if not os.path.exists(mp4_path):
         logger.error(f"MP4 not found: {mp4_path}")
@@ -469,46 +496,16 @@ async def edit_recording(mp4_path: str, srt_path: str) -> Optional[str]:
         f"[{', '.join(s.category for s in selected)}]"
     )
 
-    # Cut → concat → burn subtitles in temp dir
-    tmp_dir = tempfile.mkdtemp()
-    parts = []
-    try:
-        for i, seg in enumerate(selected):
-            part = os.path.join(tmp_dir, f"part_{i:03d}.mp4")
-            ok = await _cut(mp4_path, seg.start, seg.end, part)
-            if ok:
-                parts.append(part)
-            else:
-                logger.warning(f"Cut failed for segment {i}: {seg.start:.1f}-{seg.end:.1f}")
+    from datetime import datetime
+    date_str  = record_date or datetime.utcnow().strftime("%Y%m%d")
+    safe_name = re.sub(r'[\\/:*?"<>|]', '_', room_name)
+    out_dir   = os.path.join(RECORDINGS_DIR, safe_name, date_str)
+    os.makedirs(out_dir, exist_ok=True)
+    seq       = len([f for f in os.listdir(out_dir) if f.endswith("_clip.mp4")]) + 1
+    out_path  = os.path.join(out_dir, f"{safe_name}_{date_str}_{seq:03d}_clip.mp4")
 
-        if not parts:
-            logger.error("All cuts failed")
-            return None
-
-        base        = os.path.splitext(os.path.basename(mp4_path))[0]
-        out_path    = os.path.join(RECORDINGS_DIR, f"{base}_clip.mp4")
-        concat_path = os.path.join(tmp_dir, "concat.mp4")
-        ass_path    = os.path.join(tmp_dir, "subs.ass")
-
-        if not await _concat(parts, concat_path):
-            return None
-
-        ass_content = build_ass(selected, segs)
-        with open(ass_path, "w", encoding="utf-8") as f:
-            f.write(ass_content)
-
-        has_subs = "Dialogue:" in ass_content
-        if has_subs and await _burn_subtitles(concat_path, ass_path, out_path):
-            logger.info(
-                f"Clip with subtitles ready: {out_path} "
-                f"({os.path.getsize(out_path)/1024/1024:.1f} MB, {total_dur:.1f}s)"
-            )
-        else:
-            shutil.move(concat_path, out_path)
-            logger.info(
-                f"Clip ready: {out_path} "
-                f"({os.path.getsize(out_path)/1024/1024:.1f} MB, {total_dur:.1f}s)"
-            )
+    if await _build_clip(mp4_path, selected, segs, out_path):
+        size_mb = os.path.getsize(out_path) / 1024 / 1024
+        logger.info(f"Clip ready: {out_path} ({size_mb:.1f} MB, {total_dur:.1f}s)")
         return out_path
-    finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+    return None

@@ -141,7 +141,7 @@ async def toggle_room(room_id: int):
 # ── Recordings ───────────────────────────────────────────────────────────────
 
 @app.post("/api/rooms/{room_id}/upload", status_code=201)
-async def upload_recording(room_id: int, file: UploadFile = File(...)):
+async def upload_recording(room_id: int, file: UploadFile = File(...), srt: Optional[UploadFile] = File(None)):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT id FROM rooms WHERE id = ?", (room_id,)) as cur:
@@ -172,6 +172,22 @@ async def upload_recording(room_id: int, file: UploadFile = File(...)):
 
     asyncio.create_task(_generate_upload_thumb(recording_id, filepath))
 
+    # If SRT is provided, skip GPU transcription and trigger clipping immediately
+    if srt is not None:
+        srt_filename = os.path.splitext(filename)[0] + ".srt"
+        srt_path = os.path.join(recordings_dir, srt_filename)
+        srt_content = await srt.read()
+        with open(srt_path, "wb") as f:
+            f.write(srt_content)
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE recordings SET transcribed = 2, synced = 1 WHERE id = ?",
+                (recording_id,),
+            )
+            await db.commit()
+        asyncio.create_task(_run_editor(recording_id, filepath, srt_path))
+        return {"id": recording_id, "filename": filename, "size_bytes": size_bytes, "gpu_job_id": None}
+
     job_id = await sync_file(filepath, room_id)
     if job_id:
         async with aiosqlite.connect(DB_PATH) as db:
@@ -192,7 +208,7 @@ async def _generate_upload_thumb(recording_id: int, mp4_path: str):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
                 "UPDATE recordings SET thumbnail = ? WHERE id = ?",
-                (os.path.basename(thumb), recording_id),
+                (os.path.relpath(thumb, os.path.join(os.path.dirname(__file__), "..", "recordings")), recording_id),
             )
             await db.commit()
 
@@ -230,6 +246,29 @@ async def list_all_recordings(page: int = 1, limit: int = 50):
         "page": page,
         "pages": max(1, (total + limit - 1) // limit),
     }
+
+
+@app.get("/api/clips")
+async def list_clips():
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT r.id, r.filename, r.clip_filename, r.start_time, r.end_time,
+                   r.room_id, rm.name as room_name
+            FROM recordings r
+            JOIN rooms rm ON r.room_id = rm.id
+            WHERE r.clipped = 2 AND r.clip_filename IS NOT NULL
+            ORDER BY r.start_time DESC
+        """) as cur:
+            rows = await cur.fetchall()
+    items = []
+    for r in rows:
+        clip_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "recordings", r["clip_filename"])
+        )
+        size = os.path.getsize(clip_path) if os.path.exists(clip_path) else None
+        items.append({**dict(r), "clip_size": size})
+    return items
 
 
 # ── Subtitles ────────────────────────────────────────────────────────────────
@@ -405,6 +444,23 @@ async def retry_clip(recording_id: int):
         raise HTTPException(status_code=404, detail="SRT file missing")
     asyncio.create_task(_run_editor(recording_id, mp4_path, srt_path))
     return {"recording_id": recording_id, "clipped": 1}
+
+
+@app.post("/api/recordings/{recording_id}/reveal-clip")
+async def reveal_clip(recording_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM recordings WHERE id = ?", (recording_id,)) as cur:
+            rec = await cur.fetchone()
+    if not rec or rec["clipped"] != 2 or not rec["clip_filename"]:
+        raise HTTPException(status_code=404, detail="Clip not found")
+    clip_path = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "recordings", rec["clip_filename"])
+    )
+    if not os.path.exists(clip_path):
+        raise HTTPException(status_code=404, detail="Clip file missing on disk")
+    await asyncio.create_subprocess_exec("open", "-R", clip_path)
+    return {"ok": True}
 
 
 # ── Group management ──────────────────────────────────────────────────────────
