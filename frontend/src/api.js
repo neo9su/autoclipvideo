@@ -63,9 +63,10 @@ export async function mergeGroup(id) {
   return res.json()
 }
 
-export async function uploadRecording(roomId, file) {
+export async function uploadRecording(roomId, file, srtFile = null) {
   const form = new FormData()
   form.append('file', file)
+  if (srtFile) form.append('srt', srtFile)
   const res = await fetch(`${BASE}/api/rooms/${roomId}/upload`, { method: 'POST', body: form })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
@@ -79,6 +80,18 @@ export async function retryTranscribe(id) {
 
 export async function retryClip(id) {
   const res = await fetch(`${BASE}/api/recordings/${id}/retry-clip`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function getClips() {
+  const res = await fetch(`${BASE}/api/clips`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function revealClip(id) {
+  const res = await fetch(`${BASE}/api/recordings/${id}/reveal-clip`, { method: 'POST' })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }

@@ -56,8 +56,9 @@
           </button>
           <label class="btn-sm upload-btn" :class="{ uploading: uploadingRooms.has(room.id) }">
             {{ uploadingRooms.has(room.id) ? '上传中…' : '上传视频' }}
-            <input type="file" accept="video/*" style="display:none" @change="e => uploadVideo(room, e)" :disabled="uploadingRooms.has(room.id)" />
+            <input type="file" accept="video/*" style="display:none" @change="e => pickVideo(room, e)" :disabled="uploadingRooms.has(room.id)" />
           </label>
+          <input :ref="el => srtInputs[room.id] = el" type="file" accept=".srt" style="display:none" @change="e => onSrtPicked(e)" />
           <button class="btn-sm danger" @click="remove(room)">删除</button>
         </div>
       </div>
@@ -96,6 +97,8 @@ const newName = ref('')
 const newUrl = ref('')
 const addError = ref('')
 const uploadingRooms = ref(new Set())
+const srtInputs = ref({})
+let pendingUpload = null  // { room, file }
 let ws = null
 let timer = null
 
@@ -123,13 +126,31 @@ async function toggle(room) {
   await load()
 }
 
-async function uploadVideo(room, event) {
+function pickVideo(room, event) {
   const file = event.target.files[0]
   if (!file) return
   event.target.value = ''
+  pendingUpload = { room, file }
+  if (confirm('是否同时上传 SRT 字幕文件？\n（有字幕则跳过 GPU 转录，直接开始剪辑）')) {
+    srtInputs.value[room.id]?.click()
+  } else {
+    doUpload(room, file, null)
+  }
+}
+
+function onSrtPicked(event) {
+  const srtFile = event.target.files[0] || null
+  event.target.value = ''
+  if (!pendingUpload) return
+  const { room, file } = pendingUpload
+  pendingUpload = null
+  doUpload(room, file, srtFile)
+}
+
+async function doUpload(room, file, srtFile) {
   uploadingRooms.value = new Set([...uploadingRooms.value, room.id])
   try {
-    await uploadRecording(room.id, file)
+    await uploadRecording(room.id, file, srtFile)
     await load()
   } catch (e) {
     alert(`上传失败: ${e.message}`)

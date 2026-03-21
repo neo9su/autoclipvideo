@@ -58,11 +58,10 @@
             <span v-else class="badge dim">待转录</span>
           </td>
           <td>
-            <a v-if="rec.clipped === 2"
-               :href="`${apiBase}/api/recordings/${rec.id}/clip`"
-               class="badge purple">
-              下载剪辑
-            </a>
+            <div v-if="rec.clipped === 2" class="clip-actions">
+              <a :href="`${apiBase}/api/recordings/${rec.id}/clip`" class="badge purple">下载剪辑</a>
+              <button class="badge dim btn-retry" @click="doRevealClip(rec)" title="在 Finder 中显示">打开位置</button>
+            </div>
             <span v-else-if="rec.clipped === 1" class="badge yellow">剪辑中</span>
             <button v-else-if="rec.clipped === -1" class="badge red btn-retry" @click="doRetryClip(rec)">重试</button>
             <span v-else class="badge dim">—</span>
@@ -96,7 +95,7 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { getAllRecordings, getRooms, retryTranscribe, retryClip,
+import { getAllRecordings, getRooms, retryTranscribe, retryClip, revealClip,
          deleteLocalFile, bulkCleanup, formatBytes, formatDuration, createWS, getThumbnailUrl } from '../api.js'
 import { useToast } from '../composables/toast.js'
 
@@ -166,6 +165,14 @@ async function doRetryClip(rec) {
   }
 }
 
+async function doRevealClip(rec) {
+  try {
+    await revealClip(rec.id)
+  } catch (e) {
+    show(e.message || '打开失败', 'error')
+  }
+}
+
 async function doDeleteLocal(rec) {
   try {
     await deleteLocalFile(rec.id)
@@ -223,6 +230,7 @@ onUnmounted(() => ws?.close())
 .badge.dim    { background: #2a2a2a; color: #555; }
 .badge.blue:hover, .badge.purple:hover { filter: brightness(1.3); }
 .btn-retry { cursor: pointer; border: none; font-family: inherit; }
+.clip-actions { display: flex; flex-direction: column; gap: 4px; }
 .empty { text-align: center; color: #444; padding: 40px; }
 .pagination { display: flex; align-items: center; gap: 6px; margin-top: 20px; justify-content: center; }
 .page-btn { background: #2a2a2a; border: 1px solid #333; color: #888; padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 13px; min-width: 36px; }
