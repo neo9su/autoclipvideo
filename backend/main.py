@@ -286,7 +286,7 @@ async def download_clip(recording_id: int):
     clip_path = os.path.join(os.path.dirname(__file__), "..", "recordings", rec["clip_filename"])
     if not os.path.exists(clip_path):
         raise HTTPException(status_code=404, detail="Clip file missing")
-    return FileResponse(clip_path, media_type="video/mp4", filename=rec["clip_filename"])
+    return FileResponse(clip_path, media_type="video/mp4", filename=os.path.basename(rec["clip_filename"]))
 
 
 @app.get("/api/recordings/{recording_id}/thumbnail")
