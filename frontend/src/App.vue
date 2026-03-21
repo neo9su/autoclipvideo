@@ -8,6 +8,7 @@
           <button :class="['nav-btn', page === 'history' && 'active']" @click="page = 'history'">录像历史</button>
           <button :class="['nav-btn', page === 'groups' && 'active']" @click="page = 'groups'">分组管理</button>
           <button :class="['nav-btn', page === 'clips' && 'active']" @click="page = 'clips'">剪辑文件</button>
+          <button :class="['nav-btn', page === 'upload' && 'active']" @click="page = 'upload'">上传剪辑</button>
         </nav>
       </div>
     </header>
@@ -16,6 +17,7 @@
       <History v-else-if="page === 'history'" />
       <Groups v-else-if="page === 'groups'" />
       <Clips v-else-if="page === 'clips'" />
+      <Upload v-else-if="page === 'upload'" />
     </main>
     <div class="toast-container">
       <div v-for="t in toasts" :key="t.id" :class="['toast', t.type]">{{ t.message }}</div>
@@ -29,6 +31,7 @@ import Dashboard from './views/Dashboard.vue'
 import History from './views/History.vue'
 import Groups from './views/Groups.vue'
 import Clips from './views/Clips.vue'
+import Upload from './views/Upload.vue'
 import { useToast } from './composables/toast.js'
 const page = ref('dashboard')
 const { toasts } = useToast()

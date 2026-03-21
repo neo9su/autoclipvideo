@@ -96,7 +96,7 @@ async def _fetch_srt(client: httpx.AsyncClient, recording_id: int, job_id: str, 
         logger.error(f"SRT fetch error for {job_id}: {e}")
 
 
-async def _run_editor(recording_id: int, mp4_path: str, srt_path: str):
+async def _run_editor(recording_id: int, mp4_path: str, srt_path: str, clip_duration: Optional[float] = None):
     """Run editor and update DB with result."""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
@@ -122,7 +122,7 @@ async def _run_editor(recording_id: int, mp4_path: str, srt_path: str):
         except Exception as e:
             logger.warning(f"Could not fetch room info for recording {recording_id}: {e}")
 
-        clip_path = await edit_recording(mp4_path, srt_path, room_name=room_name, record_date=date_str)
+        clip_path = await edit_recording(mp4_path, srt_path, room_name=room_name, record_date=date_str, clip_duration=clip_duration)
         if clip_path:
             clip_filename = os.path.relpath(clip_path, RECORDINGS_DIR)
             thumb = await generate_thumbnail(clip_path)

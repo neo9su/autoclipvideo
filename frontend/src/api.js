@@ -63,11 +63,18 @@ export async function mergeGroup(id) {
   return res.json()
 }
 
-export async function uploadRecording(roomId, file, srtFile = null) {
+export async function uploadRecording(roomId, file, srtFile = null, durationSec = null) {
   const form = new FormData()
   form.append('file', file)
   if (srtFile) form.append('srt', srtFile)
+  if (durationSec) form.append('duration_sec', String(durationSec))
   const res = await fetch(`${BASE}/api/rooms/${roomId}/upload`, { method: 'POST', body: form })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function getRecording(id) {
+  const res = await fetch(`${BASE}/api/recordings/${id}`)
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
@@ -129,6 +136,16 @@ export async function reassignRecording(recordingId, groupId) {
 export async function deleteLocalFile(id) {
   const res = await fetch(`${BASE}/api/recordings/${id}/local-file`, { method: 'DELETE' })
   if (!res.ok) throw new Error(await res.text())
+}
+
+export async function reclip(roomName, date, durationSec) {
+  const res = await fetch(`${BASE}/api/reclip`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ room_name: roomName, date, duration_sec: durationSec }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
 }
 
 export async function bulkCleanup() {

@@ -9,7 +9,7 @@ from typing import Optional, Set
 import aiosqlite
 from datetime import datetime
 
-from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -141,7 +141,7 @@ async def toggle_room(room_id: int):
 # ── Recordings ───────────────────────────────────────────────────────────────
 
 @app.post("/api/rooms/{room_id}/upload", status_code=201)
-async def upload_recording(room_id: int, file: UploadFile = File(...), srt: Optional[UploadFile] = File(None)):
+async def upload_recording(room_id: int, file: UploadFile = File(...), srt: Optional[UploadFile] = File(None), duration_sec: Optional[float] = Form(None)):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT id FROM rooms WHERE id = ?", (room_id,)) as cur:
@@ -185,7 +185,7 @@ async def upload_recording(room_id: int, file: UploadFile = File(...), srt: Opti
                 (recording_id,),
             )
             await db.commit()
-        asyncio.create_task(_run_editor(recording_id, filepath, srt_path))
+        asyncio.create_task(_run_editor(recording_id, filepath, srt_path, clip_duration=duration_sec))
         return {"id": recording_id, "filename": filename, "size_bytes": size_bytes, "gpu_job_id": None}
 
     job_id = await sync_file(filepath, room_id)
@@ -392,6 +392,21 @@ async def download_merged(group_id: int):
     return FileResponse(path, media_type="video/mp4", filename=group["merged_filename"])
 
 
+@app.get("/api/recordings/{recording_id}")
+async def get_recording(recording_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT r.*, rm.name as room_name FROM recordings r "
+            "JOIN rooms rm ON r.room_id = rm.id WHERE r.id = ?",
+            (recording_id,)
+        ) as cur:
+            rec = await cur.fetchone()
+    if not rec:
+        raise HTTPException(status_code=404, detail="Recording not found")
+    return dict(rec)
+
+
 # ── Retry ────────────────────────────────────────────────────────────────────
 
 @app.post("/api/recordings/{recording_id}/retry-transcribe")
@@ -565,6 +580,36 @@ async def reassign_recording_group(recording_id: int, body: RecordingGroupUpdate
         )
         await db.commit()
     return {"recording_id": recording_id, "group_id": body.group_id}
+
+
+# ── Reclip ───────────────────────────────────────────────────────────────────
+
+class ReclipRequest(BaseModel):
+    room_name: str
+    date: str        # "YYYY-MM-DD"
+    duration_sec: float
+
+
+@app.post("/api/reclip")
+async def reclip(req: ReclipRequest):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT r.* FROM recordings r JOIN rooms rm ON r.room_id = rm.id "
+            "WHERE rm.name = ? AND substr(r.start_time,1,10) = ? AND r.transcribed = 2",
+            (req.room_name, req.date)
+        ) as cur:
+            recs = await cur.fetchall()
+    if not recs:
+        raise HTTPException(status_code=404, detail="No transcribed recordings found")
+    queued = []
+    for rec in recs:
+        mp4_path = os.path.join(os.path.dirname(__file__), "..", "recordings", rec["filename"])
+        srt_path = os.path.splitext(mp4_path)[0] + ".srt"
+        if os.path.exists(mp4_path) and os.path.exists(srt_path):
+            asyncio.create_task(_run_editor(rec["id"], mp4_path, srt_path, clip_duration=req.duration_sec))
+            queued.append(rec["id"])
+    return {"queued": queued}
 
 
 # ── Status ───────────────────────────────────────────────────────────────────

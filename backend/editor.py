@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 RECORDINGS_DIR = os.path.join(os.path.dirname(__file__), "..", "recordings")
 CLIP_MIN = 15.0   # seconds
 CLIP_MAX = 30.0   # seconds
+MAX_CLIP_SEGMENTS = 50  # cap to avoid ffmpeg resource exhaustion
 
 # ── Patterns that trigger segment removal ────────────────────────────────────
 _REMOVE_PATTERNS = [
@@ -385,16 +386,16 @@ def _pick_by_category(segs: List[Seg], cat: str, budget: float) -> List[Seg]:
     return chosen
 
 
-def select_clips(segs: List[Seg]) -> List[Seg]:
+def select_clips(segs: List[Seg], clip_min: float = CLIP_MIN, clip_max: float = CLIP_MAX) -> List[Seg]:
     valid = [s for s in segs if s.valid]
     if not valid:
         return []
 
     # Budget allocation: 20% opening, 30% problem, 25% solution, 25% result/convert
-    opening_budget  = CLIP_MAX * 0.20
-    problem_budget  = CLIP_MAX * 0.30
-    solution_budget = CLIP_MAX * 0.25
-    result_budget   = CLIP_MAX * 0.25
+    opening_budget  = clip_max * 0.20
+    problem_budget  = clip_max * 0.30
+    solution_budget = clip_max * 0.25
+    result_budget   = clip_max * 0.25
 
     # Golden opening: single highest-score segment (prefer result/transform)
     opening_pool = sorted(
@@ -422,20 +423,20 @@ def select_clips(segs: List[Seg]) -> List[Seg]:
     problems  = pick("problem",  problem_budget)
     solutions = pick("solution", solution_budget)
     results   = pick("result",   result_budget)
-    converts  = pick("convert",  CLIP_MAX * 0.15)
+    converts  = pick("convert",  clip_max * 0.15)
 
     assembled = opening + problems + solutions + results + converts
     total = sum(s.duration for s in assembled)
 
     # If under minimum, fill with highest-score neutrals
-    if total < CLIP_MIN:
+    if total < clip_min:
         used_ids = {id(s) for s in assembled}
         neutrals = sorted(
             [s for s in valid if id(s) not in used_ids],
             key=lambda s: s.score, reverse=True
         )
         for s in neutrals:
-            if total >= CLIP_MAX:
+            if total >= clip_max:
                 break
             assembled.append(s)
             total += s.duration
@@ -446,20 +447,25 @@ def select_clips(segs: List[Seg]) -> List[Seg]:
         tail = sorted(assembled[1:], key=lambda s: s.start)
         assembled = [head] + tail
 
-    # Trim to CLIP_MAX
+    # Trim to clip_max
     final, total = [], 0.0
     for s in assembled:
-        if total + s.duration > CLIP_MAX:
+        if total + s.duration > clip_max:
             break
         final.append(s)
         total += s.duration
+
+    # Cap segment count to avoid ffmpeg resource exhaustion
+    if len(final) > MAX_CLIP_SEGMENTS:
+        final = sorted(final, key=lambda s: s.score, reverse=True)[:MAX_CLIP_SEGMENTS]
+        final = sorted(final, key=lambda s: s.start)
 
     return final
 
 
 # ── Main entry ────────────────────────────────────────────────────────────────
 
-async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown", record_date: str = "") -> Optional[str]:
+async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown", record_date: str = "", clip_duration: Optional[float] = None) -> Optional[str]:
     """
     Produce a 15-30s highlight clip from a recording + its SRT.
     Returns local path to the output _clip.mp4, or None on failure.
@@ -491,7 +497,9 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
         logger.warning(f"Silence detection skipped: {e}")
 
     # Select clips
-    selected = select_clips(segs)
+    c_min = (clip_duration * 0.85) if clip_duration else CLIP_MIN
+    c_max = clip_duration if clip_duration else CLIP_MAX
+    selected = select_clips(segs, clip_min=c_min, clip_max=c_max)
     if not selected:
         logger.warning(f"No valid clips selected for {mp4_path}")
         return None

@@ -7,10 +7,21 @@
           <option value="">全部房间</option>
           <option v-for="r in rooms" :key="r.id" :value="r.id">{{ r.name }}</option>
         </select>
-        <button class="btn-cleanup" @click="doBulkCleanup" title="删除所有已处理文件的本地副本">
-          批量清理
-        </button>
       </div>
+    </div>
+
+    <!-- Custom reclip form -->
+    <div class="reclip-bar">
+      <select v-model="reclipRoom" class="room-filter">
+        <option value="">选择房间</option>
+        <option v-for="r in rooms" :key="r.id" :value="r.name">{{ r.name }}</option>
+      </select>
+      <input type="date" v-model="reclipDate" class="room-filter" />
+      <input type="number" v-model.number="reclipDuration" min="10" max="1800" placeholder="时长" class="room-filter duration-input" />
+      <span class="duration-unit">秒</span>
+      <button class="btn-cleanup btn-reclip" @click="doReclip" :disabled="!reclipRoom || !reclipDate || !reclipDuration">
+        重新剪辑
+      </button>
     </div>
 
     <table class="recordings-table">
@@ -25,7 +36,6 @@
           <th>同步</th>
           <th>字幕</th>
           <th>剪辑</th>
-          <th>本地文件</th>
         </tr>
       </thead>
       <tbody>
@@ -66,14 +76,9 @@
             <button v-else-if="rec.clipped === -1" class="badge red btn-retry" @click="doRetryClip(rec)">重试</button>
             <span v-else class="badge dim">—</span>
           </td>
-          <td>
-            <span v-if="rec.local_deleted" class="badge dim">已清理</span>
-            <button v-else-if="canCleanup(rec)" class="badge red btn-retry" @click="doDeleteLocal(rec)">清理</button>
-            <span v-else class="badge dim">—</span>
-          </td>
         </tr>
         <tr v-if="filtered.length === 0">
-          <td colspan="10" class="empty">暂无录像记录</td>
+          <td colspan="9" class="empty">暂无录像记录</td>
         </tr>
       </tbody>
     </table>
@@ -96,7 +101,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { getAllRecordings, getRooms, retryTranscribe, retryClip, revealClip,
-         deleteLocalFile, bulkCleanup, formatBytes, formatDuration, createWS, getThumbnailUrl } from '../api.js'
+         reclip, formatBytes, formatDuration, createWS, getThumbnailUrl } from '../api.js'
 import { useToast } from '../composables/toast.js'
 
 const { show } = useToast()
@@ -104,6 +109,9 @@ const { show } = useToast()
 const recordings = ref([])
 const rooms = ref([])
 const filterRoom = ref('')
+const reclipRoom = ref('')
+const reclipDate = ref('')
+const reclipDuration = ref(60)
 const page = ref(1)
 const total = ref(0)
 const totalPages = ref(1)
@@ -126,11 +134,6 @@ const pageRange = computed(() => {
 
 const fmtTime = (s) => s ? new Date(s).toLocaleString('zh-CN') : '—'
 
-const canCleanup = (rec) =>
-  rec.synced === 1 &&
-  !rec.local_deleted &&
-  rec.transcribed !== 0 && rec.transcribed !== 1 &&
-  rec.clipped !== 0 && rec.clipped !== 1
 
 async function load() {
   const [data, r] = await Promise.all([getAllRecordings(page.value), getRooms()])
@@ -173,23 +176,13 @@ async function doRevealClip(rec) {
   }
 }
 
-async function doDeleteLocal(rec) {
+async function doReclip() {
   try {
-    await deleteLocalFile(rec.id)
-    show('本地文件已删除', 'success')
+    const { queued } = await reclip(reclipRoom.value, reclipDate.value, reclipDuration.value)
+    show(`已提交 ${queued.length} 个剪辑任务`, 'success')
     await load()
   } catch (e) {
-    show(e.message || '删除失败', 'error')
-  }
-}
-
-async function doBulkCleanup() {
-  try {
-    const { deleted, total_eligible } = await bulkCleanup()
-    show(`清理完成：删除 ${deleted} / ${total_eligible} 个文件`, 'success')
-    await load()
-  } catch (e) {
-    show(e.message || '清理失败', 'error')
+    show(e.message || '提交失败', 'error')
   }
 }
 
@@ -216,6 +209,12 @@ onUnmounted(() => ws?.close())
 .room-filter { background: #1a1a1a; border: 1px solid #333; color: #ccc; padding: 7px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; }
 .btn-cleanup { background: #2a2a2a; border: 1px solid #444; color: #888; padding: 7px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; }
 .btn-cleanup:hover { background: #333; color: #ccc; }
+.reclip-bar { display: flex; gap: 10px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+.duration-input { width: 80px; }
+.duration-unit { color: #888; font-size: 13px; margin-left: -6px; }
+.btn-reclip { background: rgba(254,44,85,0.15); color: #fe2c55; border-color: rgba(254,44,85,0.3); }
+.btn-reclip:hover:not(:disabled) { background: rgba(254,44,85,0.25); color: #fe2c55; }
+.btn-reclip:disabled { opacity: 0.4; cursor: not-allowed; }
 .recordings-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .recordings-table th { text-align: left; padding: 10px 14px; color: #666; font-weight: 500; border-bottom: 1px solid #222; }
 .recordings-table td { padding: 12px 14px; border-bottom: 1px solid #1e1e1e; }
