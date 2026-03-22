@@ -11,6 +11,7 @@ from db import DB_PATH
 logger = logging.getLogger(__name__)
 
 POLL_INTERVAL = 60  # seconds
+AUTO_CLIP_COUNT = 3
 
 
 class MonitorManager:
@@ -64,9 +65,9 @@ class MonitorManager:
         """Called by recorder at the start of each segment — insert DB row with correct filename."""
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
-                """INSERT OR IGNORE INTO recordings (room_id, filename, start_time, segment_index)
-                   VALUES (?, ?, ?, ?)""",
-                (room_id, filename, datetime.now().isoformat(), segment_index),
+                """INSERT OR IGNORE INTO recordings (room_id, filename, start_time, segment_index, clip_count)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (room_id, filename, datetime.now().isoformat(), segment_index, AUTO_CLIP_COUNT),
             )
             await db.commit()
 
