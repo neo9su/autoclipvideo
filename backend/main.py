@@ -147,12 +147,14 @@ async def toggle_room(room_id: int):
 # ── Recordings ───────────────────────────────────────────────────────────────
 
 @app.post("/api/rooms/{room_id}/upload", status_code=201)
-async def upload_recording(room_id: int, file: UploadFile = File(...), srt: Optional[UploadFile] = File(None), duration_sec: Optional[float] = Form(None)):
+async def upload_recording(room_id: int, file: UploadFile = File(...), srt: Optional[UploadFile] = File(None), duration_sec: Optional[float] = Form(None), clip_count: int = Form(1)):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT id FROM rooms WHERE id = ?", (room_id,)) as cur:
             if not await cur.fetchone():
                 raise HTTPException(status_code=404, detail="Room not found")
+
+    clip_count = max(1, min(5, clip_count))
 
     now = datetime.utcnow()
     ts = now.strftime("%Y%m%d_%H%M%S")
@@ -170,8 +172,8 @@ async def upload_recording(room_id: int, file: UploadFile = File(...), srt: Opti
     start_time = now.isoformat()
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
-            "INSERT INTO recordings (room_id, filename, start_time, end_time, size_bytes, synced) VALUES (?, ?, ?, ?, ?, 0)",
-            (room_id, filename, start_time, start_time, size_bytes),
+            "INSERT INTO recordings (room_id, filename, start_time, end_time, size_bytes, synced, clip_count) VALUES (?, ?, ?, ?, ?, 0, ?)",
+            (room_id, filename, start_time, start_time, size_bytes, clip_count),
         )
         await db.commit()
         recording_id = cur.lastrowid
@@ -191,7 +193,7 @@ async def upload_recording(room_id: int, file: UploadFile = File(...), srt: Opti
                 (recording_id,),
             )
             await db.commit()
-        asyncio.create_task(_run_editor(recording_id, filepath, srt_path, clip_duration=duration_sec))
+        asyncio.create_task(_run_editor(recording_id, filepath, srt_path, clip_duration=duration_sec, clip_count=clip_count))
         return {"id": recording_id, "filename": filename, "size_bytes": size_bytes, "gpu_job_id": None}
 
     job_id = await sync_file(filepath, room_id)
@@ -293,6 +295,32 @@ async def download_clip(recording_id: int):
     if not os.path.exists(clip_path):
         raise HTTPException(status_code=404, detail="Clip file missing")
     return FileResponse(clip_path, media_type="video/mp4", filename=os.path.basename(rec["clip_filename"]))
+
+
+@app.get("/api/recordings/{recording_id}/clips")
+async def list_recording_clips(recording_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM recording_clips WHERE recording_id = ? ORDER BY variant_idx ASC",
+            (recording_id,)
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/recording-clips/{clip_id}/download")
+async def download_recording_clip(clip_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM recording_clips WHERE id = ?", (clip_id,)) as cur:
+            clip = await cur.fetchone()
+    if not clip:
+        raise HTTPException(status_code=404, detail="Clip not found")
+    clip_path = os.path.join(os.path.dirname(__file__), "..", "recordings", clip["clip_filename"])
+    if not os.path.exists(clip_path):
+        raise HTTPException(status_code=404, detail="Clip file missing")
+    return FileResponse(clip_path, media_type="video/mp4", filename=os.path.basename(clip["clip_filename"]))
 
 
 @app.get("/api/recordings/{recording_id}/thumbnail")
@@ -442,6 +470,27 @@ async def retry_transcribe(recording_id: int):
             await db.commit()
         return {"recording_id": recording_id, "transcribed": 1}
     raise HTTPException(status_code=500, detail="Failed to submit transcription job")
+
+
+@app.post("/api/recordings/clip-missing")
+async def clip_missing():
+    """查找所有已转录但未剪辑的记录，批量发起剪辑任务。"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        rows = await db.execute_fetchall(
+            "SELECT * FROM recordings WHERE transcribed = 2 AND clipped IN (0, -1)"
+        )
+    queued, skipped = [], []
+    base = os.path.join(os.path.dirname(__file__), "..", "recordings")
+    for rec in rows:
+        mp4_path = os.path.join(base, rec["filename"])
+        srt_path = os.path.join(base, os.path.splitext(rec["filename"])[0] + ".srt")
+        if not os.path.exists(mp4_path) or not os.path.exists(srt_path):
+            skipped.append(rec["id"])
+            continue
+        asyncio.create_task(_run_editor(rec["id"], mp4_path, srt_path))
+        queued.append(rec["id"])
+    return {"queued": queued, "skipped": skipped}
 
 
 @app.post("/api/recordings/{recording_id}/retry-clip")
@@ -594,6 +643,7 @@ class ReclipRequest(BaseModel):
     room_name: str
     date: str        # "YYYY-MM-DD"
     duration_sec: float
+    clip_count: int = 1
 
 
 @app.post("/api/reclip")
@@ -613,7 +663,7 @@ async def reclip(req: ReclipRequest):
         mp4_path = os.path.join(os.path.dirname(__file__), "..", "recordings", rec["filename"])
         srt_path = os.path.splitext(mp4_path)[0] + ".srt"
         if os.path.exists(mp4_path) and os.path.exists(srt_path):
-            asyncio.create_task(_run_editor(rec["id"], mp4_path, srt_path, clip_duration=req.duration_sec))
+            asyncio.create_task(_run_editor(rec["id"], mp4_path, srt_path, clip_duration=req.duration_sec, clip_count=req.clip_count))
             queued.append(rec["id"])
     return {"queued": queued}
 
@@ -675,6 +725,24 @@ async def system_status():
         "total_bytes": total_bytes or 0,
         "local_files": local_files,
     }
+
+
+@app.get("/api/stats")
+async def get_stats():
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        rows = await db.execute_fetchall("""
+            SELECT
+                SUM(CASE WHEN transcribed = 0 AND synced = 1 THEN 1 ELSE 0 END) AS transcribe_pending,
+                SUM(CASE WHEN transcribed = 1 THEN 1 ELSE 0 END)               AS transcribe_running,
+                SUM(CASE WHEN transcribed = -1 THEN 1 ELSE 0 END)              AS transcribe_failed,
+                SUM(CASE WHEN transcribed = 2 AND clipped = 0 THEN 1 ELSE 0 END) AS clip_pending,
+                SUM(CASE WHEN clipped = 1 THEN 1 ELSE 0 END)                   AS clip_running,
+                SUM(CASE WHEN clipped = -1 THEN 1 ELSE 0 END)                  AS clip_failed
+            FROM recordings
+        """)
+        r = dict(rows[0])
+    return {k: (v or 0) for k, v in r.items()}
 
 
 # ── WebSocket ────────────────────────────────────────────────────────────────
@@ -824,7 +892,12 @@ async def login_publish_account(account_id: int):
 
 
 async def _do_login(publisher, account: dict, cookie_file: str, account_id: int):
-    success = await publisher.login_interactive(account, cookie_file)
+    try:
+        success = await publisher.login_interactive(account, cookie_file)
+    except Exception as e:
+        logger.error(f"_do_login unexpected error: {e}")
+        await broadcast({"type": "login_done", "account_id": account_id, "success": False})
+        return
     if success:
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
