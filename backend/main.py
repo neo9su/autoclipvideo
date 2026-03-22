@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from typing import Optional, Set
 
 import aiosqlite
+import httpx
 from datetime import datetime
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
@@ -16,12 +17,14 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from db import init_db, DB_PATH
-from models import RoomCreate, Room, Recording
+from models import RoomCreate, Room, Recording, ProductCreate, ProductUpdate, PublishAccountCreate, PublishTaskCreate
 from monitor import MonitorManager
 from transcribe import poll_transcriptions, _run_editor
 from analyzer import merge_group
 from sync import sync_file
 from thumbnail import generate_thumbnail
+from meta_generator import generate_meta, match_product
+from publish_scheduler import poll_publish_tasks
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -48,12 +51,15 @@ async def lifespan(app: FastAPI):
     await init_db()
     await monitor.start_all()
     transcribe_task = asyncio.create_task(poll_transcriptions(broadcast_fn=broadcast))
+    scheduler_task = asyncio.create_task(poll_publish_tasks(broadcast_fn=broadcast))
     yield
     transcribe_task.cancel()
-    try:
-        await transcribe_task
-    except asyncio.CancelledError:
-        pass
+    scheduler_task.cancel()
+    for t in [transcribe_task, scheduler_task]:
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
     for room_id in list(monitor._tasks.keys()):
         await monitor.remove_room(room_id)
 
@@ -612,6 +618,41 @@ async def reclip(req: ReclipRequest):
     return {"queued": queued}
 
 
+# ── GPU Status ────────────────────────────────────────────────────────────────
+
+GPU_SERVICE_URL = os.environ.get("GPU_SERVICE_URL", "http://10.190.0.203:8877")
+
+
+@app.get("/api/gpu/status")
+async def gpu_status():
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            health_r, jobs_r = await asyncio.gather(
+                client.get(f"{GPU_SERVICE_URL}/health"),
+                client.get(f"{GPU_SERVICE_URL}/jobs"),
+            )
+        health = health_r.json() if health_r.status_code == 200 else {}
+        jobs = jobs_r.json().get("jobs", []) if jobs_r.status_code == 200 else []
+    except Exception:
+        return {"reachable": False, "health": {}, "jobs": []}
+
+    if jobs:
+        job_ids = [j["job_id"] for j in jobs]
+        placeholders = ",".join("?" * len(job_ids))
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                f"SELECT gpu_job_id, filename FROM recordings WHERE gpu_job_id IN ({placeholders})",
+                job_ids,
+            ) as cur:
+                rows = await cur.fetchall()
+        id_to_filename = {r["gpu_job_id"]: r["filename"] for r in rows}
+        for j in jobs:
+            j["filename"] = id_to_filename.get(j["job_id"], "")
+
+    return {"reachable": True, "health": health, "jobs": jobs}
+
+
 # ── Status ───────────────────────────────────────────────────────────────────
 
 @app.get("/api/status")
@@ -647,6 +688,324 @@ async def ws_events(websocket: WebSocket):
             await websocket.receive_text()
     except WebSocketDisconnect:
         _ws_clients.discard(websocket)
+
+
+# ── Products ─────────────────────────────────────────────────────────────────
+
+@app.get("/api/products")
+async def list_products(keyword: Optional[str] = None):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        if keyword:
+            async with db.execute(
+                "SELECT * FROM products WHERE product_name LIKE ? OR keywords LIKE ? ORDER BY created_at DESC",
+                (f"%{keyword}%", f"%{keyword}%"),
+            ) as cur:
+                rows = await cur.fetchall()
+        else:
+            async with db.execute("SELECT * FROM products ORDER BY created_at DESC") as cur:
+                rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/products", status_code=201)
+async def create_product(body: ProductCreate):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """INSERT INTO products (platform, product_id, product_name, product_url, keywords, enabled)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (body.platform, body.product_id, body.product_name,
+             body.product_url, body.keywords, int(body.enabled)),
+        )
+        await db.commit()
+    return {"id": cur.lastrowid, **body.model_dump()}
+
+
+@app.post("/api/products/bulk", status_code=201)
+async def bulk_create_products(body: list[ProductCreate]):
+    ids = []
+    async with aiosqlite.connect(DB_PATH) as db:
+        for p in body:
+            cur = await db.execute(
+                """INSERT INTO products (platform, product_id, product_name, product_url, keywords, enabled)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (p.platform, p.product_id, p.product_name,
+                 p.product_url, p.keywords, int(p.enabled)),
+            )
+            ids.append(cur.lastrowid)
+        await db.commit()
+    return {"created": len(ids), "ids": ids}
+
+
+@app.patch("/api/products/{product_id}")
+async def update_product(product_id: int, body: ProductUpdate):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT id FROM products WHERE id = ?", (product_id,)) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(status_code=404, detail="Product not found")
+        updates = {k: v for k, v in body.model_dump().items() if v is not None}
+        if not updates:
+            return {"id": product_id}
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        await db.execute(
+            f"UPDATE products SET {set_clause} WHERE id = ?",
+            list(updates.values()) + [product_id],
+        )
+        await db.commit()
+    return {"id": product_id, **updates}
+
+
+@app.delete("/api/products/{product_id}", status_code=204)
+async def delete_product(product_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM products WHERE id = ?", (product_id,))
+        await db.commit()
+
+
+# ── Publish Accounts ──────────────────────────────────────────────────────────
+
+COOKIES_DIR = os.path.expanduser("~/.douyin-publisher/cookies")
+
+
+@app.get("/api/publish-accounts")
+async def list_publish_accounts():
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM publish_accounts ORDER BY created_at DESC") as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/publish-accounts", status_code=201)
+async def create_publish_account(body: PublishAccountCreate):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO publish_accounts (platform, account_name) VALUES (?, ?)",
+            (body.platform, body.account_name),
+        )
+        await db.commit()
+        account_id = cur.lastrowid
+    return {"id": account_id, "platform": body.platform, "account_name": body.account_name}
+
+
+@app.delete("/api/publish-accounts/{account_id}", status_code=204)
+async def delete_publish_account(account_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM publish_accounts WHERE id = ?", (account_id,))
+        await db.commit()
+
+
+@app.post("/api/publish-accounts/{account_id}/login")
+async def login_publish_account(account_id: int):
+    """Launch a headed Playwright browser for the user to log in manually."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM publish_accounts WHERE id = ?", (account_id,)) as cur:
+            account = await cur.fetchone()
+    if not account:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    platform = account["platform"]
+    os.makedirs(COOKIES_DIR, exist_ok=True)
+    cookie_file = os.path.join(COOKIES_DIR, f"{platform}_{account_id}.json")
+
+    try:
+        if platform == "douyin":
+            from publisher_douyin import DouyinPublisher
+            publisher = DouyinPublisher()
+        else:
+            raise HTTPException(status_code=400, detail=f"Login not supported for platform: {platform}")
+
+        # Run login in background task so it doesn't block the request
+        asyncio.create_task(_do_login(publisher, dict(account), cookie_file, account_id))
+        return {"account_id": account_id, "cookie_file": cookie_file, "status": "login_started"}
+    except ImportError:
+        raise HTTPException(status_code=500, detail="playwright not installed")
+
+
+async def _do_login(publisher, account: dict, cookie_file: str, account_id: int):
+    success = await publisher.login_interactive(account, cookie_file)
+    if success:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE publish_accounts SET cookie_file = ? WHERE id = ?",
+                (cookie_file, account_id),
+            )
+            await db.commit()
+        await broadcast({"type": "login_done", "account_id": account_id, "success": True})
+    else:
+        await broadcast({"type": "login_done", "account_id": account_id, "success": False})
+
+
+# ── Publish Tasks ─────────────────────────────────────────────────────────────
+
+@app.get("/api/publish-tasks")
+async def list_publish_tasks(status: Optional[str] = None):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        if status:
+            async with db.execute(
+                """SELECT t.*, g.label as group_label, g.merged_filename,
+                          pa.account_name, pa.platform as account_platform,
+                          p.product_name
+                   FROM publish_tasks t
+                   JOIN clip_groups g ON t.group_id = g.id
+                   LEFT JOIN publish_accounts pa ON t.account_id = pa.id
+                   LEFT JOIN products p ON t.product_id = p.id
+                   WHERE t.status = ?
+                   ORDER BY t.created_at DESC""",
+                (status,),
+            ) as cur:
+                rows = await cur.fetchall()
+        else:
+            async with db.execute(
+                """SELECT t.*, g.label as group_label, g.merged_filename,
+                          pa.account_name, pa.platform as account_platform,
+                          p.product_name
+                   FROM publish_tasks t
+                   JOIN clip_groups g ON t.group_id = g.id
+                   LEFT JOIN publish_accounts pa ON t.account_id = pa.id
+                   LEFT JOIN products p ON t.product_id = p.id
+                   ORDER BY t.created_at DESC"""
+            ) as cur:
+                rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/publish-tasks", status_code=201)
+async def create_publish_task(body: PublishTaskCreate):
+    # Validate group exists and has a merged video
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM clip_groups WHERE id = ?", (body.group_id,)) as cur:
+            group = await cur.fetchone()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    if group["merge_status"] != 2 or not group["merged_filename"]:
+        raise HTTPException(status_code=409, detail="Group merged video not ready (merge_status must be 2)")
+
+    title = body.title
+    description = body.description
+    tags = body.tags
+
+    # Auto-generate metadata via LLM if requested
+    if body.auto_meta:
+        meta = await generate_meta(body.group_id)
+        if meta:
+            title = title or meta.get("title")
+            description = description or meta.get("description")
+            tags = tags or meta.get("tags")
+
+    video_path = os.path.join(
+        os.path.dirname(__file__), "..", "recordings", group["merged_filename"]
+    )
+
+    status = "scheduled" if body.scheduled_at else "pending"
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """INSERT INTO publish_tasks
+               (group_id, platform, account_id, status, scheduled_at,
+                title, description, tags, product_id, video_path)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (body.group_id, body.platform, body.account_id, status,
+             body.scheduled_at, title, description, tags,
+             body.product_id, video_path),
+        )
+        await db.commit()
+        task_id = cur.lastrowid
+
+    return {
+        "id": task_id,
+        "group_id": body.group_id,
+        "platform": body.platform,
+        "status": status,
+        "title": title,
+        "description": description,
+        "tags": tags,
+    }
+
+
+@app.get("/api/publish-tasks/{task_id}")
+async def get_publish_task(task_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT t.*, g.label as group_label, g.merged_filename,
+                      pa.account_name, p.product_name
+               FROM publish_tasks t
+               JOIN clip_groups g ON t.group_id = g.id
+               LEFT JOIN publish_accounts pa ON t.account_id = pa.id
+               LEFT JOIN products p ON t.product_id = p.id
+               WHERE t.id = ?""",
+            (task_id,),
+        ) as cur:
+            task = await cur.fetchone()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return dict(task)
+
+
+@app.delete("/api/publish-tasks/{task_id}", status_code=204)
+async def cancel_publish_task(task_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT status FROM publish_tasks WHERE id = ?", (task_id,)) as cur:
+            task = await cur.fetchone()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task["status"] not in ("pending", "scheduled"):
+        raise HTTPException(status_code=409, detail="Can only cancel pending/scheduled tasks")
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM publish_tasks WHERE id = ?", (task_id,))
+        await db.commit()
+
+
+@app.post("/api/publish-tasks/{task_id}/retry")
+async def retry_publish_task(task_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM publish_tasks WHERE id = ?", (task_id,)) as cur:
+            task = await cur.fetchone()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task["status"] != "failed":
+        raise HTTPException(status_code=409, detail="Can only retry failed tasks")
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE publish_tasks SET status = 'pending', error_msg = NULL WHERE id = ?",
+            (task_id,),
+        )
+        await db.commit()
+    return {"task_id": task_id, "status": "pending"}
+
+
+# ── Meta generation ───────────────────────────────────────────────────────────
+
+@app.post("/api/groups/{group_id}/generate-meta")
+async def generate_group_meta(group_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT id FROM clip_groups WHERE id = ?", (group_id,)) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(status_code=404, detail="Group not found")
+    meta = await generate_meta(group_id)
+    if not meta:
+        raise HTTPException(status_code=500, detail="LLM metadata generation failed")
+    return meta
+
+
+# ── Product matching ──────────────────────────────────────────────────────────
+
+@app.post("/api/groups/{group_id}/match-product")
+async def match_group_product(group_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT id FROM clip_groups WHERE id = ?", (group_id,)) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(status_code=404, detail="Group not found")
+    product = await match_product(group_id)
+    return {"group_id": group_id, "product": product}
 
 
 # ── Static frontend ───────────────────────────────────────────────────────────

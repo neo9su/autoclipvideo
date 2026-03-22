@@ -165,6 +165,125 @@ export function formatBytes(bytes) {
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
 }
 
+// ── Products ─────────────────────────────────────────────────────────────────
+
+export async function getProducts(keyword = '') {
+  const q = keyword ? `?keyword=${encodeURIComponent(keyword)}` : ''
+  const res = await fetch(`${BASE}/api/products${q}`)
+  return res.json()
+}
+
+export async function createProduct(body) {
+  const res = await fetch(`${BASE}/api/products`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function bulkCreateProducts(items) {
+  const res = await fetch(`${BASE}/api/products/bulk`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(items),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function updateProduct(id, body) {
+  const res = await fetch(`${BASE}/api/products/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function deleteProduct(id) {
+  const res = await fetch(`${BASE}/api/products/${id}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(await res.text())
+}
+
+// ── Publish Accounts ──────────────────────────────────────────────────────────
+
+export async function getPublishAccounts() {
+  const res = await fetch(`${BASE}/api/publish-accounts`)
+  return res.json()
+}
+
+export async function createPublishAccount(body) {
+  const res = await fetch(`${BASE}/api/publish-accounts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function deletePublishAccount(id) {
+  const res = await fetch(`${BASE}/api/publish-accounts/${id}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(await res.text())
+}
+
+export async function loginPublishAccount(id) {
+  const res = await fetch(`${BASE}/api/publish-accounts/${id}/login`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+// ── Publish Tasks ─────────────────────────────────────────────────────────────
+
+export async function getPublishTasks(status = null) {
+  const q = status ? `?status=${encodeURIComponent(status)}` : ''
+  const res = await fetch(`${BASE}/api/publish-tasks${q}`)
+  return res.json()
+}
+
+export async function createPublishTask(body) {
+  const res = await fetch(`${BASE}/api/publish-tasks`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function retryPublishTask(id) {
+  const res = await fetch(`${BASE}/api/publish-tasks/${id}/retry`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function cancelPublishTask(id) {
+  const res = await fetch(`${BASE}/api/publish-tasks/${id}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(await res.text())
+}
+
+// ── Meta generation & product matching ────────────────────────────────────────
+
+export async function generatePublishMeta(groupId) {
+  const res = await fetch(`${BASE}/api/groups/${groupId}/generate-meta`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function matchGroupProduct(groupId) {
+  const res = await fetch(`${BASE}/api/groups/${groupId}/match-product`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function getGpuStatus() {
+  const res = await fetch(`${BASE}/api/gpu/status`)
+  return res.json()
+}
+
 export function formatDuration(start, end) {
   if (!start) return '—'
   const s = new Date(start)
