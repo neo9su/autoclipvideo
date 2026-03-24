@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime
 
 
@@ -30,3 +30,39 @@ class Recording(BaseModel):
     size_bytes: Optional[int] = None
     synced: bool
     segment_index: int
+
+
+# ── Publish models ────────────────────────────────────────────────────────────
+
+class ProductCreate(BaseModel):
+    platform: str = "douyin"
+    product_id: Optional[str] = None
+    product_name: str
+    product_url: Optional[str] = None
+    keywords: Optional[str] = None
+    enabled: bool = True
+
+
+class ProductUpdate(BaseModel):
+    product_name: Optional[str] = None
+    product_url: Optional[str] = None
+    keywords: Optional[str] = None
+    enabled: Optional[bool] = None
+
+
+class PublishAccountCreate(BaseModel):
+    platform: str
+    account_name: str
+
+
+class PublishTaskCreate(BaseModel):
+    group_id: int
+    platform: str
+    account_id: Optional[int] = None
+    scheduled_at: Optional[str] = None   # ISO datetime string, None = immediate
+    title: Optional[str] = None
+    description: Optional[str] = None
+    tags: Optional[str] = None
+    product_id: Optional[int] = None
+    product_ids: Optional[List[int]] = None
+    auto_meta: bool = False              # trigger LLM meta generation

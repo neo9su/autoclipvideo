@@ -41,6 +41,60 @@ async def init_db():
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS products (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                platform TEXT NOT NULL DEFAULT 'douyin',
+                product_id TEXT,
+                product_name TEXT NOT NULL,
+                product_url TEXT,
+                keywords TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS publish_accounts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                platform TEXT NOT NULL,
+                account_name TEXT NOT NULL,
+                cookie_file TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS publish_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id INTEGER NOT NULL,
+                platform TEXT NOT NULL,
+                account_id INTEGER,
+                status TEXT NOT NULL DEFAULT 'pending',
+                scheduled_at TEXT,
+                title TEXT,
+                description TEXT,
+                tags TEXT,
+                product_id INTEGER,
+                video_path TEXT,
+                published_at TEXT,
+                error_msg TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (group_id) REFERENCES clip_groups(id),
+                FOREIGN KEY (account_id) REFERENCES publish_accounts(id),
+                FOREIGN KEY (product_id) REFERENCES products(id)
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS recording_clips (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                recording_id INTEGER NOT NULL,
+                variant_idx INTEGER NOT NULL DEFAULT 0,
+                clip_filename TEXT NOT NULL,
+                thumbnail TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                FOREIGN KEY (recording_id) REFERENCES recordings(id)
+            )
+        """)
         await db.commit()
 
         # Migrations
@@ -58,6 +112,9 @@ async def init_db():
             "ALTER TABLE recordings ADD COLUMN group_id INTEGER",
             "ALTER TABLE recordings ADD COLUMN local_deleted INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE recordings ADD COLUMN thumbnail TEXT",
+            "ALTER TABLE recordings ADD COLUMN clip_count INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE publish_tasks ADD COLUMN product_ids TEXT",
+            "ALTER TABLE recordings ADD COLUMN transcribe_error TEXT",
         ]:
             try:
                 await db.execute(migration)

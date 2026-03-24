@@ -6,18 +6,25 @@
         <nav>
           <button :class="['nav-btn', page === 'dashboard' && 'active']" @click="page = 'dashboard'">监控面板</button>
           <button :class="['nav-btn', page === 'history' && 'active']" @click="page = 'history'">录像历史</button>
+          <button :class="['nav-btn', page === 'upload' && 'active']" @click="page = 'upload'">上传剪辑</button>
+          <button :class="['nav-btn', page === 'queue' && 'active']" @click="page = 'queue'">作业队列</button>
           <button :class="['nav-btn', page === 'groups' && 'active']" @click="page = 'groups'">分组管理</button>
           <button :class="['nav-btn', page === 'clips' && 'active']" @click="page = 'clips'">剪辑文件</button>
-          <button :class="['nav-btn', page === 'upload' && 'active']" @click="page = 'upload'">上传剪辑</button>
+          <button :class="['nav-btn', page === 'products' && 'active']" @click="page = 'products'">商品库</button>
+          <button :class="['nav-btn', page === 'publish' && 'active']" @click="page = 'publish'">发布</button>
         </nav>
       </div>
     </header>
+    <GpuBanner />
     <main class="main">
       <Dashboard v-if="page === 'dashboard'" />
       <History v-else-if="page === 'history'" />
       <Groups v-else-if="page === 'groups'" />
       <Clips v-else-if="page === 'clips'" />
       <Upload v-else-if="page === 'upload'" />
+      <Products v-else-if="page === 'products'" />
+      <Publish v-else-if="page === 'publish'" />
+      <ClipQueue v-else-if="page === 'queue'" />
     </main>
     <div class="toast-container">
       <div v-for="t in toasts" :key="t.id" :class="['toast', t.type]">{{ t.message }}</div>
@@ -32,6 +39,10 @@ import History from './views/History.vue'
 import Groups from './views/Groups.vue'
 import Clips from './views/Clips.vue'
 import Upload from './views/Upload.vue'
+import Products from './views/Products.vue'
+import Publish from './views/Publish.vue'
+import ClipQueue from './views/ClipQueue.vue'
+import GpuBanner from './components/GpuBanner.vue'
 import { useToast } from './composables/toast.js'
 const page = ref('dashboard')
 const { toasts } = useToast()

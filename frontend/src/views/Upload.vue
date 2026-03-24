@@ -59,6 +59,10 @@
           <input v-model.number="duration" type="number" min="10" max="1800" class="sel dur-input" />
           <span class="dur-unit">秒</span>
         </div>
+        <div class="dur-wrap">
+          <input v-model.number="clipCount" type="number" min="1" max="5" class="sel count-input" />
+          <span class="dur-unit">个视频</span>
+        </div>
         <button
           class="btn-submit"
           :disabled="!videoFile || !roomId || uploading"
@@ -105,7 +109,10 @@
             </td>
             <td>
               <div v-if="j.clipped === 2" class="action-col">
-                <a :href="clipDownloadUrl(j.id)" class="badge purple" download>下载剪辑</a>
+                <template v-if="j.clips && j.clips.length > 1">
+                  <a v-for="c in j.clips" :key="c.id" :href="clipVariantDownloadUrl(c.id)" class="badge purple" download>V{{ c.variant_idx + 1 }}</a>
+                </template>
+                <a v-else :href="clipDownloadUrl(j.id)" class="badge purple" download>下载剪辑</a>
                 <button class="badge dim btn-action" @click="doReveal(j.id)">打开文件夹</button>
               </div>
               <span v-else class="badge dim">—</span>
@@ -119,7 +126,7 @@
 
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
-import { getRooms, uploadRecording, getRecording, revealClip, formatBytes } from '../api.js'
+import { getRooms, uploadRecording, getRecording, getRecordingClips, recordingClipDownloadUrl, revealClip, formatBytes } from '../api.js'
 import { useToast } from '../composables/toast.js'
 
 const { show } = useToast()
@@ -128,6 +135,7 @@ const apiBase = import.meta.env.DEV ? 'http://localhost:8899' : ''
 const rooms = ref([])
 const roomId = ref('')
 const duration = ref(60)
+const clipCount = ref(1)
 const videoFile = ref(null)
 const srtFile = ref(null)
 const dragVideo = ref(false)
@@ -193,7 +201,7 @@ async function submit() {
   uploading.value = true
   try {
     const room = rooms.value.find(r => r.id === Number(roomId.value))
-    const result = await uploadRecording(roomId.value, videoFile.value, srtFile.value, duration.value)
+    const result = await uploadRecording(roomId.value, videoFile.value, srtFile.value, duration.value, clipCount.value)
     const job = {
       id: result.id,
       filename: result.filename,
@@ -201,6 +209,7 @@ async function submit() {
       duration: duration.value,
       transcribed: srtFile.value ? 2 : 0,
       clipped: 0,
+      clips: [],
     }
     jobs.value.unshift(job)
     saveJobs()
@@ -231,7 +240,12 @@ async function pollJobs() {
       const rec = await getRecording(j.id)
       j.transcribed = rec.transcribed
       j.clipped = rec.clipped
-      if (rec.clipped === 2) show(`剪辑完成：${rec.filename}`, 'success')
+      if (rec.clipped === 2) {
+        show(`剪辑完成：${rec.filename}`, 'success')
+        try {
+          j.clips = await getRecordingClips(j.id)
+        } catch {}
+      }
     } catch {}
   }
   saveJobs()
@@ -239,6 +253,10 @@ async function pollJobs() {
 
 function clipDownloadUrl(id) {
   return `${apiBase}/api/recordings/${id}/clip`
+}
+
+function clipVariantDownloadUrl(clipId) {
+  return recordingClipDownloadUrl(clipId)
 }
 
 async function doReveal(id) {
@@ -306,6 +324,7 @@ function clipLbl(v) {
 .sel { background: #1a1a1a; border: 1px solid #333; color: #ccc; padding: 8px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; }
 .dur-wrap { display: flex; align-items: center; gap: 6px; }
 .dur-input { width: 80px; }
+.count-input { width: 56px; }
 .dur-unit { font-size: 13px; color: #666; }
 
 .btn-submit {

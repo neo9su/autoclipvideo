@@ -73,30 +73,53 @@ class MonitorManager:
 
     async def _on_segment_done(self, room_id: int, filepath: str, segment_index: int):
         """Called when a recording segment completes."""
-        filename = filepath.split("/")[-1]
+        import os as _os
+        filename = _os.path.basename(filepath)
         size = None
         try:
-            import os
-            size = os.path.getsize(filepath)
+            size = _os.path.getsize(filepath)
         except Exception:
             pass
 
+        # Persist size and end_time; fetch the recording id
         async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
             await db.execute(
                 """UPDATE recordings SET end_time = ?, size_bytes = ?
                    WHERE room_id = ? AND filename = ?""",
-                (datetime.now().isoformat(), size, room_id, filename)
+                (datetime.now().isoformat(), size, room_id, filename),
             )
             await db.commit()
+            async with db.execute(
+                "SELECT id FROM recordings WHERE room_id=? AND filename=?",
+                (room_id, filename),
+            ) as cur:
+                rec = await cur.fetchone()
 
-        # Upload to GPU service (triggers transcription automatically)
-        job_id = await sync_file(filepath, room_id)
+        if not rec:
+            await self._notify_update(room_id)
+            return
+
+        # Check whether to merge small segments before uploading
+        from segment_merger import maybe_merge_before_upload
+        result = await maybe_merge_before_upload(room_id, rec["id"])
+
+        if result is None:
+            # Small file — deferred until more segments arrive or stream ends
+            await self._notify_update(room_id)
+            return
+
+        upload_path, primary_id = result
+
+        from comfyui_client import free_vram
+        await free_vram()
+
+        job_id = await sync_file(upload_path, room_id)
         if job_id:
             async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute(
-                    """UPDATE recordings SET synced = 1, transcribed = 1, gpu_job_id = ?
-                       WHERE room_id = ? AND filename = ?""",
-                    (job_id, room_id, filename)
+                    "UPDATE recordings SET synced=1, transcribed=1, gpu_job_id=? WHERE id=?",
+                    (job_id, primary_id),
                 )
                 await db.commit()
 

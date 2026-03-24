@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from db import init_db, DB_PATH
 from models import RoomCreate, Room, Recording, ProductCreate, ProductUpdate, PublishAccountCreate, PublishTaskCreate
 from monitor import MonitorManager
-from transcribe import poll_transcriptions, _run_editor
+from transcribe import poll_transcriptions, _run_editor, _clip_progress, get_clip_queue, update_job_priority
 from analyzer import merge_group
 from sync import sync_file
 from thumbnail import generate_thumbnail
@@ -46,16 +46,37 @@ async def broadcast(message: dict):
 monitor = MonitorManager(broadcast_fn=broadcast)
 
 
+async def _reset_stuck_clip_tasks():
+    """On startup, reset recordings stuck at clipped=1 (server killed mid-clip).
+    If clip_filename is already set → mark done (clipped=2); otherwise reset to pending (clipped=0)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        r1 = await db.execute(
+            "UPDATE recordings SET clipped=2 WHERE clipped=1 AND clip_filename IS NOT NULL"
+        )
+        r2 = await db.execute(
+            "UPDATE recordings SET clipped=0 WHERE clipped=1 AND clip_filename IS NULL"
+        )
+        await db.commit()
+        if r1.rowcount:
+            logger.info(f"Reset {r1.rowcount} stuck clip task(s) to done (clip_filename present)")
+        if r2.rowcount:
+            logger.info(f"Reset {r2.rowcount} stuck clip task(s) to pending (no clip_filename)")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    await _reset_stuck_clip_tasks()
     await monitor.start_all()
+    from gpu_state import watch_gpu_service
+    gpu_watcher_task = asyncio.create_task(watch_gpu_service(broadcast_fn=broadcast))
     transcribe_task = asyncio.create_task(poll_transcriptions(broadcast_fn=broadcast))
     scheduler_task = asyncio.create_task(poll_publish_tasks(broadcast_fn=broadcast))
     yield
+    gpu_watcher_task.cancel()
     transcribe_task.cancel()
     scheduler_task.cancel()
-    for t in [transcribe_task, scheduler_task]:
+    for t in [gpu_watcher_task, transcribe_task, scheduler_task]:
         try:
             await t
         except asyncio.CancelledError:
@@ -63,6 +84,8 @@ async def lifespan(app: FastAPI):
     for room_id in list(monitor._tasks.keys()):
         await monitor.remove_room(room_id)
 
+
+APP_VERSION = "MVP1.02.2026032401"
 
 app = FastAPI(title="Douyin Recorder", lifespan=lifespan)
 
@@ -164,10 +187,15 @@ async def upload_recording(room_id: int, file: UploadFile = File(...), srt: Opti
     os.makedirs(recordings_dir, exist_ok=True)
     filepath = os.path.join(recordings_dir, filename)
 
-    content = await file.read()
+    # Stream to disk in 1 MB chunks to avoid loading large video files into RAM
+    size_bytes = 0
     with open(filepath, "wb") as f:
-        f.write(content)
-    size_bytes = len(content)
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            f.write(chunk)
+            size_bytes += len(chunk)
 
     start_time = now.isoformat()
     async with aiosqlite.connect(DB_PATH) as db:
@@ -193,9 +221,11 @@ async def upload_recording(room_id: int, file: UploadFile = File(...), srt: Opti
                 (recording_id,),
             )
             await db.commit()
-        asyncio.create_task(_run_editor(recording_id, filepath, srt_path, clip_duration=duration_sec, clip_count=clip_count))
+        asyncio.create_task(_run_editor(recording_id, filepath, srt_path, clip_duration=duration_sec, clip_count=clip_count, broadcast_fn=broadcast))
         return {"id": recording_id, "filename": filename, "size_bytes": size_bytes, "gpu_job_id": None}
 
+    from comfyui_client import free_vram
+    await free_vram()
     job_id = await sync_file(filepath, room_id)
     if job_id:
         async with aiosqlite.connect(DB_PATH) as db:
@@ -233,18 +263,49 @@ async def list_recordings(room_id: int):
     return [dict(r) for r in rows]
 
 
+_STATUS_WHERE = {
+    "transcribe_running": "r.transcribed = 1",
+    "transcribe_pending": "r.transcribed = 0 AND r.local_deleted = 0 AND r.end_time IS NOT NULL",
+    "transcribe_failed":  "r.transcribed = -1",
+    "clip_running":       "r.clipped = 1",
+    "clip_pending":       "r.transcribed = 2 AND r.clipped = 0",
+    "clip_failed":        "r.clipped = -1",
+    "running":            "(r.transcribed = 1 OR r.clipped = 1)",
+    # top-level filter bar shortcuts
+    "success":  "r.clipped = 2",
+    "failed":   "(r.transcribed = -1 OR r.clipped = -1)",
+    "active":   "(r.transcribed = 1 OR r.clipped = 1)",
+}
+
+_SORT_COLS = {
+    "start_time": "r.start_time",
+    "filename":   "r.filename",
+    "id":         "r.id",
+}
+
+
 @app.get("/api/recordings")
-async def list_all_recordings(page: int = 1, limit: int = 50):
+async def list_all_recordings(
+    page: int = 1,
+    limit: int = 50,
+    status: Optional[str] = None,
+    sort: str = "start_time",
+    order: str = "desc",
+):
     offset = (page - 1) * limit
+    where = f"WHERE {_STATUS_WHERE[status]}" if status in _STATUS_WHERE else ""
+    col = _SORT_COLS.get(sort, "r.start_time")
+    direction = "ASC" if order.lower() == "asc" else "DESC"
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT COUNT(*) FROM recordings") as cur:
+        async with db.execute(f"SELECT COUNT(*) FROM recordings r {where}") as cur:
             (total,) = await cur.fetchone()
-        async with db.execute("""
+        async with db.execute(f"""
             SELECT r.*, rm.name as room_name
             FROM recordings r
             JOIN rooms rm ON r.room_id = rm.id
-            ORDER BY r.start_time DESC
+            {where}
+            ORDER BY {col} {direction}
             LIMIT ? OFFSET ?
         """, (limit, offset)) as cur:
             rows = await cur.fetchall()
@@ -254,6 +315,34 @@ async def list_all_recordings(page: int = 1, limit: int = 50):
         "page": page,
         "pages": max(1, (total + limit - 1) // limit),
     }
+
+
+@app.get("/api/recording-clips/bulk")
+async def bulk_recording_clips(ids: str = ""):
+    """Return all clips for a comma-separated list of recording ids."""
+    id_list = [int(x) for x in ids.split(",") if x.strip().isdigit()]
+    if not id_list:
+        return {}
+    placeholders = ",".join("?" * len(id_list))
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        # Only return the latest retry's clips (highest id per recording+variant)
+        async with db.execute(
+            f"""SELECT rc.* FROM recording_clips rc
+                INNER JOIN (
+                    SELECT recording_id, variant_idx, MAX(id) as max_id
+                    FROM recording_clips
+                    WHERE recording_id IN ({placeholders})
+                    GROUP BY recording_id, variant_idx
+                ) latest ON rc.id = latest.max_id
+                ORDER BY rc.recording_id, rc.variant_idx ASC""",
+            id_list,
+        ) as cur:
+            rows = await cur.fetchall()
+    result: dict = {}
+    for r in rows:
+        result.setdefault(str(r["recording_id"]), []).append(dict(r))
+    return result
 
 
 @app.get("/api/clips")
@@ -460,6 +549,8 @@ async def retry_transcribe(recording_id: int):
             (recording_id,)
         )
         await db.commit()
+    from comfyui_client import free_vram
+    await free_vram()
     job_id = await sync_file(filepath, rec["room_id"])
     if job_id:
         async with aiosqlite.connect(DB_PATH) as db:
@@ -488,7 +579,8 @@ async def clip_missing():
         if not os.path.exists(mp4_path) or not os.path.exists(srt_path):
             skipped.append(rec["id"])
             continue
-        asyncio.create_task(_run_editor(rec["id"], mp4_path, srt_path))
+        clip_count = rec["clip_count"] if rec["clip_count"] else 1
+        asyncio.create_task(_run_editor(rec["id"], mp4_path, srt_path, clip_count=clip_count, broadcast_fn=broadcast))
         queued.append(rec["id"])
     return {"queued": queued, "skipped": skipped}
 
@@ -512,7 +604,8 @@ async def retry_clip(recording_id: int):
         raise HTTPException(status_code=404, detail="Recording file missing")
     if not os.path.exists(srt_path):
         raise HTTPException(status_code=404, detail="SRT file missing")
-    asyncio.create_task(_run_editor(recording_id, mp4_path, srt_path))
+    clip_count = rec["clip_count"] if rec["clip_count"] else 1
+    asyncio.create_task(_run_editor(recording_id, mp4_path, srt_path, clip_count=clip_count, broadcast_fn=broadcast))
     return {"recording_id": recording_id, "clipped": 1}
 
 
@@ -663,7 +756,7 @@ async def reclip(req: ReclipRequest):
         mp4_path = os.path.join(os.path.dirname(__file__), "..", "recordings", rec["filename"])
         srt_path = os.path.splitext(mp4_path)[0] + ".srt"
         if os.path.exists(mp4_path) and os.path.exists(srt_path):
-            asyncio.create_task(_run_editor(rec["id"], mp4_path, srt_path, clip_duration=req.duration_sec, clip_count=req.clip_count))
+            asyncio.create_task(_run_editor(rec["id"], mp4_path, srt_path, clip_duration=req.duration_sec, clip_count=req.clip_count, broadcast_fn=broadcast))
             queued.append(rec["id"])
     return {"queued": queued}
 
@@ -673,34 +766,187 @@ async def reclip(req: ReclipRequest):
 GPU_SERVICE_URL = os.environ.get("GPU_SERVICE_URL", "http://10.190.0.203:8877")
 
 
+COMFYUI_URL = os.environ.get("COMFYUI_URL", "http://10.190.0.203:8188")
+
+
 @app.get("/api/gpu/status")
 async def gpu_status():
+    from gpu_state import is_online as gpu_is_online, _offline_since
+    import time as _time
+    offline_sec = int(_time.monotonic() - _offline_since) if (not gpu_is_online() and _offline_since) else 0
+    result = {
+        "reachable": False, "health": {}, "jobs": [],
+        "gpu_online": gpu_is_online(),
+        "gpu_offline_seconds": offline_sec,
+        "comfyui": {"reachable": False, "vram_total": 0, "vram_free": 0, "ram_total": 0, "ram_free": 0, "queue_running": 0, "queue_pending": 0},
+    }
+    # Skip live probing of GPU service when watcher already knows it is offline;
+    # still probe ComfyUI independently.
+    skip_gpu_probe = not gpu_is_online()
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            health_r, jobs_r = await asyncio.gather(
-                client.get(f"{GPU_SERVICE_URL}/health"),
-                client.get(f"{GPU_SERVICE_URL}/jobs"),
+            comfy_r, queue_r = await asyncio.gather(
+                client.get(f"{COMFYUI_URL}/system_stats"),
+                client.get(f"{COMFYUI_URL}/queue"),
+                return_exceptions=True,
             )
-        health = health_r.json() if health_r.status_code == 200 else {}
-        jobs = jobs_r.json().get("jobs", []) if jobs_r.status_code == 200 else []
+            # Only probe GPU service if watcher thinks it may be online
+            if not skip_gpu_probe:
+                try:
+                    health_r = await client.get(f"{GPU_SERVICE_URL}/health", timeout=5.0)
+                    if health_r.status_code == 200:
+                        result["reachable"] = True
+                        result["health"] = health_r.json()
+                except Exception:
+                    pass
+        if not isinstance(comfy_r, Exception) and comfy_r.status_code == 200:
+            cs = comfy_r.json()
+            dev = cs.get("devices", [{}])[0]
+            sys_ = cs.get("system", {})
+            # Use torch_vram (dedicated/allocated by PyTorch) rather than the
+            # shared-memory pool that AMD iGPU reports as vram_total/vram_free.
+            torch_total = dev.get("torch_vram_total", 0)
+            torch_free  = dev.get("torch_vram_free",  0)
+            # Fall back to vram fields only if torch fields are zero/missing
+            vram_total = torch_total or dev.get("vram_total", 0)
+            vram_free  = torch_free  or dev.get("vram_free",  0)
+            result["comfyui"] = {
+                "reachable": True,
+                "vram_total": vram_total,
+                "vram_free": vram_free,
+                "ram_total": sys_.get("ram_total", 0),
+                "ram_free": sys_.get("ram_free", 0),
+                "queue_running": 0,
+                "queue_pending": 0,
+            }
+        if not isinstance(queue_r, Exception) and queue_r.status_code == 200:
+            q = queue_r.json()
+            result["comfyui"]["queue_running"] = len(q.get("queue_running", []))
+            result["comfyui"]["queue_pending"] = len(q.get("queue_pending", []))
+    except Exception as e:
+        logger.error(f"GPU status check failed: {e}")
+
+    # Pending transcription jobs: in-flight on GPU + waiting to upload
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            """SELECT COUNT(*) FROM recordings
+               WHERE (transcribed = 1 AND gpu_job_id IS NOT NULL)
+                  OR (transcribed = 0 AND synced = 0 AND local_deleted = 0)"""
+        ) as cur:
+            (pending_transcribe,) = await cur.fetchone()
+    result["pending_transcribe"] = pending_transcribe
+    # Include cached watchdog state (no extra HTTP call needed)
+    from gpu_state import watchdog_status
+    result["watchdog"] = watchdog_status()
+    return result
+
+
+@app.get("/api/watchdog/status")
+async def get_watchdog_status():
+    """Proxy to watchdog agent /status."""
+    from gpu_state import WATCHDOG_URL, watchdog_status
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(f"{WATCHDOG_URL}/status")
+            if r.status_code == 200:
+                return r.json()
     except Exception:
-        return {"reachable": False, "health": {}, "jobs": []}
+        pass
+    return watchdog_status().get("services", {})
 
-    if jobs:
-        job_ids = [j["job_id"] for j in jobs]
-        placeholders = ",".join("?" * len(job_ids))
-        async with aiosqlite.connect(DB_PATH) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute(
-                f"SELECT gpu_job_id, filename FROM recordings WHERE gpu_job_id IN ({placeholders})",
-                job_ids,
-            ) as cur:
-                rows = await cur.fetchall()
-        id_to_filename = {r["gpu_job_id"]: r["filename"] for r in rows}
-        for j in jobs:
-            j["filename"] = id_to_filename.get(j["job_id"], "")
 
-    return {"reachable": True, "health": health, "jobs": jobs}
+@app.post("/api/watchdog/start/{service}")
+async def watchdog_start(service: str):
+    """Ask watchdog agent to start a named service."""
+    from gpu_state import WATCHDOG_URL
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(f"{WATCHDOG_URL}/start/{service}")
+            if r.status_code == 200:
+                return r.json()
+            raise HTTPException(status_code=r.status_code, detail=r.text)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Watchdog unreachable: {e}")
+
+
+@app.post("/api/watchdog/stop/{service}")
+async def watchdog_stop(service: str):
+    """Ask watchdog agent to stop a named service."""
+    from gpu_state import WATCHDOG_URL
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(f"{WATCHDOG_URL}/stop/{service}")
+            if r.status_code == 200:
+                return r.json()
+            raise HTTPException(status_code=r.status_code, detail=r.text)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Watchdog unreachable: {e}")
+
+
+@app.post("/api/watchdog/restart/{service}")
+async def watchdog_restart(service: str):
+    """Ask watchdog agent to restart a named service."""
+    from gpu_state import WATCHDOG_URL
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.post(f"{WATCHDOG_URL}/restart/{service}")
+            if r.status_code == 200:
+                return r.json()
+            raise HTTPException(status_code=r.status_code, detail=r.text)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Watchdog unreachable: {e}")
+
+
+@app.get("/api/gpu/logs")
+async def gpu_logs():
+    """Recent transcription activity for the GPU log marquee."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT r.id, r.filename, r.transcribed, r.transcribe_error, r.start_time, rm.name as room_name
+               FROM recordings r LEFT JOIN rooms rm ON r.room_id = rm.id
+               WHERE r.gpu_job_id IS NOT NULL
+               ORDER BY r.id DESC LIMIT 20"""
+        ) as cur:
+            rows = await cur.fetchall()
+
+    logs = []
+    for row in rows:
+        if row["transcribed"] == 2:
+            status = "转录完成"
+            level = "success"
+        elif row["transcribed"] == -1:
+            err = (row["transcribe_error"] or "")[:60]
+            status = f"转录失败: {err}"
+            level = "error"
+        elif row["transcribed"] == 1:
+            status = "转录中"
+            level = "info"
+        else:
+            status = "等待转录"
+            level = "pending"
+        logs.append({
+            "id": row["id"],
+            "filename": row["filename"],
+            "room": row["room_name"] or "",
+            "status": status,
+            "level": level,
+            "time": (row["start_time"] or "")[:16].replace("T", " "),
+        })
+    return logs
+
+
+# ── Version ──────────────────────────────────────────────────────────────────
+
+@app.get("/api/version")
+def get_version():
+    return {"version": APP_VERSION}
 
 
 # ── Status ───────────────────────────────────────────────────────────────────
@@ -727,13 +973,108 @@ async def system_status():
     }
 
 
+@app.get("/api/clip-jobs")
+async def get_clip_jobs():
+    """Return in-progress clip job progress keyed by recording_id."""
+    return _clip_progress
+
+
+@app.get("/api/transcribe-queue")
+async def get_transcribe_queue():
+    """Return pending/running transcription jobs for the queue view."""
+    import time as _time
+    from transcribe import transcribe_timing
+    timing = transcribe_timing()
+    now = _time.time()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT r.id, r.filename, r.transcribed, r.transcribe_error, r.start_time,
+                      r.gpu_job_id, r.synced, r.size_bytes, rm.name as room_name
+               FROM recordings r LEFT JOIN rooms rm ON r.room_id = rm.id
+               WHERE (r.transcribed IN (0, 1) AND (r.synced = 1 OR r.gpu_job_id IS NOT NULL))
+                  OR (r.transcribed = 0 AND r.synced = 0 AND r.local_deleted = 0)
+               ORDER BY r.id ASC
+               LIMIT 100"""
+        ) as cur:
+            rows = await cur.fetchall()
+
+    avg_s = timing["avg_duration_s"]
+    submit_times = timing["submit_times"]
+
+    jobs = []
+    queue_pos = 0  # position among waiting-for-GPU jobs
+    for row in rows:
+        if row["transcribed"] == 1 and row["gpu_job_id"]:
+            status = "转录中"
+            level = "running"
+            elapsed_s = int(now - submit_times[row["gpu_job_id"]]) if row["gpu_job_id"] in submit_times else None
+            pct = min(99, int(elapsed_s / avg_s * 100)) if (elapsed_s is not None and avg_s > 0) else None
+            pos = None
+        elif row["transcribed"] == 0 and row["synced"] == 1:
+            status = "等待转录"
+            level = "queued"
+            elapsed_s = None
+            pct = None
+            queue_pos += 1
+            pos = queue_pos
+        else:
+            status = "待上传"
+            level = "pending"
+            elapsed_s = None
+            pct = None
+            queue_pos += 1
+            pos = queue_pos
+
+        jobs.append({
+            "recording_id": row["id"],
+            "filename": row["filename"],
+            "room_name": row["room_name"] or "",
+            "status": status,
+            "level": level,
+            "gpu_job_id": row["gpu_job_id"],
+            "start_time": (row["start_time"] or "")[:16].replace("T", " "),
+            "elapsed_s": elapsed_s,
+            "pct": pct,
+            "queue_pos": pos,
+            "size_bytes": row["size_bytes"],
+        })
+
+    total = len(jobs) + timing["session_done"]
+    eta_s = int(avg_s * len(jobs)) if avg_s > 0 else None
+    return {
+        "jobs": jobs,
+        "avg_duration_s": avg_s,
+        "session_done": timing["session_done"],
+        "total": total,
+        "eta_seconds": eta_s,
+    }
+
+
+@app.get("/api/clip-queue")
+async def get_clip_queue_api():
+    """Return running + queued clip jobs with priority info."""
+    return get_clip_queue()
+
+
+@app.post("/api/clip-queue/{recording_id}/priority")
+async def set_clip_priority(recording_id: int, priority: int):
+    """Update the priority of a queued clip job (1=highest, 99=lowest)."""
+    priority = max(1, min(99, priority))
+    updated = await update_job_priority(recording_id, priority)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Job not found in queue (may already be running or completed)")
+    return {"ok": True, "recording_id": recording_id, "priority": priority}
+
+
 @app.get("/api/stats")
 async def get_stats():
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         rows = await db.execute_fetchall("""
             SELECT
-                SUM(CASE WHEN transcribed = 0 AND synced = 1 THEN 1 ELSE 0 END) AS transcribe_pending,
+                SUM(CASE WHEN transcribed = 0 AND local_deleted = 0 AND end_time IS NOT NULL THEN 1 ELSE 0 END) AS transcribe_pending,
                 SUM(CASE WHEN transcribed = 1 THEN 1 ELSE 0 END)               AS transcribe_running,
                 SUM(CASE WHEN transcribed = -1 THEN 1 ELSE 0 END)              AS transcribe_failed,
                 SUM(CASE WHEN transcribed = 2 AND clipped = 0 THEN 1 ELSE 0 END) AS clip_pending,
@@ -920,7 +1261,7 @@ async def list_publish_tasks(status: Optional[str] = None):
             async with db.execute(
                 """SELECT t.*, g.label as group_label, g.merged_filename,
                           pa.account_name, pa.platform as account_platform,
-                          p.product_name
+                          p.product_name, t.product_ids
                    FROM publish_tasks t
                    JOIN clip_groups g ON t.group_id = g.id
                    LEFT JOIN publish_accounts pa ON t.account_id = pa.id
@@ -934,7 +1275,7 @@ async def list_publish_tasks(status: Optional[str] = None):
             async with db.execute(
                 """SELECT t.*, g.label as group_label, g.merged_filename,
                           pa.account_name, pa.platform as account_platform,
-                          p.product_name
+                          p.product_name, t.product_ids
                    FROM publish_tasks t
                    JOIN clip_groups g ON t.group_id = g.id
                    LEFT JOIN publish_accounts pa ON t.account_id = pa.id
@@ -974,16 +1315,19 @@ async def create_publish_task(body: PublishTaskCreate):
     )
 
     status = "scheduled" if body.scheduled_at else "pending"
+    product_ids_str = ",".join(str(i) for i in body.product_ids) if body.product_ids else None
+    # keep product_id as first item for backward compat
+    first_product_id = body.product_ids[0] if body.product_ids else body.product_id
 
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             """INSERT INTO publish_tasks
                (group_id, platform, account_id, status, scheduled_at,
-                title, description, tags, product_id, video_path)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                title, description, tags, product_id, product_ids, video_path)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (body.group_id, body.platform, body.account_id, status,
              body.scheduled_at, title, description, tags,
-             body.product_id, video_path),
+             first_product_id, product_ids_str, video_path),
         )
         await db.commit()
         task_id = cur.lastrowid

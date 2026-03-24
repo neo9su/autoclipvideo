@@ -7,7 +7,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 RECORDINGS_DIR = os.path.join(os.path.dirname(__file__), "..", "recordings")
-SEGMENT_DURATION = 19 * 60  # 19 minutes in seconds
+SEGMENT_DURATION = 25 * 60  # 25 minutes in seconds
 
 
 from douyin_live import get_stream_url, check_live_status  # noqa: F401
@@ -105,7 +105,8 @@ class RoomRecorder:
                 break
 
             # Segment completed normally
-            if returncode == 0 and os.path.exists(filepath):
+            segment_ok = os.path.exists(filepath) and os.path.getsize(filepath) > 0
+            if segment_ok:
                 size = os.path.getsize(filepath)
                 logger.info(f"[{self.room_name}] Segment done: {filename} ({size // 1024 // 1024}MB)")
                 self.segment_index += 1
@@ -113,11 +114,14 @@ class RoomRecorder:
                     asyncio.create_task(
                         self.on_segment_done(self.room_id, filepath, self.segment_index - 1)
                     )
+
+            if returncode == 0:
                 # Re-fetch stream URL for next segment (URL may expire)
                 stream_url = await get_stream_url(self.room_url) or stream_url
             else:
-                logger.warning(f"[{self.room_name}] ffmpeg exited with code {returncode}, retrying in 10s")
-                await asyncio.sleep(10)
+                if not segment_ok:
+                    logger.warning(f"[{self.room_name}] ffmpeg exited with code {returncode}, retrying in 10s")
+                    await asyncio.sleep(10)
                 new_url = await get_stream_url(self.room_url)
                 if new_url:
                     stream_url = new_url

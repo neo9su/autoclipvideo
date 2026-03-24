@@ -68,9 +68,9 @@ def _parse_live_status(html: str) -> Optional[int]:
 
 def _parse_stream_url(html: str) -> Optional[str]:
     """
-    Extract an FLV stream URL from the Douyin live page HTML.
+    Extract the highest-quality FLV stream URL from the Douyin live page HTML.
     The page embeds JSON with \\u0026-escaped ampersands.
-    Prefer lower-quality streams (smaller, more stable for recording).
+    Quality preference: origin > uhd > hd > sd > ld (highest → lowest).
     """
     pattern = r'"(https://pull-[^"]*?\.flv\?[^"]*?)"'
     matches = re.findall(pattern, html)
@@ -81,9 +81,22 @@ def _parse_stream_url(html: str) -> Optional[str]:
     if not matches:
         return None
 
-    url = matches[0]
-    url = url.replace("\\u0026", "&").replace("\\/", "/")
-    return url
+    # Decode escape sequences for all candidates
+    candidates = [m.replace("\\u0026", "&").replace("\\/", "/") for m in matches]
+
+    # Sort by quality: origin > uhd > hd > sd > ld; unknown scores 0
+    _QUALITY_RANK = {"origin": 5, "uhd": 4, "hd": 3, "sd": 2, "ld": 1}
+
+    def _quality_score(url: str) -> int:
+        url_lower = url.lower()
+        for q, rank in _QUALITY_RANK.items():
+            if q in url_lower:
+                return rank
+        return 0
+
+    best = max(candidates, key=_quality_score)
+    logger.debug(f"Stream quality selected: score={_quality_score(best)} url={best[:80]}…")
+    return best
 
 
 async def _fetch_page(room_id: str) -> Optional[str]:
@@ -111,6 +124,11 @@ async def get_stream_url(room_url: str) -> Optional[str]:
     """
     Return the live FLV stream URL for a Douyin live room,
     or None if the room is offline / not found.
+
+    Stream URL presence is the authoritative indicator of live status —
+    Douyin embeds pull URLs only when the room is actively streaming.
+    The status field in the page JSON is unreliable (can match the wrong
+    object when multiple status fields are embedded in the page).
     """
     room_id = _extract_room_id(room_url)
     if not room_id:
@@ -121,24 +139,15 @@ async def get_stream_url(room_url: str) -> Optional[str]:
     if html is None:
         return None
 
-    # Check explicit status first — fast fail if clearly offline
-    status = _parse_live_status(html)
-    if status is not None:
-        logger.debug(f"[{room_id}] __INIT_PROPS__ status={status}")
-        if status != 1:
-            logger.debug(f"[{room_id}] Room not live (status={status})")
-            return None
-
     stream_url = _parse_stream_url(html)
     if stream_url:
-        logger.debug(f"[{room_id}] Stream URL found: {stream_url[:80]}…")
-    else:
-        if status is None:
-            # No status field and no stream URL → assume offline
-            logger.debug(f"[{room_id}] No status or stream URL in page → offline")
-        else:
-            logger.warning(f"[{room_id}] Status=1 but no stream URL found in page")
-    return stream_url
+        logger.debug(f"[{room_id}] Stream URL found (room is live): {stream_url[:80]}…")
+        return stream_url
+
+    # No stream URL → offline. Log status for debugging.
+    status = _parse_live_status(html)
+    logger.debug(f"[{room_id}] No stream URL found → offline (status={status})")
+    return None
 
 
 async def check_live_status(room_url: str) -> bool:

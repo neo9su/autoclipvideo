@@ -29,8 +29,16 @@ export async function getRecordings(roomId) {
   return res.json()
 }
 
-export async function getAllRecordings(page = 1) {
-  const res = await fetch(`${BASE}/api/recordings?page=${page}&limit=50`)
+export async function getAllRecordings(page = 1, status = '', sort = 'start_time', order = 'desc') {
+  const params = new URLSearchParams({ page, limit: 50, sort, order })
+  if (status) params.set('status', status)
+  const res = await fetch(`${BASE}/api/recordings?${params}`)
+  return res.json()
+}
+
+export async function getRecordingClipsBulk(ids) {
+  if (!ids.length) return {}
+  const res = await fetch(`${BASE}/api/recording-clips/bulk?ids=${ids.join(',')}`)
   return res.json()
 }
 
@@ -63,14 +71,25 @@ export async function mergeGroup(id) {
   return res.json()
 }
 
-export async function uploadRecording(roomId, file, srtFile = null, durationSec = null) {
+export async function uploadRecording(roomId, file, srtFile = null, durationSec = null, clipCount = 1) {
   const form = new FormData()
   form.append('file', file)
   if (srtFile) form.append('srt', srtFile)
   if (durationSec) form.append('duration_sec', String(durationSec))
+  form.append('clip_count', String(clipCount))
   const res = await fetch(`${BASE}/api/rooms/${roomId}/upload`, { method: 'POST', body: form })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
+}
+
+export async function getRecordingClips(recordingId) {
+  const res = await fetch(`${BASE}/api/recordings/${recordingId}/clips`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export function recordingClipDownloadUrl(clipId) {
+  return `${BASE}/api/recording-clips/${clipId}/download`
 }
 
 export async function getRecording(id) {
@@ -138,12 +157,18 @@ export async function deleteLocalFile(id) {
   if (!res.ok) throw new Error(await res.text())
 }
 
-export async function reclip(roomName, date, durationSec) {
+export async function reclip(roomName, date, durationSec, clipCount = 1) {
   const res = await fetch(`${BASE}/api/reclip`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ room_name: roomName, date, duration_sec: durationSec }),
+    body: JSON.stringify({ room_name: roomName, date, duration_sec: durationSec, clip_count: clipCount }),
   })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function clipMissing() {
+  const res = await fetch(`${BASE}/api/recordings/clip-missing`, { method: 'POST' })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
@@ -276,6 +301,18 @@ export async function generatePublishMeta(groupId) {
 export async function matchGroupProduct(groupId) {
   const res = await fetch(`${BASE}/api/groups/${groupId}/match-product`, { method: 'POST' })
   if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function getStats() {
+  const res = await fetch(`${BASE}/api/stats`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function getClipJobs() {
+  const res = await fetch(`${BASE}/api/clip-jobs`)
+  if (!res.ok) return {}
   return res.json()
 }
 

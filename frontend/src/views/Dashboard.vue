@@ -20,36 +20,6 @@
       </div>
     </div>
 
-    <!-- GPU Queue Panel -->
-    <div v-if="!gpuStatus.reachable && gpuStatus.reachable !== undefined" class="gpu-unreachable">
-      ⚠ GPU 转录服务不可达 (10.190.0.203:8877)
-    </div>
-    <div v-else-if="gpuStatus.reachable" class="gpu-panel">
-      <div class="gpu-panel-header">
-        <span class="gpu-title">GPU 转录队列</span>
-        <span class="gpu-idle" v-if="activeJobs.length === 0">GPU 空闲</span>
-      </div>
-      <div v-if="gpuStatus.health?.vram_used_mb !== undefined" class="vram-row">
-        <span class="vram-label">VRAM</span>
-        <div class="vram-bar-wrap">
-          <div
-            class="vram-bar-fill"
-            :class="vramColorClass"
-            :style="{ width: vramPct + '%' }"
-          ></div>
-        </div>
-        <span class="vram-text">{{ gpuStatus.health.vram_used_mb }} / {{ gpuStatus.health.vram_total_mb }} MB</span>
-      </div>
-      <div class="gpu-jobs" v-if="activeJobs.length > 0">
-        <div v-for="job in activeJobs" :key="job.job_id" class="gpu-job">
-          <span v-if="job.status === 'processing'" class="job-spinner"></span>
-          <span v-else class="job-wait-icon">⏳</span>
-          <span class="job-filename">{{ job.filename || job.job_id }}</span>
-          <span :class="['job-badge', job.status]">{{ job.status }}</span>
-        </div>
-      </div>
-    </div>
-
     <!-- Toolbar -->
     <div class="toolbar">
       <h2>直播间列表</h2>
@@ -117,12 +87,11 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { getRooms, addRoom, deleteRoom, toggleRoom, getStatus, getGpuStatus, createWS, formatBytes, formatDuration, uploadRecording } from '../api.js'
+import { ref, onMounted, onUnmounted } from 'vue'
+import { getRooms, addRoom, deleteRoom, toggleRoom, getStatus, createWS, formatBytes, formatDuration, uploadRecording } from '../api.js'
 
 const rooms = ref([])
 const status = ref({})
-const gpuStatus = ref({})
 const showAdd = ref(false)
 const newName = ref('')
 const newUrl = ref('')
@@ -132,28 +101,6 @@ const srtInputs = ref({})
 let pendingUpload = null  // { room, file }
 let ws = null
 let timer = null
-let gpuTimer = null
-
-const activeJobs = computed(() =>
-  (gpuStatus.value.jobs || []).filter(j => j.status === 'processing' || j.status === 'pending')
-)
-
-const vramPct = computed(() => {
-  const h = gpuStatus.value.health || {}
-  if (!h.vram_total_mb) return 0
-  return Math.min(100, Math.round((h.vram_used_mb / h.vram_total_mb) * 100))
-})
-
-const vramColorClass = computed(() => {
-  const p = vramPct.value
-  if (p >= 90) return 'vram-red'
-  if (p >= 70) return 'vram-yellow'
-  return 'vram-green'
-})
-
-async function loadGpu() {
-  gpuStatus.value = await getGpuStatus()
-}
 
 const statusLabel = (s) => ({ live: '直播中', offline: '离线', unknown: '检测中' }[s] || '未知')
 
@@ -222,14 +169,11 @@ onMounted(() => {
   load()
   ws = createWS(() => load())
   timer = setInterval(load, 10000)
-  loadGpu()
-  gpuTimer = setInterval(loadGpu, 3000)
 })
 
 onUnmounted(() => {
   ws?.close()
   clearInterval(timer)
-  clearInterval(gpuTimer)
 })
 </script>
 
@@ -276,27 +220,4 @@ onUnmounted(() => {
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }
 .error-msg { color: #fe2c55; font-size: 13px; margin-top: 10px; }
 
-/* GPU Panel */
-.gpu-unreachable { background: rgba(254,44,85,0.1); border: 1px solid rgba(254,44,85,0.3); color: #fe2c55; border-radius: 8px; padding: 10px 16px; font-size: 13px; margin-bottom: 16px; }
-.gpu-panel { background: #1a1a1a; border: 1px solid #333; border-radius: 10px; padding: 14px 18px; margin-bottom: 16px; }
-.gpu-panel-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
-.gpu-title { font-size: 13px; font-weight: 600; color: #ccc; }
-.gpu-idle { font-size: 12px; color: #555; }
-.vram-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
-.vram-label { font-size: 11px; color: #666; width: 36px; }
-.vram-bar-wrap { flex: 1; height: 6px; background: #2a2a2a; border-radius: 3px; overflow: hidden; }
-.vram-bar-fill { height: 100%; border-radius: 3px; transition: width 0.4s; }
-.vram-green { background: #22c55e; }
-.vram-yellow { background: #eab308; }
-.vram-red { background: #fe2c55; }
-.vram-text { font-size: 11px; color: #666; white-space: nowrap; }
-.gpu-jobs { display: flex; flex-direction: column; gap: 6px; }
-.gpu-job { display: flex; align-items: center; gap: 8px; font-size: 12px; }
-.job-spinner { width: 12px; height: 12px; border: 2px solid #3b82f6; border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; flex-shrink: 0; }
-@keyframes spin { to { transform: rotate(360deg); } }
-.job-wait-icon { font-size: 12px; line-height: 1; }
-.job-filename { flex: 1; color: #aaa; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.job-badge { font-size: 10px; padding: 2px 7px; border-radius: 10px; white-space: nowrap; }
-.job-badge.processing { background: rgba(59,130,246,0.2); color: #3b82f6; }
-.job-badge.pending { background: #2a2a2a; color: #666; }
 </style>

@@ -24,12 +24,33 @@ MUSIC_DIR = os.path.join(os.path.dirname(__file__), "assets", "music")
 
 
 def _pick_music() -> Optional[str]:
-    tracks = _glob.glob(os.path.join(MUSIC_DIR, "*.mp3")) + \
-             _glob.glob(os.path.join(MUSIC_DIR, "*.wav"))
-    return random.choice(tracks) if tracks else None
-CLIP_MIN = 15.0   # seconds
-CLIP_MAX = 30.0   # seconds
+    tracks = [
+        t for t in
+        _glob.glob(os.path.join(MUSIC_DIR, "*.mp3")) +
+        _glob.glob(os.path.join(MUSIC_DIR, "*.wav"))
+        if not os.path.basename(t).startswith("_")  # skip auto-generated
+    ]
+    if tracks:
+        return random.choice(tracks)
+    # No user tracks: use auto-generated BGM library
+    auto_tracks = [
+        t for t in
+        _glob.glob(os.path.join(MUSIC_DIR, "_bgm_*.mp3")) +
+        _glob.glob(os.path.join(MUSIC_DIR, "_generated_bgm.mp3"))
+        if os.path.exists(t)
+    ]
+    if auto_tracks:
+        return random.choice(auto_tracks)
+    try:
+        from music_gen import generate_bgm
+        return generate_bgm()
+    except Exception as e:
+        logger.warning(f"BGM generation failed: {e}")
+        return None
+CLIP_MIN = 46.0   # seconds
+CLIP_MAX = 240.0  # seconds
 MAX_CLIP_SEGMENTS = 50  # cap to avoid ffmpeg resource exhaustion
+SEG_PAD = 0.5     # seconds of audio/video to retain before/after each SRT segment
 
 # ── Patterns that trigger segment removal ────────────────────────────────────
 _REMOVE_PATTERNS = [
@@ -134,21 +155,48 @@ _KW_COLORS: dict[str, str] = {
     "neutral":  "&H0000CCFF&",   # yellow      #FFCC00
 }
 
-_ASS_HEADER = """\
+
+# ── ASS subtitle style pool ───────────────────────────────────────────────────
+# Each tuple: (style_name, fontname, fontsize, bold, italic, spacing, outline, shadow)
+# Fonts: PingFang SC=clean; STHeiti=bold; Xingkai SC=brush; Yuanti SC=round;
+#        STKaiti=calligraphy; Baoli SC=slab; Microsoft YaHei=modern
+_SUBTITLE_STYLES = [
+    ("Clean",   "PingFang SC",     92,  0, 0,  1, 7, 2),
+    ("Bold",    "STHeiti",         100, 1, 0,  0, 9, 3),
+    ("Brush",   "Xingkai SC",      102, 1, 0,  2, 6, 3),
+    ("Round",   "Yuanti SC",       96,  0, 0,  2, 6, 2),
+    ("Kaiti",   "STKaiti",         96,  0, 1,  1, 7, 2),
+    ("Slab",    "Baoli SC",        98,  0, 0,  1, 8, 3),
+    ("Modern",  "Microsoft YaHei", 96,  0, 0,  1, 7, 2),
+]
+
+def _build_ass_styles() -> str:
+    """Build the [V4+ Styles] section with all font variants."""
+    fmt = "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+    lines = [fmt]
+    for name, font, size, bold, italic, spacing, outline, shadow in _SUBTITLE_STYLES:
+        lines.append(
+            f"Style: {name},{font},{size},"
+            f"&H00FFFFFF,&H000000FF,&H00141414,&H80000000,"
+            f"{bold},{italic},0,0,100,100,{spacing},0,1,{outline},{shadow},2,80,80,120,1\n"
+        )
+    return "".join(lines)
+
+_STYLE_NAMES = [s[0] for s in _SUBTITLE_STYLES]
+
+_ASS_HEADER_BASE = """\
 [Script Info]
 ScriptType: v4.00+
 WrapStyle: 0
 ScaledBorderAndShadow: yes
-PlayResX: 720
-PlayResY: 1280
+PlayResX: 1440
+PlayResY: 2560
 
 [V4+ Styles]
-Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Microsoft YaHei,58,&H00FFFFFF,&H000000FF,&H00141414,&H80000000,0,0,0,0,100,100,1,0,1,4,1.5,2,40,40,60,1
-
-[Events]
-Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
+
+def _make_ass_header() -> str:
+    return _ASS_HEADER_BASE + _build_ass_styles() + "\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
 
 
 def _sec_to_ass(s: float) -> str:
@@ -190,21 +238,27 @@ def build_ass(selected: List[Seg], all_segs: List[Seg]) -> str:
     """
     Generate ASS subtitle string with keyword highlights.
     Remaps SRT timestamps to the clip's output timeline.
-    Keyword lines get a scale-bounce entry animation; plain lines cycle 4 styles.
+    Each segment picks a random font style; keyword lines get a stronger bounce.
     """
+    header = _make_ass_header()
     dialogue: list[str] = []
     cursor = 0.0
     line_idx = 0
+    rng = random.Random()
     for sel_seg in selected:
         offset = cursor
-        cursor += sel_seg.duration
+        pad_b = min(SEG_PAD, sel_seg.start)   # actual pre-buffer for this segment
+        cursor += pad_b + sel_seg.duration + SEG_PAD
+        # Pick one style for the entire segment (visual consistency within a scene)
+        seg_style = rng.choice(_STYLE_NAMES)
         for srt in all_segs:
             ov_start = max(srt.start, sel_seg.start)
             ov_end   = min(srt.end,   sel_seg.end)
             if ov_end - ov_start < 0.1:
                 continue
-            t0 = offset + (ov_start - sel_seg.start)
-            t1 = offset + (ov_end   - sel_seg.start)
+            # pad_b shifts speech forward in the output timeline (after pre-buffer)
+            t0 = offset + pad_b + (ov_start - sel_seg.start)
+            t1 = offset + pad_b + (ov_end   - sel_seg.start)
             annotated, has_kw = _annotate_text(srt.text)
             if has_kw:
                 prefix = _ANIM_KW
@@ -213,17 +267,333 @@ def build_ass(selected: List[Seg], all_segs: List[Seg]) -> str:
             line_idx += 1
             dialogue.append(
                 f"Dialogue: 0,{_sec_to_ass(t0)},{_sec_to_ass(t1)},"
-                f"Default,,0,0,0,,{prefix}{annotated}"
+                f"{seg_style},,0,0,0,,{prefix}{annotated}"
             )
-    return _ASS_HEADER + "\n".join(dialogue) + "\n"
+    return header + "\n".join(dialogue) + "\n"
 
 
-FADE_DUR = 0.3
-TRANSITIONS = ["fade", "slideright", "slideleft", "dissolve"]
+FADE_DUR = 1.5       # video-to-video direct crossfade (seconds)
+ANIME_FADE = 0.5     # crossfade into/out of anime transition frame
+ANIME_TOTAL = 2.0    # total duration of anime still input (includes both fades)
+
+# Output resolution: 4K portrait (9:16)
+OUT_W = 2160
+OUT_H = 3840
+
+# ComfyUI input resolution: SD1.5-safe portrait (9:16), avoids VRAM OOM at 4K
+COMFY_W = 576   # 9:16 portrait, divisible by 64 (SD 1.5 requirement)
+COMFY_H = 1024
+
+# Zoom punch: 1.5× crop toward face/wig area (upper-centre of frame)
+ZOOM_FACTOR = 1.5
+ZOOM_W = int(OUT_W / ZOOM_FACTOR)   # 1440
+ZOOM_H = int(OUT_H / ZOOM_FACTOR)   # 2560
+ZOOM_X = (OUT_W - ZOOM_W) // 2      # 360 – centred horizontally
+ZOOM_Y = 0                           # start from top → captures face/wig
+
+# Transition pool – cycled across segment boundaries, 5 visual styles:
+#   前后叠加: dissolve / fade
+#   聚焦:     zoomin / radial / hblur
+#   画中画:   squeezeh / squeezev
+#   人物重叠: fadeblack  (rembg gives true BG separation)
+#   运镜:     zoom_punch (snap zoom-in to face, snap back)
+_TR_POOL = [
+    "dissolve",    # 前后叠加
+    "zoomin",      # 聚焦
+    "squeezeh",    # 画中画
+    "fadeblack",   # 人物重叠
+    "zoom_punch",  # 运镜
+    "fade",        # 前后叠加
+    "radial",      # 聚焦
+    "hblur",       # 聚焦
+    "squeezev",    # 画中画
+]
 
 
-async def _build_clip(mp4: str, selected: List[Seg], segs: List[Seg], out: str) -> bool:
-    """Single-pass ffmpeg: fast-seek N inputs + trim filter (frame-accurate) + xfade + ass burn."""
+async def _preprocess_segments(mp4: str, selected: List[Seg], tmp_dir: str, on_progress=None) -> List[Optional[str]]:
+    """Pre-encode each segment to 4K temp file in parallel to reduce filter-graph memory.
+    Audio: apply noisereduce (voice isolation) when available, else ffmpeg-only denoising.
+    Video: lanczos upscale + mild sharpening.
+    """
+    _SF = (
+        f"scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease:flags=lanczos,"
+        f"pad={OUT_W}:{OUT_H}:(ow-iw)/2:(oh-ih)/2,"
+        f"unsharp=5:5:0.6:5:5:0.0"   # mild luma sharpening
+    )
+
+    from denoise import extract_and_denoise
+
+    async def _one(i: int, seg: Seg) -> Optional[str]:
+        out = os.path.join(tmp_dir, f"seg{i}.mp4")
+        pad_b = min(SEG_PAD, seg.start)   # pre-buffer (clamped so we don't seek before t=0)
+        pad_a = SEG_PAD                    # post-buffer
+        audio_start = seg.start - pad_b
+        padded_dur  = seg.duration + pad_b + pad_a
+
+        pre = max(0.0, audio_start - 3.0)
+        fs  = audio_start - pre
+        fe  = fs + padded_dur
+        duration = padded_dur + 0.1
+
+        # Noisereduce audio covers the full padded window so it stays aligned with video.
+        denoised_wav = os.path.join(tmp_dir, f"seg{i}_dn.wav")
+        has_denoised = await extract_and_denoise(mp4, audio_start, padded_dur + 0.15, denoised_wav)
+
+        if has_denoised:
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", f"{pre:.3f}", "-i", mp4,
+                "-i", denoised_wav,
+                "-vf", f"trim={fs:.3f}:{fe:.3f},setpts=PTS-STARTPTS,{_SF},fps=25",
+                "-map", "0:v", "-map", "1:a",
+                "-t", f"{duration:.3f}",
+                "-c:v", "h264_videotoolbox", "-b:v", "20M", "-allow_sw", "1",
+                "-c:a", "aac", "-b:a", "128k",
+                out,
+            ]
+        else:
+            # Fallback: ffmpeg-only chain — highpass + aggressive afftdn + anlmdn
+            af = (
+                f"atrim={fs:.3f}:{fe:.3f},asetpts=PTS-STARTPTS,"
+                "highpass=f=100,"
+                "afftdn=nf=-40:nt=w,"
+                "anlmdn=s=7:p=0.002:r=0.002:m=15"
+            )
+            cmd = [
+                "ffmpeg", "-y", "-ss", f"{pre:.3f}", "-i", mp4,
+                "-vf", f"trim={fs:.3f}:{fe:.3f},setpts=PTS-STARTPTS,{_SF},fps=25",
+                "-af", af,
+                "-t", f"{duration:.3f}",
+                "-c:v", "h264_videotoolbox", "-b:v", "20M", "-allow_sw", "1",
+                "-c:a", "aac", "-b:a", "128k",
+                out,
+            ]
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+        )
+        await proc.communicate()
+        try:
+            os.remove(denoised_wav)
+        except Exception:
+            pass
+        if proc.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 0:
+            return out
+        logger.warning(f"Pre-encode failed for segment {i}")
+        return None
+
+    # Allow 2 concurrent pre-encodes; each uses ~1-2 GB RAM so 2 is safe on 8 GB
+    sem = asyncio.Semaphore(2)
+
+    n_segs = len(selected)
+
+    async def _one_sem(i: int, seg: Seg) -> Optional[str]:
+        async with sem:
+            logger.debug(f"Pre-encoding segment {i+1}/{n_segs} ...")
+            result = await _one(i, seg)
+            if on_progress:
+                await on_progress("preprocess", i + 1, n_segs)
+            return result
+
+    results = await asyncio.gather(*[_one_sem(i, seg) for i, seg in enumerate(selected)])
+    return list(results)
+
+
+async def _xfade_merge(
+    seg_files: List[str],
+    selected: List[Seg],
+    boundary_frames: dict,
+    tmp_dir: str,
+    seg_durations: Optional[List[float]] = None,
+    on_progress=None,
+) -> Tuple[Optional[str], float]:
+    """Tree-based parallel xfade merge with asyncio.Semaphore(2).
+
+    Merges in O(log N) rounds; up to 2 concurrent ffmpeg processes per round.
+    Memory stays bounded (each process reads exactly 2 inputs) while wall-clock
+    time is roughly halved vs. the previous linear approach for large N.
+
+    boundary_frames: {bi: jpeg/png_path} for anime/zoom_punch transitions.
+    Returns (merged_path, total_duration) or (None, 0.0) on failure.
+    """
+    n = len(seg_files)
+    if n == 0:
+        return None, 0.0
+    if n == 1:
+        return seg_files[0], selected[0].duration
+
+    _SF = (
+        f"scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease,"
+        f"pad={OUT_W}:{OUT_H}:(ow-iw)/2:(oh-ih)/2"
+    )
+    sem = asyncio.Semaphore(2)
+    _counter = [0]
+
+    async def _run(cmd: list) -> Tuple[int, str]:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+        )
+        _, err = await proc.communicate()
+        return proc.returncode, err.decode(errors="replace")
+
+    async def _merge2(f1: str, f2: str, tr: str, offset: float, dst: str) -> bool:
+        rc, err = await _run([
+            "ffmpeg", "-y", "-i", f1, "-i", f2,
+            "-filter_complex",
+            f"[0:v]settb=1/25[va];[1:v]settb=1/25[vb];"
+            f"[va][vb]xfade=transition={tr}:duration={FADE_DUR}:offset={offset:.3f}[vout];"
+            f"[0:a][1:a]acrossfade=d={FADE_DUR}[aout]",
+            "-map", "[vout]", "-map", "[aout]",
+            "-pix_fmt", "yuv420p",
+            "-c:v", "h264_videotoolbox", "-b:v", "15M", "-allow_sw", "1",
+            "-c:a", "aac", "-b:a", "128k",
+            dst,
+        ])
+        if rc != 0:
+            logger.error(f"_merge2 rc={rc}: {err[-400:]}")
+        return rc == 0
+
+    async def _merge_anime(f1: str, anime: str, f2: str, tr: str, fade_off: float, dst: str) -> bool:
+        """3-step: f1 → fadewhite → anime_still (with Ken Burns zoom) → tr-xfade → f2"""
+        tmp1 = dst + "_s1.mp4"
+        _n_frames = int(ANIME_TOTAL * 25)   # total frames for zoompan duration
+        # Ken Burns: slow zoom from 1.0× to ~1.11× centered on upper-center (face area)
+        _anime_vf = (
+            f"scale={COMFY_W}:{COMFY_H}:force_original_aspect_ratio=decrease,"
+            f"pad={COMFY_W}:{COMFY_H}:(ow-iw)/2:(oh-ih)/2,"
+            f"fps=25,"
+            f"zoompan=z='min(zoom+0.0022,1.11)':d={_n_frames}"
+            f":x='(iw/2)-(iw/zoom/2)':y='(ih/3)-(ih/zoom/3)'"
+            f":s={COMFY_W}x{COMFY_H},"
+            f"scale={OUT_W}:{OUT_H}:flags=lanczos,"
+            f"unsharp=5:5:0.4:5:5:0.0,"
+            f"settb=1/25"
+        )
+        rc1, err1 = await _run([
+            "ffmpeg", "-y", "-i", f1,
+            "-loop", "1", "-t", f"{ANIME_TOTAL:.1f}", "-i", anime,
+            "-filter_complex",
+            f"[0:v]settb=1/25[va];"
+            f"[1:v]{_anime_vf}[vb];"
+            f"[va][vb]xfade=transition=fadewhite:duration={ANIME_FADE}:offset={fade_off:.3f}[vout];"
+            f"aevalsrc=0:c=stereo:s=44100,atrim=duration={ANIME_TOTAL:.1f},asetpts=PTS-STARTPTS[asilent];"
+            f"[0:a][asilent]acrossfade=d={ANIME_FADE}[aout]",
+            "-map", "[vout]", "-map", "[aout]",
+            "-pix_fmt", "yuv420p",
+            "-c:v", "h264_videotoolbox", "-b:v", "15M", "-allow_sw", "1",
+            "-c:a", "aac", "-b:a", "128k",
+            tmp1,
+        ])
+        if rc1 != 0:
+            logger.error(f"_merge_anime step1 rc={rc1}: {err1[-300:]}")
+            return False
+        step2_off = fade_off + ANIME_TOTAL - ANIME_FADE
+        rc2, err2 = await _run([
+            "ffmpeg", "-y", "-i", tmp1, "-i", f2,
+            "-filter_complex",
+            f"[0:v]settb=1/25[va];[1:v]settb=1/25[vb];"
+            f"[va][vb]xfade=transition={tr}:duration={ANIME_FADE}:offset={step2_off:.3f}[vout];"
+            f"[0:a][1:a]acrossfade=d={ANIME_FADE}[aout]",
+            "-map", "[vout]", "-map", "[aout]",
+            "-pix_fmt", "yuv420p",
+            "-c:v", "h264_videotoolbox", "-b:v", "15M", "-allow_sw", "1",
+            "-c:a", "aac", "-b:a", "128k",
+            dst,
+        ])
+        try:
+            os.remove(tmp1)
+        except Exception:
+            pass
+        if rc2 != 0:
+            logger.error(f"_merge_anime step2 rc={rc2}: {err2[-300:]}")
+        return rc2 == 0
+
+    async def _do_merge(left: tuple, right: tuple) -> Optional[tuple]:
+        """Merge two chunks under the semaphore; returns new chunk or None."""
+        async with sem:
+            lf, ldur, llorig, lrorig, ltemp = left
+            rf, rdur, rlorig, rrorig, rtemp = right
+            bi = lrorig  # boundary index = rightmost original seg of left chunk
+            tr = _TR_POOL[bi % len(_TR_POOL)]
+            xfade_tr = "dissolve" if tr == "zoom_punch" else tr
+            _counter[0] += 1
+            dst = os.path.join(tmp_dir, f"tree_{_counter[0]}.mp4")
+
+            if bi in boundary_frames:
+                fade_off = ldur - ANIME_FADE
+                ok = await _merge_anime(lf, boundary_frames[bi], rf, xfade_tr, fade_off, dst)
+                new_dur = fade_off + ANIME_TOTAL - ANIME_FADE + rdur
+            else:
+                xfade_off = max(0.0, ldur - FADE_DUR)
+                ok = await _merge2(lf, rf, xfade_tr, xfade_off, dst)
+                new_dur = ldur - FADE_DUR + rdur
+
+            if ltemp:
+                try:
+                    os.remove(lf)
+                except Exception:
+                    pass
+            if rtemp:
+                try:
+                    os.remove(rf)
+                except Exception:
+                    pass
+            if not ok:
+                return None
+            return (dst, new_dur, llorig, rrorig, True)
+
+    # Each chunk: (file, duration, left_orig_idx, right_orig_idx, is_temp)
+    # Use provided padded durations if available, else fall back to Seg.duration
+    _durations = seg_durations if (seg_durations and len(seg_durations) == n) else [s.duration for s in selected]
+    chunks: List[tuple] = [
+        (seg_files[i], _durations[i], i, i, False) for i in range(n)
+    ]
+
+    import math as _math
+    total_rounds = _math.ceil(_math.log2(n)) if n > 1 else 1
+    round_num = 0
+    while len(chunks) > 1:
+        round_num += 1
+        next_chunks: List[Optional[tuple]] = []
+        merge_tasks: List[Tuple[int, tuple, tuple]] = []  # (slot, left, right)
+
+        for j in range(0, len(chunks), 2):
+            if j + 1 >= len(chunks):
+                next_chunks.append(chunks[j])  # odd chunk carries forward
+            else:
+                next_chunks.append(None)        # placeholder for merge result
+                merge_tasks.append((len(next_chunks) - 1, chunks[j], chunks[j + 1]))
+
+        results = await asyncio.gather(*[_do_merge(l, r) for _, l, r in merge_tasks])
+
+        for (slot, _, _), res in zip(merge_tasks, results):
+            if res is None:
+                return None, 0.0
+            next_chunks[slot] = res
+
+        chunks = next_chunks  # type: ignore
+        logger.debug(f"Tree merge round {round_num}: {len(chunks)} chunk(s) remaining")
+        if on_progress:
+            await on_progress("merge", round_num, total_rounds)
+
+    return chunks[0][0], chunks[0][1]
+
+
+async def _build_clip(
+    mp4: str,
+    selected: List[Seg],
+    segs: List[Seg],
+    out: str,
+    anime_frames: Optional[List[Optional[str]]] = None,
+    person_frames: Optional[dict] = None,
+    zoom_punch_clips: Optional[dict] = None,
+    on_progress=None,
+) -> bool:
+    """Three-phase pipeline to avoid OOM on 8 GB RAM with many 4K segments:
+      Phase 1: sequential pre-encode each segment to 4K temp file
+      Phase 2: iterative pairwise xfade merge (constant 2-input memory per step)
+      Phase 3: final pass – subtitles + background music
+    """
     n = len(selected)
     ass_content = build_ass(selected, segs)
     has_subs = "Dialogue:" in ass_content
@@ -233,56 +603,85 @@ async def _build_clip(mp4: str, selected: List[Seg], segs: List[Seg], out: str) 
         with open(ass_path, "w", encoding="utf-8") as f:
             f.write(ass_content)
 
-        music_path = _pick_music()
+        # ── Phase 1: sequential pre-encode to 4K ──────────────────────────────
+        if on_progress:
+            await on_progress("preprocess", 0, n)
+        seg_files = await _preprocess_segments(mp4, selected, tmp, on_progress=on_progress)
+        if any(f is None for f in seg_files):
+            logger.error("Pre-encode failed for one or more segments")
+            return False
 
-        cmd = ["ffmpeg", "-y"]
-        for seg in selected:
-            pre = max(0.0, seg.start - 3.0)
-            cmd += ["-ss", f"{pre:.3f}", "-i", mp4]
+        # Actual padded duration of each pre-encoded segment (includes SEG_PAD on both sides)
+        seg_durations = [
+            seg.duration + min(SEG_PAD, seg.start) + SEG_PAD
+            for seg in selected
+        ]
+
+        # Build boundary frame mapping (anime takes priority over zoom_punch)
+        boundary_frames: dict = {}
+        for bi in range(n - 1):
+            af = anime_frames[bi] if anime_frames and bi < len(anime_frames) else None
+            zf = zoom_punch_clips.get(bi) if zoom_punch_clips else None
+            frame = af or zf
+            if frame:
+                boundary_frames[bi] = frame
+
+        # ── Phase 2: iterative pairwise xfade merge ────────────────────────────
+        if on_progress:
+            await on_progress("merge", 0, 1)
+        merged_file, _merged_dur = await _xfade_merge(
+            seg_files, selected, boundary_frames, tmp,
+            seg_durations=seg_durations, on_progress=on_progress
+        )
+        if merged_file is None:
+            logger.error("Iterative xfade merge failed")
+            return False
+
+        # ── Phase 3: final encode – subtitles + music ─────────────────────────
+        if on_progress:
+            await on_progress("final", 0, 1)
+        music_path = _pick_music()
+        cmd = ["ffmpeg", "-y", "-i", merged_file]
+        parts: List[str] = []
+        music_idx: Optional[int] = None
 
         if music_path:
             cmd += ["-stream_loop", "-1", "-i", music_path]
-
-        parts = []
-        for i, seg in enumerate(selected):
-            pre = max(0.0, seg.start - 3.0)
-            fs  = seg.start - pre           # fine_start ≤ 3.0
-            fe  = fs + (seg.end - seg.start)
-            parts.append(f"[{i}:v]trim={fs:.3f}:{fe:.3f},setpts=PTS-STARTPTS,scale=-2:720[v{i}]")
-            parts.append(f"[{i}:a]atrim={fs:.3f}:{fe:.3f},asetpts=PTS-STARTPTS[a{i}]")
-
-        # xfade chain instead of concat
-        if n == 1:
-            parts += ["[v0]copy[vcat]", "[a0]acopy[acat]"]
-        else:
-            cur_v, cur_a, v_off = "v0", "a0", 0.0
-            for i in range(1, n):
-                tr = TRANSITIONS[(i - 1) % len(TRANSITIONS)]
-                v_off += selected[i - 1].duration - FADE_DUR
-                parts.append(f"[{cur_v}][v{i}]xfade=transition={tr}:duration={FADE_DUR}:offset={v_off:.3f}[xfv{i}]")
-                parts.append(f"[{cur_a}][a{i}]acrossfade=d={FADE_DUR}[xfa{i}]")
-                cur_v, cur_a = f"xfv{i}", f"xfa{i}"
-            parts += [f"[{cur_v}]copy[vcat]", f"[{cur_a}]acopy[acat]"]
-
-        if music_path:
-            parts.append(f"[{n}:a]volume=0.15[bgm];[acat][bgm]amix=inputs=2:duration=first[aout]")
+            music_idx = 1
+            parts.append(
+                # Compress voice, normalize loudness, force stereo before mixing
+                f"[0:a]acompressor=threshold=-25dB:ratio=3:attack=5:release=100:makeup=4dB,"
+                f"loudnorm=I=-16:TP=-1.5:LRA=11,"
+                f"aformat=channel_layouts=stereo[voice];"
+                f"[{music_idx}:a]volume=0.40,aformat=channel_layouts=stereo[bgm];"
+                f"[voice][bgm]amix=inputs=2:duration=first:normalize=0[aout]"
+            )
             audio_map = "[aout]"
         else:
-            audio_map = "[acat]"
+            # No music: still normalise voice loudness
+            parts.append(
+                "[0:a]acompressor=threshold=-25dB:ratio=3:attack=5:release=100:makeup=4dB,"
+                "loudnorm=I=-16:TP=-1.5:LRA=11,"
+                "aformat=channel_layouts=stereo[aout]"
+            )
+            audio_map = "[aout]"
 
         if has_subs:
-            # filter_complex uses backslash escaping, not shell quotes
             escaped = ass_path.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
-            parts.append(f"[vcat]ass={escaped}[vout]")
+            parts.append(f"[0:v]ass={escaped}[vout]")
             vmap = "[vout]"
         else:
-            vmap = "[vcat]"
+            vmap = "0:v"
+
+        if parts:
+            cmd += ["-filter_complex", ";".join(parts)]
 
         cmd += [
-            "-filter_complex", ";".join(parts),
             "-map", vmap, "-map", audio_map,
-            "-c:v", "libx264", "-crf", "22", "-preset", "veryfast",
-            "-c:a", "aac", "-b:a", "128k",
+            "-pix_fmt", "yuv420p",
+            "-c:v", "h264_videotoolbox", "-b:v", "20M", "-allow_sw", "1",
+            "-ar", "44100", "-ac", "2",
+            "-c:a", "aac", "-b:a", "192k",
             out,
         ]
         proc = await asyncio.create_subprocess_exec(
@@ -291,8 +690,304 @@ async def _build_clip(mp4: str, selected: List[Seg], segs: List[Seg], out: str) 
         _, stderr = await proc.communicate()
         ok = proc.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 0
         if not ok:
-            logger.error(f"_build_clip failed: {stderr.decode()[-300:]}")
+            decoded = stderr.decode(errors="replace")
+            logger.error(f"_build_clip final encode rc={proc.returncode}")
+            logger.error(f"_build_clip stderr:\n{decoded[-2000:]}")
         return ok
+
+
+async def _prepend_thumbnail(clip_path: str, thumb_path: str) -> bool:
+    """
+    Prepend `thumb_path` as a 0.5-second still frame at the beginning of `clip_path`.
+    Two-step: encode JPEG → 0.5s mp4, then concat with clip via demuxer (-c copy).
+    Overwrites the original file in-place.
+    """
+    tmp_thumb = clip_path + "_thumb0.mp4"
+    tmp_out   = clip_path + ".prepend_tmp.mp4"
+    list_file = clip_path + "_concat.txt"
+
+    try:
+        # Step 1: encode thumbnail JPEG → 0.5s mp4 (same codec as clip)
+        _SF = (
+            f"scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease,"
+            f"pad={OUT_W}:{OUT_H}:(ow-iw)/2:(oh-ih)/2,fps=25"
+        )
+        cmd1 = [
+            "ffmpeg", "-y",
+            "-loop", "1", "-t", "0.5", "-i", thumb_path,
+            "-f", "lavfi", "-t", "0.5", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+            "-vf", _SF,
+            "-c:v", "h264_videotoolbox", "-b:v", "15M", "-allow_sw", "1",
+            "-c:a", "aac", "-b:a", "128k",
+            tmp_thumb,
+        ]
+        p1 = await asyncio.create_subprocess_exec(
+            *cmd1, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+        )
+        _, err1 = await p1.communicate()
+        if p1.returncode != 0 or not os.path.exists(tmp_thumb):
+            logger.warning(f"_prepend_thumbnail step1 failed: {err1.decode()[-300:]}")
+            return False
+
+        # Step 2: concat via demuxer with -c copy (no re-encode of the clip)
+        with open(list_file, "w") as f:
+            f.write(f"file '{tmp_thumb}'\n")
+            f.write(f"file '{clip_path}'\n")
+
+        cmd2 = [
+            "ffmpeg", "-y",
+            "-f", "concat", "-safe", "0", "-i", list_file,
+            "-c", "copy",
+            tmp_out,
+        ]
+        p2 = await asyncio.create_subprocess_exec(
+            *cmd2, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+        )
+        _, err2 = await p2.communicate()
+        ok = p2.returncode == 0 and os.path.exists(tmp_out) and os.path.getsize(tmp_out) > 0
+        if ok:
+            os.replace(tmp_out, clip_path)
+            logger.info(f"Thumbnail prepended (0.5s) to {os.path.basename(clip_path)}")
+        else:
+            logger.warning(f"_prepend_thumbnail step2 failed: {err2.decode()[-400:]}")
+            if os.path.exists(tmp_out):
+                os.remove(tmp_out)
+        return ok
+
+    finally:
+        for p in (tmp_thumb, list_file):
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+
+
+def _cartoonize_pil(src_jpg: str, dst_jpg: str) -> Optional[str]:
+    """
+    PIL-based cartoon/anime effect as fallback when ComfyUI is unavailable.
+    Steps: posterize colors → boost saturation → smooth → edge overlay.
+    """
+    try:
+        from PIL import Image, ImageFilter, ImageEnhance, ImageOps, ImageChops
+        img = Image.open(src_jpg).convert("RGB")
+        # Smooth to remove noise before posterization
+        smooth = img.filter(ImageFilter.GaussianBlur(radius=1.5))
+        # Posterize: reduce colors to cartoon-like palette
+        poster = ImageOps.posterize(smooth, 4)
+        # Boost saturation and contrast for vivid anime look
+        poster = ImageEnhance.Color(poster).enhance(2.0)
+        poster = ImageEnhance.Contrast(poster).enhance(1.3)
+        # Extract and threshold edges
+        edges = smooth.filter(ImageFilter.FIND_EDGES).convert("L")
+        edges = edges.point(lambda x: 0 if x < 20 else min(255, x * 3))
+        edges_inv = ImageOps.invert(edges).convert("RGB")
+        # Multiply posterized image with inverted edges → dark outlines
+        result = ImageChops.multiply(poster, edges_inv)
+        result.save(dst_jpg, "JPEG", quality=90)
+        return dst_jpg
+    except Exception as e:
+        logger.warning(f"PIL cartoonize failed: {e}")
+        return None
+
+
+async def _gen_transition_anime_frames(
+    mp4: str, selected: List[Seg]
+) -> List[Optional[str]]:
+    """
+    For each boundary between selected segments, extract the first frame of the
+    NEXT segment and convert to anime style via ComfyUI.
+    Returns list of length len(selected)-1 (None where generation failed).
+    Caller must delete the returned temp files.
+    """
+    n = len(selected)
+    if n < 2:
+        return []
+    comfy_ok = False
+    try:
+        from comfyui_client import anime_img2img, health_check
+        comfy_ok = await health_check()
+    except Exception:
+        pass
+
+    async def _one(seg: Seg, idx: int) -> Optional[str]:
+        frame_tmp  = tempfile.mktemp(suffix=".jpg")   # 1080p source frame
+        comfy_tmp  = tempfile.mktemp(suffix=".jpg")   # COMFY_W×COMFY_H for ComfyUI
+        anime_tmp  = tempfile.mktemp(suffix=".jpg")   # final output
+        try:
+            pre = max(0.0, seg.start - 3.0)
+            fine = seg.start - pre
+            # Extract at 1080×1920 (half-4K): 2× better upscale to 4K vs 576×1024
+            _FW, _FH = OUT_W // 2, OUT_H // 2   # 1080×1920
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", f"{pre:.3f}", "-i", mp4,
+                "-ss", f"{fine:.3f}", "-frames:v", "1",
+                "-vf", (
+                    f"scale={_FW}:{_FH}:force_original_aspect_ratio=decrease,"
+                    f"pad={_FW}:{_FH}:(ow-iw)/2:(oh-ih)/2"
+                ),
+                "-q:v", "2", frame_tmp,
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+            )
+            await proc.communicate()
+            if proc.returncode != 0 or not os.path.exists(frame_tmp):
+                return None
+
+            if comfy_ok:
+                # Downscale to ComfyUI-safe SD1.5 resolution before img2img
+                try:
+                    from PIL import Image as _PIL
+                    _img = _PIL.open(frame_tmp).convert("RGB")
+                    _img = _img.resize((COMFY_W, COMFY_H), _PIL.LANCZOS)
+                    _img.save(comfy_tmp, "JPEG", quality=88)
+                except Exception:
+                    comfy_tmp = frame_tmp   # fallback: send 1080p directly
+
+                seed = (hash(mp4) ^ idx * 0xCAFE) & 0xFFFFFF
+                ok = await anime_img2img(comfy_tmp, anime_tmp, seed=seed, timeout=90)
+                if ok and os.path.exists(anime_tmp) and os.path.getsize(anime_tmp) > 0:
+                    return anime_tmp   # ComfyUI output (576×1024), upscaled by _merge_anime
+
+            # PIL fallback: cartoonize at 1080×1920 (much sharper than 576×1024 when upscaled to 4K)
+            return _cartoonize_pil(frame_tmp, anime_tmp)
+        except Exception as e:
+            logger.warning(f"Anime transition frame {idx} error: {e}")
+            return None
+        finally:
+            for _p in {frame_tmp, comfy_tmp}:  # set deduplicates when comfy_tmp==frame_tmp
+                try:
+                    os.remove(_p)
+                except Exception:
+                    pass
+
+    tasks = [_one(selected[i + 1], i) for i in range(n - 1)]
+    results = list(await asyncio.gather(*tasks))
+    ok_count = sum(1 for r in results if r)
+    logger.info(f"Anime transition frames: {ok_count}/{n - 1} generated")
+    return results
+
+
+async def _gen_zoom_punch_clips(
+    mp4: str, selected: List[Seg], boundaries: List[int]
+) -> dict:
+    """
+    For each boundary, extract the first frame of the NEXT segment and apply a
+    1.5× zoom-in crop targeting the face/wig area (upper-centre of frame).
+    Returns {boundary_i: JPEG_path}. Caller must delete temp files.
+    """
+    async def _one(bi: int) -> tuple:
+        seg = selected[bi + 1]
+        out_tmp = tempfile.mktemp(suffix=".jpg")
+        try:
+            pre = max(0.0, seg.start - 3.0)
+            fine = seg.start - pre
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", f"{pre:.3f}", "-i", mp4,
+                "-ss", f"{fine:.3f}", "-frames:v", "1",
+                "-vf", (
+                    # Step 1: scale source to 4K
+                    f"scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease,"
+                    f"pad={OUT_W}:{OUT_H}:(ow-iw)/2:(oh-ih)/2,"
+                    # Step 2: crop upper-centre at 1/ZOOM_FACTOR size → 1.5× zoom toward face
+                    f"crop={ZOOM_W}:{ZOOM_H}:{ZOOM_X}:{ZOOM_Y},"
+                    # Step 3: scale cropped area back to 4K (high-quality)
+                    f"scale={OUT_W}:{OUT_H}:flags=lanczos"
+                ),
+                "-q:v", "2", out_tmp,
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.communicate()
+            if proc.returncode == 0 and os.path.exists(out_tmp) and os.path.getsize(out_tmp) > 0:
+                return bi, out_tmp
+            return bi, None
+        except Exception as e:
+            logger.warning(f"Zoom punch frame error at boundary {bi}: {e}")
+            try:
+                os.remove(out_tmp)
+            except Exception:
+                pass
+            return bi, None
+
+    pairs = await asyncio.gather(*[_one(bi) for bi in boundaries])
+    result = {bi: path for bi, path in pairs if path}
+    logger.info(f"Zoom punch clips: {len(result)}/{len(boundaries)} generated")
+    return result
+
+
+async def _gen_person_frames(
+    mp4: str, selected: List[Seg], boundaries: List[int]
+) -> dict:
+    """
+    For each boundary in `boundaries`, extract the last frame of segment[i] and
+    apply rembg background removal to isolate the person.
+    Returns dict {boundary_i: PNG_path}. Caller must delete temp files.
+    """
+    if not boundaries:
+        return {}
+    try:
+        import rembg
+    except ImportError:
+        logger.debug("rembg not installed – person overlay transitions disabled")
+        return {}
+
+    async def _one(bi: int) -> tuple:
+        seg = selected[bi]
+        frame_tmp = tempfile.mktemp(suffix=".jpg")
+        person_tmp = tempfile.mktemp(suffix=".png")
+        try:
+            seek = max(0.0, seg.end - 0.5)
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", f"{seek:.3f}", "-i", mp4,
+                "-frames:v", "1",
+                "-vf", (
+                    f"scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease,"
+                    f"pad={OUT_W}:{OUT_H}:(ow-iw)/2:(oh-ih)/2"
+                ),
+                "-q:v", "2", frame_tmp,
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+            )
+            await proc.communicate()
+            if proc.returncode != 0 or not os.path.exists(frame_tmp):
+                return bi, None
+
+            def _remove_bg():
+                with open(frame_tmp, "rb") as f:
+                    data = f.read()
+                result = rembg.remove(data)
+                with open(person_tmp, "wb") as f:
+                    f.write(result)
+
+            await asyncio.get_event_loop().run_in_executor(None, _remove_bg)
+            if os.path.exists(person_tmp) and os.path.getsize(person_tmp) > 0:
+                return bi, person_tmp
+            return bi, None
+        except Exception as e:
+            logger.warning(f"Person frame error at boundary {bi}: {e}")
+            try:
+                os.remove(person_tmp)
+            except Exception:
+                pass
+            return bi, None
+        finally:
+            try:
+                os.remove(frame_tmp)
+            except Exception:
+                pass
+
+    results = await asyncio.gather(*[_one(bi) for bi in boundaries])
+    out = {bi: path for bi, path in results if path}
+    logger.info(f"Person overlay frames: {len(out)}/{len(boundaries)} generated")
+    return out
 
 
 # ── SRT parsing ───────────────────────────────────────────────────────────────
@@ -335,10 +1030,14 @@ def score_and_tag(seg: Seg) -> None:
             seg.valid = False
             return
 
-    # Too short to be useful
-    if seg.duration < 0.4:
+    # Too short to be useful (min 3s per scene)
+    if seg.duration < 3.0:
         seg.valid = False
         return
+
+    # Trim over-long segments (max 6s per scene)
+    if seg.duration > 6.0:
+        seg.end = seg.start + 6.0
 
     # Keyword score
     score = 0.0
@@ -346,8 +1045,8 @@ def score_and_tag(seg: Seg) -> None:
         if kw in text:
             score += pts
 
-    # Boost punchy short segments
-    if 1.0 <= seg.duration <= 4.0:
+    # Boost punchy short segments (3–4s sweet spot)
+    if 3.0 <= seg.duration <= 4.0:
         score *= 1.2
 
     seg.score = round(score, 2)
@@ -406,8 +1105,8 @@ def _pick_by_category(segs: List[Seg], cat: str, budget: float) -> List[Seg]:
     return chosen
 
 
-def select_clips(segs: List[Seg], clip_min: float = CLIP_MIN, clip_max: float = CLIP_MAX) -> List[Seg]:
-    valid = [s for s in segs if s.valid]
+def _select_from_valid(valid: List[Seg], clip_min: float = CLIP_MIN, clip_max: float = CLIP_MAX) -> List[Seg]:
+    """Core A-B-A selection logic from a pre-filtered valid segment list."""
     if not valid:
         return []
 
@@ -483,9 +1182,31 @@ def select_clips(segs: List[Seg], clip_min: float = CLIP_MIN, clip_max: float = 
     return final
 
 
+def select_clips(segs: List[Seg], clip_min: float = CLIP_MIN, clip_max: float = CLIP_MAX) -> List[Seg]:
+    valid = [s for s in segs if s.valid]
+    return _select_from_valid(valid, clip_min, clip_max)
+
+
+def select_clips_variant(
+    segs: List[Seg],
+    exclude_ids: set,
+    clip_min: float = CLIP_MIN,
+    clip_max: float = CLIP_MAX,
+    seed: int = 0,
+) -> List[Seg]:
+    """Like select_clips but excludes segments already used in a prior variant."""
+    valid = [s for s in segs if s.valid and id(s) not in exclude_ids]
+    # If remaining content is insufficient, allow reuse but shuffle to differ from variant 0
+    if sum(s.duration for s in valid) < clip_min:
+        rng = random.Random(seed)
+        valid = [s for s in segs if s.valid]
+        rng.shuffle(valid)
+    return _select_from_valid(valid, clip_min, clip_max)
+
+
 # ── Main entry ────────────────────────────────────────────────────────────────
 
-async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown", record_date: str = "", clip_duration: Optional[float] = None) -> Optional[str]:
+async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown", record_date: str = "", clip_duration: Optional[float] = None, on_progress=None) -> Optional[str]:
     """
     Produce a 15-30s highlight clip from a recording + its SRT.
     Returns local path to the output _clip.mp4, or None on failure.
@@ -538,8 +1259,186 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
     seq       = len([f for f in os.listdir(out_dir) if f.endswith("_clip.mp4")]) + 1
     out_path  = os.path.join(out_dir, f"{safe_name}_{date_str}_{seq:03d}_clip.mp4")
 
-    if await _build_clip(mp4_path, selected, segs, out_path):
-        size_mb = os.path.getsize(out_path) / 1024 / 1024
-        logger.info(f"Clip ready: {out_path} ({size_mb:.1f} MB, {total_dur:.1f}s)")
-        return out_path
+    anime_frames = await _gen_transition_anime_frames(mp4_path, selected)
+
+    # Zoom punch: boundaries with "zoom_punch" type AND no anime frame
+    zoom_boundaries = [
+        bi for bi in range(len(selected) - 1)
+        if _TR_POOL[bi % len(_TR_POOL)] == "zoom_punch"
+        and not (bi < len(anime_frames) and anime_frames[bi])
+    ]
+    zoom_clips = await _gen_zoom_punch_clips(mp4_path, selected, zoom_boundaries)
+    # Merge zoom clips into anime_frames list (zoom_punch fills empty slots)
+    for bi, path in zoom_clips.items():
+        if bi < len(anime_frames) and not anime_frames[bi]:
+            anime_frames[bi] = path
+
+    person_boundaries = [
+        bi for bi in range(len(selected) - 1)
+        if _TR_POOL[bi % len(_TR_POOL)] == "fadeblack"
+        and not (bi < len(anime_frames) and anime_frames[bi])
+    ]
+    person_frames = await _gen_person_frames(mp4_path, selected, person_boundaries)
+    try:
+        if on_progress:
+            await on_progress("build", 0, 1)
+        if await _build_clip(
+            mp4_path, selected, segs, out_path,
+            anime_frames=anime_frames, person_frames=person_frames,
+            on_progress=on_progress,
+        ):
+            try:
+                if on_progress:
+                    await on_progress("thumbnail", 0, 1)
+                from thumbnail import generate_thumbnail
+                # Pick best-scored segment for thumbnail; fallback to 1/4 position
+                best_seg = max(selected, key=lambda s: s.score) if any(s.score > 0 for s in selected) \
+                           else selected[max(0, len(selected) // 4)]
+                thumb_seek = best_seg.start + 1.0
+                # Extract from original mp4 (no subtitle overlay, clean face frame)
+                thumb = await generate_thumbnail(mp4_path, offset=thumb_seek)
+                if thumb:
+                    await _prepend_thumbnail(out_path, thumb)
+            except Exception as e:
+                logger.warning(f"Thumbnail prepend skipped: {e}")
+            size_mb = os.path.getsize(out_path) / 1024 / 1024
+            logger.info(f"Clip ready: {out_path} ({size_mb:.1f} MB, {total_dur:.1f}s)")
+            return out_path
+    finally:
+        for af in anime_frames:
+            if af:
+                try:
+                    os.remove(af)
+                except Exception:
+                    pass
+        for pf in person_frames.values():
+            try:
+                os.remove(pf)
+            except Exception:
+                pass
     return None
+
+
+async def edit_recording_multi(
+    mp4_path: str,
+    srt_path: str,
+    count: int,
+    room_name: str = "unknown",
+    record_date: str = "",
+    clip_duration: Optional[float] = None,
+    on_progress=None,
+) -> List[str]:
+    """
+    Produce `count` distinct highlight clips from the same recording.
+    Returns list of successfully generated output paths.
+    """
+    if not os.path.exists(mp4_path):
+        logger.error(f"MP4 not found: {mp4_path}")
+        return []
+    if not os.path.exists(srt_path):
+        logger.error(f"SRT not found: {srt_path}")
+        return []
+
+    # Parse + score once
+    segs = parse_srt(srt_path)
+    if not segs:
+        logger.warning(f"Empty SRT: {srt_path}")
+        return []
+    for seg in segs:
+        score_and_tag(seg)
+
+    # Detect silence once
+    try:
+        silences = await detect_silence(mp4_path)
+        for seg in segs:
+            if seg.valid and _silence_ratio(seg, silences) > 0.6:
+                seg.valid = False
+    except Exception as e:
+        logger.warning(f"Silence detection skipped: {e}")
+
+    c_min = (clip_duration * 0.85) if clip_duration else CLIP_MIN
+    c_max = clip_duration if clip_duration else CLIP_MAX
+
+    from datetime import datetime
+    date_str  = record_date or datetime.utcnow().strftime("%Y%m%d")
+    safe_name = re.sub(r'[\\/:*?"<>|]', '_', room_name)
+    out_dir   = os.path.join(RECORDINGS_DIR, safe_name, date_str)
+    os.makedirs(out_dir, exist_ok=True)
+    base_seq  = len([f for f in os.listdir(out_dir) if f.endswith("_clip.mp4") or "_clip_v" in f]) + 1
+
+    results: List[str] = []
+    exclude_ids: set = set()
+
+    for k in range(count):
+        if k == 0:
+            selected = _select_from_valid([s for s in segs if s.valid], c_min, c_max)
+        else:
+            selected = select_clips_variant(segs, exclude_ids, c_min, c_max, seed=k)
+
+        if not selected:
+            logger.warning(f"No clips selected for variant {k+1}")
+            continue
+
+        # Accumulate used segment ids to encourage variety in next variant
+        exclude_ids.update(id(s) for s in selected)
+
+        out_path = os.path.join(out_dir, f"{safe_name}_{date_str}_{base_seq:03d}_clip_v{k+1}.mp4")
+        total_dur = sum(s.duration for s in selected)
+        logger.info(f"Variant {k+1}: {len(selected)} segs, {total_dur:.1f}s")
+
+        anime_frames = await _gen_transition_anime_frames(mp4_path, selected)
+
+        zoom_boundaries = [
+            bi for bi in range(len(selected) - 1)
+            if _TR_POOL[bi % len(_TR_POOL)] == "zoom_punch"
+            and not (bi < len(anime_frames) and anime_frames[bi])
+        ]
+        zoom_clips = await _gen_zoom_punch_clips(mp4_path, selected, zoom_boundaries)
+        for bi, path in zoom_clips.items():
+            if bi < len(anime_frames) and not anime_frames[bi]:
+                anime_frames[bi] = path
+
+        person_boundaries = [
+            bi for bi in range(len(selected) - 1)
+            if _TR_POOL[bi % len(_TR_POOL)] == "fadeblack"
+            and not (bi < len(anime_frames) and anime_frames[bi])
+        ]
+        person_frames = await _gen_person_frames(mp4_path, selected, person_boundaries)
+        try:
+            if on_progress:
+                await on_progress("build", k, count)
+            if await _build_clip(
+                mp4_path, selected, segs, out_path,
+                anime_frames=anime_frames, person_frames=person_frames,
+                on_progress=on_progress,
+            ):
+                try:
+                    if on_progress:
+                        await on_progress("thumbnail", k, count)
+                    from thumbnail import generate_thumbnail
+                    best_seg = max(selected, key=lambda s: s.score) if any(s.score > 0 for s in selected) \
+                               else selected[max(0, len(selected) // 4)]
+                    thumb = await generate_thumbnail(mp4_path, offset=best_seg.start + 1.0)
+                    if thumb:
+                        await _prepend_thumbnail(out_path, thumb)
+                except Exception as e:
+                    logger.warning(f"Thumbnail prepend skipped (variant {k+1}): {e}")
+                size_mb = os.path.getsize(out_path) / 1024 / 1024
+                logger.info(f"Variant {k+1} ready: {out_path} ({size_mb:.1f} MB)")
+                results.append(out_path)
+            else:
+                logger.error(f"Variant {k+1} build failed")
+        finally:
+            for af in anime_frames:
+                if af:
+                    try:
+                        os.remove(af)
+                    except Exception:
+                        pass
+            for pf in person_frames.values():
+                try:
+                    os.remove(pf)
+                except Exception:
+                    pass
+
+    return results

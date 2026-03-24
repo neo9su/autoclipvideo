@@ -4,7 +4,7 @@ const toasts = reactive([])
 let _id = 0
 
 export function useToast() {
-  function show(message, type = 'info', duration = 3000) {
+  function showToast(message, type = 'info', duration = 3000) {
     const id = ++_id
     toasts.push({ id, message, type })
     setTimeout(() => {
@@ -12,5 +12,5 @@ export function useToast() {
       if (i !== -1) toasts.splice(i, 1)
     }, duration)
   }
-  return { toasts, show }
+  return { toasts, showToast }
 }
