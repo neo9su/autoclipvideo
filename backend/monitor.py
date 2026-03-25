@@ -1,8 +1,9 @@
 import asyncio
 import logging
+import os
 import aiosqlite
 from datetime import datetime
-from typing import Dict
+from typing import Dict, Optional
 
 from recorder import RoomRecorder, get_stream_url
 from sync import sync_file
@@ -12,6 +13,8 @@ logger = logging.getLogger(__name__)
 
 POLL_INTERVAL = 60  # seconds
 AUTO_CLIP_COUNT = 3
+MIN_STREAM_HEIGHT = 720   # warn if recorded stream is below this resolution
+RECORDINGS_DIR = os.path.join(os.path.dirname(__file__), "..", "recordings")
 
 
 class MonitorManager:
@@ -19,6 +22,7 @@ class MonitorManager:
         self._recorders: Dict[int, RoomRecorder] = {}
         self._tasks: Dict[int, asyncio.Task] = {}
         self._room_status: Dict[int, str] = {}  # room_id -> live/offline/unknown
+        self._resolution_warnings: Dict[int, Optional[str]] = {}  # room_id -> warning or None
         self._broadcast = broadcast_fn  # WebSocket broadcast callback
 
     async def start_all(self):
@@ -59,7 +63,37 @@ class MonitorManager:
             "current_segment": recorder.current_file if recorder else None,
             "segment_start": recorder.segment_start.isoformat() if (recorder and recorder.segment_start) else None,
             "session_start": recorder.session_start.isoformat() if (recorder and recorder.session_start) else None,
+            "resolution_warning": self._resolution_warnings.get(room_id),
         }
+
+    async def _check_stream_resolution(self, room_id: int, filename: str):
+        """Wait for the recording to accumulate data, then probe its resolution."""
+        await asyncio.sleep(20)  # let ffmpeg write enough data for ffprobe
+        filepath = os.path.join(RECORDINGS_DIR, filename)
+        if not os.path.exists(filepath):
+            return
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ffprobe", "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=width,height",
+                "-of", "csv=p=0", filepath,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await proc.communicate()
+            parts = stdout.strip().split(b",")
+            if len(parts) >= 2:
+                w, h = int(parts[0]), int(parts[1])
+                if h < MIN_STREAM_HEIGHT:
+                    self._resolution_warnings[room_id] = (
+                        f"直播间画质过低：{w}×{h}（低于{MIN_STREAM_HEIGHT}P），"
+                        f"录像将被跳过剪辑。请检查直播间画质档位或账号权限。"
+                    )
+                    logger.warning(f"[room {room_id}] Low resolution stream: {w}x{h}")
+                    await self._notify_update(room_id)
+                else:
+                    self._resolution_warnings.pop(room_id, None)
+        except Exception as e:
+            logger.debug(f"Resolution check error for {filename}: {e}")
 
     async def _on_segment_start(self, room_id: int, filename: str, segment_index: int):
         """Called by recorder at the start of each segment — insert DB row with correct filename."""
@@ -70,6 +104,8 @@ class MonitorManager:
                 (room_id, filename, datetime.now().isoformat(), segment_index, AUTO_CLIP_COUNT),
             )
             await db.commit()
+        # Check stream resolution in background after file has data
+        asyncio.create_task(self._check_stream_resolution(room_id, filename))
 
     async def _on_segment_done(self, room_id: int, filepath: str, segment_index: int):
         """Called when a recording segment completes."""
@@ -147,6 +183,7 @@ class MonitorManager:
                         logger.info(f"[{name}] Recording started")
                 else:
                     self._room_status[room_id] = "offline"
+                    self._resolution_warnings.pop(room_id, None)
                     recorder = self._recorders.pop(room_id, None)
                     if recorder and recorder.recording:
                         await recorder.stop()

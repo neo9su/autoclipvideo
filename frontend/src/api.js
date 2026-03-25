@@ -142,6 +142,40 @@ export async function updateGroup(id, body) {
   return res.json()
 }
 
+export async function importGroupVideos(groupId, paths) {
+  const res = await fetch(`${BASE}/api/groups/${groupId}/import-videos`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ paths }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function deleteGroup(id) {
+  const res = await fetch(`${BASE}/api/groups/${id}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error(await res.text())
+}
+
+export async function createCustomGroup(body) {
+  const res = await fetch(`${BASE}/api/groups/custom`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function uploadCustomGroupVideo(groupId, file, clipCount = 1) {
+  const form = new FormData()
+  form.append('file', file)
+  form.append('clip_count', String(clipCount))
+  const res = await fetch(`${BASE}/api/groups/${groupId}/upload-video`, { method: 'POST', body: form })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
 export async function reassignRecording(recordingId, groupId) {
   const res = await fetch(`${BASE}/api/recordings/${recordingId}/group`, {
     method: 'PATCH',
@@ -310,6 +344,12 @@ export async function getStats() {
   return res.json()
 }
 
+export async function getProcessingProgress() {
+  const res = await fetch(`${BASE}/api/recordings/processing-progress`)
+  if (!res.ok) return {}
+  return res.json()
+}
+
 export async function getClipJobs() {
   const res = await fetch(`${BASE}/api/clip-jobs`)
   if (!res.ok) return {}
@@ -318,6 +358,16 @@ export async function getClipJobs() {
 
 export async function getGpuStatus() {
   const res = await fetch(`${BASE}/api/gpu/status`)
+  return res.json()
+}
+
+export async function reclipRecording(id, feedback) {
+  const res = await fetch(`${BASE}/api/recordings/${id}/reclip`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ feedback: feedback || '' }),
+  })
+  if (!res.ok) throw new Error((await res.json()).detail || '重新剪辑失败')
   return res.json()
 }
 

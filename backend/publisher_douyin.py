@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from typing import Optional
 
 from publisher_base import BasePublisher
@@ -211,17 +212,25 @@ class DouyinPublisher(BasePublisher):
                         await desc_el.click(force=True)
                         await asyncio.sleep(0.3)
                         if desc:
+                            await desc_el.focus()
                             await desc_el.type(desc, delay=10)
                         if tags:
                             await progress("正在添加话题标签...")
                             for tag in tags:
-                                await page.keyboard.type(f" #{tag}")
+                                await desc_el.focus()
+                                await desc_el.type(f" #{tag}", delay=30)
                                 await asyncio.sleep(0.8)
                                 suggestion = page.locator('[class*="topic-item"], [class*="mention-item"]').first
                                 if await suggestion.is_visible():
                                     await suggestion.click()
                                     await asyncio.sleep(0.3)
+                                # Close any remaining suggestion dropdown after each tag
+                                await page.keyboard.press("Escape")
+                                await asyncio.sleep(0.2)
                         logger.info(f"Description + {len(tags)} tags filled")
+                        # After all tags: click a neutral spot to fully dismiss
+                        # the suggestion dropdown before scrolling further
+                        await _dismiss_overlays(page)
                     except Exception as e:
                         logger.warning(f"Description/tags fill failed: {e}")
 
@@ -230,6 +239,9 @@ class DouyinPublisher(BasePublisher):
                 if product_ids:
                     await progress(f"正在添加购物车商品链接（共 {len(product_ids)} 件）...")
                     await _show_banner(page, f"正在自动选择购物车并添加商品链接（共 {len(product_ids)} 件），请勿操作…", "system")
+                    # Ensure all floating dropdowns/tooltips (hashtag suggestions,
+                    # 共创 tooltip, etc.) are gone before interacting with 添加标签
+                    await _dismiss_overlays(page)
                     await _ensure_shopping_cart_tag(page)
                     for pid in product_ids:
                         await _attach_product(page, pid)
@@ -248,7 +260,7 @@ class DouyinPublisher(BasePublisher):
                 # 9. Wait for quick-check results, then auto-publish if all clear
                 await progress("正在等待快速检测结果…")
                 await _show_banner(page, "正在等待快速检测（检测中请耐心等待）…", "system")
-                auto_ok = await _wait_for_quick_check(page, max_wait=300)
+                auto_ok = await _wait_for_quick_check(page, max_wait=900)
 
                 if auto_ok:
                     await progress("✅ 检测通过，正在自动点击发布…")
@@ -293,6 +305,37 @@ class DouyinPublisher(BasePublisher):
 
             finally:
                 await browser.close()
+
+
+async def _lock_input(page):
+    """Inject a full-screen transparent overlay that swallows all user mouse/keyboard events.
+    Playwright dispatches events via CDP directly to elements, so automation is unaffected.
+    Called before each automated step; removed by _unlock_input when user action is needed."""
+    js = """
+    (() => {
+        if (document.getElementById('__rf_lock__')) return;
+        const el = document.createElement('div');
+        el.id = '__rf_lock__';
+        el.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;z-index:999998;cursor:not-allowed;';
+        const stop = e => { e.stopPropagation(); e.stopImmediatePropagation(); };
+        ['click','mousedown','mouseup','mousemove','keydown','keyup','keypress',
+         'pointerdown','pointerup','pointermove','wheel','touchstart','touchend']
+            .forEach(t => el.addEventListener(t, stop, true));
+        document.body.appendChild(el);
+    })();
+    """
+    try:
+        await page.evaluate(js)
+    except Exception:
+        pass
+
+
+async def _unlock_input(page):
+    """Remove the input-blocking overlay so the user can interact with the page."""
+    try:
+        await page.evaluate("const el=document.getElementById('__rf_lock__'); if(el) el.remove();")
+    except Exception:
+        pass
 
 
 async def _show_banner(page, message: str, mode: str = "system"):
@@ -358,54 +401,266 @@ async def _dismiss_tooltips(page):
             break
 
 
+async def _dismiss_overlays(page):
+    """
+    Close all floating layers that block subsequent interactions:
+      - Hashtag/mention suggestion dropdowns
+      - The '添加共创' informational tooltip
+      - Any open combobox listbox
+
+    Strategy for 共创 tooltip:
+      1. Click '?' icon near '添加共创' label (mirroring the manual close gesture)
+      2. Remove any remaining floating element whose text contains known markers
+    Repeats up to 3 times until nothing floatable remains.
+
+    NOTE: position:fixed elements have offsetParent===null, so we use
+    getBoundingClientRect() for proper visibility detection.
+    """
+    # Step A: click the '?' icon adjacent to '添加共创' to close the tooltip
+    # (this mirrors the user's manual workaround: click '?' → click blank × 3)
+    for _ in range(3):
+        clicked_q = await page.evaluate("""() => {
+            // Walk all text nodes looking for '添加共创'
+            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+            let node;
+            while ((node = walker.nextNode())) {
+                if (node.textContent.trim() !== '添加共创') continue;
+                // Search sibling/ancestor area for a '?' icon or help button
+                let el = node.parentElement;
+                for (let i = 0; i < 6; i++) {
+                    if (!el) break;
+                    // Look for question-mark SVG wrappers or icon buttons
+                    const candidates = el.querySelectorAll(
+                        '[class*="question"], [class*="help"], [class*="icon"], ' +
+                        '[class*="tip"], svg, [role="button"], button'
+                    );
+                    for (const c of candidates) {
+                        const t = c.textContent.trim();
+                        // Only click small elements (not the label itself)
+                        const rect = c.getBoundingClientRect();
+                        if (rect.width < 40 && rect.height < 40 && rect.width > 0) {
+                            c.click();
+                            return true;
+                        }
+                    }
+                    el = el.parentElement;
+                }
+            }
+            return false;
+        }""")
+        if clicked_q:
+            await asyncio.sleep(0.2)
+            try:
+                await page.mouse.click(10, 10)
+            except Exception:
+                pass
+            await asyncio.sleep(0.2)
+
+    # Step B: Escape key + DOM cleanup
+    for attempt in range(3):
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(0.15)
+
+        removed = await page.evaluate("""() => {
+            let count = 0;
+
+            // 1. Remove floating elements containing 共创 tooltip markers.
+            //    Use getBoundingClientRect (works for position:fixed elements too).
+            const coCreateMarkers = [
+                '邀请多人共同完成作品', '共创投稿邀请', '共创者身份', '共创作品说明'
+            ];
+            document.querySelectorAll('div, section, aside, [role="tooltip"], [class*="tooltip"], [class*="popover"]').forEach(el => {
+                const rect = el.getBoundingClientRect();
+                if (rect.width === 0 || rect.height === 0) return;   // truly invisible
+                if (rect.height > window.innerHeight * 0.8) return;   // whole-page element
+                if (coCreateMarkers.some(m => el.textContent.includes(m))) {
+                    el.remove();
+                    count++;
+                }
+            });
+
+            // 2. Hide open listboxes / suggestion dropdowns
+            document.querySelectorAll(
+                '[role="listbox"], [role="tooltip"], [class*="popover"], [class*="dropdown-menu"]'
+            ).forEach(el => {
+                const rect = el.getBoundingClientRect();
+                if (rect.width > 0 && rect.height > 0) {
+                    el.style.display = 'none';
+                    count++;
+                }
+            });
+
+            return count;
+        }""")
+
+        # 3. Click a page-level safe spot to blur any focused input
+        try:
+            await page.mouse.click(10, 10)
+        except Exception:
+            pass
+        await asyncio.sleep(0.25)
+
+        if removed == 0:
+            break
+        logger.info(f"_dismiss_overlays attempt {attempt+1}: removed/closed {removed} layer(s)")
+
+    await asyncio.sleep(0.2)
+
+
 async def _load_cookies(ctx, cookie_file: str):
     with open(cookie_file, encoding="utf-8") as f:
         cookies = json.load(f)
     await ctx.add_cookies(cookies)
 
 
+async def _read_tag_dropdown_value(page) -> str:
+    """Read the current text of the 添加标签 dropdown. Returns '' on failure."""
+    return await page.evaluate("""() => {
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+        let node, labelEl = null;
+        while ((node = walker.nextNode())) {
+            if (node.textContent.trim() === '添加标签') {
+                labelEl = node.parentElement;
+                break;
+            }
+        }
+        if (!labelEl) return '';
+        let el = labelEl;
+        for (let i = 0; i < 8; i++) {
+            el = el.parentElement;
+            if (!el) break;
+            const sel = el.querySelector(
+                '[role="combobox"], [class*="Select"], [class*="select-trigger"],' +
+                '[class*="selector"], [class*="semi-select"]'
+            );
+            if (sel) return sel.textContent.trim();
+        }
+        return '';
+    }""") or ''
+
+
+async def _open_and_select_cart(page) -> bool:
+    """
+    Open the 添加标签 dropdown via JS and click the 购物车 option.
+    Returns True if the click was issued, False if the dropdown couldn't be opened.
+    """
+    result = await page.evaluate("""() => {
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+        let node, labelEl = null;
+        while ((node = walker.nextNode())) {
+            if (node.textContent.trim() === '添加标签') {
+                labelEl = node.parentElement;
+                break;
+            }
+        }
+        if (!labelEl) return 'label_not_found';
+        let el = labelEl;
+        for (let i = 0; i < 8; i++) {
+            el = el.parentElement;
+            if (!el) break;
+            const trigger = el.querySelector(
+                '[role="combobox"], [class*="Select"], [class*="select-trigger"],' +
+                '[class*="selector"], [class*="semi-select"]'
+            );
+            if (trigger) { trigger.click(); return 'clicked'; }
+        }
+        return 'trigger_not_found';
+    }""")
+    logger.info(f"_open_and_select_cart dropdown open: {result}")
+    if result != 'clicked':
+        return False
+
+    await asyncio.sleep(0.5)
+
+    # Click the 购物车 option
+    option = page.get_by_role("option", name="购物车", exact=True)
+    if await option.count() == 0:
+        option = page.locator('li, [role="option"]').filter(has_text=re.compile(r'^购物车$'))
+    try:
+        await option.first.wait_for(state="visible", timeout=4000)
+        box = await option.first.bounding_box()
+        logger.info(f"购物车 option bounding_box: {box}")
+        await option.first.click()
+    except Exception as e:
+        logger.warning(f"Could not click 购物车 option: {e}")
+        return False
+
+    await asyncio.sleep(0.6)
+    return True
+
+
 async def _ensure_shopping_cart_tag(page):
     """
-    In 扩展信息 → 添加标签, ensure "购物车" is selected.
-    Scrolls to the section once, then selects without further page movement.
-    """
-    try:
-        label = page.get_by_text("添加标签", exact=False).first
-        await label.scroll_into_view_if_needed()
-        await asyncio.sleep(0.5)
+    Ensure '购物车' is selected in the 添加标签 dropdown before adding product links.
 
-        dropdown = page.locator(
-            '[class*="select"]:near(:text("添加标签")), '
-            '[class*="dropdown"]:near(:text("添加标签"))'
-        ).first
-        current_text = (await dropdown.text_content() or "").strip()
-        if "购物车" in current_text:
-            logger.info("购物车 already selected")
+    Verification: the product-link input (placeholder '粘贴商品链接') only appears
+    when 购物车 is active — its visibility is the single source of truth.
+
+    If the dropdown shows a wrong value (e.g. '游戏手柄') after a failed attempt,
+    we dismiss overlays and retry, up to MAX_ATTEMPTS times.
+    """
+    MAX_ATTEMPTS = 3
+    link_input = page.locator('input[placeholder*="粘贴商品链接"]')
+
+    for attempt in range(MAX_ATTEMPTS):
+        # ── Check current state ──────────────────────────────────────────────
+        if await link_input.is_visible():
+            logger.info(f"购物车 confirmed (attempt {attempt+1}): link input visible")
             return
 
-        await dropdown.click()
-        await asyncio.sleep(0.5)
+        current_val = await _read_tag_dropdown_value(page)
+        logger.info(f"Attempt {attempt+1}/{MAX_ATTEMPTS}: dropdown='{current_val}'")
 
-        # Exact match to avoid selecting 小程序/话题 etc.
-        option = page.get_by_role("option", name="购物车")
-        if await option.count() == 0:
-            option = page.locator(
-                'li:text-is("购物车"), '
-                '[class*="option"]:text-is("购物车"), '
-                '[class*="item"]:text-is("购物车")'
-            ).first
-        await option.wait_for(state="visible", timeout=5000)
-        await option.click()
-        await asyncio.sleep(0.5)
+        # ── Clear all overlays before every attempt ──────────────────────────
+        await _dismiss_overlays(page)
 
-        # Verify selection succeeded
-        current_text = (await dropdown.text_content() or "").strip()
-        logger.info(f"购物车 dropdown selected, current value: {current_text}")
-    except Exception as e:
-        logger.warning(f"Could not select 购物车 dropdown: {e}")
+        # ── Scroll 添加标签 into the upper part of the viewport ─────────────
+        # scroll_into_view_if_needed() may leave the element at the very bottom
+        # where the 共创 tooltip can still overlap it.  Scrolling to block:"start"
+        # places it near the top so the dropdown has clear space below it.
+        try:
+            scrolled = await page.evaluate("""() => {
+                const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+                let node;
+                while ((node = walker.nextNode())) {
+                    if (node.textContent.trim() === '添加标签') {
+                        node.parentElement.scrollIntoView({block: 'start', inline: 'nearest', behavior: 'smooth'});
+                        return true;
+                    }
+                }
+                return false;
+            }""")
+            if not scrolled:
+                tag_label = page.get_by_text("添加标签", exact=True).first
+                await tag_label.scroll_into_view_if_needed()
+            await asyncio.sleep(0.6)
+        except Exception:
+            pass
+
+        # ── Open dropdown and select 购物车 ──────────────────────────────────
+        clicked = await _open_and_select_cart(page)
+        if not clicked:
+            logger.warning(f"Attempt {attempt+1}: could not open dropdown")
+            await asyncio.sleep(0.5)
+            continue
+
+        # ── Verify: wait for link input to appear (up to 5s) ─────────────────
+        try:
+            await link_input.wait_for(state="visible", timeout=5000)
+            new_val = await _read_tag_dropdown_value(page)
+            logger.info(f"Attempt {attempt+1} succeeded: dropdown='{new_val}', input visible")
+            return
+        except Exception:
+            new_val = await _read_tag_dropdown_value(page)
+            logger.warning(
+                f"Attempt {attempt+1} failed: dropdown='{new_val}', input not visible — retrying"
+            )
+            await asyncio.sleep(0.5)
+
+    logger.error(f"_ensure_shopping_cart_tag: failed after {MAX_ATTEMPTS} attempts")
 
 
-async def _wait_for_quick_check(page, max_wait: int = 300) -> bool:
+async def _wait_for_quick_check(page, max_wait: int = 900) -> bool:
     """
     Poll 快速检测 panel until a definitive result is reached.
 
@@ -415,7 +670,7 @@ async def _wait_for_quick_check(page, max_wait: int = 300) -> bool:
       - known error text visible         → FAIL, return False
       - none of the above               → indeterminate, return False (user intervention)
 
-    max_wait: maximum seconds to wait while "正在检测中" is still showing (default 5 min).
+    max_wait: maximum seconds to wait while "正在检测中" is still showing (default 15 min).
     """
     PASS_CONTENT  = "作品未见异常"
     PASS_COVER    = "封面检测通过"
@@ -502,12 +757,21 @@ async def _set_cover(page):
         hori_tab = page.locator(':text-is("设置横封面")').first
         await hori_tab.wait_for(state="visible", timeout=5000)
         await hori_tab.click()
-        await asyncio.sleep(1)
 
-        # 4. Click "完成" — the red button bottom-right of the modal
-        # Use last() since multiple "完成" texts may exist; the modal's is last/visible
+        # 4. Wait for 横封面 mode to fully render.
+        #    The right-side preview label changes to "横封面预览" only after the
+        #    tab switch completes — this is more reliable than a fixed sleep.
+        try:
+            await page.locator(':text("横封面预览")').first.wait_for(
+                state="visible", timeout=10000
+            )
+        except Exception:
+            # Fallback: if the preview label doesn't appear, wait a bit longer
+            await asyncio.sleep(2.5)
+
+        # 5. Click "完成" — now safe because 横封面 mode is fully loaded
         done_btn = page.locator('button:has-text("完成")').last
-        await done_btn.wait_for(state="visible", timeout=5000)
+        await done_btn.wait_for(state="visible", timeout=8000)
         await done_btn.click()
         await asyncio.sleep(1)
         logger.info("Cover set (横封面 4:3)")
@@ -523,46 +787,92 @@ async def _set_cover(page):
             pass
 
 
+async def _find_sibling_button(anchor_locator, button_text: str):
+    """
+    Walk up the DOM from anchor_locator, searching each ancestor level for a
+    button whose full text matches button_text exactly.
+    Returns the first matching Playwright Locator, or None.
+    """
+    xpath_up = ""
+    pattern = re.compile(rf"^{re.escape(button_text)}$")
+    for levels in range(1, 7):
+        xpath_up += "/.."
+        try:
+            container = anchor_locator.locator(f"xpath={xpath_up}")
+            btn = container.locator("button").filter(has_text=pattern)
+            if await btn.count() > 0:
+                logger.info(f"_find_sibling_button: '{button_text}' found at {levels} level(s) up")
+                return btn.first
+        except Exception:
+            pass
+    return None
+
+
 async def _attach_product(page, product_link: str, short_title: str = ""):
     """
-    Add one product via inline input → 添加链接 button → handle 编辑商品 dialog.
-
-    UI layout (inline, no popup needed):
-      [购物车 ▼] [粘贴商品链接 input .................] [添加链接]
-
-    Flow:
-      1. Fill the inline "粘贴商品链接" input with the link
-      2. Click "添加链接" button
-      3. Check if "添加链接" is disabled (invalid link) → clear and return
-      4. Wait for "编辑商品" dialog → fill 商品短标题 → click "完成编辑"
+    Add one product: fill link input → click '添加链接' (anchored to same container)
+    → handle 编辑商品 dialog.  JS fallback if first click misses.
     """
     try:
-        # 1. Find inline input and fill it
+        # 1. Fill the product link input
         link_input = page.locator(
-            'input[placeholder*="粘贴商品链接"], '
-            'input[placeholder*="商品链接"]'
+            'input[placeholder*="粘贴商品链接"], input[placeholder*="商品链接"]'
         ).first
         await link_input.wait_for(state="visible", timeout=8000)
         await link_input.click()
         await asyncio.sleep(0.2)
         await link_input.fill(product_link)
-        await asyncio.sleep(0.8)  # allow link validation to run
+        await asyncio.sleep(0.8)
 
-        # 2. Check if 添加链接 button is enabled before clicking
-        add_btn = page.locator(':text-is("添加链接")').first
-        await add_btn.wait_for(state="visible", timeout=5000)
-        is_disabled = await add_btn.get_attribute("disabled")
-        aria_disabled = await add_btn.get_attribute("aria-disabled")
-        btn_class = await add_btn.get_attribute("class") or ""
-        if is_disabled is not None or aria_disabled == "true" or "disabled" in btn_class:
-            logger.warning(f"Product link invalid — 添加链接 disabled: {product_link}")
+        # 2. Find '添加链接' button anchored to the same container as the input
+        add_btn = await _find_sibling_button(link_input, "添加链接")
+        if add_btn is None:
+            logger.warning(f"添加链接 button not found near input for: {product_link}")
             await link_input.clear()
             return
 
-        await add_btn.click()
-        await asyncio.sleep(1.5)
+        box = await add_btn.bounding_box()
+        logger.info(f"添加链接 btn bounding_box: {box}")
 
-        # 3. Check for "未搜索到对应商品" error dialog (invalid/unsupported link)
+        # 3. Check disabled state
+        is_disabled   = await add_btn.get_attribute("disabled")
+        aria_disabled = await add_btn.get_attribute("aria-disabled")
+        btn_class     = await add_btn.get_attribute("class") or ""
+        if is_disabled is not None or aria_disabled == "true" or "disabled" in btn_class:
+            logger.warning(f"添加链接 disabled — invalid link: {product_link}")
+            await link_input.clear()
+            return
+
+        # 4. Click and wait briefly for a reaction
+        await add_btn.click()
+        await asyncio.sleep(0.8)
+
+        # 5. Verify click landed: expect 编辑商品 dialog or a product-added indicator
+        edit_visible = await page.locator(':text("编辑商品")').first.is_visible()
+        if not edit_visible:
+            logger.info("No dialog after first click — trying JS fallback")
+            js_ok = await page.evaluate("""() => {
+                const input = document.querySelector(
+                    'input[placeholder*="粘贴商品链接"], input[placeholder*="商品链接"]'
+                );
+                if (!input) return false;
+                let el = input.parentElement;
+                for (let i = 0; i < 6; i++) {
+                    if (!el) break;
+                    for (const btn of el.querySelectorAll('button')) {
+                        if (btn.textContent.trim() === '添加链接') {
+                            btn.click();
+                            return true;
+                        }
+                    }
+                    el = el.parentElement;
+                }
+                return false;
+            }""")
+            logger.info(f"JS fallback result: {js_ok}")
+            await asyncio.sleep(1.0)
+
+        # 6. Check for "未搜索到对应商品" error dialog
         error_dialog = page.locator(':text("未搜索到对应商品")').first
         if await error_dialog.is_visible(timeout=3000):
             logger.warning(f"Product not found / unsupported link: {product_link}")
@@ -570,7 +880,6 @@ async def _attach_product(page, product_link: str, short_title: str = ""):
             if await ok_btn.is_visible(timeout=2000):
                 await ok_btn.click()
                 await asyncio.sleep(0.5)
-            # Clear input and skip this product
             try:
                 await link_input.click()
                 await link_input.clear()
@@ -578,12 +887,10 @@ async def _attach_product(page, product_link: str, short_title: str = ""):
                 pass
             return
 
-        # 4. Handle "编辑商品" dialog that may appear after clicking 添加链接
+        # 7. Handle 编辑商品 dialog
         edit_dialog = page.locator(':text("编辑商品")').first
         if await edit_dialog.is_visible(timeout=5000):
             logger.info("编辑商品 dialog appeared")
-
-            # Fill 商品短标题 if empty (required field, max 10 chars)
             short_input = page.locator(
                 'input[placeholder*="短标题"], input[placeholder*="商品短标题"]'
             ).first
@@ -591,22 +898,18 @@ async def _attach_product(page, product_link: str, short_title: str = ""):
                 await short_input.click()
                 current_val = await short_input.input_value()
                 if not current_val.strip():
-                    title_10 = (short_title or "精选假发")[:10]
-                    await short_input.fill(title_10)
+                    await short_input.fill((short_title or "精选假发")[:10])
                     await asyncio.sleep(0.3)
-
-            # Click 完成编辑
             done_btn = page.locator('button:has-text("完成编辑")').first
             await done_btn.wait_for(state="visible", timeout=5000)
             await done_btn.click()
             await asyncio.sleep(1)
-            logger.info(f"编辑商品 dialog confirmed for {product_link}")
+            logger.info(f"编辑商品 confirmed for {product_link}")
         else:
-            logger.info(f"Product added (no 编辑商品 dialog): {product_link}")
+            logger.info(f"Product added (no dialog): {product_link}")
 
     except Exception as e:
-        logger.warning(f"Failed to add product link {product_link}: {e}")
-        # Try to close any open dialog before continuing
+        logger.warning(f"_attach_product failed ({product_link}): {e}")
         try:
             for btn_text in ["取消", "关闭"]:
                 btn = page.locator(f'button:has-text("{btn_text}")').first

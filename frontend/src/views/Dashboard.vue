@@ -45,9 +45,15 @@
           </div>
           <div class="segment-name">{{ room.current_segment }}</div>
           <div class="segment-dur">已录 {{ formatDuration(room.session_start, null) }}</div>
+          <div v-if="room.resolution_warning" class="resolution-warning">
+            ⚠ {{ room.resolution_warning }}
+          </div>
         </div>
         <div class="room-info" v-else>
           <div class="offline-info">未在录制</div>
+          <div v-if="room.resolution_warning" class="resolution-warning">
+            ⚠ {{ room.resolution_warning }}
+          </div>
         </div>
 
         <div class="room-actions">
@@ -204,6 +210,7 @@ onUnmounted(() => {
 .segment-name { font-size: 12px; color: #888; margin-bottom: 2px; }
 .segment-dur { font-size: 12px; color: #666; }
 .offline-info { font-size: 13px; color: #444; padding-top: 6px; }
+.resolution-warning { margin-top: 8px; padding: 6px 10px; background: rgba(251,191,36,0.1); border: 1px solid rgba(251,191,36,0.4); border-radius: 6px; font-size: 12px; color: #fbbf24; line-height: 1.5; }
 .room-actions { display: flex; gap: 8px; }
 .btn-sm { background: #2a2a2a; border: 1px solid #333; color: #ccc; padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
 .btn-sm:hover { background: #333; }

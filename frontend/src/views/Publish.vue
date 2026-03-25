@@ -26,7 +26,7 @@
           </div>
           <div class="task-title">{{ t.title || '(无标题)' }}</div>
           <div class="task-meta">
-            <span class="muted">{{ t.group_label }}</span>
+            <span class="muted"><span v-if="t.room_name" class="task-room-tag">{{ t.room_name }}</span>{{ t.group_label }}</span>
             <span v-if="t.scheduled_at" class="countdown">{{ formatScheduled(t.scheduled_at) }}</span>
           </div>
         </div>
@@ -99,14 +99,27 @@
         <h3>创建发布任务</h3>
 
         <label>选择分组 *（仅显示已合并的）</label>
+        <div class="room-filter-chips">
+          <button :class="['room-chip', roomFilter === 0 && 'active']" @click="roomFilter = 0">全部</button>
+          <button v-for="r in rooms" :key="r.id"
+            :class="['room-chip', roomFilter === r.id && 'active']"
+            @click="roomFilter = r.id">{{ r.name }}</button>
+        </div>
         <div class="group-list">
-          <div v-if="!mergedGroups.length" class="muted" style="padding:8px;font-size:12px">暂无已合并分组</div>
-          <div v-for="g in mergedGroups" :key="g.id"
-            :class="['group-item', newTask.group_id === g.id && 'group-item-selected']"
+          <div v-if="!filteredGroups.length" class="muted" style="padding:8px;font-size:12px">暂无已合并分组</div>
+          <div v-for="g in filteredGroups" :key="g.id"
+            :class="['group-item', newTask.group_id === g.id && 'group-item-selected', g.is_custom && 'group-item-custom']"
             @click="newTask.group_id = g.id; onGroupSelect()">
             <div class="group-item-name">{{ g.label }}</div>
-            <div class="group-item-sub">{{ g.wig_model }} · {{ g.wig_color }}</div>
+            <div class="group-item-sub">
+              <span v-if="g.room_name" class="group-room-tag">{{ g.room_name }}</span>{{ g.wig_model }} · {{ g.wig_color }}
+            </div>
             <span v-if="publishedGroupIds.has(g.id)" class="group-published-badge">✓ 已发布</span>
+            <div class="group-item-actions" @click.stop>
+              <button class="gact-btn" title="预览视频" @click="previewGroup = g">▶</button>
+              <button class="gact-btn gact-orange" title="重新剪辑" @click="openReclipModal(g)">↺ 重剪</button>
+              <button class="gact-btn gact-red" title="删除分组" @click="confirmDeleteGroup(g)">✕</button>
+            </div>
           </div>
         </div>
 
@@ -157,17 +170,37 @@
           </button>
         </div>
 
+        <!-- AI方案选择器 -->
+        <div v-if="metaSchemes.length" class="scheme-picker">
+          <div class="scheme-picker-label">选择文案方案：</div>
+          <div class="scheme-tabs">
+            <button
+              v-for="s in metaSchemes" :key="s.type"
+              :class="['scheme-tab', selectedScheme === s.type && 'scheme-tab-active']"
+              @click="applyScheme(s)"
+            >{{ s.type }}</button>
+          </div>
+          <div v-if="selectedScheme" class="scheme-preview">
+            <div class="scheme-preview-title">{{ currentScheme?.title }}</div>
+            <div class="scheme-preview-desc">{{ currentScheme?.description }}</div>
+          </div>
+        </div>
+
         <label>描述</label>
         <textarea v-model="newTask.description" class="textarea" rows="4" placeholder="100-200字，含卖点和互动引导"></textarea>
 
         <label>标签（逗号分隔，#格式）</label>
         <input v-model="newTask.tags" class="input" placeholder="#假发,#卷发,#变身" />
 
-        <label>小黄车商品（可多选）</label>
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <label>小黄车商品（可多选）</label>
+          <button v-if="products.length" class="btn-xs" @click="toggleAllProducts">{{ newTask.product_ids.length === products.length ? '取消全选' : '全选' }}</button>
+        </div>
         <div class="product-multi">
           <div class="product-multi-list">
             <label v-for="p in products" :key="p.id" class="product-check-item">
               <input type="checkbox" :value="p.id" v-model="newTask.product_ids" />
+              <span v-if="p.room_name" class="product-room-tag">{{ p.room_name }}</span>
               <span>{{ p.product_name }}</span>
             </label>
             <div v-if="!products.length" class="muted" style="font-size:12px;padding:6px 0">暂无商品</div>
@@ -180,6 +213,42 @@
           <button class="btn-secondary" @click="showCreateModal = false">取消</button>
           <button class="btn-primary" @click="submitCreate" :disabled="!newTask.group_id || !newTask.platform">发布</button>
         </div>
+      </div>
+    </div>
+
+    <!-- Video preview modal -->
+    <div v-if="previewGroup" class="preview-overlay" @click.self="previewGroup = null">
+      <div class="preview-modal">
+        <div class="preview-header">
+          <span>{{ previewGroup.label }}</span>
+          <button class="preview-close" @click="previewGroup = null">✕</button>
+        </div>
+        <video class="preview-video" :src="groupVideoUrl(previewGroup.id)" controls autoplay playsinline></video>
+      </div>
+    </div>
+
+    <!-- Reclip modal -->
+    <div v-if="reclipModal" class="preview-overlay" @click.self="!reclipModal.saving && (reclipModal = null)">
+      <div class="reclip-modal">
+        <template v-if="reclipModal.submitted">
+          <div style="text-align:center;padding:20px 0">
+            <div style="font-size:32px;margin-bottom:8px">✓</div>
+            <div style="font-size:15px;font-weight:600;margin-bottom:6px">重剪已加入队列</div>
+            <div style="font-size:12px;color:#999">{{ reclipModal.feedback.trim() ? 'AI将根据反馈调整片段策略' : '将使用不同片段重新生成' }}</div>
+          </div>
+          <button class="btn-primary" style="width:100%;margin-top:8px" @click="reclipModal = null">知道了</button>
+        </template>
+        <template v-else>
+          <div style="font-size:14px;font-weight:600;margin-bottom:12px">重新剪辑「{{ reclipModal.group.label }}」</div>
+          <label style="font-size:12px;color:#999;display:block;margin-bottom:6px">反馈意见（可选）</label>
+          <textarea v-model="reclipModal.feedback" class="textarea" rows="3" placeholder="如：片段太短，缺少试戴环节，想要更多互动内容..."></textarea>
+          <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
+            <button class="btn-secondary" @click="reclipModal = null">取消</button>
+            <button class="btn-primary" :disabled="reclipModal.saving" @click="doReclip">
+              {{ reclipModal.saving ? '提交中...' : '确认重剪' }}
+            </button>
+          </div>
+        </template>
       </div>
     </div>
 
@@ -213,11 +282,11 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import {
-  getGroups, getPublishTasks, createPublishTask, retryPublishTask, cancelPublishTask,
+  getRooms, getGroups, getGroup, getPublishTasks, createPublishTask, retryPublishTask, cancelPublishTask,
   getProducts, getPublishAccounts, createPublishAccount, deletePublishAccount, loginPublishAccount,
-  generatePublishMeta, matchGroupProduct, createWS,
+  generatePublishMeta, matchGroupProduct, createWS, deleteGroup, reclipRecording,
 } from '../api.js'
 import { useToast } from '../composables/toast.js'
 
@@ -228,16 +297,29 @@ const selectedTask = ref(null)
 const showCreateModal = ref(false)
 const statusFilter = ref('')
 const mergedGroups = ref([])
+const rooms = ref([])
+const roomFilter = ref(1)   // default: 小圆圆不圆 (id=1)
 const accounts = ref([])
 const products = ref([])
 const generating = ref(false)
 const matchedProduct = ref(null)
+const metaSchemes = ref([])
+const selectedScheme = ref('')
+const previewGroup = ref(null)   // group being previewed in video modal
+const reclipModal = ref(null)    // {group, feedback, saving, submitted}
+const BASE_URL = import.meta.env.VITE_API_BASE || ''
 const scheduleMode = ref('now')
 const progressLog = ref({})   // task_id → string[]
 let ws = null
 const scheduleTime = ref('10:00')
 const scheduleInterval = ref(60)
 const showAccounts = ref(false)
+
+const filteredGroups = computed(() =>
+  roomFilter.value === 0
+    ? mergedGroups.value
+    : mergedGroups.value.filter(g => g.room_id === roomFilter.value)
+)
 
 const publishedGroupIds = computed(() =>
   new Set(tasks.value.filter(t => t.status === 'done').map(t => t.group_id))
@@ -340,14 +422,68 @@ async function cancelTask(id) {
 async function onGroupSelect() {
   matchedProduct.value = null
   newTask.value.product_ids = []
+  metaSchemes.value = []
+  selectedScheme.value = ''
+}
+
+const currentScheme = computed(() =>
+  metaSchemes.value.find(s => s.type === selectedScheme.value) || null
+)
+
+function groupVideoUrl(groupId) {
+  return `${BASE_URL}/api/groups/${groupId}/download`
+}
+
+async function confirmDeleteGroup(g) {
+  if (!confirm(`确认删除分组「${g.label}」？此操作不可撤销。`)) return
+  try {
+    await deleteGroup(g.id)
+    mergedGroups.value = mergedGroups.value.filter(x => x.id !== g.id)
+    if (newTask.value.group_id === g.id) {
+      newTask.value.group_id = ''
+      metaSchemes.value = []
+      selectedScheme.value = ''
+    }
+    showToast('分组已删除', 'success')
+  } catch (e) {
+    showToast('删除失败: ' + e.message, 'error')
+  }
+}
+
+async function openReclipModal(g) {
+  reclipModal.value = { group: g, feedback: '', saving: false, submitted: false }
+}
+
+async function doReclip() {
+  if (!reclipModal.value || reclipModal.value.saving) return
+  reclipModal.value.saving = true
+  try {
+    const detail = await getGroup(reclipModal.value.group.id)
+    const recs = detail.recordings || []
+    if (!recs.length) throw new Error('该分组没有关联录像')
+    await Promise.all(recs.map(r => reclipRecording(r.id, reclipModal.value.feedback)))
+    reclipModal.value.submitted = true
+  } catch (e) {
+    showToast('重剪失败: ' + e.message, 'error')
+  } finally {
+    reclipModal.value.saving = false
+  }
 }
 
 async function generateMeta() {
   if (!newTask.value.group_id) return
   generating.value = true
+  metaSchemes.value = []
+  selectedScheme.value = ''
   try {
     const meta = await generatePublishMeta(newTask.value.group_id)
-    if (meta) {
+    if (meta && meta.schemes && meta.schemes.length) {
+      metaSchemes.value = meta.schemes
+      // Auto-apply first scheme
+      applyScheme(meta.schemes[0])
+      showToast(`AI生成了 ${meta.schemes.length} 套文案方案`, 'success')
+    } else if (meta) {
+      // Legacy single-scheme fallback
       newTask.value.title = meta.title || newTask.value.title
       newTask.value.description = meta.description || newTask.value.description
       newTask.value.tags = meta.tags || newTask.value.tags
@@ -357,6 +493,21 @@ async function generateMeta() {
     showToast('生成失败: ' + e.message, 'error')
   } finally {
     generating.value = false
+  }
+}
+
+function applyScheme(scheme) {
+  selectedScheme.value = scheme.type
+  newTask.value.title = scheme.title || ''
+  newTask.value.description = scheme.description || ''
+  newTask.value.tags = scheme.tags || ''
+}
+
+function toggleAllProducts() {
+  if (newTask.value.product_ids.length === products.value.length) {
+    newTask.value.product_ids = []
+  } else {
+    newTask.value.product_ids = products.value.map(p => p.id)
   }
 }
 
@@ -391,7 +542,16 @@ async function submitCreate() {
     auto_meta: false,
   }
   try {
-    await createPublishTask(body)
+    try {
+      await createPublishTask(body)
+    } catch (e) {
+      if (e.message?.includes('duplicate')) {
+        const go = confirm(`该分组已存在 ${body.platform} 发布任务（可能已发布或排队中）。\n确认要再次发布吗？\n如需重复发布，请先在任务列表删除旧任务。`)
+        if (go) showToast('请先在发布列表删除旧任务，再重新创建', 'info')
+        return
+      }
+      throw e
+    }
     // Advance schedule time by interval for next task
     if (scheduleMode.value === 'later' && scheduleInterval.value) {
       const [h, m] = scheduleTime.value.split(':').map(Number)
@@ -443,12 +603,13 @@ async function loginAccount(id) {
 
 onMounted(async () => {
   await loadTasks()
-  const groups = await getGroups()
+  const [groups, roomList] = await Promise.all([getGroups(), getRooms()])
   mergedGroups.value = groups.filter(g => g.merge_status === 2)
+  rooms.value = roomList
   accounts.value = await getPublishAccounts()
   const defaultAccount = accounts.value.find(a => a.account_name === '颜遇生活')
   if (defaultAccount) newTask.value.account_id = defaultAccount.id
-  products.value = await getProducts()
+  products.value = (await getProducts()).filter(p => p.enabled)
   ws = createWS((msg) => {
     if (msg.type === 'publish_task_update') {
       loadTasks()
@@ -486,6 +647,7 @@ onUnmounted(() => ws?.close())
 .task-title { font-size: 13px; font-weight: 500; margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .task-meta { display: flex; justify-content: space-between; font-size: 11px; }
 .countdown { color: #f59e0b; }
+.task-room-tag { font-size: 10px; color: #888; background: #222; border: 1px solid #333; border-radius: 3px; padding: 1px 4px; margin-right: 5px; }
 
 .task-detail-panel { flex: 1; }
 .detail { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 12px; padding: 20px; }
@@ -514,6 +676,15 @@ label { display: block; font-size: 12px; color: #888; margin: 12px 0 4px; }
 .input-with-ai .input { flex: 1; }
 .btn-ai { background: #1d4ed8; color: #fff; border: none; border-radius: 6px; padding: 8px 12px; cursor: pointer; font-size: 12px; white-space: nowrap; }
 .btn-ai:disabled { opacity: 0.5; cursor: not-allowed; }
+.scheme-picker { background: #111; border: 1px solid #333; border-radius: 8px; padding: 12px; margin-bottom: 8px; }
+.scheme-picker-label { font-size: 11px; color: #888; margin-bottom: 8px; }
+.scheme-tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.scheme-tab { background: #2a2a2a; color: #ccc; border: 1px solid #444; border-radius: 20px; padding: 4px 14px; cursor: pointer; font-size: 12px; }
+.scheme-tab:hover { background: #333; }
+.scheme-tab-active { background: #fe2c55; color: #fff; border-color: #fe2c55; }
+.scheme-preview { background: #1a1a1a; border-radius: 6px; padding: 8px 10px; }
+.scheme-preview-title { font-size: 13px; font-weight: 600; color: #e0e0e0; margin-bottom: 4px; }
+.scheme-preview-desc { font-size: 11px; color: #999; line-height: 1.5; max-height: 60px; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
 .product-row { display: flex; gap: 8px; align-items: center; }
 .product-row .input { flex: 1; }
 .match-hint { font-size: 11px; color: #34d399; margin-top: 4px; }
@@ -525,18 +696,43 @@ label { display: block; font-size: 12px; color: #888; margin: 12px 0 4px; }
 .input-time { width: 110px; }
 .input-interval { width: 80px; }
 .schedule-preview { font-size: 11px; color: #f59e0b; }
+.room-filter-chips { display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 6px; }
+.room-chip { background: #1e1e1e; border: 1px solid #333; color: #888; border-radius: 4px; padding: 3px 10px; cursor: pointer; font-size: 11px; white-space: nowrap; }
+.room-chip.active { background: #fe2c55; border-color: #fe2c55; color: #fff; }
 .group-list { background: #111; border: 1px solid #333; border-radius: 6px; max-height: 180px; overflow-y: auto; }
 .group-item { padding: 8px 12px; cursor: pointer; border-bottom: 1px solid #1e1e1e; position: relative; transition: background 0.15s; }
+.group-item-actions { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); display: none; gap: 4px; align-items: center; }
+.group-item:hover .group-item-actions { display: flex; }
+.gact-btn { background: #2a2a2a; color: #ccc; border: 1px solid #444; border-radius: 4px; padding: 2px 7px; cursor: pointer; font-size: 11px; }
+.gact-btn:hover { background: #3a3a3a; }
+.gact-orange { color: #f97316; border-color: #f97316; }
+.gact-orange:hover { background: rgba(249,115,22,0.1); }
+.gact-red { color: #fe2c55; border-color: #fe2c55; }
+.gact-red:hover { background: rgba(254,44,85,0.1); }
+.preview-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.85); z-index: 200; display: flex; align-items: center; justify-content: center; }
+.preview-modal { background: #111; border: 1px solid #333; border-radius: 12px; width: min(420px, 95vw); overflow: hidden; }
+.preview-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #222; font-size: 13px; font-weight: 600; }
+.preview-close { background: none; border: none; color: #888; cursor: pointer; font-size: 16px; padding: 0 4px; }
+.preview-close:hover { color: #fff; }
+.preview-video { width: 100%; max-height: 70vh; display: block; background: #000; }
+.reclip-modal { background: #1a1a1a; border: 1px solid #333; border-radius: 12px; padding: 20px; width: min(400px, 95vw); }
 .group-item:last-child { border-bottom: none; }
 .group-item:hover { background: #1a1a1a; }
 .group-item-selected { background: rgba(254,44,85,0.08); border-left: 2px solid #fe2c55; }
 .group-item-name { font-size: 13px; color: #e0e0e0; }
-.group-item-sub { font-size: 11px; color: #666; margin-top: 2px; }
+.group-item-sub { font-size: 11px; color: #666; margin-top: 2px; display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.group-room-tag { font-size: 10px; color: #888; background: #222; border: 1px solid #333; border-radius: 3px; padding: 1px 5px; white-space: nowrap; }
 .group-published-badge { position: absolute; right: 12px; top: 50%; transform: translateY(-50%); font-size: 11px; color: #34d399; font-weight: 600; }
+.group-item-custom { background: #f5f3ef; border-left: 2px solid #fb923c; }
+.group-item-custom:hover { background: #ede9e1; }
+.group-item-custom .group-item-name { color: #1a1a1a; }
+.group-item-custom .group-item-sub { color: #777; }
+.group-item-custom.group-item-selected { background: rgba(251,146,60,0.15); border-left: 2px solid #fb923c; }
 
 .product-multi { display: flex; flex-direction: column; }
 .product-multi-list { background: #111; border: 1px solid #333; border-radius: 6px; padding: 8px 10px; max-height: 160px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
-.product-check-item { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #e0e0e0; cursor: pointer; }
+.product-check-item { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #e0e0e0; cursor: pointer; }
+.product-room-tag { font-size: 10px; color: #888; background: #222; border: 1px solid #333; border-radius: 3px; padding: 1px 5px; white-space: nowrap; flex-shrink: 0; }
 .product-check-item input[type=checkbox] { accent-color: #fe2c55; width: 14px; height: 14px; cursor: pointer; }
 .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px; }
 

@@ -79,7 +79,7 @@ class RoomRecorder:
                 "-i", stream_url,
                 "-c", "copy",
                 "-t", str(SEGMENT_DURATION),
-                "-movflags", "+faststart",
+                "-movflags", "frag_keyframe+empty_moov+default_base_moof",
                 "-y",
                 filepath,
             ]

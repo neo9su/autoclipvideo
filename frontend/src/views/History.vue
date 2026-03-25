@@ -158,6 +158,7 @@
                 约剩 {{ fmtEta(clipJobs[rec.id].eta_seconds) }}
               </span>
             </div>
+            <span v-else-if="rec.clipped === -1 && rec.skip_reason" class="badge dim skip-reason" :title="rec.skip_reason">⚠ 已跳过</span>
             <button v-else-if="rec.clipped === -1" class="badge red btn-retry" @click="doRetryClip(rec)">重试</button>
             <span v-else class="badge dim">—</span>
           </td>
@@ -460,6 +461,7 @@ onUnmounted(() => ws?.close())
 .badge.red    { background: rgba(254,44,85,0.15);  color: #fe2c55; }
 .badge.purple { background: rgba(168,85,247,0.15); color: #c084fc; }
 .badge.dim    { background: #2a2a2a; color: #555; }
+.skip-reason  { color: #f59e0b; background: rgba(245,158,11,0.1); cursor: help; }
 .badge.blue:hover, .badge.purple:hover { filter: brightness(1.3); }
 .btn-retry { cursor: pointer; border: none; font-family: inherit; }
 .clip-actions { display: flex; flex-direction: column; gap: 4px; }

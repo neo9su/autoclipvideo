@@ -3,6 +3,7 @@ Background publish scheduler.
 Polls every 60 seconds for pending/scheduled publish tasks and executes them.
 """
 import asyncio
+import json
 import logging
 import os
 from datetime import datetime, timezone
@@ -16,6 +17,63 @@ logger = logging.getLogger(__name__)
 
 RECORDINGS_DIR = os.path.join(os.path.dirname(__file__), "..", "recordings")
 COOKIES_DIR = os.path.expanduser("~/.douyin-publisher/cookies")
+
+
+async def check_video_quality(video_path: str) -> tuple[bool, str]:
+    """
+    Check video quality requirements for publishing:
+      - Resolution >= 1080x1920 (portrait 1080P)
+      - Frame rate >= 25 fps
+      - Duration >= 45 seconds
+    Returns (passed, reason). reason is empty string if passed.
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "quiet", "-print_format", "json",
+            "-show_streams", "-show_format", video_path,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+        if proc.returncode != 0:
+            return False, "ffprobe 无法读取视频文件"
+        info = json.loads(stdout)
+    except Exception as e:
+        return False, f"视频信息读取失败: {e}"
+
+    video_stream = next((s for s in info.get("streams", []) if s.get("codec_type") == "video"), None)
+    if not video_stream:
+        return False, "视频文件中未找到视频流"
+
+    issues = []
+
+    # Resolution: both dimensions must meet 1080x1920
+    w = int(video_stream.get("width", 0))
+    h = int(video_stream.get("height", 0))
+    long_side, short_side = max(w, h), min(w, h)
+    if short_side < 1080 or long_side < 1920:
+        issues.append(f"分辨率不足（{w}x{h}，需要 1080x1920 以上）")
+
+    # Frame rate: parse "num/den" fraction
+    fps_raw = video_stream.get("r_frame_rate", "0/1")
+    try:
+        num, den = fps_raw.split("/")
+        fps = float(num) / float(den)
+    except Exception:
+        fps = 0.0
+    if fps < 25:
+        issues.append(f"帧率不足（{fps:.1f} fps，需要 ≥ 25 fps）")
+
+    # Duration: from format section (more reliable than stream duration)
+    try:
+        duration = float(info.get("format", {}).get("duration", 0))
+    except Exception:
+        duration = 0.0
+    if duration < 45:
+        issues.append(f"时长不足（{duration:.1f}s，需要 ≥ 45 秒）")
+
+    if issues:
+        return False, "；".join(issues)
+    return True, ""
 
 
 def _get_publisher(platform: str):
@@ -65,6 +123,20 @@ async def _execute_task(task: dict, broadcast_fn: Optional[Callable] = None):
             video_path = os.path.join(RECORDINGS_DIR, task["merged_filename"])
         if not video_path or not os.path.exists(video_path):
             raise RuntimeError(f"Video file not found: {video_path}")
+
+        # Quality gate: resolution, fps, duration
+        passed, quality_reason = await check_video_quality(video_path)
+        if not passed:
+            # Mark the group so it shows in management UI
+            group_id = task.get("group_id")
+            if group_id:
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute(
+                        "UPDATE clip_groups SET quality_issue = ? WHERE id = ?",
+                        (quality_reason, group_id),
+                    )
+                    await db.commit()
+            raise RuntimeError(f"视频质量不达标，请重新剪辑：{quality_reason}")
 
         # Build task context
         task_ctx = dict(task)

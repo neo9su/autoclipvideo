@@ -10,7 +10,7 @@ import aiosqlite
 import httpx
 from datetime import datetime
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from db import init_db, DB_PATH
 from models import RoomCreate, Room, Recording, ProductCreate, ProductUpdate, PublishAccountCreate, PublishTaskCreate
 from monitor import MonitorManager
-from transcribe import poll_transcriptions, _run_editor, _clip_progress, get_clip_queue, update_job_priority
+from transcribe import poll_transcriptions, _run_editor, _clip_progress, get_clip_queue, update_job_priority, cancel_clip_job, pause_clip_job, resume_clip_job, _job_submit_times, _job_durations, _poll_state, flush_poll, POLL_INTERVAL, RECORDINGS_DIR
 from analyzer import merge_group
 from sync import sync_file
 from thumbnail import generate_thumbnail
@@ -63,6 +63,73 @@ async def _reset_stuck_clip_tasks():
             logger.info(f"Reset {r2.rowcount} stuck clip task(s) to pending (no clip_filename)")
 
 
+async def _memory_monitor(broadcast_fn=None):
+    """Monitor system RAM every 30 s.
+
+    When used memory exceeds MEM_WARN_GB:
+      - Set memory_pressure=True to pause new clip dispatches
+      - Call gc.collect() to release Python-held objects
+      - Broadcast a warning to the frontend
+
+    When memory recovers below MEM_RECOVER_GB the pressure flag is cleared.
+    """
+    import gc
+
+    MEM_WARN_GB    = 5   # M2 8GB: 超过 5GB 即触发警告（62% of 8GB）
+    MEM_RECOVER_GB = 4   # 恢复阈值
+    INTERVAL       = 10  # seconds（缩短轮询间隔，ffmpeg峰值持续时间短）
+
+    try:
+        import psutil
+    except ImportError:
+        logger.warning("psutil not installed – memory monitor disabled. Run: pip install psutil")
+        return
+
+    from transcribe import set_memory_pressure
+
+    warned = False
+    while True:
+        try:
+            vm = psutil.virtual_memory()
+            used_gb = vm.used / 1024 ** 3
+
+            if used_gb > MEM_WARN_GB:
+                gc.collect()
+                vm2 = psutil.virtual_memory()
+                used_after = vm2.used / 1024 ** 3
+                set_memory_pressure(True)
+                msg = (
+                    f"[内存警告] 系统内存占用 {used_gb:.1f}GB 超过 {MEM_WARN_GB}GB 阈值，"
+                    f"已暂停新剪辑任务派发 (gc后 {used_after:.1f}GB)"
+                )
+                logger.warning(msg)
+                if broadcast_fn and not warned:
+                    await broadcast_fn({
+                        "type": "memory_warning",
+                        "used_gb": round(used_gb, 1),
+                        "limit_gb": MEM_WARN_GB,
+                        "msg": msg,
+                    })
+                warned = True
+
+            elif warned and used_gb < MEM_RECOVER_GB:
+                set_memory_pressure(False)
+                logger.info(f"[内存恢复] 系统内存 {used_gb:.1f}GB < {MEM_RECOVER_GB}GB，已恢复剪辑任务派发")
+                if broadcast_fn:
+                    await broadcast_fn({
+                        "type": "memory_recovered",
+                        "used_gb": round(used_gb, 1),
+                    })
+                warned = False
+
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            logger.debug(f"Memory monitor error: {e}")
+
+        await asyncio.sleep(INTERVAL)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
@@ -72,11 +139,13 @@ async def lifespan(app: FastAPI):
     gpu_watcher_task = asyncio.create_task(watch_gpu_service(broadcast_fn=broadcast))
     transcribe_task = asyncio.create_task(poll_transcriptions(broadcast_fn=broadcast))
     scheduler_task = asyncio.create_task(poll_publish_tasks(broadcast_fn=broadcast))
+    memory_task = asyncio.create_task(_memory_monitor(broadcast_fn=broadcast))
     yield
     gpu_watcher_task.cancel()
     transcribe_task.cancel()
     scheduler_task.cancel()
-    for t in [gpu_watcher_task, transcribe_task, scheduler_task]:
+    memory_task.cancel()
+    for t in [gpu_watcher_task, transcribe_task, scheduler_task, memory_task]:
         try:
             await t
         except asyncio.CancelledError:
@@ -85,7 +154,7 @@ async def lifespan(app: FastAPI):
         await monitor.remove_room(room_id)
 
 
-APP_VERSION = "MVP1.02.2026032401"
+APP_VERSION = "MVP1.04.2026032501"
 
 app = FastAPI(title="Douyin Recorder", lifespan=lifespan)
 
@@ -266,14 +335,14 @@ async def list_recordings(room_id: int):
 _STATUS_WHERE = {
     "transcribe_running": "r.transcribed = 1",
     "transcribe_pending": "r.transcribed = 0 AND r.local_deleted = 0 AND r.end_time IS NOT NULL",
-    "transcribe_failed":  "r.transcribed = -1",
+    "transcribe_failed":  "r.transcribed = -1 AND (r.skip_reason IS NULL OR r.skip_reason = '')",
     "clip_running":       "r.clipped = 1",
     "clip_pending":       "r.transcribed = 2 AND r.clipped = 0",
-    "clip_failed":        "r.clipped = -1",
+    "clip_failed":        "r.clipped = -1 AND (r.skip_reason IS NULL OR r.skip_reason = '')",
     "running":            "(r.transcribed = 1 OR r.clipped = 1)",
     # top-level filter bar shortcuts
     "success":  "r.clipped = 2",
-    "failed":   "(r.transcribed = -1 OR r.clipped = -1)",
+    "failed":   "((r.transcribed = -1 OR r.clipped = -1) AND (r.skip_reason IS NULL OR r.skip_reason = ''))",
     "active":   "(r.transcribed = 1 OR r.clipped = 1)",
 }
 
@@ -412,6 +481,52 @@ async def download_recording_clip(clip_id: int):
     return FileResponse(clip_path, media_type="video/mp4", filename=os.path.basename(clip["clip_filename"]))
 
 
+@app.post("/api/recordings/{recording_id}/reclip", status_code=200)
+async def reclip_recording(recording_id: int, body: dict = Body({})):
+    """Reset a completed clip and re-run the editor, optionally with user feedback."""
+    feedback = (body.get("feedback") or "").strip() or None
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM recordings WHERE id=?", (recording_id,)
+        ) as cur:
+            rec = await cur.fetchone()
+    if not rec:
+        raise HTTPException(status_code=404, detail="Recording not found")
+    if rec["transcribed"] != 2:
+        raise HTTPException(status_code=409, detail="Transcription not complete yet")
+
+    # Delete old clip files for this recording
+    old_clip = rec["clip_filename"]
+    if old_clip:
+        old_path = os.path.join(os.path.dirname(__file__), "..", "recordings", old_clip)
+        try:
+            if os.path.exists(old_path):
+                os.unlink(old_path)
+        except Exception as e:
+            logger.warning(f"Could not delete old clip {old_clip}: {e}")
+
+    # Delete old recording_clips rows
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM recording_clips WHERE recording_id=?", (recording_id,))
+        await db.execute(
+            "UPDATE recordings SET clipped=0, clip_filename=NULL, thumbnail=NULL, reclip_feedback=? WHERE id=?",
+            (feedback, recording_id),
+        )
+        await db.commit()
+
+    # Re-trigger the editor with feedback
+    mp4_path = os.path.join(os.path.dirname(__file__), "..", "recordings", rec["filename"])
+    srt_path = os.path.splitext(mp4_path)[0] + ".srt"
+    asyncio.create_task(
+        _run_editor(recording_id, mp4_path, srt_path,
+                    clip_count=rec["clip_count"] or 1,
+                    feedback=feedback,
+                    broadcast_fn=broadcast)
+    )
+    return {"ok": True, "recording_id": recording_id, "feedback": feedback}
+
+
 @app.get("/api/recordings/{recording_id}/thumbnail")
 async def get_thumbnail(recording_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -455,9 +570,11 @@ async def list_groups():
             SELECT g.*,
                    rm.name as room_name,
                    COUNT(r.id) as clip_count,
-                   SUM(CASE WHEN r.clipped = 2 THEN 1 ELSE 0 END) as ready_count
+                   SUM(CASE WHEN r.clipped = 2 THEN 1 ELSE 0 END) as ready_count,
+                   (SELECT COUNT(*) FROM publish_tasks pt
+                    WHERE pt.group_id = g.id AND pt.status IN ('done','publishing','pending','scheduled')) as published_count
             FROM clip_groups g
-            JOIN rooms rm ON g.room_id = rm.id
+            LEFT JOIN rooms rm ON g.room_id = rm.id
             LEFT JOIN recordings r ON r.group_id = g.id
             GROUP BY g.id
             ORDER BY g.created_at DESC
@@ -471,15 +588,15 @@ async def get_group(group_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT g.*, rm.name as room_name FROM clip_groups g JOIN rooms rm ON g.room_id = rm.id WHERE g.id = ?",
+            "SELECT g.*, rm.name as room_name FROM clip_groups g LEFT JOIN rooms rm ON g.room_id = rm.id WHERE g.id = ?",
             (group_id,)
         ) as cur:
             group = await cur.fetchone()
         if not group:
             raise HTTPException(status_code=404, detail="Group not found")
         async with db.execute(
-            """SELECT id, filename, clip_filename, start_time, end_time,
-                      session_label, has_tryon, has_promotion, clipped
+            """SELECT id, filename, clip_filename, thumbnail, start_time, end_time,
+                      session_label, has_tryon, has_promotion, transcribed, clipped, transcribe_error
                FROM recordings WHERE group_id = ? ORDER BY start_time ASC""",
             (group_id,)
         ) as cur:
@@ -497,6 +614,10 @@ async def trigger_merge(group_id: int):
         raise HTTPException(status_code=404, detail="Group not found")
     if group["merge_status"] == 1:
         raise HTTPException(status_code=409, detail="Merge already in progress")
+    # Clear any previous quality issue when re-merging
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE clip_groups SET quality_issue = NULL WHERE id = ?", (group_id,))
+        await db.commit()
     asyncio.create_task(merge_group(group_id))
     return {"group_id": group_id, "merge_status": 1}
 
@@ -513,6 +634,54 @@ async def download_merged(group_id: int):
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="File missing")
     return FileResponse(path, media_type="video/mp4", filename=group["merged_filename"])
+
+
+@app.get("/api/recordings/processing-progress")
+async def get_processing_progress():
+    """Return progress for all currently processing recordings (transcribing + clipping)."""
+    import time, statistics
+    result = {}
+
+    # ── Clipping progress (from in-memory dict) ──────────────────────────────
+    for rid, p in _clip_progress.items():
+        result[str(rid)] = {
+            "phase": p.get("phase", ""),
+            "pct": p.get("pct", 0),
+            "msg": p.get("msg", ""),
+            "eta_seconds": p.get("eta_seconds"),
+        }
+
+    # ── Transcription progress (time-based estimate) ──────────────────────────
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, gpu_job_id FROM recordings WHERE transcribed = 1 AND gpu_job_id IS NOT NULL"
+        ) as cur:
+            transcribing = await cur.fetchall()
+
+    avg_dur = statistics.mean(_job_durations) if _job_durations else None
+    now = time.time()
+    for rec in transcribing:
+        rid = rec["id"]
+        job_id = rec["gpu_job_id"]
+        if str(rid) in result:
+            continue  # already has clip progress
+        submit_at = _job_submit_times.get(job_id)
+        if submit_at and avg_dur and avg_dur > 0:
+            elapsed = now - submit_at
+            pct = min(95, int(elapsed / avg_dur * 100))
+            eta = max(0, int(avg_dur - elapsed))
+        else:
+            pct = 5
+            eta = None
+        result[str(rid)] = {
+            "phase": "transcribe",
+            "pct": pct,
+            "msg": "GPU转录中",
+            "eta_seconds": eta,
+        }
+
+    return result
 
 
 @app.get("/api/recordings/{recording_id}")
@@ -645,6 +814,98 @@ class RecordingGroupUpdate(BaseModel):
     group_id: Optional[int] = None
 
 
+class ImportVideosRequest(BaseModel):
+    paths: list[str]
+
+
+class CustomGroupCreate(BaseModel):
+    label: str
+    wig_model: Optional[str] = None
+    wig_color: Optional[str] = None
+
+
+async def _get_custom_room_id() -> int:
+    """Get or create the special '自定义上传' room used for custom groups."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT id FROM rooms WHERE url = '__custom__'") as cur:
+            row = await cur.fetchone()
+        if row:
+            return row["id"]
+        cur = await db.execute(
+            "INSERT INTO rooms (name, url, enabled) VALUES ('自定义上传', '__custom__', 0)",
+        )
+        await db.commit()
+        return cur.lastrowid
+
+
+@app.post("/api/groups/custom", status_code=201)
+async def create_custom_group(body: CustomGroupCreate):
+    room_id = await _get_custom_room_id()
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO clip_groups (room_id, label, wig_model, wig_color, is_custom) VALUES (?, ?, ?, ?, 1)",
+            (room_id, body.label, body.wig_model or None, body.wig_color or None),
+        )
+        await db.commit()
+        return {"id": cur.lastrowid, "label": body.label,
+                "wig_model": body.wig_model, "wig_color": body.wig_color, "is_custom": 1}
+
+
+@app.post("/api/groups/{group_id}/upload-video", status_code=201)
+async def upload_custom_group_video(group_id: int, file: UploadFile = File(...), clip_count: int = Form(1)):
+    """Upload a video file directly to a custom group and trigger the clip pipeline."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM clip_groups WHERE id = ? AND is_custom = 1", (group_id,)) as cur:
+            group = await cur.fetchone()
+    if not group:
+        raise HTTPException(status_code=404, detail="Custom group not found")
+
+    room_id = group["room_id"]
+    clip_count = max(1, min(5, clip_count))
+    now = datetime.utcnow()
+    ts = now.strftime("%Y%m%d_%H%M%S")
+    safe_name = re.sub(r"[^\w\-.]", "_", file.filename or "upload.mp4")
+    filename = f"custom_{ts}_{safe_name}"
+    recordings_dir = os.path.join(os.path.dirname(__file__), "..", "recordings")
+    os.makedirs(recordings_dir, exist_ok=True)
+    filepath = os.path.join(recordings_dir, filename)
+
+    size_bytes = 0
+    with open(filepath, "wb") as f:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            f.write(chunk)
+            size_bytes += len(chunk)
+
+    start_time = now.isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO recordings (room_id, filename, start_time, end_time, size_bytes, synced, clip_count, group_id) VALUES (?, ?, ?, ?, ?, 0, ?, ?)",
+            (room_id, filename, start_time, start_time, size_bytes, clip_count, group_id),
+        )
+        await db.commit()
+        recording_id = cur.lastrowid
+
+    asyncio.create_task(_generate_upload_thumb(recording_id, filepath))
+
+    from comfyui_client import free_vram
+    await free_vram()
+    job_id = await sync_file(filepath, room_id)
+    if job_id:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE recordings SET transcribed = 1, synced = 1, gpu_job_id = ? WHERE id = ?",
+                (job_id, recording_id),
+            )
+            await db.commit()
+
+    return {"id": recording_id, "filename": filename, "size_bytes": size_bytes}
+
+
 @app.post("/api/groups", status_code=201)
 async def create_group(body: GroupCreate):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -655,6 +916,61 @@ async def create_group(body: GroupCreate):
         await db.commit()
         return {"id": cur.lastrowid, "label": body.label,
                 "wig_model": body.wig_model, "wig_color": body.wig_color}
+
+
+@app.post("/api/groups/{group_id}/import-videos", status_code=200)
+async def import_group_videos(group_id: int, body: ImportVideosRequest):
+    """Associate local .mp4 files with a group. Files outside recordings/ are copied in."""
+    recordings_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "recordings"))
+    imported = 0
+    skipped = []
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT room_id FROM clip_groups WHERE id = ?", (group_id,)) as cur:
+            grp = await cur.fetchone()
+        if not grp:
+            raise HTTPException(status_code=404, detail="Group not found")
+        room_id = grp["room_id"]
+
+        for raw_path in body.paths:
+            path = raw_path.strip()
+            if not path:
+                continue
+            if not os.path.isfile(path) or not path.lower().endswith(".mp4"):
+                skipped.append(path)
+                continue
+
+            abs_path = os.path.abspath(path)
+            # If outside recordings dir, copy it in
+            if not abs_path.startswith(recordings_dir + os.sep):
+                import shutil
+                dest = os.path.join(recordings_dir, os.path.basename(abs_path))
+                if not os.path.exists(dest):
+                    shutil.copy2(abs_path, dest)
+                abs_path = dest
+
+            filename = os.path.basename(abs_path)
+            size = os.path.getsize(abs_path)
+
+            # Upsert: if already in DB, update group_id; else insert
+            async with db.execute("SELECT id FROM recordings WHERE filename = ?", (filename,)) as cur:
+                existing = await cur.fetchone()
+            if existing:
+                await db.execute(
+                    "UPDATE recordings SET group_id = ? WHERE id = ?",
+                    (group_id, existing["id"]),
+                )
+            else:
+                await db.execute(
+                    """INSERT INTO recordings
+                       (room_id, filename, size_bytes, group_id, synced, transcribed, clipped, local_deleted, segment_index)
+                       VALUES (?, ?, ?, ?, 0, 0, 0, 0, 0)""",
+                    (room_id, filename, size, group_id),
+                )
+            imported += 1
+
+        await db.commit()
+    return {"imported": imported, "skipped": skipped}
 
 
 @app.patch("/api/groups/{group_id}")
@@ -670,6 +986,18 @@ async def update_group(group_id: int, body: GroupUpdate):
         await db.commit()
     return {"id": group_id, "label": body.label,
             "wig_model": body.wig_model, "wig_color": body.wig_color}
+
+
+@app.delete("/api/groups/{group_id}", status_code=204)
+async def delete_group(group_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT id FROM clip_groups WHERE id = ?", (group_id,)) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(status_code=404, detail="Group not found")
+        # Unlink recordings from this group (don't delete the recordings themselves)
+        await db.execute("UPDATE recordings SET group_id = NULL WHERE group_id = ?", (group_id,))
+        await db.execute("DELETE FROM clip_groups WHERE id = ?", (group_id,))
+        await db.commit()
 
 
 @app.delete("/api/recordings/{recording_id}/local-file", status_code=204)
@@ -805,11 +1133,16 @@ async def gpu_status():
             sys_ = cs.get("system", {})
             # Use torch_vram (dedicated/allocated by PyTorch) rather than the
             # shared-memory pool that AMD iGPU reports as vram_total/vram_free.
-            torch_total = dev.get("torch_vram_total", 0)
-            torch_free  = dev.get("torch_vram_free",  0)
-            # Fall back to vram fields only if torch fields are zero/missing
-            vram_total = torch_total or dev.get("vram_total", 0)
-            vram_free  = torch_free  or dev.get("vram_free",  0)
+            # Hardware total is always reliable; use it as the denominator.
+            # torch_vram fields reflect only PyTorch-allocated memory (0 when
+            # no models are loaded), so don't use them as the "total" baseline.
+            vram_total = dev.get("vram_total", 0)
+            vram_free  = dev.get("vram_free",  0)
+            # If the hardware fields are missing (some virtual devices), fall
+            # back to torch allocation fields.
+            if not vram_total:
+                vram_total = dev.get("torch_vram_total", 0)
+                vram_free  = dev.get("torch_vram_free",  0)
             result["comfyui"] = {
                 "reachable": True,
                 "vram_total": vram_total,
@@ -826,19 +1159,41 @@ async def gpu_status():
     except Exception as e:
         logger.error(f"GPU status check failed: {e}")
 
-    # Pending transcription jobs: in-flight on GPU + waiting to upload
+    # Pending transcription jobs: in-flight on GPU + waiting to upload (exclude live segments)
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
             """SELECT COUNT(*) FROM recordings
                WHERE (transcribed = 1 AND gpu_job_id IS NOT NULL)
-                  OR (transcribed = 0 AND synced = 0 AND local_deleted = 0)"""
+                  OR (transcribed = 0 AND synced = 0 AND local_deleted = 0 AND end_time IS NOT NULL)"""
         ) as cur:
             (pending_transcribe,) = await cur.fetchone()
     result["pending_transcribe"] = pending_transcribe
     # Include cached watchdog state (no extra HTTP call needed)
     from gpu_state import watchdog_status
     result["watchdog"] = watchdog_status()
+    # Include poll loop health state
+    import time as _t
+    from datetime import datetime, timezone
+    now = _t.time()
+    ps = _poll_state
+    def _iso(ts):
+        return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat() if ts else None
+    result["poll_state"] = {
+        "last_poll_at": _iso(ps["last_poll_at"]),
+        "last_submit_at": _iso(ps["last_submit_at"]),
+        "last_complete_at": _iso(ps["last_complete_at"]),
+        "blocked_count": ps["blocked_count"],
+        "active_job_id": ps["active_job_id"],
+        "poll_interval": POLL_INTERVAL,
+    }
     return result
+
+
+@app.post("/api/transcribe/flush", status_code=200)
+async def flush_transcribe_queue():
+    """Wake the poll loop immediately without waiting for the 60-second interval."""
+    await flush_poll()
+    return {"ok": True, "msg": "Poll loop woken up"}
 
 
 @app.get("/api/watchdog/status")
@@ -973,6 +1328,29 @@ async def system_status():
     }
 
 
+@app.get("/api/memory/status")
+async def memory_status():
+    """Return current system memory usage and clip dispatch pressure state."""
+    try:
+        import psutil
+        vm = psutil.virtual_memory()
+        used_gb  = round(vm.used  / 1024 ** 3, 2)
+        total_gb = round(vm.total / 1024 ** 3, 2)
+        avail_gb = round(vm.available / 1024 ** 3, 2)
+    except ImportError:
+        used_gb = total_gb = avail_gb = None
+
+    from transcribe import _memory_pressure
+    return {
+        "used_gb": used_gb,
+        "total_gb": total_gb,
+        "available_gb": avail_gb,
+        "pressure": _memory_pressure,
+        "warn_threshold_gb": 20,
+        "recover_threshold_gb": 17,
+    }
+
+
 @app.get("/api/clip-jobs")
 async def get_clip_jobs():
     """Return in-progress clip job progress keyed by recording_id."""
@@ -1068,6 +1446,74 @@ async def set_clip_priority(recording_id: int, priority: int):
     return {"ok": True, "recording_id": recording_id, "priority": priority}
 
 
+@app.post("/api/clip-queue/{recording_id}/cancel")
+async def cancel_clip_queue_job(recording_id: int):
+    """Remove a queued/paused job from the clip queue (cannot cancel running jobs)."""
+    removed = await cancel_clip_job(recording_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail="Job not found in queue (may be running or already completed)")
+    # Reset clipped status so the job can be re-dispatched later
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE recordings SET clipped = 0 WHERE id = ? AND clipped = 1", (recording_id,))
+        await db.commit()
+    return {"ok": True, "recording_id": recording_id}
+
+
+@app.post("/api/clip-queue/{recording_id}/pause")
+async def pause_clip_queue_job(recording_id: int):
+    """Pause a queued job (it stays in queue but won't be dispatched until resumed)."""
+    paused = await pause_clip_job(recording_id)
+    if not paused:
+        raise HTTPException(status_code=404, detail="Job not found in queue or is already running")
+    return {"ok": True, "recording_id": recording_id, "status": "paused"}
+
+
+@app.post("/api/clip-queue/{recording_id}/start")
+async def start_clip_queue_job(recording_id: int):
+    """Move a queued/paused job to the front of the queue (priority=1) and resume if paused."""
+    # Resume if paused
+    await resume_clip_job(recording_id)
+    # Set to highest priority
+    updated = await update_job_priority(recording_id, 1)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Job not found in queue")
+    return {"ok": True, "recording_id": recording_id, "priority": 1}
+
+
+@app.post("/api/clip-queue/{recording_id}/retry")
+async def retry_clip_queue_job(recording_id: int):
+    """Re-enqueue a failed clip job (clipped=-1)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT r.*, rm.name as room_name FROM recordings r "
+            "JOIN rooms rm ON r.room_id = rm.id WHERE r.id = ?",
+            (recording_id,)
+        ) as cur:
+            rec = await cur.fetchone()
+    if not rec:
+        raise HTTPException(status_code=404, detail="Recording not found")
+    if rec["clipped"] != -1:
+        raise HTTPException(status_code=409, detail=f"Recording is not in failed state (clipped={rec['clipped']})")
+
+    mp4_path = os.path.join(RECORDINGS_DIR, rec["filename"])
+    srt_filename = os.path.splitext(rec["filename"])[0] + ".srt"
+    srt_path = os.path.join(RECORDINGS_DIR, srt_filename)
+    if not os.path.exists(mp4_path):
+        raise HTTPException(status_code=404, detail="MP4 file not found on disk")
+    if not os.path.exists(srt_path):
+        raise HTTPException(status_code=404, detail="SRT file not found — re-transcribe first")
+
+    # Reset failed state and re-enqueue
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE recordings SET clipped = 0, clip_error = NULL WHERE id = ?", (recording_id,))
+        await db.commit()
+
+    asyncio.create_task(_run_editor(recording_id, mp4_path, srt_path,
+                                    clip_count=rec["clip_count"] or 1))
+    return {"ok": True, "recording_id": recording_id, "status": "queued"}
+
+
 @app.get("/api/stats")
 async def get_stats():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -1105,14 +1551,17 @@ async def ws_events(websocket: WebSocket):
 async def list_products(keyword: Optional[str] = None):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
+        base = """SELECT p.*, rm.name as room_name
+                  FROM products p
+                  LEFT JOIN rooms rm ON p.room_id = rm.id"""
         if keyword:
             async with db.execute(
-                "SELECT * FROM products WHERE product_name LIKE ? OR keywords LIKE ? ORDER BY created_at DESC",
+                base + " WHERE p.product_name LIKE ? OR p.keywords LIKE ? ORDER BY p.created_at DESC",
                 (f"%{keyword}%", f"%{keyword}%"),
             ) as cur:
                 rows = await cur.fetchall()
         else:
-            async with db.execute("SELECT * FROM products ORDER BY created_at DESC") as cur:
+            async with db.execute(base + " ORDER BY p.created_at DESC") as cur:
                 rows = await cur.fetchall()
     return [dict(r) for r in rows]
 
@@ -1121,10 +1570,10 @@ async def list_products(keyword: Optional[str] = None):
 async def create_product(body: ProductCreate):
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
-            """INSERT INTO products (platform, product_id, product_name, product_url, keywords, enabled)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO products (platform, product_id, product_name, product_url, keywords, enabled, room_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (body.platform, body.product_id, body.product_name,
-             body.product_url, body.keywords, int(body.enabled)),
+             body.product_url, body.keywords, int(body.enabled), body.room_id),
         )
         await db.commit()
     return {"id": cur.lastrowid, **body.model_dump()}
@@ -1136,10 +1585,10 @@ async def bulk_create_products(body: list[ProductCreate]):
     async with aiosqlite.connect(DB_PATH) as db:
         for p in body:
             cur = await db.execute(
-                """INSERT INTO products (platform, product_id, product_name, product_url, keywords, enabled)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
+                """INSERT INTO products (platform, product_id, product_name, product_url, keywords, enabled, room_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (p.platform, p.product_id, p.product_name,
-                 p.product_url, p.keywords, int(p.enabled)),
+                 p.product_url, p.keywords, int(p.enabled), p.room_id),
             )
             ids.append(cur.lastrowid)
         await db.commit()
@@ -1261,9 +1710,10 @@ async def list_publish_tasks(status: Optional[str] = None):
             async with db.execute(
                 """SELECT t.*, g.label as group_label, g.merged_filename,
                           pa.account_name, pa.platform as account_platform,
-                          p.product_name, t.product_ids
+                          p.product_name, t.product_ids, rm.name as room_name
                    FROM publish_tasks t
                    JOIN clip_groups g ON t.group_id = g.id
+                   LEFT JOIN rooms rm ON g.room_id = rm.id
                    LEFT JOIN publish_accounts pa ON t.account_id = pa.id
                    LEFT JOIN products p ON t.product_id = p.id
                    WHERE t.status = ?
@@ -1275,9 +1725,10 @@ async def list_publish_tasks(status: Optional[str] = None):
             async with db.execute(
                 """SELECT t.*, g.label as group_label, g.merged_filename,
                           pa.account_name, pa.platform as account_platform,
-                          p.product_name, t.product_ids
+                          p.product_name, t.product_ids, rm.name as room_name
                    FROM publish_tasks t
                    JOIN clip_groups g ON t.group_id = g.id
+                   LEFT JOIN rooms rm ON g.room_id = rm.id
                    LEFT JOIN publish_accounts pa ON t.account_id = pa.id
                    LEFT JOIN products p ON t.product_id = p.id
                    ORDER BY t.created_at DESC"""
@@ -1297,6 +1748,21 @@ async def create_publish_task(body: PublishTaskCreate):
         raise HTTPException(status_code=404, detail="Group not found")
     if group["merge_status"] != 2 or not group["merged_filename"]:
         raise HTTPException(status_code=409, detail="Group merged video not ready (merge_status must be 2)")
+
+    # Duplicate publish guard: same group + platform already has an active or completed task
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            """SELECT id, status FROM publish_tasks
+               WHERE group_id=? AND platform=? AND status IN ('pending','scheduled','publishing','done')
+               LIMIT 1""",
+            (body.group_id, body.platform),
+        ) as cur:
+            existing = await cur.fetchone()
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"duplicate: group {body.group_id} already has a {existing['status']} task for {body.platform} (task_id={existing['id']})"
+        )
 
     title = body.title
     description = body.description
@@ -1410,6 +1876,31 @@ async def generate_group_meta(group_id: int):
     if not meta:
         raise HTTPException(status_code=500, detail="LLM metadata generation failed")
     return meta
+
+
+# ── Group thumbnail regeneration ──────────────────────────────────────────────
+
+@app.post("/api/groups/{group_id}/generate-thumbnail")
+async def generate_group_thumbnail(group_id: int, body: dict = {}):
+    """Regenerate the thumbnail for a group's merged video with a specific scheme."""
+    scheme_type = body.get("scheme_type", "种草") if body else "种草"
+    title = body.get("title", "") if body else ""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT merged_filename FROM clip_groups WHERE id = ?", (group_id,)
+        ) as cur:
+            group = await cur.fetchone()
+    if not group or not group["merged_filename"]:
+        raise HTTPException(status_code=404, detail="Group or merged video not found")
+    mp4_path = os.path.join(RECORDINGS_DIR, group["merged_filename"])
+    if not os.path.exists(mp4_path):
+        raise HTTPException(status_code=404, detail="Merged video file not found")
+    thumb = await generate_thumbnail(mp4_path, title=title or "假发变美瞬间", scheme_type=scheme_type)
+    if not thumb:
+        raise HTTPException(status_code=500, detail="Thumbnail generation failed")
+    thumb_rel = os.path.relpath(thumb, RECORDINGS_DIR)
+    return {"thumbnail": thumb_rel, "scheme_type": scheme_type}
 
 
 # ── Product matching ──────────────────────────────────────────────────────────

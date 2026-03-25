@@ -14,6 +14,7 @@
         <thead>
           <tr>
             <th>ID</th>
+            <th>直播间</th>
             <th>商品名称</th>
             <th>平台商品ID</th>
             <th>匹配关键词</th>
@@ -24,6 +25,16 @@
         <tbody>
           <tr v-for="p in products" :key="p.id">
             <td class="muted">{{ p.id }}</td>
+            <td>
+              <select
+                class="room-select"
+                :value="p.room_id || ''"
+                @change="changeRoom(p, $event.target.value)"
+              >
+                <option value="">—</option>
+                <option v-for="r in rooms" :key="r.id" :value="r.id">{{ r.name }}</option>
+              </select>
+            </td>
             <td>
               <a v-if="p.product_url" :href="p.product_url" target="_blank" class="link">{{ p.product_name }}</a>
               <span v-else>{{ p.product_name }}</span>
@@ -58,6 +69,11 @@
     <div v-if="showAddModal" class="modal-overlay" @click.self="showAddModal = false">
       <div class="modal">
         <h3>新增商品</h3>
+        <label>直播间</label>
+        <select v-model="form.room_id" class="input">
+          <option value="">不关联直播间</option>
+          <option v-for="r in rooms" :key="r.id" :value="r.id">{{ r.name }}</option>
+        </select>
         <label>商品名称 *</label>
         <input v-model="form.product_name" class="input" placeholder="如：蓬松波波头假发" />
         <label>平台商品ID</label>
@@ -91,12 +107,13 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
-import { getProducts, createProduct, bulkCreateProducts, updateProduct, deleteProduct as apiDelete } from '../api.js'
+import { getRooms, getProducts, createProduct, bulkCreateProducts, updateProduct, deleteProduct as apiDelete } from '../api.js'
 import { useToast } from '../composables/toast.js'
 
 const { showToast } = useToast()
 
 const products = ref([])
+const rooms = ref([])
 const searchKeyword = ref('')
 const showAddModal = ref(false)
 const showBulkModal = ref(false)
@@ -105,7 +122,7 @@ const editKeywords = ref('')
 const bulkJson = ref('')
 const bulkError = ref('')
 
-const form = ref({ product_name: '', product_id: '', product_url: '', keywords: '' })
+const form = ref({ product_name: '', product_id: '', product_url: '', keywords: '', room_id: '' })
 
 async function loadProducts() {
   products.value = await getProducts(searchKeyword.value)
@@ -127,6 +144,15 @@ async function saveKeywords(id) {
     editingId.value = null
     await loadProducts()
     showToast('关键词已更新', 'success')
+  } catch (e) {
+    showToast('更新失败: ' + e.message, 'error')
+  }
+}
+
+async function changeRoom(p, roomId) {
+  try {
+    await updateProduct(p.id, { room_id: roomId ? parseInt(roomId) : null })
+    await loadProducts()
   } catch (e) {
     showToast('更新失败: ' + e.message, 'error')
   }
@@ -154,9 +180,10 @@ async function deleteProduct(id) {
 
 async function submitAdd() {
   try {
-    await createProduct(form.value)
+    const payload = { ...form.value, room_id: form.value.room_id || null }
+    await createProduct(payload)
     showAddModal.value = false
-    form.value = { product_name: '', product_id: '', product_url: '', keywords: '' }
+    form.value = { product_name: '', product_id: '', product_url: '', keywords: '', room_id: '' }
     await loadProducts()
     showToast('商品已添加', 'success')
   } catch (e) {
@@ -185,7 +212,10 @@ async function submitBulk() {
   }
 }
 
-onMounted(loadProducts)
+onMounted(async () => {
+  rooms.value = await getRooms()
+  await loadProducts()
+})
 </script>
 
 <style scoped>
@@ -199,6 +229,10 @@ th { text-align: left; color: #888; font-weight: 500; padding: 10px 12px; border
 td { padding: 10px 12px; border-bottom: 1px solid #1e1e1e; vertical-align: middle; }
 tr:hover td { background: #1a1a1a; }
 .muted { color: #666; }
+.room-badge { font-size: 11px; color: #888; background: #222; border: 1px solid #333; border-radius: 3px; padding: 1px 6px; white-space: nowrap; }
+.room-select { background: #1e1e1e; border: 1px solid #333; color: #ccc; border-radius: 4px; padding: 2px 4px; font-size: 11px; cursor: pointer; }
+.room-select:hover { border-color: #555; }
+.room-select:focus { outline: none; border-color: #fe2c55; }
 .mono { font-family: monospace; font-size: 12px; }
 .link { color: #fe2c55; text-decoration: none; }
 .link:hover { text-decoration: underline; }

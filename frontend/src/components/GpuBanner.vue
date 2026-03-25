@@ -33,6 +33,17 @@
           {{ status.pending_transcribe ?? 0 }}
         </span>
       </div>
+      <div class="metric poll-info" v-if="pollState">
+        <span class="metric-label">上次轮询</span>
+        <span class="metric-val" :class="lastPollAgo > 90 ? 'text-warn' : ''">{{ fmtAgo(lastPollAgo) }}</span>
+        <span v-if="pollState.active_job_id" class="active-job">GPU处理中</span>
+        <span v-if="pollState.blocked_count > 0" class="blocked-hint">{{ pollState.blocked_count }}个等待合并</span>
+      </div>
+      <div v-if="isQueueStuck" class="metric stuck-warn">
+        <span class="stuck-icon">⚠</span>
+        <span class="stuck-text">队列可能卡住</span>
+        <button class="flush-btn" :disabled="flushing" @click="doFlush">{{ flushing ? '处理中…' : '强制处理' }}</button>
+      </div>
       <div class="metric jobs">
         <span class="metric-label">生图队列</span>
         <span class="metric-val badge" :class="(status.comfyui.queue_running + status.comfyui.queue_pending) > 0 ? 'active' : ''">
@@ -124,6 +135,37 @@ const watchdogServices = computed(() => {
 })
 
 const wdBusy = ref({})
+const flushing = ref(false)
+const now = ref(Date.now())
+let nowTimer = null
+
+const pollState = computed(() => status.value.poll_state || null)
+const lastPollAgo = computed(() => {
+  if (!pollState.value?.last_poll_at) return 9999
+  return Math.round((now.value - new Date(pollState.value.last_poll_at).getTime()) / 1000)
+})
+const isQueueStuck = computed(() => {
+  const q = status.value.pending_transcribe || 0
+  if (q === 0) return false
+  const ps = pollState.value
+  if (!ps) return false
+  const staleNoActivity = lastPollAgo.value > 120
+  const allBlocked = ps.blocked_count > 0 && ps.blocked_count >= q && !ps.active_job_id
+  return staleNoActivity || allBlocked
+})
+
+function fmtAgo(s) {
+  if (s >= 9999) return '未知'
+  if (s < 60) return `${s}秒前`
+  if (s < 3600) return `${Math.floor(s/60)}分前`
+  return `${Math.floor(s/3600)}小时前`
+}
+
+async function doFlush() {
+  flushing.value = true
+  try { await fetch('/api/transcribe/flush', { method: 'POST' }) } catch {}
+  setTimeout(() => { flushing.value = false; fetchStatus() }, 2000)
+}
 
 async function wdStart(svc) {
   wdBusy.value[svc] = true
@@ -185,6 +227,7 @@ function stopLogPoll() {
 onMounted(async () => {
   fetchStatus()
   pollTimer = setInterval(fetchStatus, 8000)
+  nowTimer = setInterval(() => { now.value = Date.now() }, 5000)
   try {
     const r = await fetch('/api/version')
     if (r.ok) { const d = await r.json(); appVersion.value = d.version || '' }
@@ -193,6 +236,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   clearInterval(pollTimer)
+  clearInterval(nowTimer)
   stopLogPoll()
 })
 </script>
@@ -249,6 +293,16 @@ onUnmounted(() => {
 .wd-btn.stop    { border-color: rgba(254,44,85,0.4);   color: #fe2c55; }
 .wd-btn.restart { border-color: rgba(251,191,36,0.4);  color: #fbbf24; }
 .pending-badge { background: rgba(251,191,36,0.15); color: #fbbf24; border-radius: 10px; padding: 1px 8px; font-size: 11px; }
+.poll-info { gap: 5px; }
+.text-warn { color: #fbbf24 !important; }
+.active-job { background: rgba(96,165,250,0.15); color: #60a5fa; border-radius: 8px; padding: 1px 6px; font-size: 10px; }
+.blocked-hint { color: #555; font-size: 10px; }
+.stuck-warn { gap: 5px; background: rgba(254,44,85,0.08); border: 1px solid rgba(254,44,85,0.25); border-radius: 6px; padding: 2px 8px; }
+.stuck-icon { color: #fbbf24; font-size: 11px; }
+.stuck-text { color: #fe2c55; font-size: 11px; }
+.flush-btn { font-size: 10px; padding: 1px 8px; border-radius: 3px; cursor: pointer; border: 1px solid rgba(254,44,85,0.5); background: rgba(254,44,85,0.15); color: #fe2c55; transition: all 0.15s; }
+.flush-btn:hover:not(:disabled) { background: rgba(254,44,85,0.3); }
+.flush-btn:disabled { opacity: 0.5; cursor: default; }
 
 .banner-right { display: flex; align-items: center; gap: 10px; flex-shrink: 0; max-width: 400px; overflow: hidden; }
 .version-tag { font-size: 10px; color: #3a3a3a; white-space: nowrap; user-select: none; }

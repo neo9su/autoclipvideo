@@ -34,16 +34,16 @@ _SYS_FONTS = [
 # ── Anime colour themes ────────────────────────────────────────────────────────
 # Each theme: (grad_top RGBA, grad_bottom RGBA, title_grad_left, title_grad_right, outline, pill_bg, pill_text)
 _THEMES = [
-    # Sakura pink
-    ((255, 180, 210, 160), (120,  40, 120, 200), (255, 220, 240), (255, 100, 180), (180, 0, 100), (255, 80, 160, 200), (255, 255, 255)),
-    # Ocean blue
-    ((100, 200, 255, 150), ( 20,  40, 140, 210), (200, 240, 255), ( 60, 140, 255), ( 20,  60, 180), (40, 160, 255, 200), (255, 255, 255)),
-    # Mint dream
-    ((150, 255, 200, 140), ( 20, 120,  80, 200), (210, 255, 230), ( 60, 210, 140), ( 10, 100,  60), (50, 200, 130, 200), (255, 255, 255)),
-    # Sunset gold
-    ((255, 220, 120, 150), (180,  60,  20, 210), (255, 250, 180), (255, 160,  40), (160,  60,   0), (255, 180, 40, 200), (255, 255, 255)),
-    # Lavender night
-    ((180, 140, 255, 150), ( 60,  20, 120, 210), (230, 210, 255), (180,  80, 255), ( 80,  20, 140), (160, 80, 255, 200), (255, 255, 255)),
+    # Sakura bloom — warm pink, soft rose bottom
+    ((255, 190, 220, 130), (220,  80, 130, 160), (255, 230, 245), (255, 120, 190), (200,  40, 110), (255, 100, 170, 210), (255, 255, 255)),
+    # Peach sunshine — golden orange top, warm coral bottom
+    ((255, 220, 150, 130), (240, 120,  60, 160), (255, 250, 200), (255, 180,  60), (180,  80,   0), (255, 160,  50, 210), (255, 255, 255)),
+    # Candy sky — cheerful sky blue, warm lemon bottom
+    ((160, 230, 255, 120), (100, 180, 255, 150), (220, 248, 255), (80,  200, 255), ( 30, 120, 200), (60,  190, 255, 210), (255, 255, 255)),
+    # Warm lemon — bright yellow, soft apricot bottom
+    ((255, 240, 130, 120), (255, 190,  80, 150), (255, 255, 200), (255, 210,  60), (160, 120,   0), (255, 210,  60, 210), (255, 255, 255)),
+    # Spring mint — fresh green top, warm lime bottom
+    ((180, 255, 210, 120), (100, 210, 140, 150), (220, 255, 235), (80,  230, 160), ( 20, 140,  80), (70,  220, 150, 210), (255, 255, 255)),
 ]
 
 
@@ -186,8 +186,8 @@ async def _extract_frame(mp4_path: str, seek: float, out_jpg: str) -> bool:
     cmd = [
         "ffmpeg", "-y", "-ss", f"{seek:.3f}", "-i", mp4_path,
         "-frames:v", "1",
-        "-vf", "scale=2160:3840:force_original_aspect_ratio=decrease,"
-               "pad=2160:3840:(ow-iw)/2:(oh-ih)/2",
+        "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,"
+               "pad=1080:1920:(ow-iw)/2:(oh-ih)/2",
         "-q:v", "2", out_jpg,
     ]
     proc = await asyncio.create_subprocess_exec(
@@ -222,7 +222,7 @@ def _composite(frame_path: str, out_path: str, title: str, subtitle: str, seed: 
     theme = rng.choice(_THEMES)
     grad_top, grad_bottom, title_l, title_r, title_outline, pill_bg, pill_text = theme
 
-    W, H = 2160, 3840  # 4K portrait (9:16)
+    W, H = 1080, 1920  # 2K portrait (9:16)
 
     # Base frame
     base = Image.open(frame_path).convert("RGBA").resize((W, H), Image.LANCZOS)
@@ -233,9 +233,9 @@ def _composite(frame_path: str, out_path: str, title: str, subtitle: str, seed: 
 
     overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
 
-    # Bottom gradient veil
-    _draw_gradient_rect(overlay, 0, H * 2 // 3, W, H,
-                        (0, 0, 0, 0), (0, 0, 0, 200))
+    # Bottom gradient veil — lighter to keep overall warmth
+    _draw_gradient_rect(overlay, 0, H * 3 // 4, W, H,
+                        (0, 0, 0, 0), (0, 0, 0, 140))
 
     # Top colour tone strip
     _draw_gradient_rect(overlay, 0, 0, W, H // 5,
@@ -296,9 +296,18 @@ def _composite(frame_path: str, out_path: str, title: str, subtitle: str, seed: 
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
+_SCHEME_SUBTITLES = {
+    "种草": "点击查看同款",
+    "催单": "直播间同价 点小黄车下单",
+    "产品介绍": "了解更多详情",
+    "教学": "手把手教你变美",
+}
+
+
 async def generate_thumbnail(mp4_path: str, offset: Optional[float] = None,
                               title: str = "假发变美瞬间",
-                              subtitle: str = "点击查看同款") -> Optional[str]:
+                              subtitle: str = "点击查看同款",
+                              scheme_type: str = "种草") -> Optional[str]:
     """
     Generate an anime-style thumbnail for `mp4_path`.
 
@@ -309,6 +318,10 @@ async def generate_thumbnail(mp4_path: str, offset: Optional[float] = None,
 
     Returns path to the output JPEG, or None on failure.
     """
+    # scheme_type overrides subtitle if subtitle is still the default
+    if subtitle == "点击查看同款" and scheme_type in _SCHEME_SUBTITLES:
+        subtitle = _SCHEME_SUBTITLES[scheme_type]
+
     out = mp4_path.replace(".mp4", "_thumb.jpg")
 
     duration = await _get_duration(mp4_path)

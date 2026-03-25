@@ -15,6 +15,8 @@ While the room is still recording and the group is too small, upload is deferred
 import asyncio
 import logging
 import os
+import time
+from datetime import datetime, timezone
 from typing import Optional
 
 import aiosqlite
@@ -23,8 +25,12 @@ from db import DB_PATH
 
 logger = logging.getLogger(__name__)
 
-SMALL_THRESHOLD = 50 * 1024 * 1024   # files smaller than this get merged
-MERGE_TARGET    = 150 * 1024 * 1024  # target size for merged file
+SMALL_THRESHOLD  = 50  * 1024 * 1024  # files smaller than this get merged
+STALE_WAIT_SECS  = 600                # force-upload small files after waiting this long
+MERGE_TARGET     = 150 * 1024 * 1024  # target size for merged file
+MERGE_MAX        = 200 * 1024 * 1024  # hard cap: never produce a merged file larger than this
+SPLIT_THRESHOLD  = 200 * 1024 * 1024  # standalone files larger than this get split before upload
+SPLIT_CHUNK_SIZE = 150 * 1024 * 1024  # target chunk size when splitting large files
 
 RECORDINGS_DIR = os.path.join(os.path.dirname(__file__), "..", "recordings")
 
@@ -87,6 +93,145 @@ def _consecutive_group_for(segments: list, target_id: int) -> list:
         if seg["id"] == target_id:
             return [seg]
     return []
+
+
+async def _ffprobe_duration(filepath: str) -> Optional[float]:
+    """Return video duration in seconds using ffprobe, or None on failure."""
+    cmd = [
+        "ffprobe", "-v", "quiet", "-print_format", "json",
+        "-show_format", filepath,
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    stdout, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return None
+    try:
+        import json
+        info = json.loads(stdout)
+        return float(info["format"]["duration"])
+    except Exception:
+        return None
+
+
+async def _ffmpeg_split_file(
+    filepath: str, file_size: int, room_id: int, recording_id: int
+) -> Optional[list[tuple[str, int]]]:
+    """
+    Split a large MP4 file into ~SPLIT_CHUNK_SIZE chunks using stream-copy.
+
+    Returns list of (chunk_filepath, chunk_size_bytes) pairs (including the first
+    chunk, which reuses the original path slot), or None on failure.
+    The caller is responsible for updating the DB and deleting the original file.
+    """
+    duration = await _ffprobe_duration(filepath)
+    if not duration or duration <= 0:
+        logger.warning(f"Could not determine duration for {filepath}, skipping split")
+        return None
+
+    bytes_per_sec = file_size / duration
+    chunk_duration = SPLIT_CHUNK_SIZE / bytes_per_sec
+    n_chunks = max(2, int(os.path.getsize(filepath) / SPLIT_CHUNK_SIZE) + 1)
+
+    stem, ext = os.path.splitext(os.path.basename(filepath))
+    dir_path = os.path.dirname(filepath)
+
+    chunks: list[tuple[str, int]] = []
+    for i in range(n_chunks):
+        ss = i * chunk_duration
+        if ss >= duration:
+            break
+        chunk_filename = f"{stem}_chunk{i:03d}{ext}"
+        chunk_path = os.path.join(dir_path, chunk_filename)
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", f"{ss:.3f}", "-i", filepath,
+            "-t", f"{chunk_duration:.3f}",
+            "-c", "copy",
+            chunk_path,
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0 or not os.path.exists(chunk_path):
+            logger.error(
+                f"Split chunk {i} failed for {filepath}: {stderr.decode()[-300:]}"
+            )
+            # Clean up any chunks written so far
+            for cp, _ in chunks:
+                try:
+                    os.unlink(cp)
+                except Exception:
+                    pass
+            return None
+        chunk_size = os.path.getsize(chunk_path)
+        chunks.append((chunk_path, chunk_size))
+        logger.info(
+            f"Split chunk {i+1}/{n_chunks}: {chunk_filename} ({chunk_size // 1024 // 1024}MB)"
+        )
+
+    return chunks if len(chunks) >= 2 else None
+
+
+async def _split_and_register(
+    filepath: str, file_size: int, room_id: int, recording_id: int
+) -> Optional[tuple[str, int]]:
+    """
+    Split `filepath` into SPLIT_CHUNK_SIZE chunks, register extra chunks as new
+    DB rows (inheriting room_id), update the original row to point to chunk 0,
+    and delete the original large file.
+
+    Returns (chunk0_path, recording_id) for the first chunk, or None on failure.
+    """
+    chunks = await _ffmpeg_split_file(filepath, file_size, room_id, recording_id)
+    if not chunks:
+        return None
+
+    chunk0_path, chunk0_size = chunks[0]
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Find original recording to get its segment_index
+        async with db.execute(
+            "SELECT segment_index FROM recordings WHERE id=?", (recording_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        base_index = row[0] if row else 0
+
+        # Update original row → chunk 0
+        chunk0_filename = os.path.basename(chunk0_path)
+        await db.execute(
+            "UPDATE recordings SET filename=?, size_bytes=? WHERE id=?",
+            (chunk0_filename, chunk0_size, recording_id),
+        )
+
+        # Insert new rows for chunks 1..N
+        for i, (cp, csz) in enumerate(chunks[1:], start=1):
+            await db.execute(
+                """INSERT INTO recordings
+                   (room_id, filename, size_bytes, synced, transcribed, local_deleted, segment_index)
+                   VALUES (?, ?, ?, 0, 0, 0, ?)""",
+                (room_id, os.path.basename(cp), csz, base_index + i),
+            )
+
+        await db.commit()
+
+    # Delete the original large file
+    try:
+        os.unlink(filepath)
+    except Exception as e:
+        logger.warning(f"Could not delete original file {filepath}: {e}")
+
+    logger.info(
+        f"Split {os.path.basename(filepath)} ({file_size // 1024 // 1024}MB) "
+        f"→ {len(chunks)} chunks, registered in DB"
+    )
+    return (chunk0_path, recording_id)
 
 
 async def _ffmpeg_concat(file_paths: list[str], output_path: str) -> bool:
@@ -161,8 +306,18 @@ async def maybe_merge_before_upload(
 
     size = rec["size_bytes"] or os.path.getsize(filepath)
 
-    # Large file — no merge needed
+    # Large file — no merge needed, but split if it exceeds the upload cap
     if size >= SMALL_THRESHOLD:
+        if size > SPLIT_THRESHOLD:
+            logger.info(
+                f"Recording {recording_id}: file {rec['filename']} is "
+                f"{size // 1024 // 1024}MB > {SPLIT_THRESHOLD // 1024 // 1024}MB, splitting"
+            )
+            result = await _split_and_register(filepath, size, room_id, recording_id)
+            if result:
+                return result
+            # Split failed — fall through and upload as-is
+            logger.warning(f"Split failed for {rec['filename']}, uploading original")
         return (filepath, recording_id)
 
     # Small file — find consecutive group in pending unsynced segments
@@ -183,25 +338,46 @@ async def maybe_merge_before_upload(
     total_size = sum(sz for _, _, sz in valid)
     still_recording = await _is_room_still_recording(room_id)
 
-    # Not enough data and room still active — defer
+    # Not enough data and room still active — defer, but only up to STALE_WAIT_SECS
     if total_size < SMALL_THRESHOLD and still_recording:
-        logger.info(
-            f"Room {room_id}: small group {len(valid)} segs "
-            f"{total_size // 1024 // 1024}MB < {SMALL_THRESHOLD // 1024 // 1024}MB, "
-            "waiting for more segments"
+        # Check how long the oldest segment in the group has been waiting
+        oldest_start = min(
+            (seg["start_time"] for seg, _, _ in valid if seg["start_time"]),
+            default=None,
         )
-        return None
+        wait_secs = 0
+        if oldest_start:
+            try:
+                dt = datetime.fromisoformat(oldest_start.replace(" ", "T"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                wait_secs = int(time.time() - dt.timestamp())
+            except Exception:
+                pass
+        if wait_secs < STALE_WAIT_SECS:
+            logger.info(
+                f"Room {room_id}: small group {len(valid)} segs "
+                f"{total_size // 1024 // 1024}MB < {SMALL_THRESHOLD // 1024 // 1024}MB, "
+                f"waiting for more segments (waited {wait_secs}s / {STALE_WAIT_SECS}s)"
+            )
+            return None
+        logger.info(
+            f"Room {room_id}: small group waited {wait_secs}s >= {STALE_WAIT_SECS}s, "
+            "force-uploading despite active recording"
+        )
 
     # Only one file — upload as-is (can't merge alone)
     if len(valid) == 1:
         return (filepath, recording_id)
 
-    # Select segments up to MERGE_TARGET
+    # Select segments up to MERGE_TARGET, but never let the total exceed MERGE_MAX
     selected: list[tuple] = []
     selected_size = 0
     for seg, p, sz in valid:
+        if selected_size + sz > MERGE_MAX:
+            break  # adding this file would push merged size over 200 MB
         if selected_size >= MERGE_TARGET:
-            break
+            break  # already at target size
         selected.append((seg, p, sz))
         selected_size += sz
 

@@ -23,14 +23,16 @@ COMFYUI_URL = os.environ.get("COMFYUI_URL", "http://10.190.0.203:8188")
 # Anime-style prompts
 _POSITIVE_BASE = (
     "masterpiece, best quality, anime illustration, beautiful girl, "
-    "gorgeous hair, detailed face, vibrant colors, soft lighting, "
-    "bokeh background, cinematic composition, glowing eyes, "
+    "gorgeous hair, detailed face, vibrant warm colors, cheerful bright lighting, "
+    "sunny atmosphere, warm golden light, happy joyful expression, "
+    "bokeh background, pastel tones, glowing skin, "
     "fashion outfit, dynamic pose, high detail, 8k"
 )
 _NEGATIVE = (
     "lowres, bad anatomy, bad hands, missing fingers, extra limbs, "
     "blurry, worst quality, low quality, jpeg artifacts, watermark, "
-    "text, signature, username, ugly, deformed, mutated, disfigured"
+    "text, signature, username, ugly, deformed, mutated, disfigured, "
+    "dark, gloomy, moody, shadow, low contrast, desaturated"
 )
 
 # ── Workflow builder ───────────────────────────────────────────────────────────

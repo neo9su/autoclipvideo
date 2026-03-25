@@ -5,10 +5,12 @@
       <div class="toolbar-meta">
         <span class="meta-item">剪辑并发: {{ maxConcurrent }}</span>
         <span class="meta-sep">·</span>
-        <span class="meta-item">剪辑运行: {{ queue.running.length }}</span>
+        <span class="meta-item">运行: {{ queue.running.length }}</span>
         <span class="meta-sep">·</span>
-        <span class="meta-item">剪辑等待: {{ queue.queued.length }}</span>
+        <span class="meta-item">等待: {{ queue.queued.length }}</span>
         <span class="meta-sep">·</span>
+        <span v-if="queue.paused.length > 0" class="meta-item meta-paused">暂停: {{ queue.paused.length }}</span>
+        <span v-if="queue.paused.length > 0" class="meta-sep">·</span>
         <span class="meta-item">转录: {{ transcribeJobs.length }}</span>
         <button class="btn-refresh" @click="load" :disabled="loading">刷新</button>
       </div>
@@ -133,6 +135,57 @@
             <button class="prio-btn up" @click="setPriority(job.recording_id, Math.max(1, job.priority - 10))" title="提高优先级">↑</button>
             <button class="prio-btn dn" @click="setPriority(job.recording_id, Math.min(99, job.priority + 10))" title="降低优先级">↓</button>
           </div>
+          <div class="action-btns">
+            <button class="act-btn start" @click="startJob(job.recording_id)" title="立即优先运行">▶</button>
+            <button class="act-btn pause" @click="pauseJob(job.recording_id)" title="暂停此任务">⏸</button>
+            <button class="act-btn cancel" @click="cancelJob(job.recording_id)" title="从队列移除">✕</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Paused jobs -->
+    <section v-if="queue.paused.length > 0" class="section">
+      <div class="section-header">
+        <span class="section-title">已暂停</span>
+        <span class="section-badge paused">{{ queue.paused.length }}</span>
+        <span class="section-hint">点击 ▶ 恢复排队</span>
+      </div>
+      <div class="job-list">
+        <div v-for="job in queue.paused" :key="'p'+job.recording_id" class="job-card paused-card">
+          <div class="queue-pos paused-icon">⏸</div>
+          <div class="job-info">
+            <span class="job-id">录像 #{{ job.recording_id }}</span>
+            <span v-if="job.room_name" class="job-room">{{ job.room_name }}</span>
+            <span v-if="job.record_date" class="job-date">{{ job.record_date }}</span>
+          </div>
+          <div class="action-btns">
+            <button class="act-btn start" @click="startJob(job.recording_id)" title="恢复并优先运行">▶</button>
+            <button class="act-btn cancel" @click="cancelJob(job.recording_id)" title="从队列移除">✕</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Failed clip jobs -->
+    <section v-if="failedClips.length > 0" class="section">
+      <div class="section-header">
+        <span class="section-title">剪辑失败</span>
+        <span class="section-badge failed">{{ failedClips.length }}</span>
+        <span class="section-hint">点击重试重新入队</span>
+      </div>
+      <div class="job-list">
+        <div v-for="job in failedClips" :key="'f'+job.id" class="job-card failed-card">
+          <div class="queue-pos failed-icon">✕</div>
+          <div class="job-info">
+            <span class="job-id">录像 #{{ job.id }}</span>
+            <span v-if="job.room_name" class="job-room">{{ job.room_name }}</span>
+            <span v-if="job.filename" class="job-date">{{ job.filename }}</span>
+            <span v-if="job.clip_error" class="job-error">{{ job.clip_error }}</span>
+          </div>
+          <div class="action-btns">
+            <button class="act-btn retry" @click="retryJob(job.id)" title="重新剪辑">重试</button>
+          </div>
         </div>
       </div>
     </section>
@@ -144,7 +197,8 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useToast } from '../composables/toast.js'
 
 const { showToast } = useToast()
-const queue = ref({ running: [], queued: [] })
+const queue = ref({ running: [], queued: [], paused: [] })
+const failedClips = ref([])
 const transcribeJobs = ref([])
 const transcribeMeta = ref({ total: 0, session_done: 0, avg_duration_s: 0, eta_seconds: null })
 const loading = ref(false)
@@ -160,11 +214,15 @@ const overallPct = computed(() => {
 async function load() {
   loading.value = true
   try {
-    const [clipRes, transcribeRes] = await Promise.all([
+    const [clipRes, transcribeRes, failedRes] = await Promise.all([
       fetch('/api/clip-queue'),
       fetch('/api/transcribe-queue'),
+      fetch('/api/recordings?status=clip_failed&limit=50'),
     ])
-    if (clipRes.ok) queue.value = await clipRes.json()
+    if (clipRes.ok) {
+      const data = await clipRes.json()
+      queue.value = { running: data.running || [], queued: data.queued || [], paused: data.paused || [] }
+    }
     if (transcribeRes.ok) {
       const data = await transcribeRes.json()
       transcribeJobs.value = data.jobs || []
@@ -174,6 +232,10 @@ async function load() {
         avg_duration_s: data.avg_duration_s || 0,
         eta_seconds: data.eta_seconds ?? null,
       }
+    }
+    if (failedRes.ok) {
+      const data = await failedRes.json()
+      failedClips.value = data.items || []
     }
   } catch (e) {
     showToast('加载队列失败', 'error')
@@ -196,6 +258,38 @@ async function setPriority(recordingId, rawValue) {
   } catch (e) {
     showToast('请求失败', 'error')
   }
+}
+
+async function startJob(recordingId) {
+  try {
+    const r = await fetch(`/api/clip-queue/${recordingId}/start`, { method: 'POST' })
+    if (r.ok) { showToast('已移至队首', 'success'); await load() }
+    else { const e = await r.json().catch(() => ({})); showToast(e.detail || '操作失败', 'error') }
+  } catch { showToast('请求失败', 'error') }
+}
+
+async function pauseJob(recordingId) {
+  try {
+    const r = await fetch(`/api/clip-queue/${recordingId}/pause`, { method: 'POST' })
+    if (r.ok) { showToast('已暂停', 'success'); await load() }
+    else { const e = await r.json().catch(() => ({})); showToast(e.detail || '操作失败', 'error') }
+  } catch { showToast('请求失败', 'error') }
+}
+
+async function cancelJob(recordingId) {
+  try {
+    const r = await fetch(`/api/clip-queue/${recordingId}/cancel`, { method: 'POST' })
+    if (r.ok) { showToast('已从队列移除', 'success'); await load() }
+    else { const e = await r.json().catch(() => ({})); showToast(e.detail || '操作失败', 'error') }
+  } catch { showToast('请求失败', 'error') }
+}
+
+async function retryJob(recordingId) {
+  try {
+    const r = await fetch(`/api/clip-queue/${recordingId}/retry`, { method: 'POST' })
+    if (r.ok) { showToast('已重新入队', 'success'); await load() }
+    else { const e = await r.json().catch(() => ({})); showToast(e.detail || '重试失败', 'error') }
+  } catch { showToast('请求失败', 'error') }
 }
 
 function formatEta(secs) {
@@ -330,6 +424,34 @@ onUnmounted(() => clearInterval(timer))
 .lvl-running { color: #60a5fa !important; }
 .lvl-queued  { color: #888 !important; }
 .lvl-pending { color: #555 !important; }
+
+/* ── Action buttons ── */
+.action-btns { display: flex; align-items: center; gap: 6px; margin-left: 8px; flex-shrink: 0; }
+.act-btn {
+  border: 1px solid #333; cursor: pointer; border-radius: 5px;
+  font-size: 12px; padding: 3px 8px; transition: all 0.15s;
+  display: flex; align-items: center; justify-content: center;
+}
+.act-btn.start  { background: rgba(52,211,153,0.1); border-color: rgba(52,211,153,0.3); color: #34d399; }
+.act-btn.start:hover  { background: rgba(52,211,153,0.25); }
+.act-btn.pause  { background: rgba(251,191,36,0.1);  border-color: rgba(251,191,36,0.3);  color: #fbbf24; }
+.act-btn.pause:hover  { background: rgba(251,191,36,0.25); }
+.act-btn.cancel { background: rgba(239,68,68,0.1);   border-color: rgba(239,68,68,0.3);   color: #ef4444; }
+.act-btn.cancel:hover { background: rgba(239,68,68,0.25); }
+.act-btn.retry  { background: rgba(96,165,250,0.1);  border-color: rgba(96,165,250,0.3);  color: #60a5fa; }
+.act-btn.retry:hover  { background: rgba(96,165,250,0.25); }
+
+/* ── Paused card ── */
+.job-card.paused-card { display: flex; align-items: center; gap: 14px; border-color: rgba(251,191,36,0.2); opacity: 0.85; }
+.paused-icon { color: #fbbf24 !important; border-color: rgba(251,191,36,0.4) !important; background: rgba(251,191,36,0.08) !important; font-size: 12px; }
+
+/* ── Failed card ── */
+.job-card.failed-card { display: flex; align-items: center; gap: 14px; border-color: rgba(239,68,68,0.25); }
+.failed-icon { color: #ef4444 !important; border-color: rgba(239,68,68,0.4) !important; background: rgba(239,68,68,0.08) !important; font-size: 11px; }
+.job-error { font-size: 11px; color: #ef4444; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+.section-badge.paused { background: rgba(251,191,36,0.15); color: #fbbf24; }
+.section-badge.failed  { background: rgba(239,68,68,0.15);  color: #ef4444; }
+.meta-paused { color: #fbbf24; }
 
 /* ── Overall progress ── */
 .transcribe-overall { margin-bottom: 12px; padding: 10px 14px; background: #111; border-radius: 8px; border: 1px solid #222; }

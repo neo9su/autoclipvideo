@@ -276,9 +276,9 @@ FADE_DUR = 1.5       # video-to-video direct crossfade (seconds)
 ANIME_FADE = 0.5     # crossfade into/out of anime transition frame
 ANIME_TOTAL = 2.0    # total duration of anime still input (includes both fades)
 
-# Output resolution: 4K portrait (9:16)
-OUT_W = 2160
-OUT_H = 3840
+# Output resolution: 2K portrait (9:16)
+OUT_W = 1080
+OUT_H = 1920
 
 # ComfyUI input resolution: SD1.5-safe portrait (9:16), avoids VRAM OOM at 4K
 COMFY_W = 576   # 9:16 portrait, divisible by 64 (SD 1.5 requirement)
@@ -347,7 +347,7 @@ async def _preprocess_segments(mp4: str, selected: List[Seg], tmp_dir: str, on_p
                 "-vf", f"trim={fs:.3f}:{fe:.3f},setpts=PTS-STARTPTS,{_SF},fps=25",
                 "-map", "0:v", "-map", "1:a",
                 "-t", f"{duration:.3f}",
-                "-c:v", "h264_videotoolbox", "-b:v", "20M", "-allow_sw", "1",
+                "-c:v", "h264_videotoolbox", "-b:v", "10M", "-allow_sw", "1",
                 "-c:a", "aac", "-b:a", "128k",
                 out,
             ]
@@ -364,7 +364,7 @@ async def _preprocess_segments(mp4: str, selected: List[Seg], tmp_dir: str, on_p
                 "-vf", f"trim={fs:.3f}:{fe:.3f},setpts=PTS-STARTPTS,{_SF},fps=25",
                 "-af", af,
                 "-t", f"{duration:.3f}",
-                "-c:v", "h264_videotoolbox", "-b:v", "20M", "-allow_sw", "1",
+                "-c:v", "h264_videotoolbox", "-b:v", "10M", "-allow_sw", "1",
                 "-c:a", "aac", "-b:a", "128k",
                 out,
             ]
@@ -382,8 +382,9 @@ async def _preprocess_segments(mp4: str, selected: List[Seg], tmp_dir: str, on_p
         logger.warning(f"Pre-encode failed for segment {i}")
         return None
 
-    # Allow 2 concurrent pre-encodes; each uses ~1-2 GB RAM so 2 is safe on 8 GB
-    sem = asyncio.Semaphore(2)
+    # 1 concurrent pre-encode per clip job; with MAX_CONCURRENT_CLIPS=2 this means
+    # at most 2 parallel 4K ffmpeg pre-encodes system-wide, avoiding OOM
+    sem = asyncio.Semaphore(1)
 
     n_segs = len(selected)
 
@@ -426,7 +427,7 @@ async def _xfade_merge(
         f"scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease,"
         f"pad={OUT_W}:{OUT_H}:(ow-iw)/2:(oh-ih)/2"
     )
-    sem = asyncio.Semaphore(2)
+    sem = asyncio.Semaphore(1)   # one merge at a time: each xfade buffers two 4K streams in RAM
     _counter = [0]
 
     async def _run(cmd: list) -> Tuple[int, str]:
@@ -445,7 +446,7 @@ async def _xfade_merge(
             f"[0:a][1:a]acrossfade=d={FADE_DUR}[aout]",
             "-map", "[vout]", "-map", "[aout]",
             "-pix_fmt", "yuv420p",
-            "-c:v", "h264_videotoolbox", "-b:v", "15M", "-allow_sw", "1",
+            "-c:v", "h264_videotoolbox", "-b:v", "8M", "-allow_sw", "1",
             "-c:a", "aac", "-b:a", "128k",
             dst,
         ])
@@ -480,7 +481,7 @@ async def _xfade_merge(
             f"[0:a][asilent]acrossfade=d={ANIME_FADE}[aout]",
             "-map", "[vout]", "-map", "[aout]",
             "-pix_fmt", "yuv420p",
-            "-c:v", "h264_videotoolbox", "-b:v", "15M", "-allow_sw", "1",
+            "-c:v", "h264_videotoolbox", "-b:v", "8M", "-allow_sw", "1",
             "-c:a", "aac", "-b:a", "128k",
             tmp1,
         ])
@@ -679,7 +680,7 @@ async def _build_clip(
         cmd += [
             "-map", vmap, "-map", audio_map,
             "-pix_fmt", "yuv420p",
-            "-c:v", "h264_videotoolbox", "-b:v", "20M", "-allow_sw", "1",
+            "-c:v", "h264_videotoolbox", "-b:v", "10M", "-allow_sw", "1",
             "-ar", "44100", "-ac", "2",
             "-c:a", "aac", "-b:a", "192k",
             out,
@@ -717,7 +718,7 @@ async def _prepend_thumbnail(clip_path: str, thumb_path: str) -> bool:
             "-loop", "1", "-t", "0.5", "-i", thumb_path,
             "-f", "lavfi", "-t", "0.5", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
             "-vf", _SF,
-            "-c:v", "h264_videotoolbox", "-b:v", "15M", "-allow_sw", "1",
+            "-c:v", "h264_videotoolbox", "-b:v", "10M", "-allow_sw", "1",
             "-c:a", "aac", "-b:a", "128k",
             tmp_thumb,
         ]
@@ -862,7 +863,13 @@ async def _gen_transition_anime_frames(
                 except Exception:
                     pass
 
-    tasks = [_one(selected[i + 1], i) for i in range(n - 1)]
+    sem_frames = asyncio.Semaphore(1)  # M2 8GB: 串行帧提取，避免多路4K解码叠加内存
+
+    async def _one_limited(seg: Seg, idx: int) -> Optional[str]:
+        async with sem_frames:
+            return await _one(seg, idx)
+
+    tasks = [_one_limited(selected[i + 1], i) for i in range(n - 1)]
     results = list(await asyncio.gather(*tasks))
     ok_count = sum(1 for r in results if r)
     logger.info(f"Anime transition frames: {ok_count}/{n - 1} generated")
@@ -915,7 +922,13 @@ async def _gen_zoom_punch_clips(
                 pass
             return bi, None
 
-    pairs = await asyncio.gather(*[_one(bi) for bi in boundaries])
+    sem_zoom = asyncio.Semaphore(1)  # M2 8GB: 串行帧提取，避免多路2K解码叠加内存
+
+    async def _one_sem(bi: int) -> tuple:
+        async with sem_zoom:
+            return await _one(bi)
+
+    pairs = await asyncio.gather(*[_one_sem(bi) for bi in boundaries])
     result = {bi: path for bi, path in pairs if path}
     logger.info(f"Zoom punch clips: {len(result)}/{len(boundaries)} generated")
     return result
@@ -960,14 +973,34 @@ async def _gen_person_frames(
             if proc.returncode != 0 or not os.path.exists(frame_tmp):
                 return bi, None
 
-            def _remove_bg():
-                with open(frame_tmp, "rb") as f:
-                    data = f.read()
-                result = rembg.remove(data)
-                with open(person_tmp, "wb") as f:
-                    f.write(result)
+            # Try GPU rembg first (CUDA, <0.5s/frame); fallback to local CPU (~5-30s/frame)
+            _used_gpu_rembg = False
+            try:
+                from gpu_state import is_online as _gpu_online
+                if _gpu_online():
+                    import httpx as _httpx
+                    with open(frame_tmp, "rb") as _f:
+                        _img_data = _f.read()
+                    async with _httpx.AsyncClient(timeout=30.0) as _c:
+                        _r = await _c.post(
+                            f"{_GPU_SERVICE_URL}/rembg",
+                            files={"file": ("frame.jpg", _img_data, "image/jpeg")},
+                        )
+                    if _r.status_code == 200:
+                        with open(person_tmp, "wb") as _f:
+                            _f.write(_r.content)
+                        _used_gpu_rembg = True
+            except Exception:
+                pass
 
-            await asyncio.get_event_loop().run_in_executor(None, _remove_bg)
+            if not _used_gpu_rembg:
+                def _remove_bg():
+                    with open(frame_tmp, "rb") as f:
+                        data = f.read()
+                    result = rembg.remove(data)
+                    with open(person_tmp, "wb") as f:
+                        f.write(result)
+                await asyncio.get_event_loop().run_in_executor(None, _remove_bg)
             if os.path.exists(person_tmp) and os.path.getsize(person_tmp) > 0:
                 return bi, person_tmp
             return bi, None
@@ -984,7 +1017,13 @@ async def _gen_person_frames(
             except Exception:
                 pass
 
-    results = await asyncio.gather(*[_one(bi) for bi in boundaries])
+    sem_rembg = asyncio.Semaphore(1)  # rembg loads U2Net model ~1-2 GB per inference; keep serial
+
+    async def _one_rembg(bi: int) -> tuple:
+        async with sem_rembg:
+            return await _one(bi)
+
+    results = await asyncio.gather(*[_one_rembg(bi) for bi in boundaries])
     out = {bi: path for bi, path in results if path}
     logger.info(f"Person overlay frames: {len(out)}/{len(boundaries)} generated")
     return out
@@ -1020,6 +1059,31 @@ def parse_srt(path: str) -> List[Seg]:
 
 
 # ── Scoring ───────────────────────────────────────────────────────────────────
+
+def _merge_short_segs(segs: List[Seg], min_dur: float = 3.0, max_gap: float = 1.5, max_merged: float = 6.0) -> List[Seg]:
+    """Merge consecutive SRT segments that are too short into scene-level segments.
+
+    Segments whose individual duration < min_dur are merged with their neighbours
+    as long as the inter-segment gap is <= max_gap and the combined duration stays
+    <= max_merged.  This handles fine-grained transcripts where each sentence is
+    only 1-2 seconds long.
+    """
+    if not segs:
+        return segs
+    out: List[Seg] = []
+    buf = Seg(idx=segs[0].idx, start=segs[0].start, end=segs[0].end, text=segs[0].text)
+    for nxt in segs[1:]:
+        gap = nxt.start - buf.end
+        combined = nxt.end - buf.start
+        if buf.duration < min_dur and gap <= max_gap and combined <= max_merged:
+            buf.end  = nxt.end
+            buf.text = buf.text + " " + nxt.text
+        else:
+            out.append(buf)
+            buf = Seg(idx=nxt.idx, start=nxt.start, end=nxt.end, text=nxt.text)
+    out.append(buf)
+    return out
+
 
 def score_and_tag(seg: Seg) -> None:
     text = seg.text
@@ -1204,9 +1268,211 @@ def select_clips_variant(
     return _select_from_valid(valid, clip_min, clip_max)
 
 
+# ── Feedback-guided scoring ───────────────────────────────────────────────────
+
+async def _feedback_to_hints(srt_path: str, feedback: str) -> dict:
+    """
+    Call Claude via Bedrock to convert user feedback into scoring hints.
+    Returns a dict with keys: preferred_ranges, avoid_ranges, boost_keywords,
+    avoid_keywords, prefer_longer, clip_min_override, clip_max_override.
+    Falls back to empty hints on any error.
+    """
+    from analyzer import BEDROCK_URL, BEDROCK_MODEL, BEDROCK_TOKEN
+    import httpx, json as _json, re as _re
+
+    if not BEDROCK_TOKEN:
+        logger.warning("Bedrock not configured, skipping feedback hints")
+        return {}
+
+    # Read SRT text (up to 6000 chars)
+    try:
+        with open(srt_path, encoding="utf-8") as f:
+            raw_srt = f.read()
+        lines = [l for l in raw_srt.splitlines()
+                 if l.strip() and not l.strip().isdigit() and "-->" not in l]
+        srt_text = "\n".join(lines)[:6000]
+    except Exception:
+        srt_text = ""
+
+    prompt = f"""你是短视频剪辑专家。用户对当前剪辑效果不满意，请根据反馈和字幕内容给出改善建议。
+
+用户反馈：
+{feedback}
+
+字幕片段（含时间轴，格式 秒数|内容）：
+{srt_text}
+
+请以JSON格式返回（只返回JSON，不含任何其他文字）：
+{{
+  "preferred_ranges": [[开始秒, 结束秒], ...],
+  "avoid_ranges": [[开始秒, 结束秒], ...],
+  "boost_keywords": ["词1", "词2"],
+  "avoid_keywords": ["词1"],
+  "prefer_longer": true或false,
+  "clip_min_override": null或秒数,
+  "clip_max_override": null或秒数,
+  "reasoning": "一句话解释"
+}}"""
+
+    payload = {
+        "messages": [{"role": "user", "content": [{"text": prompt}]}],
+        "inferenceConfig": {"maxTokens": 600, "temperature": 0},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{BEDROCK_URL}/model/{BEDROCK_MODEL}/converse",
+                json=payload,
+                headers={"Authorization": f"Bearer {BEDROCK_TOKEN}",
+                         "Content-Type": "application/json"},
+            )
+        if resp.status_code != 200:
+            logger.warning(f"Bedrock feedback hints error {resp.status_code}")
+            return {}
+        raw = resp.json()["output"]["message"]["content"][0]["text"]
+        m = _re.search(r"\{.*\}", raw, _re.DOTALL)
+        if m:
+            hints = _json.loads(m.group())
+            logger.info(f"Feedback hints: {hints.get('reasoning', '')}")
+            return hints
+    except Exception as e:
+        logger.warning(f"Feedback hints failed: {e}")
+    return {}
+
+
+def _apply_hints(segs: List[Seg], hints: dict) -> None:
+    """Apply Claude-generated hints to segment scores in-place."""
+    if not hints:
+        return
+
+    boost_kw = hints.get("boost_keywords") or []
+    avoid_kw = hints.get("avoid_keywords") or []
+    preferred = hints.get("preferred_ranges") or []
+    avoided   = hints.get("avoid_ranges") or []
+
+    for seg in segs:
+        if not seg.valid:
+            continue
+        # Keyword boosts / penalties
+        for kw in boost_kw:
+            if kw in seg.text:
+                seg.score += 3.0
+        for kw in avoid_kw:
+            if kw in seg.text:
+                seg.score -= 5.0
+                if seg.score < 0:
+                    seg.valid = False
+        # Time-range preferences
+        mid = (seg.start + seg.end) / 2
+        for s, e in preferred:
+            if s <= mid <= e:
+                seg.score += 4.0
+        for s, e in avoided:
+            if s <= mid <= e:
+                seg.valid = False
+
+
+# ── GPU offload path ──────────────────────────────────────────────────────────
+
+_GPU_SERVICE_URL = os.environ.get("GPU_SERVICE_URL", "http://10.190.0.203:8877")
+
+
+async def _edit_via_gpu(
+    mp4_filename: str,
+    room_id: int,
+    selected: List["Seg"],
+    segs: List["Seg"],
+    out_path: str,
+    on_progress=None,
+) -> Optional[str]:
+    """
+    Offload clip encoding to GPU server via NVENC.
+    Source MP4 is already on GPU server from transcription upload — no re-upload needed.
+    Returns out_path on success, None on failure (caller falls back to local pipeline).
+    """
+    import httpx
+
+    ass_content = build_ass(selected, segs)
+    best_seg = max(selected, key=lambda s: s.score) if any(s.score > 0 for s in selected) \
+               else selected[max(0, len(selected) // 4)]
+
+    payload = {
+        "mp4_filename": mp4_filename,
+        "room_id": room_id,
+        "segments": [{"start": s.start, "end": s.end} for s in selected],
+        "ass_content": ass_content,
+        "thumb_seek": best_seg.start + 1.0,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(f"{_GPU_SERVICE_URL}/clip-jobs", json=payload)
+            if resp.status_code != 201:
+                logger.warning(f"GPU clip job rejected: {resp.status_code} {resp.text[:200]}")
+                return None
+            job_id = resp.json()["job_id"]
+            logger.info(f"GPU clip job created: {job_id} for {mp4_filename}")
+    except Exception as e:
+        logger.warning(f"GPU clip job submission failed: {e}")
+        return None
+
+    # Poll until done or 25-minute timeout
+    deadline = asyncio.get_event_loop().time() + 1500
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        while asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(5.0)
+            try:
+                data = (await client.get(f"{_GPU_SERVICE_URL}/clip-jobs/{job_id}")).json()
+            except Exception:
+                continue
+
+            status = data.get("status")
+            pct    = data.get("pct", 0)
+            phase  = data.get("phase", "")
+
+            if on_progress and pct > 0:
+                if phase == "preprocess":
+                    await on_progress("preprocess", pct, 40)
+                elif phase == "merge":
+                    await on_progress("merge", pct - 40, 35)
+                elif phase in ("final", "thumbnail", "done"):
+                    await on_progress("final", 1, 1)
+
+            if status == "done":
+                break
+            if status == "error":
+                logger.warning(f"GPU clip job {job_id} error: {data.get('error')}")
+                return None
+        else:
+            logger.warning(f"GPU clip job {job_id} timed out")
+            return None
+
+    # Download result
+    try:
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            r = await client.get(f"{_GPU_SERVICE_URL}/clip-jobs/{job_id}/mp4")
+            if r.status_code != 200:
+                logger.warning(f"GPU clip download failed: {r.status_code}")
+                return None
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+            with open(out_path, "wb") as f:
+                f.write(r.content)
+    except Exception as e:
+        logger.warning(f"GPU clip download error: {e}")
+        return None
+
+    if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
+        logger.warning("GPU clip download produced empty file")
+        return None
+
+    size_mb = os.path.getsize(out_path) / 1024 / 1024
+    logger.info(f"GPU clip downloaded: {out_path} ({size_mb:.1f} MB)")
+    return out_path
+
+
 # ── Main entry ────────────────────────────────────────────────────────────────
 
-async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown", record_date: str = "", clip_duration: Optional[float] = None, on_progress=None) -> Optional[str]:
+async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown", record_date: str = "", clip_duration: Optional[float] = None, on_progress=None, feedback: Optional[str] = None, room_id: Optional[int] = None) -> Optional[str]:
     """
     Produce a 15-30s highlight clip from a recording + its SRT.
     Returns local path to the output _clip.mp4, or None on failure.
@@ -1219,11 +1485,12 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
         logger.error(f"SRT not found: {srt_path}")
         return None
 
-    # Parse + score
+    # Parse + merge short segments + score
     segs = parse_srt(srt_path)
     if not segs:
         logger.warning(f"Empty SRT: {srt_path}")
         return None
+    segs = _merge_short_segs(segs)
     for seg in segs:
         score_and_tag(seg)
 
@@ -1237,9 +1504,19 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
     except Exception as e:
         logger.warning(f"Silence detection skipped: {e}")
 
+    # Apply feedback hints if provided
+    if feedback:
+        hints = await _feedback_to_hints(srt_path, feedback)
+        _apply_hints(segs, hints)
+        c_min = hints.get("clip_min_override") or ((clip_duration * 0.85) if clip_duration else CLIP_MIN)
+        c_max = hints.get("clip_max_override") or (clip_duration if clip_duration else CLIP_MAX)
+        if hints.get("prefer_longer"):
+            c_min = max(c_min, CLIP_MIN * 1.3)
+    else:
+        c_min = (clip_duration * 0.85) if clip_duration else CLIP_MIN
+        c_max = clip_duration if clip_duration else CLIP_MAX
+
     # Select clips
-    c_min = (clip_duration * 0.85) if clip_duration else CLIP_MIN
-    c_max = clip_duration if clip_duration else CLIP_MAX
     selected = select_clips(segs, clip_min=c_min, clip_max=c_max)
     if not selected:
         logger.warning(f"No valid clips selected for {mp4_path}")
@@ -1259,6 +1536,34 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
     seq       = len([f for f in os.listdir(out_dir) if f.endswith("_clip.mp4")]) + 1
     out_path  = os.path.join(out_dir, f"{safe_name}_{date_str}_{seq:03d}_clip.mp4")
 
+    # ── Try GPU path first ────────────────────────────────────────────────────
+    if room_id is not None:
+        try:
+            mp4_filename = os.path.basename(mp4_path)
+            gpu_result = await _edit_via_gpu(
+                mp4_filename, room_id, selected, segs, out_path, on_progress
+            )
+            if gpu_result:
+                # GPU succeeded — generate thumbnail locally from original mp4
+                try:
+                    if on_progress:
+                        await on_progress("thumbnail", 0, 1)
+                    from thumbnail import generate_thumbnail
+                    best_seg = max(selected, key=lambda s: s.score) if any(s.score > 0 for s in selected) \
+                               else selected[max(0, len(selected) // 4)]
+                    thumb = await generate_thumbnail(mp4_path, offset=best_seg.start + 1.0)
+                    if thumb:
+                        await _prepend_thumbnail(out_path, thumb)
+                except Exception as e:
+                    logger.warning(f"Thumbnail prepend skipped (GPU path): {e}")
+                size_mb = os.path.getsize(out_path) / 1024 / 1024
+                logger.info(f"Clip ready (GPU): {out_path} ({size_mb:.1f} MB, {total_dur:.1f}s)")
+                return out_path
+            logger.info("GPU clip failed — falling back to local pipeline")
+        except Exception as e:
+            logger.warning(f"GPU path error, falling back to local: {e}")
+
+    # ── Local pipeline (fallback / GPU unavailable) ───────────────────────────
     anime_frames = await _gen_transition_anime_frames(mp4_path, selected)
 
     # Zoom punch: boundaries with "zoom_punch" type AND no anime frame
@@ -1327,6 +1632,8 @@ async def edit_recording_multi(
     record_date: str = "",
     clip_duration: Optional[float] = None,
     on_progress=None,
+    feedback: Optional[str] = None,
+    room_id: Optional[int] = None,
 ) -> List[str]:
     """
     Produce `count` distinct highlight clips from the same recording.
@@ -1339,11 +1646,12 @@ async def edit_recording_multi(
         logger.error(f"SRT not found: {srt_path}")
         return []
 
-    # Parse + score once
+    # Parse + merge short segments + score once
     segs = parse_srt(srt_path)
     if not segs:
         logger.warning(f"Empty SRT: {srt_path}")
         return []
+    segs = _merge_short_segs(segs)
     for seg in segs:
         score_and_tag(seg)
 
@@ -1355,6 +1663,11 @@ async def edit_recording_multi(
                 seg.valid = False
     except Exception as e:
         logger.warning(f"Silence detection skipped: {e}")
+
+    # Apply feedback hints if provided
+    if feedback:
+        hints = await _feedback_to_hints(srt_path, feedback)
+        _apply_hints(segs, hints)
 
     c_min = (clip_duration * 0.85) if clip_duration else CLIP_MIN
     c_max = clip_duration if clip_duration else CLIP_MAX
@@ -1386,6 +1699,35 @@ async def edit_recording_multi(
         total_dur = sum(s.duration for s in selected)
         logger.info(f"Variant {k+1}: {len(selected)} segs, {total_dur:.1f}s")
 
+        # ── Try GPU NVENC path first ──────────────────────────────────────────
+        gpu_used = False
+        if room_id is not None:
+            try:
+                mp4_filename = os.path.basename(mp4_path)
+                gpu_result = await _edit_via_gpu(
+                    mp4_filename, room_id, selected, segs, out_path, on_progress
+                )
+                if gpu_result:
+                        try:
+                            best_seg = max(selected, key=lambda s: s.score) if any(s.score > 0 for s in selected) \
+                                       else selected[max(0, len(selected) // 4)]
+                            from thumbnail import generate_thumbnail
+                            thumb = await generate_thumbnail(mp4_path, offset=best_seg.start + 1.0)
+                            if thumb:
+                                await _prepend_thumbnail(out_path, thumb)
+                        except Exception as te:
+                            logger.warning(f"Thumbnail prepend skipped (GPU variant {k+1}): {te}")
+                        size_mb = os.path.getsize(out_path) / 1024 / 1024
+                        logger.info(f"Variant {k+1} ready (NVENC): {out_path} ({size_mb:.1f} MB)")
+                        results.append(out_path)
+                        gpu_used = True
+            except Exception as e:
+                logger.warning(f"GPU path error for variant {k+1}, falling back: {e}")
+
+        if gpu_used:
+            continue
+
+        # ── Local fallback pipeline ───────────────────────────────────────────
         anime_frames = await _gen_transition_anime_frames(mp4_path, selected)
 
         zoom_boundaries = [

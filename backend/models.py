@@ -41,6 +41,7 @@ class ProductCreate(BaseModel):
     product_url: Optional[str] = None
     keywords: Optional[str] = None
     enabled: bool = True
+    room_id: Optional[int] = None
 
 
 class ProductUpdate(BaseModel):
@@ -48,6 +49,7 @@ class ProductUpdate(BaseModel):
     product_url: Optional[str] = None
     keywords: Optional[str] = None
     enabled: Optional[bool] = None
+    room_id: Optional[int] = None
 
 
 class PublishAccountCreate(BaseModel):
