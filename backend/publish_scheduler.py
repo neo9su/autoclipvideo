@@ -165,7 +165,7 @@ async def _execute_task(task: dict, broadcast_fn: Optional[Callable] = None):
                                 product_links.append(link)
         elif task.get("product_douyin_id"):
             product_links = [task["product_douyin_id"]]
-        if product_links:
+        if product_links and not task.get("no_cart"):
             task_ctx["_product_douyin_ids"] = product_links
 
         url = await publisher.publish(task_ctx, video_path)

@@ -324,6 +324,23 @@ export async function cancelPublishTask(id) {
   if (!res.ok) throw new Error(await res.text())
 }
 
+export async function getUnscheduledGroups(platform = 'douyin', roomId = null) {
+  const q = new URLSearchParams({ platform })
+  if (roomId) q.set('room_id', roomId)
+  const res = await fetch(`${BASE}/api/publish-tasks/unscheduled-groups?${q}`)
+  return res.json()
+}
+
+export async function batchSchedulePublish(body) {
+  const res = await fetch(`${BASE}/api/publish-tasks/batch-schedule`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
 // ── Meta generation & product matching ────────────────────────────────────────
 
 export async function generatePublishMeta(groupId) {
@@ -369,6 +386,39 @@ export async function reclipRecording(id, feedback) {
   })
   if (!res.ok) throw new Error((await res.json()).detail || '重新剪辑失败')
   return res.json()
+}
+
+// ── 画质增强 ──────────────────────────────────────────────────────────────────
+
+export async function getEnhanceServiceStatus() {
+  const res = await fetch(`${BASE}/api/enhance-service/status`)
+  return res.json()
+}
+
+export async function createEnhanceJob(file, { model = 'general', targetRes = '1080p', denoise = 'medium', previewOnly = false } = {}) {
+  const form = new FormData()
+  form.append('file', file)
+  form.append('model', model)
+  form.append('target_res', targetRes)
+  form.append('denoise', denoise)
+  form.append('preview_only', String(previewOnly))
+  const res = await fetch(`${BASE}/api/enhance-jobs`, { method: 'POST', body: form })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function getEnhanceJob(jobId) {
+  const res = await fetch(`${BASE}/api/enhance-jobs/${jobId}`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export function enhanceJobDownloadUrl(jobId) {
+  return `${BASE}/api/enhance-jobs/${jobId}/download`
+}
+
+export async function cancelEnhanceJob(jobId) {
+  await fetch(`${BASE}/api/enhance-jobs/${jobId}`, { method: 'DELETE' })
 }
 
 export function formatDuration(start, end) {

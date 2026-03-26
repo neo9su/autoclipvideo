@@ -116,10 +116,12 @@ async def init_db():
             "ALTER TABLE publish_tasks ADD COLUMN product_ids TEXT",
             "ALTER TABLE recordings ADD COLUMN transcribe_error TEXT",
             "ALTER TABLE clip_groups ADD COLUMN is_custom INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE publish_tasks ADD COLUMN no_cart INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE recordings ADD COLUMN reclip_feedback TEXT",
             "ALTER TABLE clip_groups ADD COLUMN quality_issue TEXT",
             "ALTER TABLE products ADD COLUMN room_id INTEGER",
             "ALTER TABLE recordings ADD COLUMN skip_reason TEXT",
+            "ALTER TABLE clip_groups ADD COLUMN merge_error TEXT",
         ]:
             try:
                 await db.execute(migration)

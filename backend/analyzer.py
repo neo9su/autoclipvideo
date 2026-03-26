@@ -229,10 +229,12 @@ async def merge_group(group_id: int) -> Optional[str]:
             await db.commit()
         return out_filename
     else:
-        logger.error(f"Merge failed for group {group_id}: {stderr.decode()[-300:]}")
+        err_msg = stderr.decode(errors="replace")[-400:].strip()
+        logger.error(f"Merge failed for group {group_id}: {err_msg}")
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
-                "UPDATE clip_groups SET merge_status = -1 WHERE id = ?", (group_id,)
+                "UPDATE clip_groups SET merge_status = -1, merge_error = ? WHERE id = ?",
+                (err_msg or "未知错误", group_id),
             )
             await db.commit()
         return None

@@ -89,7 +89,7 @@ def transcribe_timing() -> dict:
 # Jobs are dispatched up to MAX_CONCURRENT_CLIPS at a time, ordered by priority.
 # Lower priority number = runs first. Default priority = 50.
 
-MAX_CONCURRENT_CLIPS = int(os.environ.get("MAX_CONCURRENT_CLIPS", "1"))
+MAX_CONCURRENT_CLIPS = int(os.environ.get("MAX_CONCURRENT_CLIPS", "3"))
 
 _pending_heap: list = []          # heapq of [priority, seq, recording_id]
 _pending_meta: dict = {}          # recording_id -> job metadata dict

@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from db import init_db, DB_PATH
-from models import RoomCreate, Room, Recording, ProductCreate, ProductUpdate, PublishAccountCreate, PublishTaskCreate
+from models import RoomCreate, Room, Recording, ProductCreate, ProductUpdate, PublishAccountCreate, PublishTaskCreate, BatchScheduleCreate
 from monitor import MonitorManager
 from transcribe import poll_transcriptions, _run_editor, _clip_progress, get_clip_queue, update_job_priority, cancel_clip_job, pause_clip_job, resume_clip_job, _job_submit_times, _job_durations, _poll_state, flush_poll, POLL_INTERVAL, RECORDINGS_DIR
 from analyzer import merge_group
@@ -130,22 +130,70 @@ async def _memory_monitor(broadcast_fn=None):
         await asyncio.sleep(INTERVAL)
 
 
+async def _on_gpu_online():
+    """
+    Auto-retry recently-failed clip jobs when GPU comes back online.
+    Targets recordings with clipped=-1, no skip_reason, SRT available, failed in last 24h.
+    """
+    try:
+        from datetime import timedelta
+        cutoff = (datetime.utcnow() - timedelta(hours=24)).isoformat()
+        recordings_dir = os.path.join(os.path.dirname(__file__), "..", "recordings")
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT id, filename, clip_count FROM recordings "
+                "WHERE clipped = -1 AND skip_reason IS NULL AND transcribed = 2 "
+                "AND start_time >= ? ORDER BY start_time DESC LIMIT 20",
+                (cutoff,),
+            ) as cur:
+                rows = await cur.fetchall()
+        if not rows:
+            return
+        queued = []
+        for rec in rows:
+            mp4_path = os.path.join(recordings_dir, rec["filename"])
+            srt_path = os.path.splitext(mp4_path)[0] + ".srt"
+            if not (os.path.exists(mp4_path) and os.path.exists(srt_path)):
+                continue
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "UPDATE recordings SET clipped = 0, clip_error = NULL WHERE id = ?",
+                    (rec["id"],),
+                )
+                await db.commit()
+            asyncio.create_task(_run_editor(
+                rec["id"], mp4_path, srt_path,
+                clip_count=rec["clip_count"] or 1,
+                broadcast_fn=broadcast,
+            ))
+            queued.append(rec["id"])
+        if queued:
+            logger.info(f"GPU online — auto-retrying {len(queued)} failed clip job(s): {queued}")
+            await broadcast({"type": "gpu_auto_retry", "recording_ids": queued})
+    except Exception as e:
+        logger.warning(f"_on_gpu_online auto-retry failed: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
     await _reset_stuck_clip_tasks()
     await monitor.start_all()
-    from gpu_state import watch_gpu_service
+    from gpu_state import watch_gpu_service, register_online_callback
+    register_online_callback(_on_gpu_online)
     gpu_watcher_task = asyncio.create_task(watch_gpu_service(broadcast_fn=broadcast))
     transcribe_task = asyncio.create_task(poll_transcriptions(broadcast_fn=broadcast))
     scheduler_task = asyncio.create_task(poll_publish_tasks(broadcast_fn=broadcast))
     memory_task = asyncio.create_task(_memory_monitor(broadcast_fn=broadcast))
+    enhance_worker_task = asyncio.create_task(_enhance_worker())
     yield
     gpu_watcher_task.cancel()
     transcribe_task.cancel()
     scheduler_task.cancel()
     memory_task.cancel()
-    for t in [gpu_watcher_task, transcribe_task, scheduler_task, memory_task]:
+    enhance_worker_task.cancel()
+    for t in [gpu_watcher_task, transcribe_task, scheduler_task, memory_task, enhance_worker_task]:
         try:
             await t
         except asyncio.CancelledError:
@@ -238,6 +286,15 @@ async def toggle_room(room_id: int):
 
 # ── Recordings ───────────────────────────────────────────────────────────────
 
+async def _upload_gpu_then_edit(recording_id: int, filepath: str, srt_path: str, room_id: int, clip_duration, clip_count: int):
+    """Upload MP4 to GPU server so clip-jobs can find it, then run the editor."""
+    try:
+        await sync_file(filepath, room_id)
+    except Exception as e:
+        logger.warning(f"GPU pre-upload failed for recording {recording_id}: {e}")
+    await _run_editor(recording_id, filepath, srt_path, clip_duration=clip_duration, clip_count=clip_count, broadcast_fn=broadcast)
+
+
 @app.post("/api/rooms/{room_id}/upload", status_code=201)
 async def upload_recording(room_id: int, file: UploadFile = File(...), srt: Optional[UploadFile] = File(None), duration_sec: Optional[float] = Form(None), clip_count: int = Form(1)):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -290,7 +347,8 @@ async def upload_recording(room_id: int, file: UploadFile = File(...), srt: Opti
                 (recording_id,),
             )
             await db.commit()
-        asyncio.create_task(_run_editor(recording_id, filepath, srt_path, clip_duration=duration_sec, clip_count=clip_count, broadcast_fn=broadcast))
+        # Upload MP4 to GPU server first so clip-jobs can find the file, then edit
+        asyncio.create_task(_upload_gpu_then_edit(recording_id, filepath, srt_path, room_id, duration_sec, clip_count))
         return {"id": recording_id, "filename": filename, "size_bytes": size_bytes, "gpu_job_id": None}
 
     from comfyui_client import free_vram
@@ -338,7 +396,7 @@ _STATUS_WHERE = {
     "transcribe_failed":  "r.transcribed = -1 AND (r.skip_reason IS NULL OR r.skip_reason = '')",
     "clip_running":       "r.clipped = 1",
     "clip_pending":       "r.transcribed = 2 AND r.clipped = 0",
-    "clip_failed":        "r.clipped = -1 AND (r.skip_reason IS NULL OR r.skip_reason = '')",
+    "clip_failed":        "r.clipped = -1 AND (r.skip_reason IS NULL OR r.skip_reason != '已手动清除')",
     "running":            "(r.transcribed = 1 OR r.clipped = 1)",
     # top-level filter bar shortcuts
     "success":  "r.clipped = 2",
@@ -628,12 +686,25 @@ async def download_merged(group_id: int):
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM clip_groups WHERE id = ?", (group_id,)) as cur:
             group = await cur.fetchone()
-    if not group or group["merge_status"] != 2 or not group["merged_filename"]:
-        raise HTTPException(status_code=404, detail="Merged video not ready")
-    path = os.path.join(os.path.dirname(__file__), "..", "recordings", group["merged_filename"])
+        if not group:
+            raise HTTPException(status_code=404, detail="Group not found")
+        # Prefer merged video; fall back to any ready clip in the group
+        if group["merge_status"] == 2 and group["merged_filename"]:
+            rel_path = group["merged_filename"]
+        else:
+            async with db.execute(
+                "SELECT clip_filename FROM recordings WHERE group_id = ? AND clip_filename IS NOT NULL AND clipped = 2 ORDER BY id DESC LIMIT 1",
+                (group_id,),
+            ) as cur:
+                rec = await cur.fetchone()
+            if not rec:
+                raise HTTPException(status_code=404, detail="No preview available")
+            rel_path = rec["clip_filename"]
+    path = os.path.join(os.path.dirname(__file__), "..", "recordings", rel_path)
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="File missing")
-    return FileResponse(path, media_type="video/mp4", filename=group["merged_filename"])
+    filename = os.path.basename(rel_path)
+    return FileResponse(path, media_type="video/mp4", filename=filename)
 
 
 @app.get("/api/recordings/processing-progress")
@@ -714,7 +785,7 @@ async def retry_transcribe(recording_id: int):
         raise HTTPException(status_code=404, detail="Recording file missing on disk")
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "UPDATE recordings SET transcribed = 0, gpu_job_id = NULL WHERE id = ?",
+            "UPDATE recordings SET transcribed = 0, synced = 0, gpu_job_id = NULL WHERE id = ?",
             (recording_id,)
         )
         await db.commit()
@@ -1514,6 +1585,206 @@ async def retry_clip_queue_job(recording_id: int):
     return {"ok": True, "recording_id": recording_id, "status": "queued"}
 
 
+@app.post("/api/clip-queue/{recording_id}/dismiss")
+async def dismiss_clip_job(recording_id: int):
+    """Permanently dismiss a failed clip job so it no longer appears in the failed list."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT clipped FROM recordings WHERE id = ?", (recording_id,)) as cur:
+            rec = await cur.fetchone()
+        if not rec:
+            raise HTTPException(status_code=404, detail="Recording not found")
+        await db.execute(
+            "UPDATE recordings SET clipped = -1, skip_reason = '已手动清除' WHERE id = ?",
+            (recording_id,),
+        )
+        await db.commit()
+    return {"ok": True, "recording_id": recording_id}
+
+
+# ── 画质增强 ──────────────────────────────────────────────────────────────────
+
+ENHANCE_OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "..", "enhance_output")
+
+# 内存中跟踪作业状态（local_job_id → metadata）
+_enhance_jobs: dict = {}
+# 串行队列：每次只向 GPU 提交一个增强作业，避免 CUDA OOM
+_enhance_queue: asyncio.Queue = asyncio.Queue()
+_enhance_seq: int = 0
+
+
+def _refresh_enhance_queue_positions():
+    """重新计算所有排队中作业的位置编号。"""
+    pos = 1
+    for job in _enhance_jobs.values():
+        if job.get("status") == "queued":
+            job["queue_pos"] = pos
+            job["msg"] = f"排队中，第 {pos} 位"
+            pos += 1
+
+
+async def _enhance_worker():
+    """串行消费 enhance 队列，一次只处理一个作业，防止 GPU CUDA OOM。"""
+    from enhance import submit_enhance_job, get_enhance_job_status, download_enhance_result
+    while True:
+        local_id, file_path, out_path = await _enhance_queue.get()
+        job = _enhance_jobs.get(local_id)
+        if not job or job.get("status") == "cancelled":
+            if file_path and os.path.exists(file_path):
+                os.unlink(file_path)
+            _refresh_enhance_queue_positions()
+            continue
+
+        try:
+            job.update({"status": "uploading", "msg": "上传中…", "queue_pos": 0, "pct": 0})
+            _refresh_enhance_queue_positions()
+
+            gpu_job_id = await submit_enhance_job(
+                file_path,
+                model=job["model"], target_res=job["target_res"],
+                denoise=job["denoise"], preview_only=job["preview_only"],
+            )
+            if file_path and os.path.exists(file_path):
+                os.unlink(file_path)
+
+            if not gpu_job_id:
+                job.update({"status": "error", "error": "提交到 GPU 增强服务失败"})
+                continue
+
+            job.update({"gpu_job_id": gpu_job_id, "status": "running", "msg": "GPU 处理中…"})
+
+            # 轮询直到完成
+            deadline = asyncio.get_event_loop().time() + 7200
+            consecutive_failures = 0
+            while asyncio.get_event_loop().time() < deadline:
+                await asyncio.sleep(5)
+                if job.get("status") == "cancelled":
+                    from enhance import delete_enhance_job
+                    await delete_enhance_job(gpu_job_id)
+                    break
+                data = await get_enhance_job_status(gpu_job_id)
+                if not data:
+                    consecutive_failures += 1
+                    if consecutive_failures >= 24:
+                        job.update({"status": "error", "error": "服务无响应超过 2 分钟，作业已中止"})
+                        logger.warning(f"Enhance {local_id} aborted: unreachable 2 min")
+                    continue
+                consecutive_failures = 0
+                status = data.get("status")
+                job.update({"gpu_status": status, "pct": data.get("pct", 0), "msg": data.get("msg", "")})
+                if status == "done":
+                    ok = await download_enhance_result(gpu_job_id, out_path)
+                    if ok:
+                        job.update({"status": "done", "local_path": out_path})
+                        logger.info(f"Enhance {local_id} done → {out_path}")
+                    else:
+                        job.update({"status": "error", "error": "下载结果失败"})
+                    break
+                if status == "error":
+                    job.update({"status": "error", "error": data.get("error", "GPU 处理失败")})
+                    break
+            else:
+                job.update({"status": "error", "error": "轮询超时"})
+
+        except Exception as e:
+            job.update({"status": "error", "error": str(e)})
+            logger.error(f"Enhance worker error {local_id}: {e}")
+        finally:
+            _refresh_enhance_queue_positions()
+
+
+@app.post("/api/enhance-jobs", status_code=201)
+async def create_enhance_job(
+    file:         UploadFile = File(...),
+    model:        str = Form("general"),
+    target_res:   str = Form("1080p"),
+    denoise:      str = Form("medium"),
+    preview_only: bool = Form(False),
+):
+    """接收文件，加入本地串行队列，返回 job_id 供前端轮询。"""
+    global _enhance_seq
+    from enhance import is_enhance_service_available
+    if not await is_enhance_service_available():
+        raise HTTPException(status_code=503, detail="画质增强服务不可用，请确认 GPU 服务器已启动 enhance_service.py")
+
+    os.makedirs(ENHANCE_OUTPUT_DIR, exist_ok=True)
+    safe_name = re.sub(r"[^\w\-.]", "_", file.filename or "upload")
+    _enhance_seq += 1
+    local_id  = f"enhance_{_enhance_seq}_{safe_name}"
+    tmp_path  = os.path.join(ENHANCE_OUTPUT_DIR, f"_tmp_{local_id}")
+
+    with open(tmp_path, "wb") as f:
+        while chunk := await file.read(1024 * 1024):
+            f.write(chunk)
+
+    ext      = os.path.splitext(safe_name)[1]
+    suffix   = "_preview" if preview_only else "_enhanced"
+    out_name = os.path.splitext(safe_name)[0] + suffix + ext
+    out_path = os.path.join(ENHANCE_OUTPUT_DIR, out_name)
+
+    queue_pos = _enhance_queue.qsize() + 1
+    _enhance_jobs[local_id] = {
+        "job_id":       local_id,
+        "status":       "queued",
+        "queue_pos":    queue_pos,
+        "gpu_job_id":   None,
+        "gpu_status":   None,
+        "pct":          0,
+        "msg":          f"排队中，第 {queue_pos} 位",
+        "filename":     safe_name,
+        "out_filename": out_name,
+        "model":        model,
+        "target_res":   target_res,
+        "denoise":      denoise,
+        "preview_only": preview_only,
+        "local_path":   None,
+        "error":        None,
+    }
+    await _enhance_queue.put((local_id, tmp_path, out_path))
+    logger.info(f"Enhance job queued: {local_id} (queue_pos={queue_pos})")
+    return {"job_id": local_id, "filename": safe_name}
+
+
+@app.get("/api/enhance-jobs/{job_id}")
+async def get_enhance_job(job_id: str):
+    job = _enhance_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+@app.get("/api/enhance-jobs/{job_id}/download")
+async def download_enhance_job(job_id: str):
+    from fastapi.responses import FileResponse
+    job = _enhance_jobs.get(job_id)
+    if not job or job.get("status") != "done":
+        raise HTTPException(status_code=404, detail="结果尚未就绪")
+    path = job.get("local_path")
+    if not path or not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="本地文件不存在")
+    return FileResponse(path, filename=job["out_filename"])
+
+
+@app.delete("/api/enhance-jobs/{job_id}")
+async def cancel_enhance_job(job_id: str):
+    job = _enhance_jobs.get(job_id)
+    if job:
+        gpu_id = job.get("gpu_job_id")
+        if gpu_id:
+            from enhance import delete_enhance_job
+            await delete_enhance_job(gpu_id)
+        job["status"] = "cancelled"   # worker 检查此标志跳过
+        _enhance_jobs.pop(job_id, None)
+    _refresh_enhance_queue_positions()
+    return {"ok": True}
+
+
+@app.get("/api/enhance-service/status")
+async def enhance_service_status():
+    from enhance import is_enhance_service_available, ENHANCE_SERVICE_URL
+    available = await is_enhance_service_available()
+    return {"available": available, "url": ENHANCE_SERVICE_URL}
+
+
 @app.get("/api/stats")
 async def get_stats():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -1789,11 +2060,11 @@ async def create_publish_task(body: PublishTaskCreate):
         cur = await db.execute(
             """INSERT INTO publish_tasks
                (group_id, platform, account_id, status, scheduled_at,
-                title, description, tags, product_id, product_ids, video_path)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                title, description, tags, product_id, product_ids, video_path, no_cart)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (body.group_id, body.platform, body.account_id, status,
              body.scheduled_at, title, description, tags,
-             first_product_id, product_ids_str, video_path),
+             first_product_id, product_ids_str, video_path, 1 if body.no_cart else 0),
         )
         await db.commit()
         task_id = cur.lastrowid
@@ -1837,8 +2108,8 @@ async def cancel_publish_task(task_id: int):
             task = await cur.fetchone()
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    if task["status"] not in ("pending", "scheduled"):
-        raise HTTPException(status_code=409, detail="Can only cancel pending/scheduled tasks")
+    if task["status"] not in ("pending", "scheduled", "failed"):
+        raise HTTPException(status_code=409, detail="Can only cancel pending/scheduled/failed tasks")
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM publish_tasks WHERE id = ?", (task_id,))
         await db.commit()
@@ -1861,6 +2132,127 @@ async def retry_publish_task(task_id: int):
         )
         await db.commit()
     return {"task_id": task_id, "status": "pending"}
+
+
+# ── Batch scheduling ──────────────────────────────────────────────────────────
+
+@app.get("/api/publish-tasks/unscheduled-groups")
+async def get_unscheduled_groups(platform: str = "douyin", room_id: Optional[int] = None):
+    """
+    Return merged groups that have no active/done publish task for the given platform.
+    Used by the batch-schedule UI to preview how many groups will be queued.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        sql = """
+            SELECT g.id, g.label, g.merged_filename, g.room_id, rm.name as room_name
+            FROM clip_groups g
+            LEFT JOIN rooms rm ON g.room_id = rm.id
+            WHERE g.merge_status = 2
+              AND g.merged_filename IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM publish_tasks pt
+                  WHERE pt.group_id = g.id
+                    AND pt.platform = ?
+                    AND pt.status IN ('pending','scheduled','publishing','done')
+              )
+        """
+        params: list = [platform]
+        if room_id:
+            sql += " AND g.room_id = ?"
+            params.append(room_id)
+        sql += " ORDER BY g.id ASC"
+        async with db.execute(sql, params) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/publish-tasks/batch-schedule", status_code=201)
+async def batch_schedule_tasks(body: BatchScheduleCreate):
+    """
+    Create scheduled publish tasks for all unscheduled merged groups.
+    Tasks are spaced by interval_minutes starting from start_datetime.
+    """
+    from datetime import datetime, timedelta
+
+    # Parse start time
+    try:
+        start_dt = datetime.fromisoformat(body.start_datetime)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="start_datetime must be ISO format, e.g. 2026-03-25T10:00:00")
+
+    # Fetch eligible groups (same logic as unscheduled-groups endpoint)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        sql = """
+            SELECT g.id, g.label, g.merged_filename, g.room_id
+            FROM clip_groups g
+            WHERE g.merge_status = 2
+              AND g.merged_filename IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM publish_tasks pt
+                  WHERE pt.group_id = g.id
+                    AND pt.platform = ?
+                    AND pt.status IN ('pending','scheduled','publishing','done')
+              )
+        """
+        params: list = [body.platform]
+        if body.room_id:
+            sql += " AND g.room_id = ?"
+            params.append(body.room_id)
+        sql += " ORDER BY g.id ASC"
+        async with db.execute(sql, params) as cur:
+            groups = await cur.fetchall()
+
+    if not groups:
+        return {"created": 0, "tasks": [], "message": "没有找到可排期的分组"}
+
+    product_ids_str = ",".join(str(i) for i in body.product_ids) if body.product_ids else None
+    first_product_id = body.product_ids[0] if body.product_ids else None
+
+    video_base = os.path.join(os.path.dirname(__file__), "..", "recordings")
+    created_tasks = []
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        for i, group in enumerate(groups):
+            scheduled_at = (start_dt + timedelta(minutes=body.interval_minutes * i)).isoformat()
+            video_path = os.path.join(video_base, group["merged_filename"])
+
+            # LLM meta generation per group if requested
+            title = description = tags = None
+            if body.auto_meta:
+                try:
+                    meta = await generate_meta(group["id"])
+                    if meta:
+                        title = meta.get("title")
+                        description = meta.get("description")
+                        tags = meta.get("tags")
+                except Exception:
+                    pass  # non-fatal; task created without meta
+
+            cur = await db.execute(
+                """INSERT INTO publish_tasks
+                   (group_id, platform, account_id, status, scheduled_at,
+                    title, description, tags, product_id, product_ids, video_path, no_cart)
+                   VALUES (?, ?, ?, 'scheduled', ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (group["id"], body.platform, body.account_id, scheduled_at,
+                 title, description, tags,
+                 first_product_id, product_ids_str, video_path,
+                 1 if body.no_cart else 0),
+            )
+            created_tasks.append({
+                "task_id": cur.lastrowid,
+                "group_id": group["id"],
+                "group_label": group["label"],
+                "scheduled_at": scheduled_at,
+            })
+        await db.commit()
+
+    return {
+        "created": len(created_tasks),
+        "tasks": created_tasks,
+        "message": f"已为 {len(created_tasks)} 个分组创建排期任务",
+    }
 
 
 # ── Meta generation ───────────────────────────────────────────────────────────
@@ -1916,8 +2308,103 @@ async def match_group_product(group_id: int):
     return {"group_id": group_id, "product": product}
 
 
+
+
+# ── Stream login status ───────────────────────────────────────────────────────
+
+import glob as _glob
+import time as _time
+
+_STREAM_COOKIE_DIR = os.path.expanduser("~/.douyin-publisher/cookies")
+_STREAM_AUTH_KEYS  = {"sessionid", "uid_tt", "sid_guard"}
+
+# Track ongoing refresh so we don't launch two browsers
+_stream_login_task: Optional[asyncio.Task] = None
+
+
+@app.get("/api/stream-login/status")
+async def stream_login_status():
+    """Return auth-cookie status used for high-quality stream recording."""
+    files = sorted(_glob.glob(os.path.join(_STREAM_COOKIE_DIR, "douyin_*.json")))
+    if not files:
+        return {"logged_in": False, "quality": "LD1", "reason": "未找到 Cookie 文件", "file_age_hours": None}
+
+    cookie_file = files[0]
+    file_age_hours = round((_time.time() - os.path.getmtime(cookie_file)) / 3600, 1)
+
+    try:
+        with open(cookie_file, encoding="utf-8") as f:
+            cookies = json.load(f)
+        names = {c["name"] for c in cookies if "name" in c}
+        has_auth = bool(names & _STREAM_AUTH_KEYS)
+    except Exception:
+        has_auth = False
+
+    refreshing = _stream_login_task is not None and not _stream_login_task.done()
+    return {
+        "logged_in": has_auth,
+        "quality": "ORIGIN" if has_auth else "LD1",
+        "cookie_file": os.path.basename(cookie_file),
+        "file_age_hours": file_age_hours,
+        "refreshing": refreshing,
+    }
+
+
+@app.post("/api/stream-login/refresh")
+async def stream_login_refresh():
+    """Launch a Playwright browser to renew Douyin live stream auth cookies."""
+    global _stream_login_task
+    if _stream_login_task and not _stream_login_task.done():
+        return {"ok": False, "msg": "登录浏览器已打开，请在浏览器中完成登录"}
+
+    async def _do_browser_login():
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            logger.error("playwright not installed")
+            return
+
+        os.makedirs(_STREAM_COOKIE_DIR, exist_ok=True)
+        cookie_file = os.path.join(_STREAM_COOKIE_DIR, "douyin_stream.json")
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=False)
+            try:
+                ctx = await browser.new_context()
+                page = await ctx.new_page()
+                await page.goto("https://live.douyin.com/", timeout=30000, wait_until="domcontentloaded")
+                logger.info("[stream-login] Browser opened — waiting for user to log in (max 5 min)…")
+
+                deadline = _time.time() + 300
+                while _time.time() < deadline:
+                    cookies = await ctx.cookies("https://live.douyin.com")
+                    names = {c["name"] for c in cookies}
+                    if names & _STREAM_AUTH_KEYS:
+                        logger.info("[stream-login] Auth cookies detected, saving…")
+                        with open(cookie_file, "w", encoding="utf-8") as f:
+                            json.dump(cookies, f, ensure_ascii=False, indent=2)
+                        # Reset douyin_live cache so next recording picks up new cookies
+                        import douyin_live as _dl
+                        _dl._auth_cookies_loaded = False
+                        _dl._auth_cookies = {}
+                        logger.info(f"[stream-login] Cookies saved to {cookie_file}")
+                        await page.close()
+                        break
+                    await asyncio.sleep(2)
+                else:
+                    logger.warning("[stream-login] Login timed out")
+            except Exception as e:
+                logger.error(f"[stream-login] Browser error: {e}")
+            finally:
+                await browser.close()
+
+    _stream_login_task = asyncio.create_task(_do_browser_login())
+    return {"ok": True, "msg": "已打开登录浏览器，请在弹出的 Chrome 窗口中登录抖音直播间"}
+
+
 # ── Static frontend ───────────────────────────────────────────────────────────
 
 frontend_dist = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
 if os.path.exists(frontend_dist):
     app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
+

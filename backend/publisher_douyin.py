@@ -235,8 +235,9 @@ class DouyinPublisher(BasePublisher):
                         logger.warning(f"Description/tags fill failed: {e}")
 
                 # 6. Attach products via 购物车 → 粘贴商品链接 (max 5)
+                #    Skipped for "无车发布" tasks (no_cart=True)
                 product_ids = (task.get("_product_douyin_ids") or [])[:5]
-                if product_ids:
+                if product_ids and not task.get("no_cart"):
                     await progress(f"正在添加购物车商品链接（共 {len(product_ids)} 件）...")
                     await _show_banner(page, f"正在自动选择购物车并添加商品链接（共 {len(product_ids)} 件），请勿操作…", "system")
                     # Ensure all floating dropdowns/tooltips (hashtag suggestions,
@@ -733,52 +734,160 @@ async def _click_publish_button(page):
         pass
 
 
-async def _set_cover(page):
-    """
-    Auto-set cover: click 选择封面 → switch to 设置横封面 tab → click 完成.
+async def _click_btn_by_text(page, text: str, timeout: int = 3000) -> bool:
+    """Click the first visible element whose exact text matches. Returns True if clicked."""
+    try:
+        el = page.locator(f':text-is("{text}")').first
+        if await el.is_visible(timeout=timeout):
+            await el.scroll_into_view_if_needed()
+            await asyncio.sleep(0.2)
+            box = await el.bounding_box()
+            if box:
+                await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+            else:
+                await el.click()
+            return True
+    except Exception:
+        pass
+    return False
 
-    Modal layout:
-      Top tabs:   [设置竖封面]  [设置横封面]
-      Bottom bar: [封面检测] ... [设置竖封面 / 完成 (red)]
+
+async def _dismiss_cover_promo_popup(page) -> bool:
+    """
+    检测并关闭「设置横封面获更多流量」推广弹窗。
+    弹窗特征：包含唯一文字「暂不设置」。
+    点击弹窗内的「设置横封面」按钮关闭。
+    返回 True 表示弹窗已处理，False 表示弹窗未出现。
     """
     try:
-        # 1. Click the first visible "选择封面" button (竖封面 or 横封面 — either opens the modal)
-        cover_btn = page.locator(':text-is("选择封面")').first
-        await cover_btn.scroll_into_view_if_needed()
-        await cover_btn.wait_for(state="visible", timeout=8000)
-        await cover_btn.click()
+        skip_btn = page.locator(':text-is("暂不设置")').first
+        if not await skip_btn.is_visible(timeout=3500):
+            return False
+        # 弹窗确认按钮：与「暂不设置」同级的「设置横封面」
+        # 先尝试同容器定位，再 fallback 到页面最后一个同名元素
+        promo_confirm = page.locator(':text-is("暂不设置")').locator('xpath=..').locator(':text-is("设置横封面")')
+        if await promo_confirm.count() == 0:
+            promo_confirm = page.locator(':text-is("暂不设置")').locator('xpath=../..').locator(':text-is("设置横封面")')
+        if await promo_confirm.count() == 0:
+            promo_confirm = page.locator(':text-is("设置横封面")').last
+        box = await promo_confirm.bounding_box()
+        if box:
+            await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        else:
+            await promo_confirm.click()
+        logger.info("推广弹窗已关闭：点击「设置横封面」")
         await asyncio.sleep(1.2)
+        return True
+    except Exception as e:
+        logger.debug(f"推广弹窗处理（非致命）: {e}")
+        return False
 
-        # 2. Wait for cover modal (confirm it opened)
+
+async def _set_cover(page):
+    """
+    Auto-set cover.
+
+    Douyin cover modal entry points (2026-03+):
+      - 有挂车流程：页面上有「选择封面」按钮
+      - 无挂车流程：页面底部有「设置横封面」按钮（无「选择封面」）
+    两种入口点击后都会打开封面 modal，随后可能出现推广弹窗。
+
+    完整流程：
+      1. 点击入口按钮（「选择封面」或「设置横封面」）
+      2. 等待封面 modal 出现
+      3. 如弹窗已出现 → 关闭弹窗
+      4. 选择推荐封面帧（best-effort）
+      5. 点击 modal 底部「设置横封面」确认按钮（如存在）
+         → 此按钮可能再次触发推广弹窗 → 再次关闭
+      6. 点击「完成」
+    """
+    try:
+        # 1. 找入口按钮：优先「选择封面」，无则用「设置横封面」
+        entry_clicked = False
+        for entry_text in ("选择封面", "设置横封面"):
+            try:
+                btn = page.locator(f':text-is("{entry_text}")').first
+                await btn.wait_for(state="visible", timeout=4000)
+                await btn.scroll_into_view_if_needed()
+                await btn.click()
+                logger.info(f"封面入口：点击「{entry_text}」")
+                entry_clicked = True
+                break
+            except Exception:
+                continue
+        if not entry_clicked:
+            logger.warning("_set_cover: 未找到封面入口按钮，跳过")
+            return
+        await asyncio.sleep(1.5)
+
+        # 2. 等待封面 modal 出现（竖封面 / 横封面 tab 任一可见）
         modal_indicator = page.locator(':text("设置竖封面"), :text("设置横封面")').first
         await modal_indicator.wait_for(state="visible", timeout=8000)
+        await asyncio.sleep(0.8)
 
-        # 3. Click "设置横封面" tab at the top of the modal
-        hori_tab = page.locator(':text-is("设置横封面")').first
-        await hori_tab.wait_for(state="visible", timeout=5000)
-        await hori_tab.click()
+        # 3. 处理 modal 打开时即出现的推广弹窗
+        await _dismiss_cover_promo_popup(page)
 
-        # 4. Wait for 横封面 mode to fully render.
-        #    The right-side preview label changes to "横封面预览" only after the
-        #    tab switch completes — this is more reliable than a fixed sleep.
-        try:
-            await page.locator(':text("横封面预览")').first.wait_for(
-                state="visible", timeout=10000
-            )
-        except Exception:
-            # Fallback: if the preview label doesn't appear, wait a bit longer
-            await asyncio.sleep(2.5)
+        # 4. 选择第一个推荐封面帧（best-effort；通常第一帧已自动选中）
+        recommend_selectors = [
+            ':text("推荐") ~ div img',
+            ':text("推荐") + div img',
+            ':text("推荐") ~ ul li:first-child',
+            ':text("智能推荐") ~ div img',
+            ':text("智能推荐") ~ ul li:first-child',
+            '[class*="recommend"] [class*="item"]:first-child',
+            '[class*="recommend"] [class*="frame"]:first-child',
+        ]
+        for sel in recommend_selectors:
+            try:
+                el = page.locator(sel).first
+                if await el.is_visible(timeout=1000):
+                    box = await el.bounding_box()
+                    if box:
+                        await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                    else:
+                        await el.click()
+                    await asyncio.sleep(0.4)
+                    logger.info(f"封面帧已选择 via: {sel}")
+                    break
+            except Exception:
+                continue
 
-        # 5. Click "完成" — now safe because 横封面 mode is fully loaded
+        # 5. 点击 modal 底部确认按钮（「设置横封面」或「设置模板封面」）
+        #    新流程：此按钮点击后会再次触发推广弹窗
+        for btn_text in ("设置横封面", "设置模板封面"):
+            try:
+                btn = page.locator(f'button:has-text("{btn_text}")').last
+                if not await btn.is_visible(timeout=2000):
+                    continue
+                box = await btn.bounding_box()
+                if box:
+                    await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                else:
+                    await btn.click()
+                logger.info(f"点击底部确认按钮：「{btn_text}」")
+                await asyncio.sleep(1.2)
+                # 处理点击后再次出现的推广弹窗
+                await _dismiss_cover_promo_popup(page)
+                break
+            except Exception:
+                continue
+
+        # 6. 点击「完成」
         done_btn = page.locator('button:has-text("完成")').last
         await done_btn.wait_for(state="visible", timeout=8000)
-        await done_btn.click()
+        await done_btn.scroll_into_view_if_needed()
+        await asyncio.sleep(0.3)
+        box = await done_btn.bounding_box()
+        if box:
+            await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        else:
+            await done_btn.click()
         await asyncio.sleep(1)
-        logger.info("Cover set (横封面 4:3)")
+        logger.info("Cover set (智能推荐 第1帧)")
 
     except Exception as e:
         logger.warning(f"Cover set failed (non-fatal, user can set manually): {e}")
-        # Try to close the modal if it's still open
         try:
             close = page.locator('[aria-label="Close"], [aria-label="关闭"], button:has-text("×")').first
             if await close.is_visible(timeout=1500):
@@ -789,20 +898,23 @@ async def _set_cover(page):
 
 async def _find_sibling_button(anchor_locator, button_text: str):
     """
-    Walk up the DOM from anchor_locator, searching each ancestor level for a
-    button whose full text matches button_text exactly.
+    Walk up the DOM from anchor_locator, searching each ancestor level for any
+    element (button, span, div, a) whose trimmed text matches button_text exactly.
     Returns the first matching Playwright Locator, or None.
     """
     xpath_up = ""
     pattern = re.compile(rf"^{re.escape(button_text)}$")
-    for levels in range(1, 7):
+    # Search button, span, div, a — Douyin uses span/div for input-suffix actions
+    tags = ["button", "span", "div", "a"]
+    for levels in range(1, 8):
         xpath_up += "/.."
         try:
             container = anchor_locator.locator(f"xpath={xpath_up}")
-            btn = container.locator("button").filter(has_text=pattern)
-            if await btn.count() > 0:
-                logger.info(f"_find_sibling_button: '{button_text}' found at {levels} level(s) up")
-                return btn.first
+            for tag in tags:
+                el = container.locator(tag).filter(has_text=pattern)
+                if await el.count() > 0:
+                    logger.info(f"_find_sibling_button: '{button_text}' found as <{tag}> at {levels} level(s) up")
+                    return el.first
         except Exception:
             pass
     return None
@@ -819,33 +931,66 @@ async def _attach_product(page, product_link: str, short_title: str = ""):
             'input[placeholder*="粘贴商品链接"], input[placeholder*="商品链接"]'
         ).first
         await link_input.wait_for(state="visible", timeout=8000)
+        await link_input.scroll_into_view_if_needed()
+        await asyncio.sleep(0.3)
         await link_input.click()
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.1)
         await link_input.fill(product_link)
-        await asyncio.sleep(0.8)
+        await asyncio.sleep(1.0)
 
-        # 2. Find '添加链接' button anchored to the same container as the input
-        add_btn = await _find_sibling_button(link_input, "添加链接")
+        # 2. Locate "添加链接" — it is a span/div suffix inside the input wrapper,
+        #    NOT a <button>.  Use get_by_text first (fastest), then DOM-walk fallback.
+        add_btn = page.get_by_text("添加链接", exact=True).first
+        btn_visible = False
+        try:
+            btn_visible = await add_btn.is_visible(timeout=2000)
+        except Exception:
+            pass
+
+        if not btn_visible:
+            add_btn = await _find_sibling_button(link_input, "添加链接")
+
         if add_btn is None:
-            logger.warning(f"添加链接 button not found near input for: {product_link}")
+            logger.warning(f"添加链接 element not found for: {product_link}")
             await link_input.clear()
             return
 
+        # 3. Wait up to 5 s for the element to become enabled / not greyed-out
+        #    Douyin validates the link asynchronously — stays disabled until done
+        enabled = False
+        for _ in range(25):
+            try:
+                el_class = await add_btn.get_attribute("class") or ""
+                is_disabled   = await add_btn.get_attribute("disabled")
+                aria_disabled = await add_btn.get_attribute("aria-disabled")
+                # "disabled" in class covers both <button disabled> and styled spans
+                if (is_disabled is None and aria_disabled != "true"
+                        and "disabled" not in el_class and "gray" not in el_class):
+                    enabled = True
+                    break
+            except Exception:
+                pass
+            await asyncio.sleep(0.2)
+
+        if not enabled:
+            logger.warning(f"添加链接 still disabled after 5 s — invalid link: {product_link}")
+            await link_input.clear()
+            return
+
+        # 4. Scroll into view → fresh bounding box → page.mouse.click (trusted events)
+        await add_btn.scroll_into_view_if_needed()
+        await asyncio.sleep(0.4)
         box = await add_btn.bounding_box()
-        logger.info(f"添加链接 btn bounding_box: {box}")
-
-        # 3. Check disabled state
-        is_disabled   = await add_btn.get_attribute("disabled")
-        aria_disabled = await add_btn.get_attribute("aria-disabled")
-        btn_class     = await add_btn.get_attribute("class") or ""
-        if is_disabled is not None or aria_disabled == "true" or "disabled" in btn_class:
-            logger.warning(f"添加链接 disabled — invalid link: {product_link}")
-            await link_input.clear()
-            return
-
-        # 4. Click and wait briefly for a reaction
-        await add_btn.click()
-        await asyncio.sleep(0.8)
+        logger.info(f"添加链接 bounding_box: {box}")
+        if box:
+            cx = box["x"] + box["width"] / 2
+            cy = box["y"] + box["height"] / 2
+            await page.mouse.move(cx, cy)
+            await asyncio.sleep(0.15)
+            await page.mouse.click(cx, cy)
+        else:
+            await add_btn.click()
+        await asyncio.sleep(1.2)
 
         # 5. Verify click landed: expect 编辑商品 dialog or a product-added indicator
         edit_visible = await page.locator(':text("编辑商品")').first.is_visible()
@@ -856,12 +1001,14 @@ async def _attach_product(page, product_link: str, short_title: str = ""):
                     'input[placeholder*="粘贴商品链接"], input[placeholder*="商品链接"]'
                 );
                 if (!input) return false;
+                // Walk up and search any element type (span/div/button/a)
                 let el = input.parentElement;
-                for (let i = 0; i < 6; i++) {
+                for (let i = 0; i < 8; i++) {
                     if (!el) break;
-                    for (const btn of el.querySelectorAll('button')) {
-                        if (btn.textContent.trim() === '添加链接') {
-                            btn.click();
+                    for (const node of el.querySelectorAll('button, span, div, a')) {
+                        if (node.textContent.trim() === '添加链接') {
+                            node.scrollIntoView({block: 'center'});
+                            node.click();
                             return true;
                         }
                     }
@@ -870,7 +1017,7 @@ async def _attach_product(page, product_link: str, short_title: str = ""):
                 return false;
             }""")
             logger.info(f"JS fallback result: {js_ok}")
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(1.2)
 
         # 6. Check for "未搜索到对应商品" error dialog
         error_dialog = page.locator(':text("未搜索到对应商品")').first

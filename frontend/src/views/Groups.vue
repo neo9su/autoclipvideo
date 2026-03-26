@@ -70,7 +70,10 @@
         </div>
 
         <!-- Merge status -->
-        <div v-if="g.merge_status === -1" class="merge-error">上次合并失败</div>
+        <div v-if="g.merge_status === -1" class="merge-error">
+          上次合并失败
+          <button v-if="g.merge_error" class="btn-error-detail" @click.stop="showMergeError(g)">查看原因</button>
+        </div>
 
         <!-- Quality issue warning -->
         <div v-if="g.quality_issue" class="quality-issue-bar">
@@ -295,6 +298,15 @@
     </div>
   </div>
 
+  <!-- Merge error detail modal -->
+  <div v-if="mergeErrorGroup" class="modal-overlay" @click.self="mergeErrorGroup = null">
+    <div class="modal-box">
+      <div class="modal-title">合并失败原因 — {{ mergeErrorGroup.label }}</div>
+      <pre class="error-pre">{{ mergeErrorGroup.merge_error || '无详细信息' }}</pre>
+      <button class="btn-action" style="margin-top:12px" @click="mergeErrorGroup = null">关闭</button>
+    </div>
+  </div>
+
 </template>
 
 <script setup>
@@ -324,6 +336,10 @@ const uploadingId = ref(null)
 // Processing progress: { [recording_id]: { pct, msg, eta_seconds, phase } }
 const progressMap = ref({})
 let progressTimer = null
+
+// Merge error detail
+const mergeErrorGroup = ref(null)
+function showMergeError(g) { mergeErrorGroup.value = g }
 
 // Video preview
 const previewRec = ref(null)
@@ -593,7 +609,12 @@ onUnmounted(() => { ws?.close(); stopProgressPolling() })
 .btn-action.orange { background: rgba(251,146,60,0.15); color: #c2540a; border-color: rgba(251,146,60,0.4); }
 .btn-sm { background: #222; border: 1px solid #333; color: #888; padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
 .btn-sm:hover { background: #2a2a2a; color: #ccc; }
-.merge-error { font-size: 12px; color: #fe2c55; margin-top: 8px; }
+.merge-error { font-size: 12px; color: #fe2c55; margin-top: 8px; display: flex; align-items: center; gap: 8px; }
+.btn-error-detail { background: none; border: 1px solid rgba(254,44,85,0.4); color: #fe2c55; border-radius: 4px; padding: 1px 7px; font-size: 11px; cursor: pointer; }
+.btn-error-detail:hover { background: rgba(254,44,85,0.1); }
+.modal-box { background: #1a1a1a; border: 1px solid #333; border-radius: 12px; padding: 20px; max-width: 560px; width: 90%; }
+.modal-title { font-size: 14px; font-weight: 600; margin-bottom: 12px; color: #fe2c55; }
+.error-pre { background: #111; border: 1px solid #2a2a2a; border-radius: 6px; padding: 12px; font-size: 11px; color: #f87171; white-space: pre-wrap; word-break: break-all; max-height: 300px; overflow-y: auto; margin: 0; }
 .quality-issue-bar { display: flex; align-items: center; gap: 8px; margin-top: 10px; background: rgba(251,146,60,0.08); border: 1px solid rgba(251,146,60,0.3); border-radius: 8px; padding: 8px 12px; }
 .quality-issue-icon { font-size: 14px; flex-shrink: 0; }
 .quality-issue-text { font-size: 12px; color: #fb923c; flex: 1; line-height: 1.4; }

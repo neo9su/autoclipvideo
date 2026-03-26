@@ -4,7 +4,10 @@
     <div class="task-list-panel">
       <div class="panel-header">
         <h3>发布任务</h3>
-        <button class="btn-primary" @click="showCreateModal = true">+ 创建任务</button>
+        <div style="display:flex;gap:8px">
+          <button class="btn-secondary" @click="openBatchModal">批量排期</button>
+          <button class="btn-primary" @click="showCreateModal = true">+ 创建任务</button>
+        </div>
       </div>
       <div class="filter-bar">
         <button v-for="s in statusFilters" :key="s.value"
@@ -21,8 +24,11 @@
           <div class="task-item-top">
             <span class="task-platform">{{ t.platform }}</span>
             <span :class="['badge', statusClass(t.status)]">{{ statusLabel(t.status) }}</span>
+            <span v-if="t.no_cart" class="badge badge-no-cart">无车</span>
             <button v-if="['failed','publishing'].includes(t.status)"
               class="btn-xs btn-retry" @click.stop="retryTask(t.id)" title="重试">↺</button>
+            <button v-if="t.status === 'failed'"
+              class="btn-xs btn-danger btn-del-failed" @click.stop="deleteFailedTask(t.id)" title="删除">×</button>
           </div>
           <div class="task-title">{{ t.title || '(无标题)' }}</div>
           <div class="task-meta">
@@ -46,6 +52,7 @@
           </div>
           <div class="detail-actions">
             <button v-if="['failed','publishing'].includes(selectedTask.status)" class="btn-primary" @click="retryTask(selectedTask.id)">重试</button>
+            <button v-if="selectedTask.status === 'failed'" class="btn-danger" @click="deleteFailedTask(selectedTask.id)">删除</button>
             <button v-if="['pending','scheduled'].includes(selectedTask.status)" class="btn-danger" @click="cancelTask(selectedTask.id)">取消</button>
           </div>
         </div>
@@ -74,7 +81,8 @@
           </div>
           <div class="field">
             <label>小黄车商品</label>
-            <div>{{ taskProductNames(selectedTask) || '未挂商品' }}</div>
+            <div v-if="selectedTask.no_cart" class="no-cart-hint" style="margin:0">无车发布</div>
+            <div v-else>{{ taskProductNames(selectedTask) || '未挂商品' }}</div>
           </div>
           <div class="field">
             <label>账号</label>
@@ -98,7 +106,12 @@
       <div class="modal">
         <h3>创建发布任务</h3>
 
-        <label>选择分组 *（仅显示已合并的）</label>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+          <label style="margin:0">选择分组 *（仅显示已合并的）</label>
+          <button class="btn-xs" @click="refreshGroups" :disabled="groupsRefreshing" style="font-size:11px">
+            {{ groupsRefreshing ? '…' : '↻ 刷新' }}
+          </button>
+        </div>
         <div class="room-filter-chips">
           <button :class="['room-chip', roomFilter === 0 && 'active']" @click="roomFilter = 0">全部</button>
           <button v-for="r in rooms" :key="r.id"
@@ -192,22 +205,38 @@
         <label>标签（逗号分隔，#格式）</label>
         <input v-model="newTask.tags" class="input" placeholder="#假发,#卷发,#变身" />
 
-        <div style="display:flex;justify-content:space-between;align-items:center">
-          <label>小黄车商品（可多选）</label>
-          <button v-if="products.length" class="btn-xs" @click="toggleAllProducts">{{ newTask.product_ids.length === products.length ? '取消全选' : '全选' }}</button>
+        <!-- 无车发布开关 -->
+        <div class="no-cart-row">
+          <button :class="['no-cart-btn', newTask.no_cart ? 'no-cart-btn-on' : 'no-cart-btn-off']"
+            @click="newTask.no_cart = !newTask.no_cart; if(newTask.no_cart) newTask.product_ids = []">
+            {{ newTask.no_cart ? '✓ 无车发布（不挂商品）' : '挂小黄车商品' }}
+          </button>
         </div>
-        <div class="product-multi">
-          <div class="product-multi-list">
-            <label v-for="p in products" :key="p.id" class="product-check-item">
-              <input type="checkbox" :value="p.id" v-model="newTask.product_ids" />
-              <span v-if="p.room_name" class="product-room-tag">{{ p.room_name }}</span>
-              <span>{{ p.product_name }}</span>
+
+        <!-- 商品选择（仅有车时显示） -->
+        <template v-if="!newTask.no_cart">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">
+            <label style="margin:0">
+              小黄车商品（可多选）
+              <span v-if="selectedGroupRoomId" class="muted" style="font-weight:normal">· 已按直播间筛选</span>
             </label>
-            <div v-if="!products.length" class="muted" style="font-size:12px;padding:6px 0">暂无商品</div>
+            <button v-if="roomFilteredProducts.length" class="btn-xs" @click="toggleAllProducts">
+              {{ newTask.product_ids.length === roomFilteredProducts.length ? '取消全选' : '全选' }}
+            </button>
           </div>
-          <button class="btn-secondary btn-sm" style="margin-top:6px" @click="autoMatchProduct" :disabled="!newTask.group_id">自动匹配</button>
-        </div>
-        <div v-if="matchedProduct" class="match-hint">建议: {{ matchedProduct.product_name }} ({{ matchedProduct.keywords }})</div>
+          <div class="product-multi">
+            <div class="product-multi-list">
+              <label v-for="p in roomFilteredProducts" :key="p.id" class="product-check-item">
+                <input type="checkbox" :value="p.id" v-model="newTask.product_ids" />
+                <span v-if="p.room_name" class="product-room-tag">{{ p.room_name }}</span>
+                <span>{{ p.product_name }}</span>
+              </label>
+              <div v-if="!roomFilteredProducts.length" class="muted" style="font-size:12px;padding:6px 0">暂无商品</div>
+            </div>
+            <button class="btn-secondary btn-sm" style="margin-top:6px" @click="autoMatchProduct" :disabled="!newTask.group_id">自动匹配</button>
+          </div>
+          <div v-if="matchedProduct" class="match-hint">建议: {{ matchedProduct.product_name }} ({{ matchedProduct.keywords }})</div>
+        </template>
 
         <div class="modal-actions">
           <button class="btn-secondary" @click="showCreateModal = false">取消</button>
@@ -252,6 +281,81 @@
       </div>
     </div>
 
+    <!-- Batch schedule modal -->
+    <div v-if="showBatchModal" class="modal-overlay" @click.self="showBatchModal = false">
+      <div class="modal">
+        <h3>批量排期发布</h3>
+        <p style="font-size:12px;color:#999;margin:0 0 16px">
+          自动为所有已合并但未发布的分组创建定时任务，按排期顺序无人工干预自动发布。
+        </p>
+
+        <label>平台 *</label>
+        <select v-model="batchForm.platform" class="input" @change="loadUnscheduledGroups">
+          <option value="douyin">抖音</option>
+          <option value="kuaishou">快手</option>
+        </select>
+
+        <label>直播间筛选（可选）</label>
+        <select v-model="batchForm.room_id" class="input" @change="loadUnscheduledGroups">
+          <option :value="null">全部直播间</option>
+          <option v-for="r in rooms" :key="r.id" :value="r.id">{{ r.name }}</option>
+        </select>
+
+        <label>发布账号</label>
+        <select v-model="batchForm.account_id" class="input">
+          <option :value="null">不指定账号</option>
+          <option v-for="a in accounts" :key="a.id" :value="a.id">
+            {{ a.account_name }} ({{ a.platform }})
+          </option>
+        </select>
+
+        <label>开始时间 *</label>
+        <input v-model="batchForm.start_datetime" type="datetime-local" class="input" />
+
+        <label>发布间隔（分钟）</label>
+        <input v-model.number="batchForm.interval_minutes" type="number" min="1" class="input" />
+
+        <div class="no-cart-row" style="margin:12px 0 4px">
+          <button :class="['no-cart-btn', batchForm.no_cart ? 'no-cart-btn-on' : 'no-cart-btn-off']"
+            @click="batchForm.no_cart = !batchForm.no_cart">
+            {{ batchForm.no_cart ? '✓ 无车发布（不挂商品）' : '挂小黄车商品' }}
+          </button>
+        </div>
+
+        <div style="margin-bottom:10px">
+          <label class="no-cart-toggle" style="color:#a78bfa">
+            <input type="checkbox" v-model="batchForm.auto_meta" />
+            <span>自动 AI 生成文案（每篇独立生成，耗时较长）</span>
+          </label>
+        </div>
+
+        <!-- Preview -->
+        <div v-if="unscheduledGroups.length" class="batch-preview">
+          <div class="batch-preview-title">
+            待排期分组（{{ unscheduledGroups.length }} 个）：
+          </div>
+          <div class="batch-preview-list">
+            <div v-for="(g, i) in unscheduledGroups" :key="g.id" class="batch-preview-item">
+              <span class="batch-idx">{{ i + 1 }}</span>
+              <span class="batch-label">{{ g.label }}</span>
+              <span class="batch-time muted">{{ previewTime(i) }}</span>
+            </div>
+          </div>
+        </div>
+        <div v-else-if="batchLoading" class="muted" style="font-size:12px;padding:8px 0">加载中…</div>
+        <div v-else class="muted" style="font-size:12px;padding:8px 0">暂无可排期的分组（所有已合并分组均已有发布任务）</div>
+
+        <div class="modal-actions">
+          <button class="btn-secondary" @click="showBatchModal = false">取消</button>
+          <button class="btn-primary"
+            :disabled="!unscheduledGroups.length || !batchForm.start_datetime || batchSubmitting"
+            @click="submitBatch">
+            {{ batchSubmitting ? '创建中…' : `确认排期（${unscheduledGroups.length} 篇）` }}
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- Accounts management panel (collapsible) -->
     <div class="accounts-panel">
       <div class="accounts-header" @click="showAccounts = !showAccounts">
@@ -287,6 +391,7 @@ import {
   getRooms, getGroups, getGroup, getPublishTasks, createPublishTask, retryPublishTask, cancelPublishTask,
   getProducts, getPublishAccounts, createPublishAccount, deletePublishAccount, loginPublishAccount,
   generatePublishMeta, matchGroupProduct, createWS, deleteGroup, reclipRecording,
+  getUnscheduledGroups, batchSchedulePublish,
 } from '../api.js'
 import { useToast } from '../composables/toast.js'
 
@@ -295,8 +400,10 @@ const { showToast } = useToast()
 const tasks = ref([])
 const selectedTask = ref(null)
 const showCreateModal = ref(false)
+watch(showCreateModal, (v) => { if (v) refreshGroups() })
 const statusFilter = ref('')
 const mergedGroups = ref([])
+const groupsRefreshing = ref(false)
 const rooms = ref([])
 const roomFilter = ref(1)   // default: 小圆圆不圆 (id=1)
 const accounts = ref([])
@@ -315,6 +422,77 @@ const scheduleTime = ref('10:00')
 const scheduleInterval = ref(60)
 const showAccounts = ref(false)
 
+// ── Batch schedule ─────────────────────────────────────────────────────────────
+const showBatchModal = ref(false)
+const batchSubmitting = ref(false)
+const batchLoading = ref(false)
+const unscheduledGroups = ref([])
+
+function _defaultBatchStart() {
+  const now = new Date()
+  now.setSeconds(0, 0)
+  // round up to next hour
+  now.setMinutes(0)
+  now.setHours(now.getHours() + 1)
+  // format for datetime-local input: "YYYY-MM-DDTHH:MM"
+  return now.toISOString().slice(0, 16)
+}
+
+const batchForm = ref({
+  platform: 'douyin',
+  account_id: null,
+  room_id: null,
+  start_datetime: _defaultBatchStart(),
+  interval_minutes: 90,
+  no_cart: false,
+  auto_meta: false,
+})
+
+function previewTime(index) {
+  if (!batchForm.value.start_datetime) return ''
+  const base = new Date(batchForm.value.start_datetime)
+  const t = new Date(base.getTime() + index * batchForm.value.interval_minutes * 60000)
+  return t.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+}
+
+async function loadUnscheduledGroups() {
+  batchLoading.value = true
+  try {
+    unscheduledGroups.value = await getUnscheduledGroups(batchForm.value.platform, batchForm.value.room_id)
+  } finally {
+    batchLoading.value = false
+  }
+}
+
+async function openBatchModal() {
+  batchForm.value.start_datetime = _defaultBatchStart()
+  showBatchModal.value = true
+  await loadUnscheduledGroups()
+}
+
+async function submitBatch() {
+  if (!batchForm.value.start_datetime || !unscheduledGroups.value.length) return
+  batchSubmitting.value = true
+  try {
+    const result = await batchSchedulePublish({
+      platform: batchForm.value.platform,
+      account_id: batchForm.value.account_id || null,
+      start_datetime: new Date(batchForm.value.start_datetime).toISOString(),
+      interval_minutes: batchForm.value.interval_minutes,
+      no_cart: batchForm.value.no_cart,
+      auto_meta: batchForm.value.auto_meta,
+      room_id: batchForm.value.room_id || null,
+    })
+    showBatchModal.value = false
+    await loadTasks()
+    showToast(result.message || `已创建 ${result.created} 个排期任务`, 'success')
+  } catch (e) {
+    showToast('批量排期失败: ' + e.message, 'error')
+  } finally {
+    batchSubmitting.value = false
+  }
+}
+
 const filteredGroups = computed(() =>
   roomFilter.value === 0
     ? mergedGroups.value
@@ -324,6 +502,23 @@ const filteredGroups = computed(() =>
 const publishedGroupIds = computed(() =>
   new Set(tasks.value.filter(t => t.status === 'done').map(t => t.group_id))
 )
+
+// Products filtered to match the selected group's room
+const selectedGroupRoomId = computed(() => {
+  if (!newTask.value.group_id) return null
+  const g = mergedGroups.value.find(g => g.id === newTask.value.group_id)
+  return g ? g.room_id : null
+})
+
+const roomFilteredProducts = computed(() => {
+  // Use selected group's room first, fall back to room chip filter, then show all
+  const roomId = selectedGroupRoomId.value || (roomFilter.value !== 0 ? roomFilter.value : null)
+  if (!roomId) return products.value
+  const byRoom = products.value.filter(p => p.room_id === roomId)
+  const globals = products.value.filter(p => !p.room_id)
+  const combined = [...byRoom, ...globals]
+  return combined.length > 0 ? combined : products.value
+})
 
 // Compute next scheduled_at from scheduleTime
 const schedulePreview = computed(() => {
@@ -364,7 +559,7 @@ const statusFilters = [
   { value: 'failed', label: '失败' },
 ]
 
-const newTask = ref({ group_id: '', platform: 'douyin', account_id: '', title: '', description: '', tags: '', product_ids: [] })
+const newTask = ref({ group_id: '', platform: 'douyin', account_id: '', title: '', description: '', tags: '', product_ids: [], no_cart: false })
 const newAccount = ref({ platform: 'douyin', account_name: '' })
 
 function statusLabel(s) {
@@ -393,6 +588,17 @@ async function loadTasks() {
   tasks.value = await getPublishTasks(statusFilter.value || null)
 }
 
+async function refreshGroups() {
+  groupsRefreshing.value = true
+  try {
+    const [groups, prods] = await Promise.all([getGroups(), getProducts()])
+    mergedGroups.value = groups.filter(g => g.ready_count > 0)
+    products.value = prods.filter(p => p.enabled)
+  } finally {
+    groupsRefreshing.value = false
+  }
+}
+
 async function selectTask(t) {
   selectedTask.value = t
 }
@@ -416,6 +622,17 @@ async function cancelTask(id) {
     showToast('任务已取消', 'success')
   } catch (e) {
     showToast('取消失败: ' + e.message, 'error')
+  }
+}
+
+async function deleteFailedTask(id) {
+  try {
+    await cancelPublishTask(id)
+    if (selectedTask.value?.id === id) selectedTask.value = null
+    await loadTasks()
+    showToast('已删除', 'success')
+  } catch (e) {
+    showToast('删除失败: ' + e.message, 'error')
   }
 }
 
@@ -504,10 +721,11 @@ function applyScheme(scheme) {
 }
 
 function toggleAllProducts() {
-  if (newTask.value.product_ids.length === products.value.length) {
+  const pool = roomFilteredProducts.value
+  if (newTask.value.product_ids.length === pool.length) {
     newTask.value.product_ids = []
   } else {
-    newTask.value.product_ids = products.value.map(p => p.id)
+    newTask.value.product_ids = pool.map(p => p.id)
   }
 }
 
@@ -540,6 +758,7 @@ async function submitCreate() {
     tags: newTask.value.tags || null,
     product_ids: newTask.value.product_ids.length ? newTask.value.product_ids : null,
     auto_meta: false,
+    no_cart: newTask.value.no_cart,
   }
   try {
     try {
@@ -560,7 +779,7 @@ async function submitCreate() {
     }
     showCreateModal.value = false
     const defaultAcc = accounts.value.find(a => a.account_name === '颜遇生活')
-    newTask.value = { group_id: '', platform: 'douyin', account_id: defaultAcc?.id || '', title: '', description: '', tags: '', product_ids: [] }
+    newTask.value = { group_id: '', platform: 'douyin', account_id: defaultAcc?.id || '', title: '', description: '', tags: '', product_ids: [], no_cart: false }
     matchedProduct.value = null
     await loadTasks()
     showToast('任务已创建', 'success')
@@ -620,6 +839,9 @@ onMounted(async () => {
       const id = msg.task_id
       if (!progressLog.value[id]) progressLog.value[id] = []
       progressLog.value[id].push(msg.message)
+    } else if (msg.type === 'clip_progress' && msg.phase === 'done') {
+      // A clip group just finished merging — refresh group list
+      refreshGroups()
     }
   })
 })
@@ -744,6 +966,7 @@ label { display: block; font-size: 12px; color: #888; margin: 12px 0 4px; }
 .btn-xs { background: #2a2a2a; color: #ccc; border: 1px solid #444; border-radius: 4px; padding: 3px 8px; cursor: pointer; font-size: 11px; margin-right: 4px; }
 .btn-xs.btn-danger { color: #fe2c55; border-color: #fe2c55; }
 .btn-xs.btn-retry { color: #60a5fa; border-color: #60a5fa; padding: 2px 6px; margin-left: auto; }
+.btn-xs.btn-del-failed { color: #fe2c55; border-color: #fe2c55; padding: 2px 7px; margin-left: 4px; font-size: 13px; line-height: 1; }
 
 .badge { border-radius: 4px; padding: 2px 8px; font-size: 11px; }
 .badge-green { background: rgba(52,211,153,0.15); color: #34d399; }
@@ -752,6 +975,21 @@ label { display: block; font-size: 12px; color: #888; margin: 12px 0 4px; }
 .badge-blue { background: rgba(59,130,246,0.15); color: #60a5fa; }
 .badge-orange { background: rgba(249,115,22,0.15); color: #fb923c; }
 .badge-red { background: rgba(254,44,85,0.15); color: #fe2c55; }
+.badge-no-cart { background: rgba(100,200,255,0.15); color: #67d4f0; }
+.no-cart-row { margin: 8px 0; }
+.no-cart-btn { width: 100%; padding: 9px 12px; border-radius: 8px; border: 1px solid; font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.15s; text-align: center; }
+.no-cart-btn-off { background: rgba(254,44,85,0.08); border-color: rgba(254,44,85,0.3); color: #fe2c55; }
+.no-cart-btn-off:hover { background: rgba(254,44,85,0.15); }
+.no-cart-btn-on { background: rgba(100,200,255,0.12); border-color: rgba(100,200,255,0.4); color: #67d4f0; }
+.no-cart-btn-on:hover { background: rgba(100,200,255,0.2); }
+.no-cart-hint { font-size: 12px; color: #67d4f0; padding: 8px 10px; background: rgba(100,200,255,0.08); border-radius: 6px; border: 1px solid rgba(100,200,255,0.2); margin-top: 4px; }
+.batch-preview { background: #111; border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px 12px; margin: 10px 0; max-height: 220px; overflow-y: auto; }
+.batch-preview-title { font-size: 12px; color: #999; margin-bottom: 6px; }
+.batch-preview-item { display: flex; align-items: center; gap: 8px; padding: 4px 0; border-bottom: 1px solid #1e1e1e; font-size: 12px; }
+.batch-preview-item:last-child { border-bottom: none; }
+.batch-idx { width: 20px; text-align: right; color: #555; flex-shrink: 0; }
+.batch-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.batch-time { flex-shrink: 0; font-size: 11px; }
 .muted { color: #666; }
 
 .progress-log { background: #111; border: 1px solid #2a2a2a; border-radius: 8px; padding: 12px 14px; margin-bottom: 16px; }

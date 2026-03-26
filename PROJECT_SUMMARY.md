@@ -2,6 +2,28 @@
 
 ---
 
+## 状态快照 — 2026-03-26T05:00 UTC (13:00 本地)
+
+**系统状态**: 转录队列恢复正常运行中
+
+| 项目 | 值 |
+|------|-----|
+| GPU服务 | 在线，健康 (pid=9348, uptime~10min, restart_count=4) |
+| 转录队列 | 57 个chunk在GPU处理中 (transcribed=1: 51, 待上传: 8) |
+| 转录完成 | 6个chunk(transcribed=2) + 119条旧录像(transcribed=2) = 125条 |
+| 剪辑状态 | clipped=2(完成): 50, clipped=0(待剪): 62, clipped=1(进行中): 1 |
+| GPU VRAM | 15.7GB free / 17.2GB (Ollama已移除) |
+| GPU RAM | 11.1GB free / 16GB (内存补丁生效) |
+| ComfyUI | 在线健康 |
+
+**本轮修复记录** (03:07-05:00 UTC):
+1. `segment_merger.py` bug: chunk INSERT缺少 `start_time NOT NULL` → 修复
+2. 手动修复DB: 16条录像注册59个chunk记录，删原始大文件
+3. GPU jobs.db UNIQUE冲突: 每次retry前SSH删除error记录+重启服务
+4. GPU服务崩溃(OOM/内存泄漏): 向 `_do_transcribe` 添加 `gc.collect()+torch.cuda.empty_cache()` finally块 → ram_free 4GB→11.1GB，崩溃停止
+
+---
+
 ## 版本历史
 
 | 版本 | 日期 | 主要变更 |
@@ -467,3 +489,196 @@ SQLite 不支持 DROP COLUMN（v3.35+才支持），如需彻底回滚：
 sqlite3 douyin.db "ALTER TABLE recordings DROP COLUMN skip_reason;"
 # 或重建表（保留数据）
 ```
+
+---
+
+## 状态快照 — 2026-03-26T15:10 UTC (23:10 本地)
+
+**系统状态**: GPU服务已恢复，转录队列运行中
+
+| 项目 | 值 |
+|------|-----|
+| GPU服务 | 在线 (watchdog pid=5424, gpu pid=7716) |
+| 转录队列 | pending ~50个chunk，GPU正在处理 |
+| 增强服务 | 后端已重启，旧enhance jobs已清空 |
+| 前端构建 | v1.2.0 已构建 (index-CwKL5OSG.js) |
+
+---
+
+## v1.2.0 变更说明（2026-03-26）
+
+### Bug修复
+
+#### GPU服务稳定性（根本原因修复）
+- **发现**: `gpu_service.py` 因PowerShell文件编辑操作导致UTF-8中文字符损坏 (11处替换字符 `\uFFFD` + 1处字符串字面量不闭合)，造成 `SyntaxError` 使服务无法启动
+- **修复**: 用Python字节级替换正确恢复11处 `→` 箭头（注释中）和1处 `中` 字符（字符串字面量中）
+- **附加优化**: Whisper模型加载从 `compute_type="float16"` 改为 `"int8_float16"` 以避免 `cudnn64_9.dll` 栈缓冲区溢出崩溃（`0xC0000409` at `0x1586d`）
+
+#### 转录队列恢复
+- 46个 `transcribed=-1` 的chunk记录重置为 `transcribed=0, synced=0`
+- 修复 `end_time=NULL` 导致chunk不被 `pending_transcribe` 计数
+- 手动注册 `小圆圆不圆_003` 的4个chunk（segment_merger的NOT NULL约束问题）
+- GPU jobs.db清理46条error记录，避免UNIQUE冲突
+
+#### 发布页 — 商品筛选修复 (`Publish.vue`)
+- **问题**: 当选定分组所在直播间无专属商品时，`roomFilteredProducts` 回退到显示**所有商品**（含其他直播间商品），导致用户看到不相关商品
+- **修复**: 回退逻辑从 `products.value`（全部）改为 `[...byRoom, ...globals]`（仅显示本房间商品+无房间归属的全局商品）；只有两者均为空时才显示所有商品
+
+#### 发布页 — 分组列表自动刷新 (`Publish.vue`)
+- **新增**: 每次打开"创建发布任务"弹窗时自动刷新分组列表（`watch(showCreateModal, v => { if (v) refreshGroups() })`），确保显示最新已合并分组
+- 手动 `↻ 刷新` 按钮保留
+
+#### 增强作业卡死修复 (`enhance.py` + `main.py`)
+- `get_enhance_job_status()`: GPU服务重启后作业记录丢失，HTTP 404 现在返回 `{"status":"error"}` 而非 `None`，避免 `_poll_enhance_job` 无限等待
+- `_poll_enhance_job()`: 新增连续失败计数器，超过2分钟（24次×5s）无响应则标记作业失败并退出轮询
+
+#### AI文案多样性提升 (`meta_generator.py`)
+- Bedrock temperature: `0.7` → `0.95`
+- 系统提示强化差异化要求：6种种草角度切入、5种催单触发角度
+- 禁止重复开头、禁止过时网络词
+
+### 版本历史更新
+
+| 版本 | 日期 | 主要变更 |
+|------|------|---------|
+| v1.2 | 2026-03-26 | GPU服务编码修复+compute_type优化；发布页商品筛选修复；分组自动刷新；增强作业卡死修复；AI文案多样性提升 |
+| v1.1 | 2026-03-25 | 画质过滤+流程优化：低画质跳过、时长过短跳过、直播流分辨率监控、AI文案4方案多标签、封面暖色主题、发布分组自动合并 |
+| v1.0 | 2026-03-25 | 直播流质量升级：webcast API原画流；fragmented MP4防损坏 |
+| v0.9 | 2026-03-25 | Phase 2 GPU卸载：gpu_service clip-jobs+rembg；editor.py NVENC+本机降级 |
+
+---
+
+## 状态快照 — 2026-03-26T08:00 UTC (16:00 本地)
+
+| 项目 | 值 |
+|------|-----|
+| GPU服务 | 在线，健康 (uptime=47min, restart_count=10, 稳定无新崩溃) |
+| pending_transcribe | 0 — 所有chunk处理完毕 |
+| gpu_busy | false |
+| queue_depth | 0 |
+| Enhance jobs | 0 |
+| Clip队列 | running=0, queued=0 |
+| GPU RAM free | 4GB |
+| GPU VRAM free | ~15.7GB |
+| Watchdog | 在线 (gpu + comfyui 均 healthy) |
+| 前端构建 | v1.2.0 (index-CwKL5OSG.js, 2026-03-26) |
+| 后端 | 运行中 pid=53401 |
+
+**本小时无异常事件。系统空闲待命。**
+
+---
+
+## v1.3.0 变更说明（2026-03-27）
+
+### GPU 服务器 Python 降级：3.13 → 3.11
+
+#### 背景
+
+v1.2.0 期间 GPU 服务器（Windows，RTX 4080S）出现连续 5 次 BSOD：
+- 崩溃模块：`cudnn64_9.dll`，异常码 `0xC0000409`（STATUS_STACK_BUFFER_OVERRUN），偏移量固定 `0x1586d`
+- 根因：**Python 3.13 + CTranslate2 + cuDNN 9.10.2 兼容性缺陷**，Python 3.13 的 GIL 变更影响多线程+CUDA 内存模型，在 Whisper 高负载下触发 cuDNN FP16 kernel 越界写入
+- v1.2.0 仅以 `compute_type=int8_float16` 作临时绕过，未根治
+
+#### 变更内容（均在 GPU 服务器 `10.190.0.203` 执行，仅写入 C: 盘）
+
+| 变更项 | 旧值 | 新值 |
+|--------|------|------|
+| GPU 服务 Python | `C:\Python313\python.exe`（3.13.5） | `C:\Python311\python.exe`（3.11.9） |
+| Watchdog Python | `C:\Python313\python.exe` | `C:\Python311\python.exe` |
+| `watchdog_config.json` cmd | `C:\Python313\python.exe` | `C:\Python311\python.exe` |
+| `start_all.bat` PYTHON 变量 | `C:\Python313\python.exe` | `C:\Python311\python.exe` |
+
+#### 安装步骤（已执行）
+
+```powershell
+# 1. 下载并静默安装 Python 3.11.9 到 C:\Python311
+C:\python311_installer.exe /quiet InstallAllUsers=0 TargetDir=C:\Python311 PrependPath=0 Include_pip=1 Include_test=0
+
+# 2. 安装所有依赖
+C:\Python311\python.exe -m pip install faster-whisper fastapi uvicorn httpx aiofiles pydantic python-multipart rembg
+
+# 3. 验证
+C:\Python311\python.exe -c "import ctranslate2, faster_whisper, fastapi; print('OK')"
+```
+
+#### 当前运行状态（2026-03-27）
+
+| 进程 | PID | Python | 状态 |
+|------|-----|--------|------|
+| GPU 服务 (:8877) | 2572 | **3.11.9** | ✅ healthy |
+| Watchdog (:8878) | 5464 | **3.11.9** | ✅ running |
+| ComfyUI (:8188) | 17672 | 3.13（独立，未动） | ✅ healthy |
+
+---
+
+## 回滚指南（完整版）
+
+### 回滚 GPU 服务器 Python 到 3.13（如需）
+
+Python 3.13 未被卸载，原始文件完整保留于 `C:\Python313\`。
+
+```powershell
+# SSH 到 GPU 服务器后执行：
+
+# 1. 修改 watchdog_config.json（用 Python 3.13 写入）
+C:\Python313\python.exe -c "
+import json; d=json.load(open('C:/Users/neo/douyin_processor/watchdog_config.json'));
+[s['cmd'].__setitem__(0,'C:\\\\Python313\\\\python.exe') for s in d['services'].values() if s.get('cmd')];
+open('C:/Users/neo/douyin_processor/watchdog_config.json','w',encoding='utf-8').write(json.dumps(d,indent=2))
+"
+
+# 2. 修改 start_all.bat
+powershell -Command "(Get-Content 'C:\Users\neo\douyin_processor\start_all.bat') -replace 'Python311','Python313' | Set-Content -Encoding UTF8 'C:\Users\neo\douyin_processor\start_all.bat'"
+
+# 3. 重启 watchdog（终止现有进程，用 Python 3.13 启动）
+taskkill /PID <watchdog_pid> /F
+taskkill /PID <gpu_service_pid> /F
+powershell -Command "Start-Process 'C:\Python313\python.exe' 'watchdog_agent.py' -WorkingDirectory 'C:\Users\neo\douyin_processor' -WindowStyle Hidden"
+```
+
+> **注意**：回滚到 3.13 后 BSOD 风险依然存在，建议同时保留 `compute_type=int8_float16` 配置。
+
+### 回滚本机代码到 v1.2.0
+
+```bash
+git checkout 7483528 -- backend/ frontend/src/ gpu_service/
+```
+
+### 回滚到 v0.9（GPU 卸载前）
+
+```bash
+git checkout 4273069 -- backend/ frontend/src/ gpu_service/
+```
+
+---
+
+## 版本历史（完整）
+
+| 版本 | 日期 | 主要变更 |
+|------|------|---------|
+| v1.3 | 2026-03-27 | GPU服务器 Python 3.13→3.11 根治 BSOD；watchdog/start_all.bat 同步更新 |
+| v1.2 | 2026-03-26 | GPU服务编码修复+compute_type优化；发布页商品筛选修复；分组自动刷新；增强作业卡死修复；AI文案多样性提升 |
+| v1.1 | 2026-03-25 | 画质过滤+流程优化：低画质跳过、时长过短跳过、直播流分辨率监控、AI文案4方案多标签、封面暖色主题、发布分组自动合并 |
+| v1.0 | 2026-03-25 | 直播流质量升级：webcast API原画流；fragmented MP4防损坏 |
+| v0.9 | 2026-03-25 | Phase 2 GPU卸载：gpu_service clip-jobs+rembg；editor.py NVENC+本机降级 |
+| v0.8 | 2026-03-25 | Phase 1 OOM根治：分辨率4K→2K；并发改为1；Semaphore(3)→(1)；内存监控阈值修正 |
+| v0.7 | 2026-03-24 | 分组详情处理进度条+ETA（WS实时推送+轮询） |
+| v0.6 | 2026-03-24 | 自定义分组；分组删除；分组管理重试按钮；批量导入视频路径 |
+| v0.5 | 2026-03-24 | OOM修复（Semaphore 1、MAX_CONCURRENT_CLIPS=1、200MB合并上限、大文件自动分割） |
+| v0.4 | 2026-03-24 | 多平台发布系统（Playwright）；发布任务管理；商品库；AI元数据生成 |
+| v0.3 | 2026-03-24 | GPU任务队列UI；背景音乐合成；字幕烧录+关键词高亮；视频降噪 |
+| v0.2 | 2026-03-24 | 分组管理；合并剪辑；缩略图生成；封面合成 |
+| v0.1 | 2026-03-24 | 基础直播录制；转录（faster-whisper via GPU）；自动剪辑 |
+
+---
+
+## 状态快照 — 2026-03-27（Python 降级后）
+
+| 项目 | 值 |
+|------|-----|
+| GPU服务 Python | **3.11.9**（已从 3.13 降级）|
+| GPU服务 | 在线 healthy (pid=2572) |
+| Watchdog | 在线 (pid=5464, Python 3.11.9) |
+| ComfyUI | 在线 healthy (pid=17672) |
+| BSOD 根因 | 已根治（Python 3.11 + CTranslate2 兼容） |
+| C盘安装路径 | `C:\Python311\`（永久盘，不受虚拟盘影响） |

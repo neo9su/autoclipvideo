@@ -1374,7 +1374,8 @@ def _apply_hints(segs: List[Seg], hints: dict) -> None:
 
 # ── GPU offload path ──────────────────────────────────────────────────────────
 
-_GPU_SERVICE_URL = os.environ.get("GPU_SERVICE_URL", "http://10.190.0.203:8877")
+_GPU_SERVICE_URL  = os.environ.get("GPU_SERVICE_URL",  "http://10.190.0.203:8877")
+_GPU_WAIT_TIMEOUT = float(os.environ.get("GPU_WAIT_TIMEOUT", "600"))  # seconds to wait for GPU before local fallback
 
 
 async def _edit_via_gpu(
@@ -1384,11 +1385,13 @@ async def _edit_via_gpu(
     segs: List["Seg"],
     out_path: str,
     on_progress=None,
+    mp4_path: Optional[str] = None,   # local path; enables auto-upload on 404
 ) -> Optional[str]:
     """
     Offload clip encoding to GPU server via NVENC.
-    Source MP4 is already on GPU server from transcription upload — no re-upload needed.
-    Returns out_path on success, None on failure (caller falls back to local pipeline).
+    If the GPU returns 404 (file not found) and mp4_path is provided, the file is
+    uploaded automatically and the job is retried.
+    Returns out_path on success, None on failure.
     """
     import httpx
 
@@ -1404,26 +1407,75 @@ async def _edit_via_gpu(
         "thumb_seek": best_seg.start + 1.0,
     }
 
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+    async def _submit(client) -> Optional[str]:
+        """POST /clip-jobs; returns job_id or None."""
+        nonlocal mp4_path
+        try:
             resp = await client.post(f"{_GPU_SERVICE_URL}/clip-jobs", json=payload)
-            if resp.status_code != 201:
-                logger.warning(f"GPU clip job rejected: {resp.status_code} {resp.text[:200]}")
+        except Exception as e:
+            logger.warning(f"GPU clip job submission failed: {e}")
+            return None
+        if resp.status_code == 404 and mp4_path and os.path.exists(mp4_path):
+            # File not on GPU server — upload it, then retry once
+            logger.info(f"GPU 404: auto-uploading {mp4_filename} to GPU server then retrying...")
+            try:
+                from sync import sync_file
+                await sync_file(mp4_path, room_id)
+            except Exception as ue:
+                logger.warning(f"Auto-upload for {mp4_filename} failed: {ue}")
                 return None
-            job_id = resp.json()["job_id"]
-            logger.info(f"GPU clip job created: {job_id} for {mp4_filename}")
-    except Exception as e:
-        logger.warning(f"GPU clip job submission failed: {e}")
+            try:
+                resp = await client.post(f"{_GPU_SERVICE_URL}/clip-jobs", json=payload)
+            except Exception as e:
+                logger.warning(f"GPU clip job retry after upload failed: {e}")
+                return None
+        if resp.status_code != 201:
+            logger.warning(f"GPU clip job rejected: {resp.status_code} {resp.text[:200]}")
+            return None
+        jid = resp.json()["job_id"]
+        logger.info(f"GPU clip job created: {jid} for {mp4_filename}")
+        return jid
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        job_id = await _submit(client)
+    if not job_id:
         return None
 
-    # Poll until done or 25-minute timeout
+    # Poll until done or 25-minute timeout; recover if GPU goes offline mid-job
     deadline = asyncio.get_event_loop().time() + 1500
+    consecutive_errors = 0
     async with httpx.AsyncClient(timeout=15.0) as client:
         while asyncio.get_event_loop().time() < deadline:
             await asyncio.sleep(5.0)
             try:
                 data = (await client.get(f"{_GPU_SERVICE_URL}/clip-jobs/{job_id}")).json()
+                consecutive_errors = 0
             except Exception:
+                consecutive_errors += 1
+                if consecutive_errors >= 6:   # ~30s of consecutive failures
+                    from gpu_state import is_online as _gpu_is_online, wait_until_online as _gpu_wait
+                    if not _gpu_is_online():
+                        logger.info(f"GPU offline during clip job {job_id} — waiting for recovery...")
+                        try:
+                            await asyncio.wait_for(_gpu_wait(), timeout=600)
+                        except asyncio.TimeoutError:
+                            logger.warning(f"GPU stayed offline; abandoning clip job {job_id}")
+                            return None
+                        # GPU is back — check if job still exists
+                        consecutive_errors = 0
+                        try:
+                            r = await client.get(f"{_GPU_SERVICE_URL}/clip-jobs/{job_id}")
+                            if r.status_code == 404:
+                                # Job was lost in restart — resubmit
+                                logger.info(f"Clip job {job_id} lost after GPU restart, resubmitting...")
+                                async with httpx.AsyncClient(timeout=30.0) as sc:
+                                    new_jid = await _submit(sc)
+                                if new_jid:
+                                    job_id = new_jid
+                                else:
+                                    return None
+                        except Exception:
+                            pass
                 continue
 
             status = data.get("status")
@@ -1468,6 +1520,124 @@ async def _edit_via_gpu(
     size_mb = os.path.getsize(out_path) / 1024 / 1024
     logger.info(f"GPU clip downloaded: {out_path} ({size_mb:.1f} MB)")
     return out_path
+
+
+# ── Fast local fallback (stream-copy + single encode) ─────────────────────────
+
+async def _fast_local_clip(
+    mp4: str,
+    selected: List[Seg],
+    segs: List[Seg],
+    out: str,
+    on_progress=None,
+) -> bool:
+    """
+    Fast local fallback when GPU is unavailable.
+    Stream-copy segment extraction + concat + single re-encode pass.
+    Skips all transitions and pre-processing.  ~10-30s vs 30+ minutes.
+    """
+    ass_content = build_ass(selected, segs)
+    has_subs = "Dialogue:" in ass_content
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ass_path = os.path.join(tmp, "subs.ass")
+        with open(ass_path, "w", encoding="utf-8") as f:
+            f.write(ass_content)
+
+        # Step 1: extract each segment via stream copy (no re-encode)
+        seg_files: List[str] = []
+        for i, seg in enumerate(selected):
+            seg_out = os.path.join(tmp, f"seg_{i:03d}.mp4")
+            pad_start = min(SEG_PAD, seg.start)
+            t_start = seg.start - pad_start
+            t_dur = seg.duration + pad_start + SEG_PAD
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", f"{t_start:.3f}",
+                "-t", f"{t_dur:.3f}",
+                "-i", mp4,
+                "-c", "copy",
+                "-reset_timestamps", "1",
+                "-avoid_negative_ts", "make_zero",
+                seg_out,
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+            )
+            await proc.communicate()
+            if proc.returncode == 0 and os.path.exists(seg_out) and os.path.getsize(seg_out) > 0:
+                seg_files.append(seg_out)
+            else:
+                logger.warning(f"_fast_local_clip: segment {i} extract failed")
+                return False
+
+        # Step 2: concat all segments (stream copy)
+        list_path = os.path.join(tmp, "concat.txt")
+        with open(list_path, "w") as lf:
+            for sf in seg_files:
+                lf.write(f"file '{sf}'\n")
+        merged = os.path.join(tmp, "merged.mp4")
+        cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy", merged]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+        )
+        await proc.communicate()
+        if proc.returncode != 0 or not os.path.exists(merged) or os.path.getsize(merged) == 0:
+            logger.error("_fast_local_clip: concat failed")
+            return False
+
+        # Step 3: single re-encode pass — scale to 1080×1920 + subtitles + music
+        music_path = _pick_music()
+        cmd = ["ffmpeg", "-y", "-i", merged]
+        filter_parts: List[str] = []
+        audio_map = "0:a"
+
+        if music_path:
+            cmd += ["-stream_loop", "-1", "-i", music_path]
+            filter_parts.append(
+                "[0:a]acompressor=threshold=-25dB:ratio=3:attack=5:release=100:makeup=4dB,"
+                "loudnorm=I=-16:TP=-1.5:LRA=11,"
+                "aformat=channel_layouts=stereo[voice];"
+                "[1:a]volume=0.40,aformat=channel_layouts=stereo[bgm];"
+                "[voice][bgm]amix=inputs=2:duration=first:normalize=0[aout]"
+            )
+            audio_map = "[aout]"
+        else:
+            filter_parts.append(
+                "[0:a]acompressor=threshold=-25dB:ratio=3:attack=5:release=100:makeup=4dB,"
+                "loudnorm=I=-16:TP=-1.5:LRA=11,"
+                "aformat=channel_layouts=stereo[aout]"
+            )
+            audio_map = "[aout]"
+
+        vf = "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2"
+        if has_subs:
+            escaped = ass_path.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+            vf += f",ass={escaped}"
+        filter_parts.append(f"[0:v]{vf}[vout]")
+
+        cmd += ["-filter_complex", ";".join(filter_parts)]
+        cmd += [
+            "-map", "[vout]", "-map", audio_map,
+            "-pix_fmt", "yuv420p",
+            "-c:v", "h264_videotoolbox", "-b:v", "10M", "-allow_sw", "1",
+            "-ar", "44100", "-ac", "2",
+            "-c:a", "aac", "-b:a", "192k",
+            out,
+        ]
+        if on_progress:
+            await on_progress("final", 0, 1)
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+        )
+        _, stderr = await proc.communicate()
+        ok = proc.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 0
+        if not ok:
+            logger.error(
+                f"_fast_local_clip final encode failed rc={proc.returncode}: "
+                f"{stderr.decode(errors='replace')[-1000:]}"
+            )
+        return ok
 
 
 # ── Main entry ────────────────────────────────────────────────────────────────
@@ -1538,89 +1708,60 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
 
     # ── Try GPU path first ────────────────────────────────────────────────────
     if room_id is not None:
-        try:
-            mp4_filename = os.path.basename(mp4_path)
-            gpu_result = await _edit_via_gpu(
-                mp4_filename, room_id, selected, segs, out_path, on_progress
-            )
-            if gpu_result:
-                # GPU succeeded — generate thumbnail locally from original mp4
-                try:
-                    if on_progress:
-                        await on_progress("thumbnail", 0, 1)
-                    from thumbnail import generate_thumbnail
-                    best_seg = max(selected, key=lambda s: s.score) if any(s.score > 0 for s in selected) \
-                               else selected[max(0, len(selected) // 4)]
-                    thumb = await generate_thumbnail(mp4_path, offset=best_seg.start + 1.0)
-                    if thumb:
-                        await _prepend_thumbnail(out_path, thumb)
-                except Exception as e:
-                    logger.warning(f"Thumbnail prepend skipped (GPU path): {e}")
-                size_mb = os.path.getsize(out_path) / 1024 / 1024
-                logger.info(f"Clip ready (GPU): {out_path} ({size_mb:.1f} MB, {total_dur:.1f}s)")
-                return out_path
-            logger.info("GPU clip failed — falling back to local pipeline")
-        except Exception as e:
-            logger.warning(f"GPU path error, falling back to local: {e}")
-
-    # ── Local pipeline (fallback / GPU unavailable) ───────────────────────────
-    anime_frames = await _gen_transition_anime_frames(mp4_path, selected)
-
-    # Zoom punch: boundaries with "zoom_punch" type AND no anime frame
-    zoom_boundaries = [
-        bi for bi in range(len(selected) - 1)
-        if _TR_POOL[bi % len(_TR_POOL)] == "zoom_punch"
-        and not (bi < len(anime_frames) and anime_frames[bi])
-    ]
-    zoom_clips = await _gen_zoom_punch_clips(mp4_path, selected, zoom_boundaries)
-    # Merge zoom clips into anime_frames list (zoom_punch fills empty slots)
-    for bi, path in zoom_clips.items():
-        if bi < len(anime_frames) and not anime_frames[bi]:
-            anime_frames[bi] = path
-
-    person_boundaries = [
-        bi for bi in range(len(selected) - 1)
-        if _TR_POOL[bi % len(_TR_POOL)] == "fadeblack"
-        and not (bi < len(anime_frames) and anime_frames[bi])
-    ]
-    person_frames = await _gen_person_frames(mp4_path, selected, person_boundaries)
-    try:
-        if on_progress:
-            await on_progress("build", 0, 1)
-        if await _build_clip(
-            mp4_path, selected, segs, out_path,
-            anime_frames=anime_frames, person_frames=person_frames,
-            on_progress=on_progress,
-        ):
+        # Wait for GPU to come back online before attempting (up to _GPU_WAIT_TIMEOUT)
+        from gpu_state import is_online as _gpu_is_online, wait_until_online as _gpu_wait
+        if not _gpu_is_online():
+            logger.info(f"GPU offline — waiting up to {_GPU_WAIT_TIMEOUT:.0f}s before clip job...")
             try:
-                if on_progress:
-                    await on_progress("thumbnail", 0, 1)
-                from thumbnail import generate_thumbnail
-                # Pick best-scored segment for thumbnail; fallback to 1/4 position
-                best_seg = max(selected, key=lambda s: s.score) if any(s.score > 0 for s in selected) \
-                           else selected[max(0, len(selected) // 4)]
-                thumb_seek = best_seg.start + 1.0
-                # Extract from original mp4 (no subtitle overlay, clean face frame)
-                thumb = await generate_thumbnail(mp4_path, offset=thumb_seek)
-                if thumb:
-                    await _prepend_thumbnail(out_path, thumb)
+                await asyncio.wait_for(_gpu_wait(), timeout=_GPU_WAIT_TIMEOUT)
+                logger.info("GPU back online, proceeding with GPU clip")
+            except asyncio.TimeoutError:
+                logger.warning(f"GPU still offline after {_GPU_WAIT_TIMEOUT:.0f}s — using local fallback")
+                room_id = None   # skip GPU attempt
+        if room_id is not None:
+            try:
+                mp4_filename = os.path.basename(mp4_path)
+                gpu_result = await _edit_via_gpu(
+                    mp4_filename, room_id, selected, segs, out_path, on_progress,
+                    mp4_path=mp4_path,
+                )
+                if gpu_result:
+                    # GPU succeeded — generate thumbnail locally from original mp4
+                    try:
+                        if on_progress:
+                            await on_progress("thumbnail", 0, 1)
+                        from thumbnail import generate_thumbnail
+                        best_seg = max(selected, key=lambda s: s.score) if any(s.score > 0 for s in selected) \
+                                   else selected[max(0, len(selected) // 4)]
+                        thumb = await generate_thumbnail(mp4_path, offset=best_seg.start + 1.0)
+                        if thumb:
+                            await _prepend_thumbnail(out_path, thumb)
+                    except Exception as e:
+                        logger.warning(f"Thumbnail prepend skipped (GPU path): {e}")
+                    size_mb = os.path.getsize(out_path) / 1024 / 1024
+                    logger.info(f"Clip ready (GPU): {out_path} ({size_mb:.1f} MB, {total_dur:.1f}s)")
+                    return out_path
+                logger.info("GPU clip failed — falling back to local pipeline")
             except Exception as e:
-                logger.warning(f"Thumbnail prepend skipped: {e}")
-            size_mb = os.path.getsize(out_path) / 1024 / 1024
-            logger.info(f"Clip ready: {out_path} ({size_mb:.1f} MB, {total_dur:.1f}s)")
-            return out_path
-    finally:
-        for af in anime_frames:
-            if af:
-                try:
-                    os.remove(af)
-                except Exception:
-                    pass
-        for pf in person_frames.values():
-            try:
-                os.remove(pf)
-            except Exception:
-                pass
+                logger.warning(f"GPU path error, falling back to local: {e}")
+
+    # ── Local pipeline (fast fallback: stream-copy + single encode) ──────────
+    logger.info(f"Using fast local fallback for {os.path.basename(mp4_path)}")
+    if await _fast_local_clip(mp4_path, selected, segs, out_path, on_progress=on_progress):
+        try:
+            if on_progress:
+                await on_progress("thumbnail", 0, 1)
+            from thumbnail import generate_thumbnail
+            best_seg = max(selected, key=lambda s: s.score) if any(s.score > 0 for s in selected) \
+                       else selected[max(0, len(selected) // 4)]
+            thumb = await generate_thumbnail(mp4_path, offset=best_seg.start + 1.0)
+            if thumb:
+                await _prepend_thumbnail(out_path, thumb)
+        except Exception as e:
+            logger.warning(f"Thumbnail prepend skipped: {e}")
+        size_mb = os.path.getsize(out_path) / 1024 / 1024
+        logger.info(f"Clip ready (fast-local): {out_path} ({size_mb:.1f} MB, {total_dur:.1f}s)")
+        return out_path
     return None
 
 
@@ -1701,86 +1842,63 @@ async def edit_recording_multi(
 
         # ── Try GPU NVENC path first ──────────────────────────────────────────
         gpu_used = False
-        if room_id is not None:
+        _room_id_v = room_id  # local copy so we can disable GPU for this variant only
+        if _room_id_v is not None:
+            from gpu_state import is_online as _gpu_is_online, wait_until_online as _gpu_wait
+            if not _gpu_is_online():
+                logger.info(f"GPU offline — waiting up to {_GPU_WAIT_TIMEOUT:.0f}s (variant {k+1})...")
+                try:
+                    await asyncio.wait_for(_gpu_wait(), timeout=_GPU_WAIT_TIMEOUT)
+                except asyncio.TimeoutError:
+                    logger.warning(f"GPU still offline — using local fallback for variant {k+1}")
+                    _room_id_v = None
+        if _room_id_v is not None:
             try:
                 mp4_filename = os.path.basename(mp4_path)
                 gpu_result = await _edit_via_gpu(
-                    mp4_filename, room_id, selected, segs, out_path, on_progress
+                    mp4_filename, _room_id_v, selected, segs, out_path, on_progress,
+                    mp4_path=mp4_path,
                 )
                 if gpu_result:
-                        try:
-                            best_seg = max(selected, key=lambda s: s.score) if any(s.score > 0 for s in selected) \
-                                       else selected[max(0, len(selected) // 4)]
-                            from thumbnail import generate_thumbnail
-                            thumb = await generate_thumbnail(mp4_path, offset=best_seg.start + 1.0)
-                            if thumb:
-                                await _prepend_thumbnail(out_path, thumb)
-                        except Exception as te:
-                            logger.warning(f"Thumbnail prepend skipped (GPU variant {k+1}): {te}")
-                        size_mb = os.path.getsize(out_path) / 1024 / 1024
-                        logger.info(f"Variant {k+1} ready (NVENC): {out_path} ({size_mb:.1f} MB)")
-                        results.append(out_path)
-                        gpu_used = True
+                    try:
+                        best_seg = max(selected, key=lambda s: s.score) if any(s.score > 0 for s in selected) \
+                                   else selected[max(0, len(selected) // 4)]
+                        from thumbnail import generate_thumbnail
+                        thumb = await generate_thumbnail(mp4_path, offset=best_seg.start + 1.0)
+                        if thumb:
+                            await _prepend_thumbnail(out_path, thumb)
+                    except Exception as te:
+                        logger.warning(f"Thumbnail prepend skipped (GPU variant {k+1}): {te}")
+                    size_mb = os.path.getsize(out_path) / 1024 / 1024
+                    logger.info(f"Variant {k+1} ready (NVENC): {out_path} ({size_mb:.1f} MB)")
+                    results.append(out_path)
+                    gpu_used = True
             except Exception as e:
                 logger.warning(f"GPU path error for variant {k+1}, falling back: {e}")
 
         if gpu_used:
             continue
 
-        # ── Local fallback pipeline ───────────────────────────────────────────
-        anime_frames = await _gen_transition_anime_frames(mp4_path, selected)
-
-        zoom_boundaries = [
-            bi for bi in range(len(selected) - 1)
-            if _TR_POOL[bi % len(_TR_POOL)] == "zoom_punch"
-            and not (bi < len(anime_frames) and anime_frames[bi])
-        ]
-        zoom_clips = await _gen_zoom_punch_clips(mp4_path, selected, zoom_boundaries)
-        for bi, path in zoom_clips.items():
-            if bi < len(anime_frames) and not anime_frames[bi]:
-                anime_frames[bi] = path
-
-        person_boundaries = [
-            bi for bi in range(len(selected) - 1)
-            if _TR_POOL[bi % len(_TR_POOL)] == "fadeblack"
-            and not (bi < len(anime_frames) and anime_frames[bi])
-        ]
-        person_frames = await _gen_person_frames(mp4_path, selected, person_boundaries)
-        try:
-            if on_progress:
-                await on_progress("build", k, count)
-            if await _build_clip(
-                mp4_path, selected, segs, out_path,
-                anime_frames=anime_frames, person_frames=person_frames,
-                on_progress=on_progress,
-            ):
-                try:
-                    if on_progress:
-                        await on_progress("thumbnail", k, count)
-                    from thumbnail import generate_thumbnail
-                    best_seg = max(selected, key=lambda s: s.score) if any(s.score > 0 for s in selected) \
-                               else selected[max(0, len(selected) // 4)]
-                    thumb = await generate_thumbnail(mp4_path, offset=best_seg.start + 1.0)
-                    if thumb:
-                        await _prepend_thumbnail(out_path, thumb)
-                except Exception as e:
-                    logger.warning(f"Thumbnail prepend skipped (variant {k+1}): {e}")
-                size_mb = os.path.getsize(out_path) / 1024 / 1024
-                logger.info(f"Variant {k+1} ready: {out_path} ({size_mb:.1f} MB)")
-                results.append(out_path)
-            else:
-                logger.error(f"Variant {k+1} build failed")
-        finally:
-            for af in anime_frames:
-                if af:
-                    try:
-                        os.remove(af)
-                    except Exception:
-                        pass
-            for pf in person_frames.values():
-                try:
-                    os.remove(pf)
-                except Exception:
-                    pass
+        # ── Local fallback pipeline (fast: stream-copy + single encode) ─────
+        logger.info(f"Using fast local fallback for variant {k+1} of {os.path.basename(mp4_path)}")
+        if on_progress:
+            await on_progress("build", k, count)
+        if await _fast_local_clip(mp4_path, selected, segs, out_path, on_progress=on_progress):
+            try:
+                if on_progress:
+                    await on_progress("thumbnail", k, count)
+                from thumbnail import generate_thumbnail
+                best_seg = max(selected, key=lambda s: s.score) if any(s.score > 0 for s in selected) \
+                           else selected[max(0, len(selected) // 4)]
+                thumb = await generate_thumbnail(mp4_path, offset=best_seg.start + 1.0)
+                if thumb:
+                    await _prepend_thumbnail(out_path, thumb)
+            except Exception as e:
+                logger.warning(f"Thumbnail prepend skipped (variant {k+1}): {e}")
+            size_mb = os.path.getsize(out_path) / 1024 / 1024
+            logger.info(f"Variant {k+1} ready (fast-local): {out_path} ({size_mb:.1f} MB)")
+            results.append(out_path)
+        else:
+            logger.error(f"Variant {k+1} build failed")
 
     return results

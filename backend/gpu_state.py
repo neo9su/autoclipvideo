@@ -38,6 +38,15 @@ _offline_since: float = 0.0             # monotonic timestamp when outage starte
 _watchdog_available: bool = False
 _watchdog_services: dict = {}           # {name: {running, healthy, pid, uptime_s}}
 
+# Callbacks fired when GPU transitions from offline → online
+_online_callbacks: list = []
+
+
+def register_online_callback(fn) -> None:
+    """Register an async callback fn() to be called when GPU comes back online."""
+    if fn not in _online_callbacks:
+        _online_callbacks.append(fn)
+
 
 def is_online() -> bool:
     return _online
@@ -142,6 +151,12 @@ async def watch_gpu_service(broadcast_fn=None) -> None:
                         await _safe_broadcast(broadcast_fn, {"type": "gpu_online"})
                     backoff = MIN_BACKOFF
                     last_autostart = 0.0  # reset so next outage triggers fresh
+                    # Fire recovery callbacks (e.g. auto-retry failed clip jobs)
+                    for _cb in list(_online_callbacks):
+                        try:
+                            asyncio.get_event_loop().create_task(_cb())
+                        except Exception:
+                            pass
 
                 elif not online and _online:
                     # just went offline

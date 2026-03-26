@@ -196,12 +196,13 @@ async def _split_and_register(
     chunk0_path, chunk0_size = chunks[0]
 
     async with aiosqlite.connect(DB_PATH) as db:
-        # Find original recording to get its segment_index
+        # Find original recording to get its segment_index and start_time
         async with db.execute(
-            "SELECT segment_index FROM recordings WHERE id=?", (recording_id,)
+            "SELECT segment_index, start_time FROM recordings WHERE id=?", (recording_id,)
         ) as cur:
             row = await cur.fetchone()
         base_index = row[0] if row else 0
+        start_time = row[1] if row else ""
 
         # Update original row → chunk 0
         chunk0_filename = os.path.basename(chunk0_path)
@@ -214,9 +215,10 @@ async def _split_and_register(
         for i, (cp, csz) in enumerate(chunks[1:], start=1):
             await db.execute(
                 """INSERT INTO recordings
-                   (room_id, filename, size_bytes, synced, transcribed, local_deleted, segment_index)
-                   VALUES (?, ?, ?, 0, 0, 0, ?)""",
-                (room_id, os.path.basename(cp), csz, base_index + i),
+                   (room_id, filename, size_bytes, synced, transcribed, local_deleted,
+                    segment_index, start_time)
+                   VALUES (?, ?, ?, 0, 0, 0, ?, ?)""",
+                (room_id, os.path.basename(cp), csz, base_index + i, start_time),
             )
 
         await db.commit()

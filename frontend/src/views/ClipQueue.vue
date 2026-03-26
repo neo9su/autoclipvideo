@@ -181,10 +181,12 @@
             <span class="job-id">录像 #{{ job.id }}</span>
             <span v-if="job.room_name" class="job-room">{{ job.room_name }}</span>
             <span v-if="job.filename" class="job-date">{{ job.filename }}</span>
-            <span v-if="job.clip_error" class="job-error">{{ job.clip_error }}</span>
+            <span v-if="job.skip_reason" class="job-error">{{ job.skip_reason }}</span>
+            <span v-else-if="job.clip_error" class="job-error">{{ job.clip_error }}</span>
           </div>
           <div class="action-btns">
-            <button class="act-btn retry" @click="retryJob(job.id)" title="重新剪辑">重试</button>
+            <button v-if="!job.skip_reason" class="act-btn retry" @click="retryJob(job.id)" title="重新剪辑">重试</button>
+            <button class="act-btn dismiss" @click="dismissJob(job.id)" title="从列表移除">清除</button>
           </div>
         </div>
       </div>
@@ -289,6 +291,14 @@ async function retryJob(recordingId) {
     const r = await fetch(`/api/clip-queue/${recordingId}/retry`, { method: 'POST' })
     if (r.ok) { showToast('已重新入队', 'success'); await load() }
     else { const e = await r.json().catch(() => ({})); showToast(e.detail || '重试失败', 'error') }
+  } catch { showToast('请求失败', 'error') }
+}
+
+async function dismissJob(recordingId) {
+  try {
+    const r = await fetch(`/api/clip-queue/${recordingId}/dismiss`, { method: 'POST' })
+    if (r.ok) { showToast('已清除', 'success'); await load() }
+    else { const e = await r.json().catch(() => ({})); showToast(e.detail || '操作失败', 'error') }
   } catch { showToast('请求失败', 'error') }
 }
 
@@ -440,6 +450,8 @@ onUnmounted(() => clearInterval(timer))
 .act-btn.cancel:hover { background: rgba(239,68,68,0.25); }
 .act-btn.retry  { background: rgba(96,165,250,0.1);  border-color: rgba(96,165,250,0.3);  color: #60a5fa; }
 .act-btn.retry:hover  { background: rgba(96,165,250,0.25); }
+.act-btn.dismiss { background: rgba(107,114,128,0.1); border-color: rgba(107,114,128,0.3); color: #9ca3af; }
+.act-btn.dismiss:hover { background: rgba(107,114,128,0.25); }
 
 /* ── Paused card ── */
 .job-card.paused-card { display: flex; align-items: center; gap: 14px; border-color: rgba(251,191,36,0.2); opacity: 0.85; }

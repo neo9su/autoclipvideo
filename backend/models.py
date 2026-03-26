@@ -68,3 +68,15 @@ class PublishTaskCreate(BaseModel):
     product_id: Optional[int] = None
     product_ids: Optional[List[int]] = None
     auto_meta: bool = False              # trigger LLM meta generation
+    no_cart: bool = False                # 无车发布：跳过小黄车挂载步骤
+
+
+class BatchScheduleCreate(BaseModel):
+    platform: str = "douyin"
+    account_id: Optional[int] = None
+    start_datetime: str                  # ISO datetime, e.g. "2026-03-25T10:00:00"
+    interval_minutes: int = 90           # 每篇间隔分钟数
+    no_cart: bool = False
+    auto_meta: bool = False              # 每个任务触发 LLM 生成文案
+    product_ids: Optional[List[int]] = None  # 统一挂载商品（可不填）
+    room_id: Optional[int] = None        # 只排期指定直播间的分组（None = 全部）
