@@ -90,7 +90,7 @@ def _load_clip_jobs() -> dict:
 def _db_insert_job(job_id: str, mp4_path: str, srt_path: str):
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
-            "INSERT INTO jobs (job_id, mp4_path, srt_path, status) VALUES (?, ?, ?, 'processing')",
+            "INSERT OR REPLACE INTO jobs (job_id, mp4_path, srt_path, status) VALUES (?, ?, ?, 'processing')",
             (job_id, mp4_path, srt_path),
         )
         conn.commit()

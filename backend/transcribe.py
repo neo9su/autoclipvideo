@@ -400,7 +400,7 @@ async def poll_transcriptions(broadcast_fn=None):
         except asyncio.CancelledError:
             break
         except Exception as e:
-            logger.error(f"Transcription poll error: {e}")
+            logger.exception(f"Transcription poll error: {e}")
 
         # Sleep until next interval, but wake immediately if flush_poll() is called
         try:

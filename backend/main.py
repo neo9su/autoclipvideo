@@ -173,6 +173,9 @@ async def _on_gpu_online():
             await broadcast({"type": "gpu_auto_retry", "recording_ids": queued})
     except Exception as e:
         logger.warning(f"_on_gpu_online auto-retry failed: {e}")
+    finally:
+        # Always wake the transcription poll when GPU comes back online
+        await flush_poll()
 
 
 @asynccontextmanager
@@ -2080,62 +2083,6 @@ async def create_publish_task(body: PublishTaskCreate):
     }
 
 
-@app.get("/api/publish-tasks/{task_id}")
-async def get_publish_task(task_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            """SELECT t.*, g.label as group_label, g.merged_filename,
-                      pa.account_name, p.product_name
-               FROM publish_tasks t
-               JOIN clip_groups g ON t.group_id = g.id
-               LEFT JOIN publish_accounts pa ON t.account_id = pa.id
-               LEFT JOIN products p ON t.product_id = p.id
-               WHERE t.id = ?""",
-            (task_id,),
-        ) as cur:
-            task = await cur.fetchone()
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
-    return dict(task)
-
-
-@app.delete("/api/publish-tasks/{task_id}", status_code=204)
-async def cancel_publish_task(task_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT status FROM publish_tasks WHERE id = ?", (task_id,)) as cur:
-            task = await cur.fetchone()
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
-    if task["status"] not in ("pending", "scheduled", "failed"):
-        raise HTTPException(status_code=409, detail="Can only cancel pending/scheduled/failed tasks")
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("DELETE FROM publish_tasks WHERE id = ?", (task_id,))
-        await db.commit()
-
-
-@app.post("/api/publish-tasks/{task_id}/retry")
-async def retry_publish_task(task_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM publish_tasks WHERE id = ?", (task_id,)) as cur:
-            task = await cur.fetchone()
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
-    if task["status"] != "failed":
-        raise HTTPException(status_code=409, detail="Can only retry failed tasks")
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "UPDATE publish_tasks SET status = 'pending', error_msg = NULL WHERE id = ?",
-            (task_id,),
-        )
-        await db.commit()
-    return {"task_id": task_id, "status": "pending"}
-
-
-# ── Batch scheduling ──────────────────────────────────────────────────────────
-
 @app.get("/api/publish-tasks/unscheduled-groups")
 async def get_unscheduled_groups(platform: str = "douyin", room_id: Optional[int] = None):
     """
@@ -2253,6 +2200,60 @@ async def batch_schedule_tasks(body: BatchScheduleCreate):
         "tasks": created_tasks,
         "message": f"已为 {len(created_tasks)} 个分组创建排期任务",
     }
+
+
+@app.get("/api/publish-tasks/{task_id}")
+async def get_publish_task(task_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT t.*, g.label as group_label, g.merged_filename,
+                      pa.account_name, p.product_name
+               FROM publish_tasks t
+               JOIN clip_groups g ON t.group_id = g.id
+               LEFT JOIN publish_accounts pa ON t.account_id = pa.id
+               LEFT JOIN products p ON t.product_id = p.id
+               WHERE t.id = ?""",
+            (task_id,),
+        ) as cur:
+            task = await cur.fetchone()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return dict(task)
+
+
+@app.delete("/api/publish-tasks/{task_id}", status_code=204)
+async def cancel_publish_task(task_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT status FROM publish_tasks WHERE id = ?", (task_id,)) as cur:
+            task = await cur.fetchone()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task["status"] not in ("pending", "scheduled", "failed"):
+        raise HTTPException(status_code=409, detail="Can only cancel pending/scheduled/failed tasks")
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM publish_tasks WHERE id = ?", (task_id,))
+        await db.commit()
+
+
+@app.post("/api/publish-tasks/{task_id}/retry")
+async def retry_publish_task(task_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM publish_tasks WHERE id = ?", (task_id,)) as cur:
+            task = await cur.fetchone()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task["status"] != "failed":
+        raise HTTPException(status_code=409, detail="Can only retry failed tasks")
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE publish_tasks SET status = 'pending', error_msg = NULL WHERE id = ?",
+            (task_id,),
+        )
+        await db.commit()
+    return {"task_id": task_id, "status": "pending"}
 
 
 # ── Meta generation ───────────────────────────────────────────────────────────

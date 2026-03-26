@@ -383,7 +383,7 @@ async def maybe_merge_before_upload(
         selected.append((seg, p, sz))
         selected_size += sz
 
-    if len(selected) == 1:
+    if len(selected) <= 1:
         return (filepath, recording_id)
 
     # Build merged filename from first→last segment indices
