@@ -182,13 +182,17 @@ def _draw_pill(draw, img, text, font, cx, y, bg_color, text_color, pad_x=28, pad
 # ── Frame extraction ──────────────────────────────────────────────────────────
 
 async def _extract_frame(mp4_path: str, seek: float, out_jpg: str) -> bool:
-    # Extract at full 4K — _composite uses this as-is for a crisp base frame
+    # Extract at native resolution with lanczos scaling + sharpening for crisp thumbnails
     cmd = [
         "ffmpeg", "-y", "-ss", f"{seek:.3f}", "-i", mp4_path,
         "-frames:v", "1",
-        "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,"
-               "pad=1080:1920:(ow-iw)/2:(oh-ih)/2",
-        "-q:v", "2", out_jpg,
+        "-vf", (
+            "scale=1080:1920:force_original_aspect_ratio=decrease:flags=lanczos,"
+            "pad=1080:1920:(ow-iw)/2:(oh-ih)/2,"
+            "unsharp=5:5:1.2:5:5:0.0"   # luma sharpening: stronger than editor default
+        ),
+        "-q:v", "1",   # JPEG quality 1 = near-lossless (was 2)
+        out_jpg,
     ]
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
@@ -215,8 +219,9 @@ async def _get_duration(mp4_path: str) -> float:
 
 # ── Main compositor ───────────────────────────────────────────────────────────
 
-def _composite(frame_path: str, out_path: str, title: str, subtitle: str, seed: int):
-    from PIL import Image, ImageDraw, ImageFilter
+def _composite(frame_path: str, out_path: str, title: str, subtitle: str, seed: int,
+               anime_overlay_path: str = None):
+    from PIL import Image, ImageDraw, ImageFilter, ImageEnhance
 
     rng = random.Random(seed)
     theme = rng.choice(_THEMES)
@@ -224,12 +229,31 @@ def _composite(frame_path: str, out_path: str, title: str, subtitle: str, seed: 
 
     W, H = 1080, 1920  # 2K portrait (9:16)
 
-    # Base frame
+    # Base frame — always the sharp raw frame
     base = Image.open(frame_path).convert("RGBA").resize((W, H), Image.LANCZOS)
 
-    # Subtle blur on lower portion to make text pop
-    blur_band = base.crop((0, H // 2, W, H)).filter(ImageFilter.GaussianBlur(radius=3))
-    base.paste(blur_band, (0, H // 2))
+    # Sharpen the raw frame for crisp facial/hair detail
+    base_rgb = base.convert("RGB")
+    base_rgb = base_rgb.filter(ImageFilter.UnsharpMask(radius=1.5, percent=130, threshold=2))
+    # Slight contrast boost to make details pop
+    base_rgb = ImageEnhance.Contrast(base_rgb).enhance(1.08)
+    base = base_rgb.convert("RGBA")
+
+    # If ComfyUI anime frame available, blend as style overlay (not base)
+    # This preserves raw frame sharpness while adding anime color grading
+    if anime_overlay_path and os.path.exists(anime_overlay_path):
+        try:
+            anime = Image.open(anime_overlay_path).convert("RGBA").resize((W, H), Image.LANCZOS)
+            # Blend anime style at 35% opacity over raw frame
+            anime_blend = Image.blend(base, anime, alpha=0.35)
+            base = anime_blend
+        except Exception:
+            pass  # keep raw frame on failure
+
+    # Blur only bottom 15% of frame (text area) — keeps person area sharp
+    blur_start = int(H * 0.85)
+    blur_band = base.crop((0, blur_start, W, H)).filter(ImageFilter.GaussianBlur(radius=4))
+    base.paste(blur_band, (0, blur_start))
 
     overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
 
@@ -290,7 +314,7 @@ def _composite(frame_path: str, out_path: str, title: str, subtitle: str, seed: 
               fill=(255, 255, 255, 120), width=2)
 
     base = base.convert("RGB")
-    base.save(out_path, "JPEG", quality=92, optimize=True)
+    base.save(out_path, "JPEG", quality=96, optimize=True, subsampling=0)  # 96 + 4:4:4 for max detail
     return True
 
 
@@ -339,16 +363,14 @@ async def generate_thumbnail(mp4_path: str, offset: Optional[float] = None,
             logger.warning(f"Frame extraction failed for {mp4_path}")
             return None
 
-        # Step 2: anime-style conversion via ComfyUI (best-effort)
-        # SD1.5 requires ≤576×1024 input; downscale the 4K frame before sending.
-        # The 4K raw frame is kept as the crisp background for _composite regardless.
-        base_frame = frame_path   # always use 4K raw as base (crisp background)
+        # Step 2: anime-style via ComfyUI (best-effort style overlay, not base frame)
+        # Raw frame is always the base for sharpness; ComfyUI adds anime colour grading.
+        anime_overlay = None
         comfy_input = None
         try:
             from comfyui_client import anime_img2img, health_check
             if await health_check():
                 seed = hash(mp4_path) & 0xFFFFFF
-                # Downscale 4K → ComfyUI-safe resolution before img2img
                 from PIL import Image as _PIL
                 with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as _tf:
                     comfy_input = _tf.name
@@ -357,20 +379,19 @@ async def generate_thumbnail(mp4_path: str, offset: Optional[float] = None,
                 _img.save(comfy_input, "JPEG", quality=88)
                 converted = await anime_img2img(comfy_input, anime_path, seed=seed, timeout=120)
                 if converted and os.path.exists(anime_path) and os.path.getsize(anime_path) > 0:
-                    # Use ComfyUI anime output as base; _composite will resize to 4K
-                    base_frame = anime_path
-                    logger.debug(f"ComfyUI anime conversion done for {mp4_path}")
+                    anime_overlay = anime_path   # used as 35% style overlay, NOT base
+                    logger.debug(f"ComfyUI anime overlay ready for {mp4_path}")
                 else:
-                    logger.debug("ComfyUI conversion failed, using 4K raw frame")
+                    logger.debug("ComfyUI conversion failed, using raw frame only")
             else:
-                logger.debug("ComfyUI unavailable, using 4K raw frame")
+                logger.debug("ComfyUI unavailable, using raw frame only")
         except Exception as e:
             logger.warning(f"ComfyUI step skipped: {e}")
 
-        # Step 3: composite title/subtitle overlays
+        # Step 3: composite — raw frame (sharp) + optional anime overlay + title/subtitle
         seed = hash(mp4_path) & 0xFFFFFF
         await asyncio.get_event_loop().run_in_executor(
-            None, _composite, base_frame, out, title, subtitle, seed
+            None, _composite, frame_path, out, title, subtitle, seed, anime_overlay
         )
 
         if os.path.exists(out) and os.path.getsize(out) > 0:
