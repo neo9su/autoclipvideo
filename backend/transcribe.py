@@ -734,7 +734,11 @@ async def _do_edit(recording_id: int, mp4_path: str, srt_path: str, clip_duratio
 
 
 async def _maybe_auto_merge(recording_id: int):
-    """After a clip finishes, auto-merge the group if all its recordings are clipped=2."""
+    """After a clip finishes, auto-merge the group if all active recordings are clipped=2.
+
+    clipped=-1 (skipped: low-res / too-short) recordings are excluded from the
+    check so a group with some skipped files can still auto-merge.
+    """
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
@@ -745,26 +749,60 @@ async def _maybe_auto_merge(recording_id: int):
             if not row or not row["group_id"]:
                 return
             group_id = row["group_id"]
-
-            # Check if all recordings in this group are done (clipped=2)
-            async with db.execute(
-                "SELECT COUNT(*) as total, SUM(CASE WHEN clipped=2 THEN 1 ELSE 0 END) as done "
-                "FROM recordings WHERE group_id = ?", (group_id,)
-            ) as cur:
-                counts = await cur.fetchone()
-            if not counts or counts["total"] == 0 or counts["total"] != counts["done"]:
-                return
-
-            # Check group merge_status
-            async with db.execute(
-                "SELECT merge_status FROM clip_groups WHERE id = ?", (group_id,)
-            ) as cur:
-                grp = await cur.fetchone()
-            if not grp or grp["merge_status"] in (1, 2):
-                return  # already merging or done
-
-        logger.info(f"Auto-merging group {group_id} (all clips ready)")
-        from analyzer import merge_group
-        await merge_group(group_id)
+            await _auto_merge_group(db, group_id)
     except Exception as e:
         logger.error(f"Auto-merge failed for group of recording {recording_id}: {e}")
+
+
+async def _auto_merge_group(db, group_id: int) -> bool:
+    """Check readiness and trigger merge for a single group. Returns True if triggered."""
+    from analyzer import merge_group as _merge_group
+
+    # Count active (non-skipped) recordings; all must be clipped=2
+    async with db.execute(
+        "SELECT "
+        "  COUNT(*) FILTER (WHERE clipped != -1) as active, "
+        "  COUNT(*) FILTER (WHERE clipped  =  2) as done "
+        "FROM recordings WHERE group_id = ?",
+        (group_id,),
+    ) as cur:
+        counts = await cur.fetchone()
+    if not counts or counts["active"] == 0 or counts["active"] != counts["done"]:
+        return False
+
+    # Check group merge_status — skip if already merging or done
+    async with db.execute(
+        "SELECT merge_status FROM clip_groups WHERE id = ?", (group_id,)
+    ) as cur:
+        grp = await cur.fetchone()
+    if not grp or grp["merge_status"] in (1, 2):
+        return False
+
+    logger.info(f"Auto-merging group {group_id} (all active clips ready)")
+    await _merge_group(group_id)
+    return True
+
+
+async def backfill_auto_merge():
+    """On startup, trigger auto-merge for groups whose clips are all done but
+    merge_status is still 0 (e.g. recorded before auto-merge was introduced)."""
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT id FROM clip_groups WHERE merge_status = 0"
+            ) as cur:
+                groups = [r["id"] for r in await cur.fetchall()]
+
+        triggered = 0
+        for gid in groups:
+            async with aiosqlite.connect(DB_PATH) as db:
+                db.row_factory = aiosqlite.Row
+                if await _auto_merge_group(db, gid):
+                    triggered += 1
+                    await asyncio.sleep(0.5)   # brief gap to avoid thundering herd
+
+        if triggered:
+            logger.info(f"Backfill auto-merge: triggered {triggered}/{len(groups)} groups")
+    except Exception as e:
+        logger.error(f"Backfill auto-merge error: {e}")

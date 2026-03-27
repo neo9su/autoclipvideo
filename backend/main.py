@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from db import init_db, DB_PATH
 from models import RoomCreate, Room, Recording, ProductCreate, ProductUpdate, PublishAccountCreate, PublishTaskCreate, BatchScheduleCreate
 from monitor import MonitorManager
-from transcribe import poll_transcriptions, _run_editor, _clip_progress, get_clip_queue, update_job_priority, cancel_clip_job, pause_clip_job, resume_clip_job, _job_submit_times, _job_durations, _poll_state, flush_poll, POLL_INTERVAL, RECORDINGS_DIR
+from transcribe import poll_transcriptions, _run_editor, _clip_progress, get_clip_queue, update_job_priority, cancel_clip_job, pause_clip_job, resume_clip_job, _job_submit_times, _job_durations, _poll_state, flush_poll, POLL_INTERVAL, RECORDINGS_DIR, backfill_auto_merge
 from analyzer import merge_group
 from sync import sync_file
 from thumbnail import generate_thumbnail
@@ -183,6 +183,7 @@ async def lifespan(app: FastAPI):
     await init_db()
     await _reset_stuck_clip_tasks()
     await monitor.start_all()
+    asyncio.create_task(backfill_auto_merge())
     from gpu_state import watch_gpu_service, register_online_callback
     register_online_callback(_on_gpu_online)
     gpu_watcher_task = asyncio.create_task(watch_gpu_service(broadcast_fn=broadcast))
