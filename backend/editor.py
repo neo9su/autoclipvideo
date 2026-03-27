@@ -47,8 +47,8 @@ def _pick_music() -> Optional[str]:
     except Exception as e:
         logger.warning(f"BGM generation failed: {e}")
         return None
-CLIP_MIN = 46.0   # seconds
-CLIP_MAX = 240.0  # seconds
+CLIP_MIN = 30.0   # seconds (巨量千川优质标准：15-60s为佳，30s确保完整三段式)
+CLIP_MAX = 60.0   # seconds (原240s完播率极低，降至60s对齐平台优质上限)
 MAX_CLIP_SEGMENTS = 50  # cap to avoid ffmpeg resource exhaustion
 SEG_PAD = 0.5     # seconds of audio/video to retain before/after each SRT segment
 
@@ -89,34 +89,49 @@ _REMOVE_PATTERNS = [
     r'年前|年后',
     r'今天|明天|昨天',
     r'这个月|下个月|上个月',
+    # 卖惨/演戏营销（巨量千川低质管控）
+    r'快撑不下去',
+    r'房租.{0,5}到期',
+    r'老板.{0,5}(亏本|亏损)',
+    r'清仓.{0,5}处理',
+    r'(快|马上)倒闭',
+    r'撑不住了',
+    # 过度效果承诺（禁止承诺改变外貌）
+    r'保证.{0,8}(变美|变好|显年轻)',
+    r'显年轻\d+岁',
+    r'遮住所有',
+    r'彻底解决',
+    # 诱骗互动（平台明确管控）
+    r'点赞送礼',
+    r'评论抽奖',
+    r'转发有惊喜',
 ]
 
 # ── Keyword scoring (higher = more valuable to keep) ─────────────────────────
+# 注：「戴之前/戴之后/对比/变美」已移除 —— 巨量千川禁止展示佩戴前后对比暗示改变外貌
 _SCORES: dict[str, float] = {
-    # Pain points
+    # Pain points（痛点共鸣）
     '发缝宽': 10, '秃头': 10, '发量少': 10, '头型不好看': 9,
     '扁头': 9, '显脸大': 9, '贴头皮': 8,
-    # Visual impact / transformation
+    # Visual impact / transformation（视觉冲击，描述真实观感非效果承诺）
     '秒变': 10, '小V脸': 10, '变身': 9, '背影杀': 9,
     '头包脸': 9, '高颅顶': 9, '一梳到底': 9,
-    '氛围感': 8, '蓬松': 8, '变美': 8,
-    # Product endorsement
+    '氛围感': 8, '蓬松': 8,
+    # Product endorsement（产品卖点）
     '真人发丝': 8, '递针': 8, '无痕': 8, '不掉色': 7,
-    '免打理': 7, '仿真': 8,
-    # Conversion urgency
+    '免打理': 7, '仿真': 8, '轻薄': 7, '透气': 6,
+    # CTA / conversion（转化号召）
     '炸福利': 10, '上车': 9, '运费险': 8,
-    '不满意包退': 9, '包退': 7,
-    # Contrast / before-after
-    '戴上': 7, '戴之前': 8, '戴之后': 8, '对比': 8,
-    # Emotion peak
-    '大笑': 7, '惊讶': 7, '天啊': 7, '哇': 5,
+    '不满意包退': 9, '包退': 7, '点购物车': 9, '加购': 7,
+    # Emotion peak（情绪峰值）
+    '大笑': 7, '惊讶': 7, '天啊': 7,
 }
 
 # ── Segment category tags (for A-B-A structure) ───────────────────────────────
 _PROBLEM_KW   = {'发缝宽', '秃头', '发量少', '扁头', '显脸大', '贴头皮', '头型不好看'}
-_SOLUTION_KW  = {'真人发丝', '递针', '无痕', '不掉色', '免打理', '仿真', '一梳到底'}
-_RESULT_KW    = {'秒变', '小V脸', '变身', '高颅顶', '头包脸', '背影杀', '氛围感', '变美'}
-_CONVERT_KW   = {'炸福利', '上车', '运费险', '包退'}
+_SOLUTION_KW  = {'真人发丝', '递针', '无痕', '不掉色', '免打理', '仿真', '一梳到底', '轻薄', '透气'}
+_RESULT_KW    = {'秒变', '小V脸', '变身', '高颅顶', '头包脸', '背影杀', '氛围感', '蓬松'}
+_CONVERT_KW   = {'炸福利', '上车', '运费险', '包退', '点购物车', '加购'}
 
 
 @dataclass
@@ -161,13 +176,14 @@ _KW_COLORS: dict[str, str] = {
 # Fonts: PingFang SC=clean; STHeiti=bold; Xingkai SC=brush; Yuanti SC=round;
 #        STKaiti=calligraphy; Baoli SC=slab; Microsoft YaHei=modern
 _SUBTITLE_STYLES = [
-    ("Clean",   "PingFang SC",     92,  0, 0,  1, 7, 2),
-    ("Bold",    "STHeiti",         100, 1, 0,  0, 9, 3),
-    ("Brush",   "Xingkai SC",      102, 1, 0,  2, 6, 3),
-    ("Round",   "Yuanti SC",       96,  0, 0,  2, 6, 2),
-    ("Kaiti",   "STKaiti",         96,  0, 1,  1, 7, 2),
-    ("Slab",    "Baoli SC",        98,  0, 0,  1, 8, 3),
-    ("Modern",  "Microsoft YaHei", 96,  0, 0,  1, 7, 2),
+    # 字体大小降至 72–88px（原 92–102px），避免大字报低质判定（巨量千川要求字幕不超画面 1/3）
+    ("Clean",   "PingFang SC",     76,  0, 0,  1, 6, 2),
+    ("Bold",    "STHeiti",         84,  1, 0,  0, 8, 3),
+    ("Brush",   "Xingkai SC",      86,  1, 0,  2, 5, 3),
+    ("Round",   "Yuanti SC",       80,  0, 0,  2, 5, 2),
+    ("Kaiti",   "STKaiti",         80,  0, 1,  1, 6, 2),
+    ("Slab",    "Baoli SC",        82,  0, 0,  1, 7, 3),
+    ("Modern",  "Microsoft YaHei", 80,  0, 0,  1, 6, 2),
 ]
 
 def _build_ass_styles() -> str:
@@ -1170,24 +1186,32 @@ def _pick_by_category(segs: List[Seg], cat: str, budget: float) -> List[Seg]:
 
 
 def _select_from_valid(valid: List[Seg], clip_min: float = CLIP_MIN, clip_max: float = CLIP_MAX) -> List[Seg]:
-    """Core A-B-A selection logic from a pre-filtered valid segment list."""
+    """Three-part selection: 黄金开场 → 核心展示 → 强制 CTA 结尾.
+
+    Structure (巨量千川优质三段式):
+      Opening  (15%): highest-score result/convert — visual hook in first 3s
+      Mid      (70%): problem → solution → result  — product value exposition
+      Closer   (15%): forced convert CTA           — required for quality rating
+    """
     if not valid:
         return []
 
-    # Budget allocation: 20% opening, 30% problem, 25% solution, 25% result/convert
-    opening_budget  = clip_max * 0.20
-    problem_budget  = clip_max * 0.30
-    solution_budget = clip_max * 0.25
-    result_budget   = clip_max * 0.25
+    # Budget allocation (巨量千川优质标准: 短视频三段式)
+    opening_budget  = clip_max * 0.15   # ~9s  开场钩子
+    mid_budget      = clip_max * 0.70   # ~42s 核心展示 (problem 30% + solution 30% + result 10%)
+    closer_budget   = clip_max * 0.15   # ~9s  结尾 CTA（强制）
 
-    # Golden opening: single highest-score segment (prefer result/transform)
+    problem_budget  = clip_max * 0.30
+    solution_budget = clip_max * 0.30
+    result_budget   = clip_max * 0.10
+
+    # ── Opening: single highest-score result/convert segment ─────────────────
     opening_pool = sorted(
         [s for s in valid if s.category in ("result", "convert") and s.score > 0],
         key=lambda s: s.score, reverse=True
     ) or sorted(valid, key=lambda s: s.score, reverse=True)
     opening = [opening_pool[0]] if opening_pool and opening_pool[0].duration <= opening_budget else []
 
-    # A-B-A segments
     exclude = {id(s) for s in opening}
     remaining = [s for s in valid if id(s) not in exclude]
 
@@ -1206,14 +1230,29 @@ def _select_from_valid(valid: List[Seg], clip_min: float = CLIP_MIN, clip_max: f
     problems  = pick("problem",  problem_budget)
     solutions = pick("solution", solution_budget)
     results   = pick("result",   result_budget)
-    converts  = pick("convert",  clip_max * 0.15)
 
-    assembled = opening + problems + solutions + results + converts
-    total = sum(s.duration for s in assembled)
+    # ── Closer: forced CTA — must exist for 巨量千川 quality rating ───────────
+    mid_ids = {id(s) for s in opening + problems + solutions + results}
+    closer_pool = sorted(
+        [s for s in valid if s.category == "convert" and id(s) not in mid_ids],
+        key=lambda s: s.score, reverse=True
+    )
+    if not closer_pool:
+        # Fallback: use highest-score remaining segment as CTA closer
+        closer_pool = sorted(
+            [s for s in valid if id(s) not in mid_ids],
+            key=lambda s: s.score, reverse=True
+        )
+    closer = [closer_pool[0]] if closer_pool and closer_pool[0].duration <= closer_budget else []
 
-    # If under minimum, fill with highest-score neutrals
+    # ── Mid: problems + solutions + results (exclude opening and closer) ──────
+    closer_ids = {id(s) for s in closer}
+    mid = [s for s in (problems + solutions + results) if id(s) not in closer_ids]
+
+    # Fill mid with neutrals if under minimum
+    total = sum(s.duration for s in opening) + sum(s.duration for s in mid) + sum(s.duration for s in closer)
     if total < clip_min:
-        used_ids = {id(s) for s in assembled}
+        used_ids = {id(s) for s in opening + mid + closer}
         neutrals = sorted(
             [s for s in valid if id(s) not in used_ids],
             key=lambda s: s.score, reverse=True
@@ -1221,29 +1260,34 @@ def _select_from_valid(valid: List[Seg], clip_min: float = CLIP_MIN, clip_max: f
         for s in neutrals:
             if total >= clip_max:
                 break
-            assembled.append(s)
+            mid.append(s)
             total += s.duration
 
-    # Sort assembled (keep opening first, rest by original time order)
-    if len(assembled) > 1:
-        head = assembled[0]
-        tail = sorted(assembled[1:], key=lambda s: s.start)
-        assembled = [head] + tail
+    # Sort mid by original time order
+    mid = sorted(mid, key=lambda s: s.start)
 
-    # Trim to clip_max
-    final, total = [], 0.0
-    for s in assembled:
-        if total + s.duration > clip_max:
+    # ── Trim mid to fit budget (preserve opening + closer) ───────────────────
+    open_dur   = sum(s.duration for s in opening)
+    closer_dur = sum(s.duration for s in closer)
+    avail      = clip_max - open_dur - closer_dur
+    mid_final, used = [], 0.0
+    for s in mid:
+        if used + s.duration > avail:
             break
-        final.append(s)
-        total += s.duration
+        mid_final.append(s)
+        used += s.duration
+
+    # ── Final assembly: opening (fixed first) + mid + closer (fixed last) ────
+    assembled = opening + mid_final + closer
 
     # Cap segment count to avoid ffmpeg resource exhaustion
-    if len(final) > MAX_CLIP_SEGMENTS:
-        final = sorted(final, key=lambda s: s.score, reverse=True)[:MAX_CLIP_SEGMENTS]
-        final = sorted(final, key=lambda s: s.start)
+    if len(assembled) > MAX_CLIP_SEGMENTS:
+        keep = MAX_CLIP_SEGMENTS - len(opening) - len(closer)
+        trimmed = sorted(mid_final, key=lambda s: s.score, reverse=True)[:keep]
+        trimmed = sorted(trimmed, key=lambda s: s.start)
+        assembled = opening + trimmed + closer
 
-    return final
+    return assembled
 
 
 def select_clips(segs: List[Seg], clip_min: float = CLIP_MIN, clip_max: float = CLIP_MAX) -> List[Seg]:
