@@ -81,6 +81,7 @@ npm run dev
 - 多平台：抖音（完整）/ 快手 / 小红书 / B站（占位）
 - Playwright 自动化：上传视频、填写元数据、挂商品、发布
 - 定时发布 + AI 元数据生成（Bedrock LLM）
+- AI 元数据遵循巨量千川优质素材规范（详见 [DOUYIN_VIDEO_QUALITY_GUIDE.md](DOUYIN_VIDEO_QUALITY_GUIDE.md)）
 
 ---
 
@@ -147,6 +148,7 @@ douyin-recorder/
 ├── recordings/                  # 本机录屏存储
 ├── douyin.db                    # SQLite 数据库
 ├── demander.md                  # 需求跟踪（Claude Code 自动维护）
+├── DOUYIN_VIDEO_QUALITY_GUIDE.md  # 巨量千川优质/低质素材标准（假发行业）
 └── PROJECT_SUMMARY.md           # 版本历史与变更详情
 ```
 
