@@ -21,7 +21,7 @@ from typing import Optional
 
 import aiosqlite
 
-from db import DB_PATH
+from db import DB_PATH, aio_connect
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,7 @@ RECORDINGS_DIR = os.path.join(os.path.dirname(__file__), "..", "recordings")
 
 async def _is_room_still_recording(room_id: int) -> bool:
     """Return True if there is an in-progress segment (end_time IS NULL) for room."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         async with db.execute(
             "SELECT COUNT(*) FROM recordings WHERE room_id=? AND end_time IS NULL AND local_deleted=0",
             (room_id,),
@@ -52,7 +52,7 @@ async def _is_room_still_recording(room_id: int) -> bool:
 
 async def _get_pending_unsynced(room_id: int) -> list:
     """Return finished, unsynced, non-deleted segments for room ordered by segment_index."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT id, filename, segment_index, size_bytes, start_time
@@ -195,14 +195,15 @@ async def _split_and_register(
 
     chunk0_path, chunk0_size = chunks[0]
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        # Find original recording to get its segment_index and start_time
+    async with aio_connect() as db:
+        # Find original recording to get its segment_index, start_time, and end_time
         async with db.execute(
-            "SELECT segment_index, start_time FROM recordings WHERE id=?", (recording_id,)
+            "SELECT segment_index, start_time, end_time FROM recordings WHERE id=?", (recording_id,)
         ) as cur:
             row = await cur.fetchone()
         base_index = row[0] if row else 0
         start_time = row[1] if row else ""
+        end_time   = row[2] if row else ""
 
         # Update original row → chunk 0
         chunk0_filename = os.path.basename(chunk0_path)
@@ -211,14 +212,15 @@ async def _split_and_register(
             (chunk0_filename, chunk0_size, recording_id),
         )
 
-        # Insert new rows for chunks 1..N
+        # Insert new rows for chunks 1..N (must include end_time so they aren't
+        # treated as in-progress recordings by the poll loop's end_time IS NOT NULL check)
         for i, (cp, csz) in enumerate(chunks[1:], start=1):
             await db.execute(
                 """INSERT INTO recordings
                    (room_id, filename, size_bytes, synced, transcribed, local_deleted,
-                    segment_index, start_time)
-                   VALUES (?, ?, ?, 0, 0, 0, ?, ?)""",
-                (room_id, os.path.basename(cp), csz, base_index + i, start_time),
+                    segment_index, start_time, end_time)
+                   VALUES (?, ?, ?, 0, 0, 0, ?, ?, ?)""",
+                (room_id, os.path.basename(cp), csz, base_index + i, start_time, end_time),
             )
 
         await db.commit()
@@ -287,7 +289,7 @@ async def maybe_merge_before_upload(
             (room still recording, not enough data accumulated yet).
     """
     # Load the target recording
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT id, filename, segment_index, size_bytes, local_deleted, synced FROM recordings WHERE id=?",
@@ -416,15 +418,16 @@ async def maybe_merge_before_upload(
     first_id  = first_seg["id"]
     other_ids = [seg["id"] for seg, _, _ in selected[1:]]
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         await db.execute(
             "UPDATE recordings SET filename=?, size_bytes=? WHERE id=?",
             (merged_filename, merged_size, first_id),
         )
-        for oid in other_ids:
+        if other_ids:
+            placeholders = ",".join("?" * len(other_ids))
             await db.execute(
-                "UPDATE recordings SET local_deleted=1 WHERE id=?",
-                (oid,),
+                f"UPDATE recordings SET local_deleted=1 WHERE id IN ({placeholders})",
+                other_ids,
             )
         await db.commit()
 

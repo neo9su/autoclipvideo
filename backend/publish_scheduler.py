@@ -11,7 +11,7 @@ from typing import Callable, Optional
 
 import aiosqlite
 
-from db import DB_PATH
+from db import DB_PATH, aio_connect
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,7 @@ async def check_video_quality(video_path: str) -> tuple[bool, str]:
     Check video quality requirements for publishing:
       - Resolution >= 1080x1920 (portrait 1080P)
       - Frame rate >= 25 fps
-      - Duration >= 45 seconds
+      - Duration >= 30 seconds
     Returns (passed, reason). reason is empty string if passed.
     """
     try:
@@ -68,8 +68,8 @@ async def check_video_quality(video_path: str) -> tuple[bool, str]:
         duration = float(info.get("format", {}).get("duration", 0))
     except Exception:
         duration = 0.0
-    if duration < 45:
-        issues.append(f"时长不足（{duration:.1f}s，需要 ≥ 45 秒）")
+    if duration < 30:
+        issues.append(f"时长不足（{duration:.1f}s，需要 ≥ 30 秒）")
 
     if issues:
         return False, "；".join(issues)
@@ -97,7 +97,7 @@ async def _execute_task(task: dict, broadcast_fn: Optional[Callable] = None):
     platform = task["platform"]
 
     async def _set_status(status: str, error_msg: str = None, published_at: str = None):
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aio_connect() as db:
             await db.execute(
                 """UPDATE publish_tasks SET status = ?, error_msg = ?, published_at = ?
                    WHERE id = ?""",
@@ -130,7 +130,7 @@ async def _execute_task(task: dict, broadcast_fn: Optional[Callable] = None):
             # Mark the group so it shows in management UI
             group_id = task.get("group_id")
             if group_id:
-                async with aiosqlite.connect(DB_PATH) as db:
+                async with aio_connect() as db:
                     await db.execute(
                         "UPDATE clip_groups SET quality_issue = ? WHERE id = ?",
                         (quality_reason, group_id),
@@ -150,23 +150,28 @@ async def _execute_task(task: dict, broadcast_fn: Optional[Callable] = None):
 
         # Resolve product links (product_url preferred, fallback to product_id)
         product_links: list[str] = []
-        if task.get("product_ids"):
-            ids = [int(x) for x in str(task["product_ids"]).split(",") if x.strip()]
+        product_names: list[str] = []
+        product_ids_str = task.get("product_ids")
+        if product_ids_str:
+            ids = [int(x) for x in str(product_ids_str).split(",") if x.strip()]
             if ids:
                 placeholders = ",".join("?" * len(ids))
-                async with aiosqlite.connect(DB_PATH) as pdb:
+                async with aio_connect() as pdb:
                     pdb.row_factory = aiosqlite.Row
                     async with pdb.execute(
-                        f"SELECT product_url, product_id FROM products WHERE id IN ({placeholders})", ids
+                        f"SELECT product_url, product_id, product_name FROM products WHERE id IN ({placeholders})", ids
                     ) as cur:
                         for r in await cur.fetchall():
                             link = r["product_url"] or r["product_id"]
                             if link:
                                 product_links.append(link)
+                                product_names.append(r["product_name"] or "")
         elif task.get("product_douyin_id"):
             product_links = [task["product_douyin_id"]]
+            product_names = [""]
         if product_links and not task.get("no_cart"):
             task_ctx["_product_douyin_ids"] = product_links
+            task_ctx["_product_names"] = product_names
 
         url = await publisher.publish(task_ctx, video_path)
         published_at = datetime.now(timezone.utc).isoformat()
@@ -180,7 +185,7 @@ async def _execute_task(task: dict, broadcast_fn: Optional[Callable] = None):
 
 async def _reset_stuck_publishing_tasks():
     """On startup, reset any tasks stuck in 'publishing' to 'failed' (server was killed mid-publish)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         result = await db.execute(
             "UPDATE publish_tasks SET status='failed', error_msg='服务重启时任务中断，请重试' WHERE status='publishing'"
         )
@@ -189,16 +194,32 @@ async def _reset_stuck_publishing_tasks():
             logger.warning(f"Reset {result.rowcount} stuck 'publishing' task(s) to 'failed'")
 
 
-async def poll_publish_tasks(broadcast_fn: Optional[Callable] = None, interval: int = 60):
-    """Continuously poll and execute due publish tasks."""
-    logger.info("Publish scheduler started")
+async def poll_publish_tasks(broadcast_fn: Optional[Callable] = None, interval: int = 90):
+    """Continuously poll and execute due publish tasks (throttled for stability)."""
+    logger.info("Publish scheduler started with throttling")
     await _reset_stuck_publishing_tasks()
+    
+    MAX_CONCURRENT = 1  # 限制为1个并发任务避免内存压力
+    
     while True:
         try:
+            # 检查当前正在发布的任务数量
+            async with aio_connect() as db:
+                async with db.execute(
+                    "SELECT COUNT(*) FROM publish_tasks WHERE status = 'publishing'"
+                ) as cur:
+                    publishing_count = (await cur.fetchone())[0]
+            
+            if publishing_count >= MAX_CONCURRENT:
+                logger.info(f"Already {publishing_count} tasks publishing, skipping this cycle")
+                await asyncio.sleep(interval)
+                continue
+                
+            # 获取待发布任务(限制数量)
             now = datetime.now(timezone.utc).isoformat()
-            async with aiosqlite.connect(DB_PATH) as db:
+            async with aio_connect() as db:
                 db.row_factory = aiosqlite.Row
-                # pending (immediate) + scheduled (due now)
+                # pending (immediate) + scheduled (due now) - 只取1个
                 async with db.execute(
                     """SELECT t.*,
                               g.merged_filename,
@@ -210,15 +231,56 @@ async def poll_publish_tasks(broadcast_fn: Optional[Callable] = None, interval: 
                        LEFT JOIN products p ON t.product_id = p.id
                        WHERE t.status IN ('pending', 'scheduled')
                          AND (t.scheduled_at IS NULL OR t.scheduled_at <= ?)
+                       LIMIT 1
                     """,
                     (now,),
                 ) as cur:
                     tasks = await cur.fetchall()
 
+            task_started = False
             for task in tasks:
+                logger.info(f"Starting single task {task['id']}")
                 asyncio.create_task(_execute_task(dict(task), broadcast_fn))
+                task_started = True
+                break  # 只处理一个任务
 
         except Exception as e:
             logger.error(f"Scheduler poll error: {e}")
+            task_started = False
 
-        await asyncio.sleep(interval)
+        # Smart sleep:
+        # - If there are pending (immediate) tasks waiting → poll again in 5s
+        # - If a scheduled task is due soon → wake up early
+        # - Otherwise → full interval
+        try:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            async with aio_connect() as db:
+                # Check for immediate pending tasks
+                async with db.execute(
+                    "SELECT COUNT(*) FROM publish_tasks WHERE status = 'pending' AND (scheduled_at IS NULL OR scheduled_at <= ?)",
+                    (now_iso,),
+                ) as cur:
+                    pending_count = (await cur.fetchone())[0]
+
+                if pending_count > 0 and publishing_count == 0 and not task_started:
+                    # There are tasks ready to run right now — check again quickly
+                    sleep_secs = 5
+                else:
+                    # Wake up early if a scheduled task is due soon
+                    async with db.execute(
+                        """SELECT scheduled_at FROM publish_tasks
+                           WHERE status = 'scheduled' AND scheduled_at > ?
+                           ORDER BY scheduled_at ASC LIMIT 1""",
+                        (now_iso,),
+                    ) as cur:
+                        row = await cur.fetchone()
+                    if row and row[0]:
+                        next_dt = datetime.fromisoformat(row[0].replace("Z", "+00:00"))
+                        secs_until = (next_dt - datetime.now(timezone.utc)).total_seconds()
+                        sleep_secs = max(5, min(interval, secs_until + 1))
+                    else:
+                        sleep_secs = interval
+        except Exception:
+            sleep_secs = interval
+
+        await asyncio.sleep(sleep_secs)

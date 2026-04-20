@@ -355,6 +355,7 @@ async def generate_thumbnail(mp4_path: str, offset: Optional[float] = None,
         frame_path = tmp.name
     with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
         anime_path = tmp.name
+    comfy_input = None  # must be initialized before try so finally can reference it
 
     try:
         # Step 1: extract raw frame
@@ -366,7 +367,6 @@ async def generate_thumbnail(mp4_path: str, offset: Optional[float] = None,
         # Step 2: anime-style via ComfyUI (best-effort style overlay, not base frame)
         # Raw frame is always the base for sharpness; ComfyUI adds anime colour grading.
         anime_overlay = None
-        comfy_input = None
         try:
             from comfyui_client import anime_img2img, health_check
             if await health_check():
@@ -390,7 +390,7 @@ async def generate_thumbnail(mp4_path: str, offset: Optional[float] = None,
 
         # Step 3: composite — raw frame (sharp) + optional anime overlay + title/subtitle
         seed = hash(mp4_path) & 0xFFFFFF
-        await asyncio.get_event_loop().run_in_executor(
+        await asyncio.get_running_loop().run_in_executor(
             None, _composite, frame_path, out, title, subtitle, seed, anime_overlay
         )
 

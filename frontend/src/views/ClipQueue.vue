@@ -310,7 +310,7 @@ function formatEta(secs) {
 
 onMounted(() => {
   load()
-  timer = setInterval(load, 3000)
+  timer = setInterval(load, 8000)
 })
 onUnmounted(() => clearInterval(timer))
 </script>

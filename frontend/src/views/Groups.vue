@@ -5,6 +5,9 @@
       <div class="toolbar-actions">
         <button class="btn-primary" @click="openCreateGroupModal">+ 新建分组</button>
         <button class="btn-custom" @click="openCustomGroupModal">+ 自定义分组</button>
+        <button v-if="suggestions.length > 0" class="btn-action orange btn-sm" @click="showSuggestions = true">
+          规则建议 ({{ suggestions.length }})
+        </button>
       </div>
     </div>
 
@@ -21,9 +24,25 @@
             <div class="group-sub">
               <span v-if="!g.is_custom" class="tag">{{ g.room_name }}</span>
               <span v-else class="tag" style="background:rgba(251,146,60,0.15);color:#c2540a;">自定义</span>
+              <span class="tag date-tag">{{ g.created_at ? g.created_at.slice(0, 10) : '' }}</span>
               <span class="tag" v-if="g.wig_model">{{ g.wig_model }}</span>
               <span class="tag color" v-if="g.wig_color">{{ g.wig_color }}</span>
               <span v-if="g.published_count > 0" class="tag published-tag">已发布 {{ g.published_count }} 次</span>
+              
+              <!-- 发布版本选择器 -->
+              <div class="mode-selector">
+                <select
+                  :value="g.publish_versions || 'both'"
+                  @change="setPublishVersions(g, $event.target.value)"
+                  class="mode-select"
+                  title="发布时使用哪个版本"
+                >
+                  <option value="both">📤 全部版本</option>
+                  <option value="director">🎬 导演版</option>
+                  <option value="classic">📹 经典版</option>
+                  <option value="creative">✍️ 自编版</option>
+                </select>
+              </div>
             </div>
           </div>
           <div class="group-stats">
@@ -32,33 +51,94 @@
             <button class="btn-del" @click="doDeleteGroup(g)" title="删除分组">✕</button>
           </div>
           <div class="group-actions">
-            <template v-if="g.merge_status === 2">
-              <a :href="`${apiBase}/api/groups/${g.id}/download`" class="btn-action purple">
-                下载合并视频
-              </a>
-            </template>
+            <!-- 三模式触发按钮 -->
             <button
-              v-else-if="g.merge_status === 1"
-              class="btn-action yellow" disabled>
-              合并中…
-            </button>
-            <button
-              v-else-if="g.merge_status === -1"
-              class="btn-action red"
-              @click="doMerge(g)">
-              ↺ 重新合并
-            </button>
-            <button
-              v-else
+              v-if="g.classic_status !== 1 && g.director_status !== 1 && (g.creative_status || 0) !== 1"
               class="btn-action"
               :disabled="g.ready_count === 0"
               @click="doMerge(g)">
-              合并剪辑
+              {{ (g.classic_status === 2 || g.director_status === 2 || g.creative_status === 2) ? '↺ 重新合并' : '剪辑并合并' }}
+            </button>
+            <button v-else class="btn-action yellow" disabled>处理中…</button>
+            <!-- 经典版结果 -->
+            <template v-if="g.classic_status === 2">
+              <button class="btn-action teal" style="margin-right:2px" @click="openClassicPreview(g)">▶ 经典版</button>
+              <a :href="`${apiBase}/api/groups/${g.id}/download`" class="btn-action teal" title="经典版下载">↓</a>
+            </template>
+            <span v-else-if="g.classic_status === 1" class="badge yellow">经典版处理中…</span>
+            <span v-else-if="g.classic_status === -1" class="badge red">经典版失败</span>
+            <!-- 自编版结果 -->
+            <template v-if="g.creative_status === 2">
+              <button class="btn-action green" style="margin-right:2px" @click="openCreativePreview(g)">▶ 自编版</button>
+              <a :href="`${apiBase}/api/groups/${g.id}/creative-download`" class="btn-action green" title="自编版下载">↓</a>
+            </template>
+            <span v-else-if="(g.creative_status || 0) === 1" class="badge yellow">自编版处理中…</span>
+            <span v-else-if="g.creative_status === -1" class="badge red">自编版失败</span>
+            <!-- 重剪 -->
+            <button
+              v-if="g.clip_count > 0"
+              class="btn-action orange"
+              :disabled="reclipAllId === g.id"
+              @click="doReclipAll(g)"
+              title="重置所有剪辑并重新生成">
+              {{ reclipAllId === g.id ? '重剪中…' : '↺ 全部重剪' }}
             </button>
             <button class="btn-sm" @click="toggleDetail(g.id)">
               {{ openId === g.id ? '收起' : '查看详情' }}
             </button>
           </div>
+        </div>
+
+        <!-- 导演模式操作面板（始终显示） -->
+        <div class="director-panel">
+          <!-- Vibe 选择器 -->
+          <div class="vibe-selector">
+            <span class="vibe-label">风格</span>
+            <select :value="g.vibe || 'trendy'" @change="setVibe(g, $event.target.value)" class="vibe-select">
+              <option value="trendy">🔥 爆款型</option>
+              <option value="emotional">💛 情感型</option>
+              <option value="lifestyle">☕ 生活型</option>
+              <option value="luxury">✨ 高端型</option>
+              <option value="contrast">⚡ 反差型</option>
+              <option value="creative">✍️ 自编文案</option>
+            </select>
+            <span class="vibe-hint">{{ vibeHints[g.vibe || 'trendy'] }}</span>
+          </div>
+          <div class="director-steps">
+            <div class="director-step">
+              <span class="step-num">1</span>
+              <button
+                class="btn-director"
+                :disabled="directorBusy[g.id] === 'script'"
+                @click="generateDirectorScript(g)">
+                {{ directorBusy[g.id] === 'script' ? '生成中…' : (g.director_script ? '↺ 重新生成脚本' : '生成脚本') }}
+              </button>
+              <span v-if="g.director_script" class="step-done">✓ 脚本已生成</span>
+            </div>
+            <div class="director-step">
+              <span class="step-num">2</span>
+              <button
+                class="btn-director"
+                :disabled="directorBusy[g.id] === 'voice'"
+                @click="generateVoiceover(g)">
+                {{ directorBusy[g.id] === 'voice' ? '合成中…' : (g.director_audio_path ? '↺ 重新生成配音' : '生成配音') }}
+              </button>
+              <span v-if="g.director_audio_path" class="step-done">✓ 配音已生成</span>
+            </div>
+            <div class="director-step">
+              <span class="step-num">3</span>
+              <button
+                class="btn-director"
+                :disabled="directorBusy[g.id] === 'video'"
+                @click="composeDirectorVideo(g)">
+                {{ directorBusy[g.id] === 'video' ? '合成中…' : (g.director_final_video ? '↺ 重新合成' : '合成视频') }}
+              </button>
+              <span v-if="g.director_final_video" class="step-done">✓ 视频已生成</span>
+              <button v-if="g.director_final_video" class="btn-action purple" style="margin-left:8px" @click="openDirectorPreview(g)">▶ 预览</button>
+              <a v-if="g.director_final_video" :href="`${apiBase}/api/groups/${g.id}/director-download`" class="btn-action purple" style="margin-left:4px">↓ 下载</a>
+            </div>
+          </div>
+          <div v-if="g.director_error" class="director-error">⚠ {{ g.director_error }}</div>
         </div>
 
         <!-- Custom group upload -->
@@ -120,6 +200,7 @@
                     <button class="badge-btn purple" @click="openPreview(r)">▶ 预览</button>
                     <a :href="`${apiBase}/api/recordings/${r.id}/clip`" class="badge purple">↓</a>
                     <button class="badge-btn orange" @click="openReclip(r)">↺ 重剪</button>
+                    <button class="badge-btn teal" @click="openReview(r)" :title="r.review_status ? '已审核（再次审核）' : '人工审核片段'">{{ r.review_status ? '✓审' : '审核' }}</button>
                   </span>
                   <!-- pending (no active progress) -->
                   <span v-else-if="r.transcribed === 0 && !progressMap[r.id]" class="badge dim">待转录</span>
@@ -225,6 +306,69 @@
     </div>
   </div>
 
+  <!-- Classic Video Preview Modal -->
+  <div v-if="classicPreviewGroup" class="modal-backdrop" @click.self="closeClassicPreview">
+    <div class="preview-modal">
+      <div class="preview-header">
+        <span class="preview-title">经典版 · {{ classicPreviewGroup.label }}</span>
+        <button class="modal-close" @click="closeClassicPreview">✕</button>
+      </div>
+      <video
+        :src="`${apiBase}/api/groups/${classicPreviewGroup.id}/download`"
+        controls
+        autoplay
+        class="preview-video"
+        @error="classicPreviewError = true"
+      ></video>
+      <div v-if="classicPreviewError" class="preview-err">视频加载失败</div>
+      <div class="preview-footer">
+        <a :href="`${apiBase}/api/groups/${classicPreviewGroup.id}/download`" class="btn-action teal" download>↓ 下载</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- Director Video Preview Modal -->
+  <div v-if="directorPreviewGroup" class="modal-backdrop" @click.self="closeDirectorPreview">
+    <div class="preview-modal">
+      <div class="preview-header">
+        <span class="preview-title">导演模式 · {{ directorPreviewGroup.label }}</span>
+        <button class="modal-close" @click="closeDirectorPreview">✕</button>
+      </div>
+      <video
+        :src="`${apiBase}/api/groups/${directorPreviewGroup.id}/director-download`"
+        controls
+        autoplay
+        class="preview-video"
+        @error="directorPreviewError = true"
+      ></video>
+      <div v-if="directorPreviewError" class="preview-err">视频加载失败</div>
+      <div class="preview-footer">
+        <a :href="`${apiBase}/api/groups/${directorPreviewGroup.id}/director-download`" class="btn-action purple" download>↓ 下载</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- Creative Video Preview Modal -->
+  <div v-if="creativePreviewGroup" class="modal-backdrop" @click.self="closeCreativePreview">
+    <div class="preview-modal">
+      <div class="preview-header">
+        <span class="preview-title">自编版 · {{ creativePreviewGroup.label }}</span>
+        <button class="modal-close" @click="closeCreativePreview">✕</button>
+      </div>
+      <video
+        :src="`${apiBase}/api/groups/${creativePreviewGroup.id}/creative-download`"
+        controls
+        autoplay
+        class="preview-video"
+        @error="creativePreviewError = true"
+      ></video>
+      <div v-if="creativePreviewError" class="preview-err">视频加载失败</div>
+      <div class="preview-footer">
+        <a :href="`${apiBase}/api/groups/${creativePreviewGroup.id}/creative-download`" class="btn-action green" download>↓ 下载</a>
+      </div>
+    </div>
+  </div>
+
   <!-- Re-clip Feedback Modal -->
   <div v-if="reclipModal" class="modal-backdrop" @click.self="!reclipSaving && (reclipModal = null)">
     <div class="modal">
@@ -307,11 +451,84 @@
     </div>
   </div>
 
+  <!-- Human Review Modal -->
+  <div v-if="reviewModal" class="modal-backdrop" @click.self="!reviewSaving && (reviewModal = null)">
+    <div class="modal review-modal">
+      <div class="modal-header">
+        <span>审核片段 · {{ reviewModal.rec.filename }}</span>
+        <button class="modal-close" @click="reviewModal = null">✕</button>
+      </div>
+      <div v-if="reviewLoading" class="review-loading">加载中…</div>
+      <template v-else-if="reviewModal.segs">
+        <div class="review-hint">
+          勾选要保留的片段（算法选中的已预选）。取消勾选 = 告诉系统该关键词不重要；手动勾选未选中片段 = 告诉系统遗漏了。
+        </div>
+        <div class="review-segments">
+          <div
+            v-for="seg in reviewModal.segs"
+            :key="seg.idx"
+            :class="['review-seg', reviewModal.selected.has(seg.idx) && 'review-seg-selected', !seg.valid && 'review-seg-invalid']"
+            @click="toggleSeg(seg.idx)"
+          >
+            <div class="review-seg-check">{{ reviewModal.selected.has(seg.idx) ? '☑' : '☐' }}</div>
+            <div class="review-seg-body">
+              <div class="review-seg-time">{{ fmtSec(seg.start) }} – {{ fmtSec(seg.end) }}</div>
+              <div class="review-seg-text">{{ seg.text }}</div>
+              <div class="review-seg-meta">
+                <span class="review-score">{{ seg.score > 0 ? '+' + seg.score : seg.score }}</span>
+                <span v-if="seg.category" class="review-cat">{{ seg.category }}</span>
+                <span v-if="!seg.valid" class="review-invalid-mark">过滤</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="review-summary">
+          已选 {{ reviewModal.selected.size }} / {{ reviewModal.segs.length }} 段
+          <span v-if="reviewModal.algoIdxs.size">
+            （算法选 {{ reviewModal.algoIdxs.size }} 段，
+            你新增 {{ reviewModal_added.length }}，删除 {{ reviewModal_removed.length }}）
+          </span>
+        </div>
+      </template>
+      <div class="modal-footer">
+        <button class="btn-action" @click="reviewModal = null">取消</button>
+        <button class="btn-action purple" :disabled="reviewSaving || reviewLoading || !reviewModal.segs" @click="submitReview">
+          {{ reviewSaving ? '提交中…' : '提交审核' }}
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Rule Suggestions Panel (shown when there are pending suggestions) -->
+  <div v-if="showSuggestions" class="modal-backdrop" @click.self="showSuggestions = false">
+    <div class="modal suggestions-modal">
+      <div class="modal-header">
+        <span>规则建议审核</span>
+        <button class="modal-close" @click="showSuggestions = false">✕</button>
+      </div>
+      <div v-if="suggestions.length === 0" class="review-hint">暂无待审核建议</div>
+      <div v-else class="suggestions-list">
+        <div v-for="s in suggestions" :key="s.id" class="suggestion-item">
+          <div class="sug-kw">{{ s.keyword }}</div>
+          <div class="sug-reason">{{ s.reason }}</div>
+          <div class="sug-score">{{ s.current_score }} → {{ s.suggested_score }}</div>
+          <div class="sug-actions">
+            <button class="btn-action purple btn-sm" @click="acceptSuggestion(s.id)">接受</button>
+            <button class="btn-action btn-sm" @click="rejectSuggestion(s.id)">忽略</button>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-action" @click="showSuggestions = false">关闭</button>
+      </div>
+    </div>
+  </div>
+
 </template>
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { getGroups, getGroup, getRooms, mergeGroup, createGroup, updateGroup, reassignRecording, importGroupVideos, createWS, getThumbnailUrl, createCustomGroup, uploadCustomGroupVideo, deleteGroup, getProcessingProgress, reclipRecording } from '../api.js'
+import { getGroups, getGroup, getRooms, mergeGroup, createGroup, updateGroup, reassignRecording, importGroupVideos, createWS, getThumbnailUrl, createCustomGroup, uploadCustomGroupVideo, deleteGroup, getProcessingProgress, reclipRecording, reclipGroupAll } from '../api.js'
 import { useToast } from '../composables/toast.js'
 
 const groups = ref([])
@@ -347,10 +564,57 @@ const previewError = ref(false)
 function openPreview(r) { previewRec.value = r; previewError.value = false }
 function closePreview() { previewRec.value = null }
 
-// Re-clip
+// Classic video preview
+const classicPreviewGroup = ref(null)
+const classicPreviewError = ref(false)
+function openClassicPreview(g) { classicPreviewGroup.value = g; classicPreviewError.value = false }
+function closeClassicPreview() { classicPreviewGroup.value = null }
+
+// Director video preview
+const directorPreviewGroup = ref(null)
+const directorPreviewError = ref(false)
+function openDirectorPreview(g) { directorPreviewGroup.value = g; directorPreviewError.value = false }
+function closeDirectorPreview() { directorPreviewGroup.value = null }
+
+// Creative video preview
+const creativePreviewGroup = ref(null)
+const creativePreviewError = ref(false)
+function openCreativePreview(g) { creativePreviewGroup.value = g; creativePreviewError.value = false }
+function closeCreativePreview() { creativePreviewGroup.value = null }
+
+// Re-clip (single recording)
 const reclipModal = ref(null)
 const reclipSaving = ref(false)
 function openReclip(r) { reclipModal.value = { rec: r, feedback: '' } }
+
+// Director mode busy state: { [groupId]: 'script' | 'voice' | 'video' | null }
+const directorBusy = ref({})
+
+const vibeHints = {
+  trendy:    '快节奏·强钩子·追热点',
+  emotional: '情感共鸣·讲故事·引共情',
+  lifestyle: 'GRWM·日常感·接地气',
+  luxury:    '品质感·精致·仪式感',
+  contrast:  '反差感·意外·强对比',
+  creative:  '自由创作·编造卖点·催单节奏',
+}
+
+// Re-clip all recordings in a group
+const reclipAllId = ref(null)
+async function doReclipAll(g) {
+  if (!confirm(`将重置「${g.label}」分组内所有剪辑并重新生成（共 ${g.clip_count} 条录像）。确认吗？`)) return
+  reclipAllId.value = g.id
+  try {
+    const result = await reclipGroupAll(g.id)
+    show(`已提交 ${result.queued.length} / ${result.total} 条录像重新剪辑`, 'success')
+    await load()
+    if (openId.value === g.id) detail.value = await getGroup(g.id)
+  } catch (e) {
+    show(e.message || '全部重剪失败', 'error')
+  } finally {
+    reclipAllId.value = null
+  }
+}
 async function doReclip() {
   if (!reclipModal.value) return
   reclipSaving.value = true
@@ -399,7 +663,7 @@ function startProgressPolling() {
     progressMap.value = await getProcessingProgress()
   }
   poll()
-  progressTimer = setInterval(poll, 3000)
+  progressTimer = setInterval(poll, 8000)
 }
 
 function stopProgressPolling() {
@@ -487,6 +751,109 @@ async function doDeleteGroup(g) {
   }
 }
 
+async function setPublishVersions(group, versions) {
+  group.publish_versions = versions
+  try {
+    const response = await fetch(`${apiBase}/api/groups/${group.id}/publish-versions`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ publish_versions: versions })
+    })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}))
+      throw new Error(error.detail || '设置失败')
+    }
+    const labels = { both: '两个版本', director: '导演版', classic: '经典版' }
+    show(`发布版本已设为：${labels[versions] || versions}`, 'success')
+  } catch (e) {
+    show(e.message || '设置发布版本失败', 'error')
+    await load()
+  }
+}
+
+async function setVibe(group, vibe) {
+  group.vibe = vibe
+  try {
+    await fetch(`${apiBase}/api/v2/director/set-vibe`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ group_id: group.id, vibe })
+    })
+  } catch (e) {
+    // best-effort — vibe is still held in local group object for current session
+  }
+}
+
+async function generateDirectorScript(group) {
+  directorBusy.value[group.id] = 'script'
+  group.director_error = null
+  try {
+    const response = await fetch(`${apiBase}/api/v2/director/generate-script`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ group_id: group.id, script_type: 'balanced', vibe: group.vibe || 'trendy' })
+    })
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}))
+      throw new Error(err.detail || '脚本生成失败')
+    }
+    const result = await response.json()
+    if (!result.success) throw new Error('脚本生成返回失败状态')
+    show(result.fallback ? '已生成备用脚本（Claude暂时不可用）' : '脚本生成成功', result.fallback ? 'warning' : 'success')
+    await load()
+  } catch (e) {
+    group.director_error = e.message || '脚本生成失败'
+    show(group.director_error, 'error')
+  } finally {
+    directorBusy.value[group.id] = null
+  }
+}
+
+async function generateVoiceover(group) {
+  directorBusy.value[group.id] = 'voice'
+  group.director_error = null
+  try {
+    const response = await fetch(`${apiBase}/api/v2/director/generate-voiceover?group_id=${group.id}`, {
+      method: 'POST'
+    })
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}))
+      throw new Error(err.detail || '配音生成失败')
+    }
+    const result = await response.json()
+    if (!result.success) throw new Error(result.error || '配音生成失败')
+    show(`配音生成成功，时长 ${Math.round(result.total_duration)} 秒`, 'success')
+    await load()
+  } catch (e) {
+    group.director_error = e.message || '配音生成失败'
+    show(group.director_error, 'error')
+  } finally {
+    directorBusy.value[group.id] = null
+  }
+}
+
+async function composeDirectorVideo(group) {
+  directorBusy.value[group.id] = 'video'
+  group.director_error = null
+  const style = group.vibe || 'trendy'
+  try {
+    const response = await fetch(`${apiBase}/api/v2/director/compose-video?group_id=${group.id}&video_style=${style}`, {
+      method: 'POST'
+    })
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}))
+      throw new Error(err.detail || '合成失败')
+    }
+    // 后台任务已启动，busy 状态由 director_done / director_error WS 事件清除
+    show('合成已启动，完成后自动通知', 'info')
+  } catch (e) {
+    // 校验失败（同步错误），立刻清除 busy
+    directorBusy.value[group.id] = null
+    group.director_error = e.message || '视频合成失败'
+    show(group.director_error, 'error')
+  }
+}
+
 function openCustomGroupModal() {
   customModal.value = { label: '', wig_model: '', wig_color: '' }
 }
@@ -528,12 +895,13 @@ async function doReassign(recordingId, newGroupId) {
     await reassignRecording(recordingId, newGroupId ? Number(newGroupId) : null)
     await load()
   } catch (e) {
-    alert(e.message || '移动失败')
+    show(e.message || '移动失败', 'error')
   }
 }
 
 onMounted(() => {
   load()
+  loadSuggestions()
   ws = createWS((msg) => {
     if (msg.type === 'merged') {
       show('视频合并完成', 'success')
@@ -546,12 +914,153 @@ onMounted(() => {
         ...progressMap.value,
         [msg.recording_id]: { pct: msg.pct, msg: msg.msg, eta_seconds: msg.eta_seconds, phase: msg.phase ?? '' }
       }
+    } else if (msg.type === 'director_done') {
+      directorBusy.value[msg.group_id] = null
+      const n = msg.matched_count ? `，匹配 ${msg.matched_count} 个片段` : ''
+      show(`导演视频合成完成${n}`, 'success')
+      load()
+    } else if (msg.type === 'director_error') {
+      directorBusy.value[msg.group_id] = null
+      show(msg.error || '合成失败', 'error')
+      load()
+    } else if (msg.type === 'director_voice_done') {
+      show('配音生成完成', 'success')
+      load()
     }
   })
   // Poll every 15s for merge status updates
   const t = setInterval(load, 15000)
   onUnmounted(() => clearInterval(t))
 })
+
+// ── Human Review ─────────────────────────────────────────────────────────────
+
+const reviewModal = ref(null)  // { rec, segs, selected: Set, algoIdxs: Set }
+const reviewLoading = ref(false)
+const reviewSaving = ref(false)
+const suggestions = ref([])
+const showSuggestions = ref(false)
+
+function fmtSec(sec) {
+  const m = Math.floor(sec / 60)
+  const s = (sec % 60).toFixed(1).padStart(4, '0')
+  return `${m}:${s}`
+}
+
+async function openReview(r) {
+  reviewModal.value = { rec: r, segs: null, selected: new Set(), algoIdxs: new Set() }
+  reviewLoading.value = true
+  try {
+    const res = await fetch(`${apiBase}/api/recordings/${r.id}/review-candidates`)
+    if (!res.ok) throw new Error(await res.text())
+    const data = await res.json()
+    const segs = data.all_segs || []
+
+    // Pre-select algo-selected segments from prev_review if available
+    let algoIdxs = new Set()
+    let prevSelected = new Set()
+    if (data.prev_review) {
+      algoIdxs = new Set(data.prev_review.algo_segments || [])
+      prevSelected = new Set(data.prev_review.user_segments || [])
+    } else {
+      // No prior review — pre-select top-scored valid segments (algo's likely picks)
+      // We sort by score descending and take top ~30%
+      const valid = segs.filter(s => s.valid && s.score > 0).sort((a, b) => b.score - a.score)
+      const topN = Math.max(1, Math.ceil(valid.length * 0.3))
+      algoIdxs = new Set(valid.slice(0, topN).map(s => s.idx))
+      prevSelected = new Set(algoIdxs)
+    }
+
+    reviewModal.value = { rec: r, segs, selected: new Set(prevSelected), algoIdxs }
+  } catch (e) {
+    show(e.message || '加载失败', 'error')
+    reviewModal.value = null
+  } finally {
+    reviewLoading.value = false
+  }
+}
+
+function toggleSeg(idx) {
+  const m = reviewModal.value
+  if (!m) return
+  if (m.selected.has(idx)) m.selected.delete(idx)
+  else m.selected.add(idx)
+  // Trigger reactivity
+  reviewModal.value = { ...m, selected: new Set(m.selected) }
+}
+
+const reviewModal_added = computed(() => {
+  const m = reviewModal.value
+  if (!m || !m.algoIdxs) return []
+  return [...m.selected].filter(i => !m.algoIdxs.has(i))
+})
+
+const reviewModal_removed = computed(() => {
+  const m = reviewModal.value
+  if (!m || !m.algoIdxs) return []
+  return [...m.algoIdxs].filter(i => !m.selected.has(i))
+})
+
+async function submitReview() {
+  const m = reviewModal.value
+  if (!m || !m.segs) return
+  reviewSaving.value = true
+  try {
+    const algoArr = [...m.algoIdxs]
+    const userArr = [...m.selected]
+    const added = userArr.filter(i => !m.algoIdxs.has(i))
+    const removed = algoArr.filter(i => !m.selected.has(i))
+    const userSegsFull = m.segs.filter(s => added.includes(s.idx))
+
+    const res = await fetch(`${apiBase}/api/recordings/${m.rec.id}/review`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        algo_segments: algoArr,
+        user_segments: userArr,
+        user_added: added,
+        user_removed: removed,
+        user_segments_full: userSegsFull,
+      })
+    })
+    if (!res.ok) throw new Error((await res.json()).detail || '提交失败')
+    show('审核已提交，系统正在学习', 'success')
+    reviewModal.value = null
+    // Refresh suggestions after submit
+    await loadSuggestions()
+    // Update the recording's review_status in detail
+    if (openId.value) detail.value = await getGroup(openId.value)
+  } catch (e) {
+    show(e.message || '提交失败', 'error')
+  } finally {
+    reviewSaving.value = false
+  }
+}
+
+async function loadSuggestions() {
+  try {
+    const res = await fetch(`${apiBase}/api/rule-suggestions`)
+    if (res.ok) suggestions.value = await res.json()
+  } catch (e) { /* best effort */ }
+}
+
+async function acceptSuggestion(id) {
+  try {
+    const res = await fetch(`${apiBase}/api/rule-suggestions/${id}/accept`, { method: 'POST' })
+    if (!res.ok) throw new Error((await res.json()).detail || '操作失败')
+    show('规则已接受并生效', 'success')
+    await loadSuggestions()
+  } catch (e) { show(e.message || '操作失败', 'error') }
+}
+
+async function rejectSuggestion(id) {
+  try {
+    const res = await fetch(`${apiBase}/api/rule-suggestions/${id}/reject`, { method: 'POST' })
+    if (!res.ok) throw new Error((await res.json()).detail || '操作失败')
+    show('建议已忽略', 'info')
+    await loadSuggestions()
+  } catch (e) { show(e.message || '操作失败', 'error') }
+}
 
 onUnmounted(() => { ws?.close(); stopProgressPolling() })
 </script>
@@ -596,6 +1105,28 @@ onUnmounted(() => { ws?.close(); stopProgressPolling() })
 .tag { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: #2a2a2a; color: #999; }
 .tag.color { background: rgba(251,191,36,0.12); color: #fbbf24; }
 .tag.promo { background: rgba(254,44,85,0.12); color: #fe2c55; }
+.tag.date-tag { background: rgba(148,163,184,0.2); color: #cbd5e1; }
+
+/* 模式选择器样式 */
+.mode-selector { margin-top: 4px; }
+.mode-select {
+  background: #1a1a1a;
+  border: 1px solid #444;
+  color: #ccc;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  cursor: pointer;
+  min-width: 120px;
+}
+.mode-select:hover {
+  border-color: #666;
+}
+.mode-select:focus {
+  outline: none;
+  border-color: #8b5cf6;
+  box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.1);
+}
 .group-stats { font-size: 13px; color: #666; white-space: nowrap; }
 .stat-item { margin-right: 12px; }
 .group-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
@@ -605,6 +1136,7 @@ onUnmounted(() => { ws?.close(); stopProgressPolling() })
 .btn-action.purple { background: rgba(168,85,247,0.15); color: #c084fc; border-color: rgba(168,85,247,0.3); }
 .btn-action.yellow { background: rgba(251,191,36,0.12); color: #fbbf24; border-color: transparent; }
 .btn-action.teal { background: rgba(45,212,191,0.12); color: #2dd4bf; border-color: rgba(45,212,191,0.3); }
+.btn-action.green { background: rgba(34,197,94,0.12); color: #22c55e; border-color: rgba(34,197,94,0.3); }
 .btn-action.red { background: rgba(254,44,85,0.12); color: #fe2c55; border-color: rgba(254,44,85,0.3); }
 .btn-action.orange { background: rgba(251,146,60,0.15); color: #c2540a; border-color: rgba(251,146,60,0.4); }
 .btn-sm { background: #222; border: 1px solid #333; color: #888; padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
@@ -684,4 +1216,45 @@ onUnmounted(() => { ws?.close(); stopProgressPolling() })
 .preview-video { width: 100%; max-height: 70vh; background: #000; display: block; }
 .preview-err { text-align: center; color: #fe2c55; padding: 20px; }
 .preview-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 1px solid #222; }
+.director-panel { padding: 10px 16px; background: rgba(99,102,241,0.07); border-top: 1px solid rgba(99,102,241,0.2); border-bottom: 1px solid rgba(99,102,241,0.2); }
+.vibe-selector { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.vibe-label { font-size: 11px; color: #a5b4fc; font-weight: 600; }
+.vibe-select { padding: 3px 8px; font-size: 12px; border-radius: 6px; border: 1px solid rgba(99,102,241,0.4); background: rgba(99,102,241,0.15); color: #e0e7ff; cursor: pointer; }
+.vibe-hint { font-size: 11px; color: #818cf8; font-style: italic; }
+.director-steps { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.director-step { display: flex; align-items: center; gap: 6px; }
+.step-num { width: 20px; height: 20px; border-radius: 50%; background: rgba(99,102,241,0.3); color: #a5b4fc; font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.btn-director { padding: 5px 12px; font-size: 12px; border-radius: 6px; border: 1px solid rgba(99,102,241,0.4); background: rgba(99,102,241,0.15); color: #a5b4fc; cursor: pointer; white-space: nowrap; }
+.btn-director:hover:not(:disabled) { background: rgba(99,102,241,0.3); }
+.btn-director:disabled { opacity: 0.4; cursor: not-allowed; }
+.step-done { font-size: 11px; color: #6ee7b7; white-space: nowrap; }
+.director-error { margin-top: 6px; font-size: 11px; color: #f87171; }
+/* Review modal */
+.review-modal { width: 680px; max-width: 95vw; max-height: 90vh; display: flex; flex-direction: column; }
+.review-loading { text-align: center; color: #666; padding: 30px 0; flex: 1; }
+.review-hint { font-size: 11px; color: #888; margin-bottom: 12px; line-height: 1.6; background: rgba(99,102,241,0.06); border-radius: 6px; padding: 8px 10px; border: 1px solid rgba(99,102,241,0.15); }
+.review-segments { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; max-height: 50vh; padding-right: 4px; }
+.review-seg { display: flex; gap: 10px; padding: 8px 10px; border-radius: 6px; border: 1px solid #2a2a2a; cursor: pointer; transition: border-color 0.15s, background 0.15s; }
+.review-seg:hover { border-color: #444; background: rgba(255,255,255,0.02); }
+.review-seg-selected { border-color: rgba(168,85,247,0.6); background: rgba(168,85,247,0.08); }
+.review-seg-invalid { opacity: 0.4; }
+.review-seg-check { font-size: 14px; color: #c084fc; width: 16px; flex-shrink: 0; padding-top: 1px; }
+.review-seg-body { flex: 1; min-width: 0; }
+.review-seg-time { font-size: 10px; color: #555; font-family: monospace; margin-bottom: 2px; }
+.review-seg-text { font-size: 12px; color: #ccc; line-height: 1.5; word-break: break-all; }
+.review-seg-meta { display: flex; gap: 6px; margin-top: 4px; flex-wrap: wrap; }
+.review-score { font-size: 10px; background: rgba(250,204,21,0.12); color: #fcd34d; border-radius: 4px; padding: 1px 5px; }
+.review-cat { font-size: 10px; background: rgba(99,102,241,0.12); color: #818cf8; border-radius: 4px; padding: 1px 5px; }
+.review-invalid-mark { font-size: 10px; background: rgba(254,44,85,0.12); color: #f87171; border-radius: 4px; padding: 1px 5px; }
+.review-summary { margin-top: 10px; font-size: 11px; color: #888; padding: 6px 10px; background: #111; border-radius: 6px; }
+.badge-btn.teal { background: rgba(20,184,166,0.15); color: #2dd4bf; }
+.badge-btn.teal:hover { background: rgba(20,184,166,0.28); }
+/* Rule suggestions panel */
+.suggestions-modal { width: 560px; max-width: 95vw; max-height: 85vh; display: flex; flex-direction: column; }
+.suggestions-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+.suggestion-item { padding: 12px; border: 1px solid #2a2a2a; border-radius: 8px; background: #111; }
+.sug-kw { font-size: 13px; font-weight: 600; color: #a78bfa; margin-bottom: 4px; }
+.sug-reason { font-size: 11px; color: #888; margin-bottom: 6px; line-height: 1.5; }
+.sug-score { font-size: 11px; color: #fcd34d; margin-bottom: 8px; font-family: monospace; }
+.sug-actions { display: flex; gap: 8px; }
 </style>

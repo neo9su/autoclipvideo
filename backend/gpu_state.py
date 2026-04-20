@@ -17,6 +17,7 @@ import logging
 import os
 import time
 
+import aiohttp
 import httpx
 
 logger = logging.getLogger(__name__)
@@ -68,9 +69,15 @@ async def wait_until_online() -> None:
 
 async def _probe_gpu(client: httpx.AsyncClient) -> bool:
     try:
-        r = await client.get(f"{GPU_SERVICE_URL}/health", timeout=5.0)
-        return r.status_code == 200
-    except Exception:
+        # Use aiohttp for the probe — httpx has read-timeout issues with this server
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{GPU_SERVICE_URL}/health",
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as r:
+                return r.status == 200
+    except Exception as e:
+        logger.debug(f"GPU probe error: {type(e).__name__}: {e}")
         return False
 
 
@@ -154,7 +161,7 @@ async def watch_gpu_service(broadcast_fn=None) -> None:
                     # Fire recovery callbacks (e.g. auto-retry failed clip jobs)
                     for _cb in list(_online_callbacks):
                         try:
-                            asyncio.get_event_loop().create_task(_cb())
+                            asyncio.create_task(_cb())
                         except Exception:
                             pass
 

@@ -61,9 +61,10 @@ class DouyinPublisher(BasePublisher):
                 await page.goto(LOGIN_URL, timeout=30000, wait_until="domcontentloaded")
                 logger.info("Browser opened — waiting for user to log in (max 5 min)...")
 
-                deadline = asyncio.get_event_loop().time() + 300
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + 300
                 cookies = []
-                while asyncio.get_event_loop().time() < deadline:
+                while loop.time() < deadline:
                     cookies = await ctx.cookies()
                     if {c["name"] for c in cookies} & AUTH_COOKIE_NAMES:
                         logger.info("Auth cookies detected, login successful")
@@ -98,10 +99,34 @@ class DouyinPublisher(BasePublisher):
         task_id = task.get("id", "unknown")
 
         async with async_playwright() as p:
-            # Semi-automatic mode: visible browser so user can review and click 发布 manually
-            browser = await p.chromium.launch(headless=False)
+            # Semi-automatic mode: visible browser with optimized startup
+            browser = await p.chromium.launch(
+                headless=False,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage", 
+                    "--disable-gpu",
+                    "--disable-extensions",
+                    "--disable-background-timer-throttling",
+                    "--disable-background-networking",
+                    "--disable-backgrounding-occluded-windows",
+                    "--disable-breakpad",
+                    "--disable-component-extensions-with-background-pages",
+                    "--disable-features=TranslateUI,VizDisplayCompositor",
+                    "--max-old-space-size=1024",
+                    "--memory-pressure-off",
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-web-security",
+                    "--disable-features=VizDisplayCompositor,UseChromeOSDirectVideoDecoder",
+                    "--fast-start",
+                    "--disable-background-mode"
+                ]
+            )
             # Pre-grant geolocation permission to suppress the browser permission dialog
-            ctx = await browser.new_context(permissions=["geolocation"])
+            ctx = await browser.new_context(
+                permissions=["geolocation"],
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+            )
             await _load_cookies(ctx, account_cookie)
             page = await ctx.new_page()
             await page.bring_to_front()
@@ -109,7 +134,7 @@ class DouyinPublisher(BasePublisher):
             try:
                 # 1. Navigate to upload page
                 await progress("正在打开发布页面...")
-                await page.goto(UPLOAD_URL, timeout=60000, wait_until="domcontentloaded")
+                await page.goto(UPLOAD_URL, timeout=30000, wait_until="domcontentloaded")
                 await _show_banner(page, "正在检查登录状态…", "system")
 
                 if "login" in page.url or "passport" in page.url:
@@ -147,14 +172,15 @@ class DouyinPublisher(BasePublisher):
                 # Concurrently show elapsed-time updates in the banner every 10s.
                 await progress("视频上传中，等待平台处理...")
                 _TITLE_SEL = 'textarea[placeholder*="标题"], input[placeholder*="标题"]'
-                upload_max = max(300, int(file_size_mb * 3))  # ~3s per MB, min 5 min
+                upload_max = max(600, int(file_size_mb * 5))  # ~5s per MB, min 10 min
                 logger.info(f"Waiting up to {upload_max}s for upload+processing ({file_size_mb:.0f} MB)")
 
                 async def _upload_ticker(page, max_sec):
                     """Update banner every 10s with elapsed time until cancelled."""
-                    start = asyncio.get_event_loop().time()
+                    loop = asyncio.get_running_loop()
+                    start = loop.time()
                     while True:
-                        elapsed = int(asyncio.get_event_loop().time() - start)
+                        elapsed = int(loop.time() - start)
                         await _show_banner(
                             page,
                             f"视频上传 & 平台转码中，请耐心等待，勿操作浏览器… 已等待 {elapsed}s / 预计最长 {max_sec}s",
@@ -177,7 +203,7 @@ class DouyinPublisher(BasePublisher):
                 await _dismiss_tooltips(page)
 
                 # 4. Fill title
-                title = task.get("title", "")
+                title = task.get("title") or ""
                 if title:
                     await progress("正在填写标题...")
                     await _show_banner(page, "正在自动填写标题，请勿操作…", "system")
@@ -192,8 +218,8 @@ class DouyinPublisher(BasePublisher):
                         logger.warning(f"Title fill failed: {e}")
 
                 # 5. Fill description + hashtags (max 5 tags)
-                desc = task.get("description", "")
-                tags_str = task.get("tags", "")
+                desc = task.get("description") or ""
+                tags_str = task.get("tags") or ""
                 tags = [t.strip().lstrip("#") for t in tags_str.split(",") if t.strip()][:5]
 
                 if desc or tags:
@@ -237,6 +263,7 @@ class DouyinPublisher(BasePublisher):
                 # 6. Attach products via 购物车 → 粘贴商品链接 (max 5)
                 #    Skipped for "无车发布" tasks (no_cart=True)
                 product_ids = (task.get("_product_douyin_ids") or [])[:5]
+                product_names = (task.get("_product_names") or [])
                 if product_ids and not task.get("no_cart"):
                     await progress(f"正在添加购物车商品链接（共 {len(product_ids)} 件）...")
                     await _show_banner(page, f"正在自动选择购物车并添加商品链接（共 {len(product_ids)} 件），请勿操作…", "system")
@@ -244,8 +271,9 @@ class DouyinPublisher(BasePublisher):
                     # 共创 tooltip, etc.) are gone before interacting with 添加标签
                     await _dismiss_overlays(page)
                     await _ensure_shopping_cart_tag(page)
-                    for pid in product_ids:
-                        await _attach_product(page, pid)
+                    for i, pid in enumerate(product_ids):
+                        name = product_names[i] if i < len(product_names) else ""
+                        await _attach_product(page, pid, short_title=name)
 
                 await _dismiss_tooltips(page)
 
@@ -305,7 +333,21 @@ class DouyinPublisher(BasePublisher):
                 return page.url
 
             finally:
-                await browser.close()
+                try:
+                    await browser.close()
+                except Exception as e:
+                    logger.warning(f"Browser close error: {e}")
+                    # Force-kill only the browser process we spawned
+                    try:
+                        import psutil, os as _os
+                        browser_pid = browser.process.pid if hasattr(browser, "process") and browser.process else None
+                        if browser_pid:
+                            try:
+                                psutil.Process(browser_pid).kill()
+                            except psutil.NoSuchProcess:
+                                pass
+                    except Exception:
+                        pass
 
 
 async def _lock_input(page):

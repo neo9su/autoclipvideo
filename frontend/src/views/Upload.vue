@@ -378,7 +378,7 @@ async function submit() {
 
 function startPolling() {
   if (pollTimer) return
-  pollTimer = setInterval(pollJobs, 3000)
+  pollTimer = setInterval(pollJobs, 8000)
 }
 
 async function pollJobs() {

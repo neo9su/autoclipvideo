@@ -324,6 +324,16 @@ export async function cancelPublishTask(id) {
   if (!res.ok) throw new Error(await res.text())
 }
 
+export async function bulkCancelPublishTasks(body) {
+  const res = await fetch(`${BASE}/api/publish-tasks/bulk-cancel`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
 export async function getUnscheduledGroups(platform = 'douyin', roomId = null) {
   const q = new URLSearchParams({ platform })
   if (roomId) q.set('room_id', roomId)
@@ -385,6 +395,12 @@ export async function reclipRecording(id, feedback) {
     body: JSON.stringify({ feedback: feedback || '' }),
   })
   if (!res.ok) throw new Error((await res.json()).detail || '重新剪辑失败')
+  return res.json()
+}
+
+export async function reclipGroupAll(groupId) {
+  const res = await fetch(`${BASE}/api/groups/${groupId}/reclip-all`, { method: 'POST' })
+  if (!res.ok) throw new Error((await res.json()).detail || '全部重剪失败')
   return res.json()
 }
 

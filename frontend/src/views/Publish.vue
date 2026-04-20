@@ -4,8 +4,9 @@
     <div class="task-list-panel">
       <div class="panel-header">
         <h3>发布任务</h3>
-        <div style="display:flex;gap:8px">
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
           <button class="btn-secondary" @click="openBatchModal">批量排期</button>
+          <button class="btn-warn-sm" @click="doBulkCancel" title="取消所有待发/定时任务">批量取消</button>
           <button class="btn-primary" @click="showCreateModal = true">+ 创建任务</button>
         </div>
       </div>
@@ -113,10 +114,10 @@
           </button>
         </div>
         <div class="room-filter-chips">
-          <button :class="['room-chip', roomFilter === 0 && 'active']" @click="roomFilter = 0">全部</button>
+          <button :class="['room-chip', roomFilter === 0 && 'active']" @click="roomFilter = 0; newTask.group_id = ''; newTask.product_ids = []">全部</button>
           <button v-for="r in rooms" :key="r.id"
             :class="['room-chip', roomFilter === r.id && 'active']"
-            @click="roomFilter = r.id">{{ r.name }}</button>
+            @click="roomFilter = r.id; newTask.group_id = ''; newTask.product_ids = []">{{ r.name }}</button>
         </div>
         <div class="group-list">
           <div v-if="!filteredGroups.length" class="muted" style="padding:8px;font-size:12px">暂无已合并分组</div>
@@ -126,6 +127,8 @@
             <div class="group-item-name">{{ g.label }}</div>
             <div class="group-item-sub">
               <span v-if="g.room_name" class="group-room-tag">{{ g.room_name }}</span>{{ g.wig_model }} · {{ g.wig_color }}
+              <span v-if="g.director_status === 2" class="vbadge vbadge-director">🎬</span>
+              <span v-if="g.classic_status === 2" class="vbadge vbadge-classic">📹</span>
             </div>
             <span v-if="publishedGroupIds.has(g.id)" class="group-published-badge">✓ 已发布</span>
             <div class="group-item-actions" @click.stop>
@@ -135,6 +138,23 @@
             </div>
           </div>
         </div>
+
+        <!-- Version selector: shown when selected group has both versions -->
+        <template v-if="selectedGroup && selectedGroup.classic_status === 2 && selectedGroup.director_status === 2">
+          <label>发布版本</label>
+          <div class="version-switcher">
+            <div :class="['vsw-option', selectedPublishVersion === 'director' && 'vsw-active']"
+                 @click="setPublishVersion('director')">
+              <span class="vsw-label">🎬 导演版</span>
+              <span class="vsw-preview-btn" @click.stop="previewGroup = selectedGroup; previewVersion = 'director'">▶ 预览</span>
+            </div>
+            <div :class="['vsw-option', selectedPublishVersion === 'classic' && 'vsw-active']"
+                 @click="setPublishVersion('classic')">
+              <span class="vsw-label">📹 经典版</span>
+              <span class="vsw-preview-btn" @click.stop="previewGroup = selectedGroup; previewVersion = 'classic'">▶ 预览</span>
+            </div>
+          </div>
+        </template>
 
         <label>平台 *</label>
         <select v-model="newTask.platform" class="input">
@@ -220,18 +240,24 @@
               小黄车商品（可多选）
               <span v-if="selectedGroupRoomId" class="muted" style="font-weight:normal">· 已按直播间筛选</span>
             </label>
-            <button v-if="roomFilteredProducts.length" class="btn-xs" @click="toggleAllProducts">
-              {{ newTask.product_ids.length === roomFilteredProducts.length ? '取消全选' : '全选' }}
+            <button v-if="cartFilteredProducts.length" class="btn-xs" @click="toggleAllProducts">
+              {{ newTask.product_ids.length === cartFilteredProducts.length ? '取消全选' : '全选' }}
             </button>
           </div>
+          <input
+            v-model="cartSearch"
+            class="input"
+            style="margin:6px 0 4px;padding:5px 10px;font-size:12px"
+            placeholder="搜索商品名/关键词…"
+          />
           <div class="product-multi">
             <div class="product-multi-list">
-              <label v-for="p in roomFilteredProducts" :key="p.id" class="product-check-item">
+              <label v-for="p in cartFilteredProducts" :key="p.id" class="product-check-item">
                 <input type="checkbox" :value="p.id" v-model="newTask.product_ids" />
                 <span v-if="p.room_name" class="product-room-tag">{{ p.room_name }}</span>
                 <span>{{ p.product_name }}</span>
               </label>
-              <div v-if="!roomFilteredProducts.length" class="muted" style="font-size:12px;padding:6px 0">暂无商品</div>
+              <div v-if="!cartFilteredProducts.length" class="muted" style="font-size:12px;padding:6px 0">暂无商品</div>
             </div>
             <button class="btn-secondary btn-sm" style="margin-top:6px" @click="autoMatchProduct" :disabled="!newTask.group_id">自动匹配</button>
           </div>
@@ -250,9 +276,13 @@
       <div class="preview-modal">
         <div class="preview-header">
           <span>{{ previewGroup.label }}</span>
+          <div v-if="previewGroup.classic_status === 2 && previewGroup.director_status === 2" class="preview-tabs">
+            <button :class="['ptab', previewVersion === 'director' && 'ptab-active']" @click="previewVersion = 'director'">🎬 导演版</button>
+            <button :class="['ptab', previewVersion === 'classic' && 'ptab-active']" @click="previewVersion = 'classic'">📹 经典版</button>
+          </div>
           <button class="preview-close" @click="previewGroup = null">✕</button>
         </div>
-        <video class="preview-video" :src="groupVideoUrl(previewGroup.id)" controls autoplay playsinline></video>
+        <video class="preview-video" :src="previewVideoUrl" :key="previewVersion" controls autoplay playsinline></video>
       </div>
     </div>
 
@@ -388,7 +418,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import {
-  getRooms, getGroups, getGroup, getPublishTasks, createPublishTask, retryPublishTask, cancelPublishTask,
+  getRooms, getGroups, getGroup, getPublishTasks, createPublishTask, retryPublishTask, cancelPublishTask, bulkCancelPublishTasks,
   getProducts, getPublishAccounts, createPublishAccount, deletePublishAccount, loginPublishAccount,
   generatePublishMeta, matchGroupProduct, createWS, deleteGroup, reclipRecording,
   getUnscheduledGroups, batchSchedulePublish,
@@ -413,7 +443,9 @@ const matchedProduct = ref(null)
 const metaSchemes = ref([])
 const selectedScheme = ref('')
 const previewGroup = ref(null)   // group being previewed in video modal
+const previewVersion = ref('director')  // 'director' | 'classic'
 const reclipModal = ref(null)    // {group, feedback, saving, submitted}
+const selectedPublishVersion = ref('both')
 const BASE_URL = import.meta.env.VITE_API_BASE || ''
 const scheduleMode = ref('now')
 const progressLog = ref({})   // task_id → string[]
@@ -520,6 +552,17 @@ const roomFilteredProducts = computed(() => {
   return combined.length > 0 ? combined : products.value
 })
 
+const cartSearch = ref('')
+const cartFilteredProducts = computed(() => {
+  const base = roomFilteredProducts.value
+  const q = cartSearch.value.trim().toLowerCase()
+  if (!q) return base
+  return base.filter(p =>
+    (p.product_name || '').toLowerCase().includes(q) ||
+    (p.keywords || '').toLowerCase().includes(q)
+  )
+})
+
 // Compute next scheduled_at from scheduleTime
 const schedulePreview = computed(() => {
   if (!scheduleTime.value) return ''
@@ -592,7 +635,7 @@ async function refreshGroups() {
   groupsRefreshing.value = true
   try {
     const [groups, prods] = await Promise.all([getGroups(), getProducts()])
-    mergedGroups.value = groups.filter(g => g.ready_count > 0)
+    mergedGroups.value = groups.filter(g => (g.merge_status === 2 || g.classic_status === 2 || g.director_status === 2) && (g.merged_filename || g.director_final_video))
     products.value = prods.filter(p => p.enabled)
   } finally {
     groupsRefreshing.value = false
@@ -625,6 +668,17 @@ async function cancelTask(id) {
   }
 }
 
+async function doBulkCancel() {
+  if (!confirm('确认批量取消所有「待发布」和「定时」状态的任务？已发布/正在发布的任务不受影响。')) return
+  try {
+    const result = await bulkCancelPublishTasks({ status: 'all' })
+    await loadTasks()
+    showToast(`已取消 ${result.deleted} 个任务`, 'success')
+  } catch (e) {
+    showToast('批量取消失败: ' + e.message, 'error')
+  }
+}
+
 async function deleteFailedTask(id) {
   try {
     await cancelPublishTask(id)
@@ -641,14 +695,48 @@ async function onGroupSelect() {
   newTask.value.product_ids = []
   metaSchemes.value = []
   selectedScheme.value = ''
+  const g = mergedGroups.value.find(g => g.id === newTask.value.group_id)
+  selectedPublishVersion.value = g?.publish_versions || 'both'
 }
 
 const currentScheme = computed(() =>
   metaSchemes.value.find(s => s.type === selectedScheme.value) || null
 )
 
+const selectedGroup = computed(() =>
+  newTask.value.group_id ? mergedGroups.value.find(g => g.id === newTask.value.group_id) : null
+)
+
+const previewVideoUrl = computed(() => {
+  if (!previewGroup.value) return ''
+  if (previewVersion.value === 'classic') return `${BASE_URL}/api/groups/${previewGroup.value.id}/download`
+  if (previewVersion.value === 'director') return `${BASE_URL}/api/groups/${previewGroup.value.id}/director-download`
+  return `${BASE_URL}/api/groups/${previewGroup.value.id}/download`
+})
+
+watch(previewGroup, (g) => {
+  if (!g) return
+  previewVersion.value = g.director_status === 2 ? 'director' : 'classic'
+})
+
 function groupVideoUrl(groupId) {
   return `${BASE_URL}/api/groups/${groupId}/download`
+}
+
+async function setPublishVersion(version) {
+  const g = selectedGroup.value
+  if (!g) return
+  selectedPublishVersion.value = version
+  g.publish_versions = version
+  try {
+    await fetch(`${BASE_URL}/api/groups/${g.id}/publish-versions`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ publish_versions: version }),
+    })
+  } catch (e) {
+    showToast('版本设置失败: ' + e.message, 'error')
+  }
 }
 
 async function confirmDeleteGroup(g) {
@@ -721,7 +809,7 @@ function applyScheme(scheme) {
 }
 
 function toggleAllProducts() {
-  const pool = roomFilteredProducts.value
+  const pool = cartFilteredProducts.value
   if (newTask.value.product_ids.length === pool.length) {
     newTask.value.product_ids = []
   } else {
@@ -823,7 +911,7 @@ async function loginAccount(id) {
 onMounted(async () => {
   await loadTasks()
   const [groups, roomList] = await Promise.all([getGroups(), getRooms()])
-  mergedGroups.value = groups.filter(g => g.merge_status === 2)
+  mergedGroups.value = groups.filter(g => (g.merge_status === 2 || g.classic_status === 2 || g.director_status === 2) && (g.merged_filename || g.director_final_video))
   rooms.value = roomList
   accounts.value = await getPublishAccounts()
   const defaultAccount = accounts.value.find(a => a.account_name === '颜遇生活')
@@ -951,6 +1039,23 @@ label { display: block; font-size: 12px; color: #888; margin: 12px 0 4px; }
 .group-item-custom .group-item-sub { color: #777; }
 .group-item-custom.group-item-selected { background: rgba(251,146,60,0.15); border-left: 2px solid #fb923c; }
 
+.vbadge { font-size: 10px; border-radius: 3px; padding: 0 3px; }
+.vbadge-director { color: #a78bfa; }
+.vbadge-classic { color: #34d399; }
+
+.version-switcher { display: flex; gap: 8px; margin-bottom: 4px; }
+.vsw-option { flex: 1; display: flex; align-items: center; justify-content: space-between; background: #111; border: 1px solid #333; border-radius: 8px; padding: 8px 12px; cursor: pointer; transition: all 0.15s; }
+.vsw-option:hover { border-color: #555; background: #1a1a1a; }
+.vsw-active { border-color: #fe2c55; background: rgba(254,44,85,0.08); }
+.vsw-label { font-size: 13px; color: #e0e0e0; }
+.vsw-preview-btn { font-size: 11px; color: #60a5fa; background: rgba(96,165,250,0.1); border: 1px solid rgba(96,165,250,0.3); border-radius: 4px; padding: 2px 7px; transition: all 0.15s; }
+.vsw-preview-btn:hover { background: rgba(96,165,250,0.2); }
+
+.preview-tabs { display: flex; gap: 6px; }
+.ptab { background: #2a2a2a; color: #888; border: 1px solid #444; border-radius: 20px; padding: 3px 12px; cursor: pointer; font-size: 12px; }
+.ptab:hover { background: #333; color: #ccc; }
+.ptab-active { background: #fe2c55; color: #fff; border-color: #fe2c55; }
+
 .product-multi { display: flex; flex-direction: column; }
 .product-multi-list { background: #111; border: 1px solid #333; border-radius: 6px; padding: 8px 10px; max-height: 160px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
 .product-check-item { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #e0e0e0; cursor: pointer; }
@@ -961,6 +1066,8 @@ label { display: block; font-size: 12px; color: #888; margin: 12px 0 4px; }
 .btn-primary { background: #fe2c55; color: #fff; border: none; border-radius: 6px; padding: 7px 16px; cursor: pointer; font-size: 13px; }
 .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-secondary { background: #2a2a2a; color: #e0e0e0; border: 1px solid #444; border-radius: 6px; padding: 7px 16px; cursor: pointer; font-size: 13px; }
+.btn-warn-sm { background: rgba(251,191,36,0.1); color: #fbbf24; border: 1px solid rgba(251,191,36,0.3); border-radius: 6px; padding: 7px 14px; cursor: pointer; font-size: 13px; }
+.btn-warn-sm:hover { background: rgba(251,191,36,0.2); }
 .btn-sm { padding: 5px 12px; font-size: 12px; }
 .btn-danger { background: transparent; color: #fe2c55; border: 1px solid #fe2c55; border-radius: 6px; padding: 7px 16px; cursor: pointer; font-size: 13px; }
 .btn-xs { background: #2a2a2a; color: #ccc; border: 1px solid #444; border-radius: 4px; padding: 3px 8px; cursor: pointer; font-size: 11px; margin-right: 4px; }

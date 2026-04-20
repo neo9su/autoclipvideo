@@ -2,6 +2,7 @@
 LLM-based publish metadata generator.
 Generates title / description / tags for a clip_group using Bedrock.
 """
+import asyncio
 import json
 import logging
 import os
@@ -11,7 +12,7 @@ from typing import Optional
 import aiosqlite
 import httpx
 
-from db import DB_PATH
+from db import DB_PATH, aio_connect
 
 logger = logging.getLogger(__name__)
 
@@ -126,26 +127,42 @@ async def _call_bedrock(prompt: str, max_tokens: int = 600) -> Optional[dict]:
         "inferenceConfig": {"maxTokens": max_tokens, "temperature": 0.95},
     }
     url = f"{BEDROCK_URL}/model/{BEDROCK_MODEL}/converse"
-    try:
-        async with httpx.AsyncClient(timeout=90.0) as client:
-            resp = await client.post(
-                url,
-                json=payload,
-                headers={
-                    "Authorization": f"Bearer {BEDROCK_TOKEN}",
-                    "Content-Type": "application/json",
-                },
-            )
-        if resp.status_code != 200:
-            logger.error(f"Bedrock error {resp.status_code}: {resp.text[:300]}")
+
+    for attempt in range(1, 4):
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    url,
+                    json=payload,
+                    headers={
+                        "Authorization": f"Bearer {BEDROCK_TOKEN}",
+                        "Content-Type": "application/json",
+                    },
+                )
+            if resp.status_code == 200:
+                raw = resp.json()["output"]["message"]["content"][0]["text"]
+                m = re.search(r"\{.*\}", raw, re.DOTALL)
+                if m:
+                    return json.loads(m.group())
+                logger.error(f"No JSON in Bedrock response: {raw[:200]}")
+                return None
+            elif resp.status_code in (429, 500, 502, 503) and attempt < 3:
+                logger.warning(f"Bedrock {resp.status_code}, retrying (attempt {attempt}/3)...")
+            else:
+                logger.error(f"Bedrock error {resp.status_code}: {resp.text[:300]}")
+                return None
+        except (httpx.ConnectError, httpx.TimeoutException) as e:
+            if attempt < 3:
+                logger.warning(f"Bedrock transient error ({e}), retrying (attempt {attempt}/3)...")
+            else:
+                logger.error(f"Bedrock call failed after 3 attempts: {e}")
+                return None
+        except Exception as e:
+            logger.error(f"Bedrock call failed: {e}")
             return None
-        raw = resp.json()["output"]["message"]["content"][0]["text"]
-        m = re.search(r"\{.*\}", raw, re.DOTALL)
-        if m:
-            return json.loads(m.group())
-        logger.error(f"No JSON in Bedrock response: {raw[:200]}")
-    except Exception as e:
-        logger.error(f"Bedrock call failed: {e}")
+
+        await asyncio.sleep(2 ** attempt)  # 2s, 4s backoff
+
     return None
 
 
@@ -174,12 +191,46 @@ def _get_srt_excerpt(merged_filename: Optional[str], max_chars: int = 800) -> st
         return ""
 
 
+def _generate_fallback_title(wig_model: str, wig_color: str, room_labels: str) -> dict:
+    """生成简单的后备标题和描述"""
+    import random
+    
+    # 基础模板
+    templates = [
+        f"😍 {wig_model}来了！{wig_color}超显白",
+        f"✨ {wig_color}{wig_model}，气质绝了",
+        f"💫 这个{wig_model}太好看了！{wig_color}显脸小", 
+        f"🔥 {wig_color}{wig_model}，上头了",
+        f"💄 {wig_model}姐妹冲！{wig_color}巨温柔"
+    ]
+    
+    descriptions = [
+        f"{wig_model}新款来啦！{wig_color}超级显白显气质，姐妹们快来试试~",
+        f"最近超火的{wig_model}！{wig_color}真的太好看了，瞬间提升颜值！",
+        f"{wig_color}{wig_model}绝了！温柔又显气质，姐妹们赶紧安排上！"
+    ]
+    
+    tags = ["假发", "变美", "气质", "显脸小", "温柔", "种草"]
+    if wig_model: tags.append(wig_model)
+    if wig_color: tags.append(wig_color)
+    
+    return {
+        "schemes": [{
+            "type": "种草", 
+            "title": random.choice(templates),
+            "description": random.choice(descriptions),
+            "tags": ",".join(random.sample(tags, min(6, len(tags))))
+        }],
+        "fallback": True
+    }
+
+
 async def generate_meta(group_id: int) -> Optional[dict]:
     """
     Generate publish metadata for a clip_group.
     Returns dict with keys: title, description, tags (comma-separated string).
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT g.wig_model, g.wig_color, g.merged_filename,
@@ -206,6 +257,16 @@ async def generate_meta(group_id: int) -> Optional[dict]:
 
     result = await _call_bedrock(prompt, max_tokens=2400)
     if not result:
+        # Bedrock失败时回退到本地备用文案库
+        logger.warning(f"Bedrock generation failed for group {group_id}, using local fallback")
+        try:
+            from meta_library import get_random_schemes
+            fallback_schemes = await get_random_schemes(4)  # 获取4个不同类型的方案
+            if fallback_schemes:
+                logger.info(f"Using {len(fallback_schemes)} fallback schemes from local library")
+                return {"schemes": fallback_schemes, "fallback": True}
+        except Exception as e:
+            logger.error(f"Failed to get fallback schemes: {e}")
         return None
 
     # New multi-scheme format: {"schemes": [{type, title, description, tags}, ...]}
@@ -243,7 +304,7 @@ async def match_product(group_id: int) -> Optional[dict]:
     Match a product from the products table for a clip_group.
     Returns the best-matching product dict, or None.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT wig_model, wig_color FROM clip_groups WHERE id = ?", (group_id,)

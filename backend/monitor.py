@@ -7,7 +7,7 @@ from typing import Dict, Optional
 
 from recorder import RoomRecorder, get_stream_url
 from sync import sync_file
-from db import DB_PATH
+from db import DB_PATH, aio_connect
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ class MonitorManager:
 
     async def start_all(self):
         """Load enabled rooms from DB and start monitoring."""
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aio_connect() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute("SELECT * FROM rooms WHERE enabled = 1") as cursor:
                 rooms = await cursor.fetchall()
@@ -97,7 +97,7 @@ class MonitorManager:
 
     async def _on_segment_start(self, room_id: int, filename: str, segment_index: int):
         """Called by recorder at the start of each segment — insert DB row with correct filename."""
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aio_connect() as db:
             await db.execute(
                 """INSERT OR IGNORE INTO recordings (room_id, filename, start_time, segment_index, clip_count)
                    VALUES (?, ?, ?, ?, ?)""",
@@ -118,7 +118,7 @@ class MonitorManager:
             pass
 
         # Persist size and end_time; fetch the recording id
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aio_connect() as db:
             db.row_factory = aiosqlite.Row
             await db.execute(
                 """UPDATE recordings SET end_time = ?, size_bytes = ?
@@ -152,7 +152,7 @@ class MonitorManager:
 
         job_id = await sync_file(upload_path, room_id)
         if job_id:
-            async with aiosqlite.connect(DB_PATH) as db:
+            async with aio_connect() as db:
                 await db.execute(
                     "UPDATE recordings SET synced=1, transcribed=1, gpu_job_id=? WHERE id=?",
                     (job_id, primary_id),

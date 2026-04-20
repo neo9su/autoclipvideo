@@ -5,10 +5,11 @@ import os
 import time
 from typing import Optional
 
+import aiohttp
 import aiosqlite
 import httpx
 
-from db import DB_PATH
+from db import DB_PATH, aio_connect
 from editor import edit_recording, edit_recording_multi
 from analyzer import analyze_recording
 from thumbnail import generate_thumbnail
@@ -70,6 +71,10 @@ _flush_event: asyncio.Event = asyncio.Event()
 RECORDINGS_DIR = os.path.join(os.path.dirname(__file__), "..", "recordings")
 POLL_INTERVAL = 60  # seconds
 
+# At most 2 director pipelines run concurrently: GPU TTS has Semaphore(1), so >2 concurrent
+# pipelines would cause TTS jobs to queue up beyond the polling timeout.
+_DIRECTOR_SEM = asyncio.Semaphore(2)
+
 # ── Transcription timing tracker ─────────────────────────────────────────────
 _job_submit_times: dict[str, float] = {}   # gpu_job_id → time.time() when submitted
 _job_durations: list[float] = []           # recent completed job durations (last 20)
@@ -89,7 +94,7 @@ def transcribe_timing() -> dict:
 # Jobs are dispatched up to MAX_CONCURRENT_CLIPS at a time, ordered by priority.
 # Lower priority number = runs first. Default priority = 50.
 
-MAX_CONCURRENT_CLIPS = int(os.environ.get("MAX_CONCURRENT_CLIPS", "3"))
+MAX_CONCURRENT_CLIPS = int(os.environ.get("MAX_CONCURRENT_CLIPS", "1"))
 
 _pending_heap: list = []          # heapq of [priority, seq, recording_id]
 _pending_meta: dict = {}          # recording_id -> job metadata dict
@@ -291,38 +296,47 @@ async def poll_transcriptions(broadcast_fn=None):
 
     # Startup recovery: re-trigger editor for recordings whose transcription completed
     # but whose clip task was lost (e.g. backend restarted mid-flight).
+    # Throttled: at most 5 per batch, with a 2s pause between batches, to avoid
+    # flooding the queue with hundreds of tasks at startup and pegging local CPU.
+    _STARTUP_RECOVERY_BATCH = 5
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aio_connect() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 "SELECT id, filename, clip_count FROM recordings "
                 "WHERE transcribed=2 AND clipped=0 AND local_deleted=0"
             ) as cur:
                 orphaned = await cur.fetchall()
+        recoverable = []
         for rec in orphaned:
             mp4_path = os.path.join(RECORDINGS_DIR, rec["filename"])
             srt_path = os.path.splitext(mp4_path)[0] + ".srt"
             if os.path.exists(mp4_path) and os.path.exists(srt_path):
-                logger.info(
-                    f"Startup recovery: re-triggering editor for recording {rec['id']} ({rec['filename']})"
-                )
-                # _run_editor will do the resolution check internally
-                asyncio.create_task(
-                    _run_editor(rec["id"], mp4_path, srt_path,
-                                clip_count=rec["clip_count"] or 1,
-                                broadcast_fn=broadcast_fn)
-                )
+                recoverable.append((rec, mp4_path, srt_path))
             else:
                 logger.warning(
                     f"Startup recovery: recording {rec['id']} missing files, skipping "
                     f"(mp4={os.path.exists(mp4_path)}, srt={os.path.exists(srt_path)})"
                 )
+        if recoverable:
+            logger.info(f"Startup recovery: {len(recoverable)} recordings to re-trigger (batch size {_STARTUP_RECOVERY_BATCH})")
+        for i in range(0, len(recoverable), _STARTUP_RECOVERY_BATCH):
+            batch = recoverable[i:i + _STARTUP_RECOVERY_BATCH]
+            for rec, mp4_path, srt_path in batch:
+                logger.info(f"Startup recovery: re-triggering editor for recording {rec['id']} ({rec['filename']})")
+                asyncio.create_task(
+                    _run_editor(rec["id"], mp4_path, srt_path,
+                                clip_count=rec["clip_count"] or 1,
+                                broadcast_fn=broadcast_fn)
+                )
+            if i + _STARTUP_RECOVERY_BATCH < len(recoverable):
+                await asyncio.sleep(2)  # pause between batches to avoid startup CPU spike
     except Exception as e:
         logger.error(f"Startup recovery error: {e}")
 
     while True:
         try:
-            async with aiosqlite.connect(DB_PATH) as db:
+            async with aio_connect() as db:
                 db.row_factory = aiosqlite.Row
                 async with db.execute(
                     "SELECT * FROM recordings WHERE transcribed = 1 AND gpu_job_id IS NOT NULL"
@@ -348,9 +362,8 @@ async def poll_transcriptions(broadcast_fn=None):
                 continue
 
             if pending and is_online():
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    for rec in pending:
-                        await _check_job(client, rec, broadcast_fn)
+                for rec in pending:
+                    await _check_job(rec, broadcast_fn)
 
             if is_online():
                 from segment_merger import maybe_merge_before_upload
@@ -373,7 +386,7 @@ async def poll_transcriptions(broadcast_fn=None):
                     valid, err_msg = await _validate_mp4(upload_path)
                     if not valid:
                         logger.warning(f"Skipping corrupt file {os.path.basename(upload_path)}: {err_msg}")
-                        async with aiosqlite.connect(DB_PATH) as db:
+                        async with aio_connect() as db:
                             await db.execute(
                                 "UPDATE recordings SET transcribed=-1, transcribe_error=? WHERE id=?",
                                 (err_msg, primary_id),
@@ -389,7 +402,7 @@ async def poll_transcriptions(broadcast_fn=None):
                         _job_submit_times[job_id] = time.time()
                         _poll_state["last_submit_at"] = time.time()
                         _poll_state["active_job_id"] = job_id
-                        async with aiosqlite.connect(DB_PATH) as db:
+                        async with aio_connect() as db:
                             await db.execute(
                                 "UPDATE recordings SET synced = 1, transcribed = 1, gpu_job_id = ? WHERE id = ?",
                                 (job_id, primary_id),
@@ -410,18 +423,22 @@ async def poll_transcriptions(broadcast_fn=None):
             pass
 
 
-async def _check_job(client: httpx.AsyncClient, rec, broadcast_fn):
+async def _check_job(rec, broadcast_fn):
     job_id = rec["gpu_job_id"]
     try:
-        resp = await client.get(f"{GPU_SERVICE_URL}/jobs/{job_id}")
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{GPU_SERVICE_URL}/jobs/{job_id}",
+                                   timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                _status_code = resp.status
+                _json = await resp.json() if _status_code in (200, 404) else None
     except Exception as e:
         logger.warning(f"Cannot reach GPU service for job {job_id}: {e}")
         return
 
-    if resp.status_code == 404:
+    if _status_code == 404:
         # GPU service restarted and lost this job — re-queue for upload
         logger.warning(f"Job {job_id} not found on GPU service (restarted?), re-queuing")
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aio_connect() as db:
             await db.execute(
                 "UPDATE recordings SET transcribed=0, synced=0, gpu_job_id=NULL WHERE id=?",
                 (rec["id"],),
@@ -429,10 +446,10 @@ async def _check_job(client: httpx.AsyncClient, rec, broadcast_fn):
             await db.commit()
         return
 
-    if resp.status_code != 200:
+    if _status_code != 200:
         return
 
-    job = resp.json()
+    job = _json
     if job["status"] == "done":
         global _session_done
         if job_id in _job_submit_times:
@@ -443,7 +460,7 @@ async def _check_job(client: httpx.AsyncClient, rec, broadcast_fn):
         _session_done += 1
         _poll_state["last_complete_at"] = time.time()
         _poll_state["active_job_id"] = None
-        await _fetch_srt(client, rec["id"], job_id, rec["filename"], clip_count=rec["clip_count"] if "clip_count" in rec.keys() else 1, broadcast_fn=broadcast_fn)
+        await _fetch_srt(rec["id"], job_id, rec["filename"], clip_count=rec["clip_count"] if "clip_count" in rec else 1, broadcast_fn=broadcast_fn)
         if broadcast_fn:
             try:
                 await broadcast_fn({"type": "transcribed", "recording_id": rec["id"]})
@@ -454,9 +471,10 @@ async def _check_job(client: httpx.AsyncClient, rec, broadcast_fn):
     elif job["status"] == "error":
         err_msg = (job.get("error") or "GPU 转录失败（未知错误）")[:300]
         logger.error(f"GPU transcription error for {rec['filename']}: {err_msg}")
+        _job_submit_times.pop(job_id, None)  # prevent unbounded growth on errors
         if _poll_state["active_job_id"] == job_id:
             _poll_state["active_job_id"] = None
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aio_connect() as db:
             await db.execute(
                 "UPDATE recordings SET transcribed = -1, transcribe_error = ? WHERE id = ?",
                 (err_msg, rec["id"]),
@@ -464,19 +482,41 @@ async def _check_job(client: httpx.AsyncClient, rec, broadcast_fn):
             await db.commit()
 
 
-async def _fetch_srt(client: httpx.AsyncClient, recording_id: int, job_id: str, filename: str, clip_count: int = 1, broadcast_fn=None):
+async def _fetch_srt(recording_id: int, job_id: str, filename: str, clip_count: int = 1, broadcast_fn=None):
     srt_filename = os.path.splitext(filename)[0] + ".srt"
     local_srt = os.path.join(RECORDINGS_DIR, srt_filename)
     try:
-        resp = await client.get(
-            f"{GPU_SERVICE_URL}/jobs/{job_id}/srt",
-            timeout=30.0,
-        )
-        if resp.status_code == 200:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{GPU_SERVICE_URL}/jobs/{job_id}/srt",
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                _srt_status = resp.status
+                content = await resp.read() if _srt_status == 200 else b""
+                expected_len = resp.headers.get("content-length")
+        if _srt_status == 200:
+            # Verify completeness against Content-Length header if present
+            if expected_len and expected_len.isdigit() and len(content) != int(expected_len):
+                logger.error(
+                    f"SRT download truncated for {job_id}: "
+                    f"got {len(content)} B, expected {expected_len} B — skipping"
+                )
+                return
+            if not content.strip():
+                # Whisper produced 0 speech segments — no text in the video.
+                # Treat as terminal failure so the recording doesn't retry forever.
+                logger.warning(f"SRT empty for {job_id} — Whisper detected no speech, marking transcribe_error")
+                async with aio_connect() as db:
+                    await db.execute(
+                        "UPDATE recordings SET transcribed = -1, transcribe_error = ? WHERE id = ?",
+                        ("Whisper detected no speech segments (silent/music-only audio)", recording_id),
+                    )
+                    await db.commit()
+                return
             with open(local_srt, "wb") as f:
-                f.write(resp.content)
+                f.write(content)
             logger.info(f"SRT fetched: {srt_filename}")
-            async with aiosqlite.connect(DB_PATH) as db:
+            async with aio_connect() as db:
                 await db.execute(
                     "UPDATE recordings SET transcribed = 2 WHERE id = ?", (recording_id,)
                 )
@@ -485,7 +525,7 @@ async def _fetch_srt(client: httpx.AsyncClient, recording_id: int, job_id: str, 
             mp4_path = os.path.join(RECORDINGS_DIR, filename)
             asyncio.create_task(_run_editor(recording_id, mp4_path, local_srt, clip_count=clip_count, broadcast_fn=broadcast_fn))
         else:
-            logger.error(f"SRT download failed for {job_id}: {resp.status_code}")
+            logger.error(f"SRT download failed for {job_id}: {_srt_status}")
     except Exception as e:
         logger.error(f"SRT fetch error for {job_id}: {e}")
 
@@ -499,7 +539,7 @@ async def _run_editor(recording_id: int, mp4_path: str, srt_path: str, clip_dura
     if 0 < height < MIN_RECORDING_HEIGHT:
         reason = f"分辨率过低（{height}p < {MIN_RECORDING_HEIGHT}p）"
         logger.warning(f"[skip] Recording {recording_id} ({os.path.basename(mp4_path)}): {reason}")
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aio_connect() as db:
             await db.execute(
                 "UPDATE recordings SET clipped = -1, skip_reason = ? WHERE id = ?",
                 (reason, recording_id),
@@ -512,7 +552,7 @@ async def _run_editor(recording_id: int, mp4_path: str, srt_path: str, clip_dura
     if 0 < duration < MIN_RECORDING_DURATION:
         reason = f"录像时长过短（{duration:.0f}秒 < {MIN_RECORDING_DURATION}秒）"
         logger.warning(f"[skip] Recording {recording_id} ({os.path.basename(mp4_path)}): {reason}")
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aio_connect() as db:
             await db.execute(
                 "UPDATE recordings SET clipped = -1, skip_reason = ? WHERE id = ?",
                 (reason, recording_id),
@@ -520,7 +560,7 @@ async def _run_editor(recording_id: int, mp4_path: str, srt_path: str, clip_dura
             await db.commit()
         return
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         await db.execute(
             "UPDATE recordings SET clipped = 1 WHERE id = ?", (recording_id,)
         )
@@ -529,7 +569,7 @@ async def _run_editor(recording_id: int, mp4_path: str, srt_path: str, clip_dura
     # Fetch room info for display in queue
     room_name, record_date = "unknown", ""
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aio_connect() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 "SELECT r.start_time, rm.name as room_name "
@@ -658,7 +698,7 @@ async def _do_edit(recording_id: int, mp4_path: str, srt_path: str, clip_duratio
         date_str = ""
         rec_room_id = None
         try:
-            async with aiosqlite.connect(DB_PATH) as db:
+            async with aio_connect() as db:
                 db.row_factory = aiosqlite.Row
                 async with db.execute(
                     "SELECT r.start_time, r.room_id, rm.name as room_name "
@@ -675,20 +715,37 @@ async def _do_edit(recording_id: int, mp4_path: str, srt_path: str, clip_duratio
 
         clip_count = max(1, min(5, clip_count))
 
+        # Read clip_engine from settings (default: "legacy")
+        clip_engine = "legacy"
+        try:
+            async with aio_connect() as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute(
+                    "SELECT value FROM settings WHERE key = 'clip_engine'"
+                ) as cur:
+                    row = await cur.fetchone()
+            if row and row["value"] in ("legacy", "v2"):
+                clip_engine = row["value"]
+        except Exception as e:
+            logger.warning(f"Could not read clip_engine setting: {e}")
+        logger.info(f"clip_engine={clip_engine} for recording {recording_id}")
+
         if clip_count == 1:
-            clip_path = await edit_recording(mp4_path, srt_path, room_name=room_name, record_date=date_str, clip_duration=clip_duration, on_progress=_on_progress, feedback=feedback, room_id=rec_room_id)
+            clip_path = await edit_recording(mp4_path, srt_path, room_name=room_name, record_date=date_str, clip_duration=clip_duration, on_progress=_on_progress, feedback=feedback, room_id=rec_room_id, clip_engine=clip_engine)
             clip_paths = [clip_path] if clip_path else []
         else:
-            clip_paths = await edit_recording_multi(mp4_path, srt_path, count=clip_count, room_name=room_name, record_date=date_str, clip_duration=clip_duration, on_progress=_on_progress, feedback=feedback, room_id=rec_room_id)
+            clip_paths = await edit_recording_multi(mp4_path, srt_path, count=clip_count, room_name=room_name, record_date=date_str, clip_duration=clip_duration, on_progress=_on_progress, feedback=feedback, room_id=rec_room_id, clip_engine=clip_engine)
 
         if clip_paths:
             c_dur = clip_duration or 30.0
-            async with aiosqlite.connect(DB_PATH) as db:
+            from editor import _clip_job_id_cache
+            async with aio_connect() as db:
                 for k, clip_path in enumerate(clip_paths):
                     clip_filename = os.path.relpath(clip_path, RECORDINGS_DIR)
                     offset = max(3.0, c_dur * (0.2 + 0.3 * k))
                     thumb = await generate_thumbnail(clip_path, offset=offset)
                     thumb_basename = os.path.relpath(thumb, RECORDINGS_DIR) if thumb else None
+                    gpu_job_id = _clip_job_id_cache.pop(clip_path, None)
 
                     if k == 0:
                         await db.execute(
@@ -697,8 +754,8 @@ async def _do_edit(recording_id: int, mp4_path: str, srt_path: str, clip_duratio
                         )
 
                     await db.execute(
-                        "INSERT INTO recording_clips (recording_id, variant_idx, clip_filename, thumbnail) VALUES (?, ?, ?, ?)",
-                        (recording_id, k, clip_filename, thumb_basename),
+                        "INSERT INTO recording_clips (recording_id, variant_idx, clip_filename, thumbnail, gpu_clip_job_id) VALUES (?, ?, ?, ?, ?)",
+                        (recording_id, k, clip_filename, thumb_basename, gpu_job_id),
                     )
 
                 # Get room_id for analysis
@@ -717,17 +774,22 @@ async def _do_edit(recording_id: int, mp4_path: str, srt_path: str, clip_duratio
                 )
                 asyncio.create_task(_maybe_auto_merge(recording_id))
         else:
-            async with aiosqlite.connect(DB_PATH) as db:
+            logger.warning(f"Editor produced no clips for recording {recording_id}")
+            async with aio_connect() as db:
                 await db.execute(
-                    "UPDATE recordings SET clipped = -1 WHERE id = ?", (recording_id,)
+                    "UPDATE recordings SET clipped = -1, clip_error = ? WHERE id = ?",
+                    ("no clips selected", recording_id),
                 )
                 await db.commit()
             _clip_progress.pop(recording_id, None)
     except Exception as e:
-        logger.error(f"Editor failed for recording {recording_id}: {e}")
-        async with aiosqlite.connect(DB_PATH) as db:
+        import traceback
+        err_msg = traceback.format_exc()
+        logger.error(f"Editor failed for recording {recording_id}: {e}\n{err_msg}")
+        async with aio_connect() as db:
             await db.execute(
-                "UPDATE recordings SET clipped = -1 WHERE id = ?", (recording_id,)
+                "UPDATE recordings SET clipped = -1, clip_error = ? WHERE id = ?",
+                (str(e)[:500], recording_id),
             )
             await db.commit()
         _clip_progress.pop(recording_id, None)
@@ -740,7 +802,7 @@ async def _maybe_auto_merge(recording_id: int):
     check so a group with some skipped files can still auto-merge.
     """
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aio_connect() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 "SELECT group_id FROM recordings WHERE id = ?", (recording_id,)
@@ -755,7 +817,7 @@ async def _maybe_auto_merge(recording_id: int):
 
 
 async def _auto_merge_group(db, group_id: int) -> bool:
-    """Check readiness and trigger merge for a single group. Returns True if triggered."""
+    """Check readiness and trigger classic+director+creative pipelines for a group. Returns True if any triggered."""
     from analyzer import merge_group as _merge_group
 
     # Count active (non-skipped) recordings; all must be clipped=2
@@ -770,39 +832,376 @@ async def _auto_merge_group(db, group_id: int) -> bool:
     if not counts or counts["active"] == 0 or counts["active"] != counts["done"]:
         return False
 
-    # Check group merge_status — skip if already merging or done
+    # Check per-pipeline statuses (0=not started, 1=running, 2=done, -1=failed)
     async with db.execute(
-        "SELECT merge_status FROM clip_groups WHERE id = ?", (group_id,)
+        "SELECT classic_status, director_status, creative_status FROM clip_groups WHERE id = ?", (group_id,)
     ) as cur:
         grp = await cur.fetchone()
-    if not grp or grp["merge_status"] in (1, 2):
+    if not grp:
         return False
 
-    logger.info(f"Auto-merging group {group_id} (all active clips ready)")
-    await _merge_group(group_id)
-    return True
+    triggered = False
+    if grp["classic_status"] == 0:
+        logger.info(f"Auto-triggering classic merge for group {group_id}")
+        asyncio.create_task(_merge_group(group_id))
+        triggered = True
+    if grp["director_status"] == 0:
+        logger.info(f"Auto-triggering director pipeline for group {group_id}")
+        asyncio.create_task(_run_director_pipeline(group_id))
+        triggered = True
+    if (grp["creative_status"] or 0) == 0:
+        logger.info(f"Auto-triggering creative pipeline for group {group_id}")
+        asyncio.create_task(_run_creative_pipeline(group_id))
+        triggered = True
+    return triggered
+
+
+async def _extract_srt_for_director(group_id: int) -> Optional[str]:
+    """Extract combined SRT text for a group (up to 5000 chars)."""
+    try:
+        async with aio_connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT filename FROM recordings WHERE group_id = ? AND transcribed = 2 LIMIT 3",
+                (group_id,),
+            ) as cur:
+                rows = await cur.fetchall()
+        srt_content = ""
+        for r in rows:
+            srt_path = os.path.join(RECORDINGS_DIR, os.path.splitext(r["filename"])[0] + ".srt")
+            if os.path.exists(srt_path):
+                with open(srt_path, encoding="utf-8") as f:
+                    srt_content += f.read() + "\n\n"
+                if len(srt_content) > 3000:
+                    break
+        return srt_content[:5000] or None
+    except Exception as e:
+        logger.error(f"_extract_srt_for_director group {group_id}: {e}")
+        return None
+
+
+async def _run_director_pipeline(group_id: int):
+    """
+    Full director pipeline: generate script → match segments → voiceover → compose video.
+    Runs independently from the classic pipeline; no fallback to classic on failure.
+    At most _DIRECTOR_SEM concurrent pipelines to avoid flooding GPU TTS queue.
+    """
+    # Skip if already completed (e.g. triggered again on restart)
+    async with aio_connect() as db:
+        async with db.execute(
+            "SELECT director_status FROM clip_groups WHERE id = ?", (group_id,)
+        ) as cur:
+            row = await cur.fetchone()
+    if row and row[0] == 2:
+        logger.info(f"Director pipeline group {group_id} already complete — skipping")
+        return
+
+    async with _DIRECTOR_SEM:
+        try:
+            await _run_director_pipeline_inner(group_id)
+        except Exception as e:
+            import traceback
+            logger.error(f"Director pipeline {group_id} unhandled exception: {e}\n{traceback.format_exc()}")
+            async with aio_connect() as db:
+                await db.execute(
+                    "UPDATE clip_groups SET director_status = -1, director_error = ? WHERE id = ?",
+                    (str(e)[:400], group_id),
+                )
+                await db.commit()
+
+
+async def _run_director_pipeline_inner(group_id: int):
+    import json
+    from director_script import DirectorScriptGenerator
+    from director_matcher import DirectorMatcher
+    from voice_director import VoiceDirector
+    from director_video import DirectorVideoComposer
+
+    # Re-check after semaphore (another task may have completed while we waited)
+    async with aio_connect() as db:
+        async with db.execute(
+            "SELECT director_status FROM clip_groups WHERE id = ?", (group_id,)
+        ) as cur:
+            row = await cur.fetchone()
+    if row and row[0] == 2:
+        logger.info(f"Director pipeline group {group_id} already complete (post-semaphore check) — skipping")
+        return
+
+    async def _fail(reason: str):
+        logger.error(f"Director pipeline group {group_id} failed: {reason}")
+        async with aio_connect() as db:
+            await db.execute(
+                "UPDATE clip_groups SET director_status = -1, director_error = ? WHERE id = ?",
+                (reason[:400], group_id),
+            )
+            await db.commit()
+
+    # Mark as in-progress
+    async with aio_connect() as db:
+        await db.execute(
+            "UPDATE clip_groups SET director_status = 1, director_error = NULL WHERE id = ?",
+            (group_id,)
+        )
+        await db.commit()
+
+    try:
+        # 1. Group metadata
+        async with aio_connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """SELECT cg.wig_model, cg.wig_color, r.name as room_name
+                   FROM clip_groups cg LEFT JOIN rooms r ON cg.room_id = r.id
+                   WHERE cg.id = ?""",
+                (group_id,),
+            ) as cur:
+                grp = await cur.fetchone()
+        if not grp:
+            return await _fail("group not found")
+
+        # 2. SRT content
+        srt_content = await _extract_srt_for_director(group_id)
+        if not srt_content:
+            return await _fail("no SRT content available")
+
+        # 3. Generate script
+        script_gen = DirectorScriptGenerator()
+        result = await script_gen.generate_script(
+            srt_content=srt_content,
+            wig_model=grp["wig_model"] or "",
+            wig_color=grp["wig_color"] or "",
+            room_name=grp["room_name"] or "",
+        )
+        if not result.get("success"):
+            return await _fail(f"script generation: {result.get('error', 'unknown')}")
+        script = result["script"]
+        async with aio_connect() as db:
+            await db.execute(
+                "UPDATE clip_groups SET director_script = ? WHERE id = ?",
+                (json.dumps(script), group_id),
+            )
+            await db.commit()
+
+        # 4. Match segments to recordings
+        matcher = DirectorMatcher(DB_PATH)
+        script_segments = script.get("scenes") or script.get("segments") or []
+        matched_segments = await matcher.match_segments_to_recordings(script_segments, group_id)
+        if not matched_segments:
+            return await _fail("segment matching returned empty")
+
+        # 5. Voiceover
+        voice_dir = VoiceDirector()
+        vo_result = await voice_dir.generate_voiceover(script=script, group_id=group_id, reference_audio_path=None)
+        if not vo_result.get("success"):
+            return await _fail(f"voiceover: {vo_result.get('error', 'unknown')}")
+        async with aio_connect() as db:
+            await db.execute(
+                "UPDATE clip_groups SET director_audio_path = ?, director_segments = ? WHERE id = ?",
+                (vo_result.get("merged_audio_path"), json.dumps(vo_result.get("audio_segments", [])), group_id),
+            )
+            await db.commit()
+
+        # 6. Compose final video
+        audio_path = vo_result.get("merged_audio_path")
+        tts_audio_segments = vo_result.get("audio_segments", [])
+        config = {
+            "video_style": "trendy",
+            "script_type": script.get("script_type", "product_showcase"),
+            "wig_model": grp["wig_model"] or "",
+            "wig_color": grp["wig_color"] or "",
+        }
+        video_dir = DirectorVideoComposer(RECORDINGS_DIR)
+        out_path = await video_dir.compose_final_video(
+            matched_segments, audio_path, config, tts_audio_segments=tts_audio_segments
+        )
+        if not out_path:
+            return await _fail("video composition returned no output")
+
+        async with aio_connect() as db:
+            await db.execute(
+                """UPDATE clip_groups SET
+                   merge_status = 2, merged_at = datetime('now'),
+                   director_status = 2, director_final_video = ?
+                   WHERE id = ?""",
+                (out_path, group_id),
+            )
+            await db.commit()
+        logger.info(f"Director pipeline complete for group {group_id}: {os.path.basename(out_path)}")
+
+    except Exception as e:
+        await _fail(str(e))
+
+
+# ── Creative pipeline (自编文案，vibe=creative) ────────────────────────────────
+
+_creative_sem = asyncio.Semaphore(1)
+
+
+async def _run_creative_pipeline(group_id: int):
+    async with _creative_sem:
+        try:
+            await _run_creative_pipeline_inner(group_id)
+        except Exception as e:
+            logger.error(f"Creative pipeline group {group_id} unhandled: {e}")
+            async with aio_connect() as db:
+                await db.execute(
+                    "UPDATE clip_groups SET creative_status = -1, creative_error = ? WHERE id = ?",
+                    (str(e)[:400], group_id),
+                )
+                await db.commit()
+
+
+async def _run_creative_pipeline_inner(group_id: int):
+    import json
+    from director_script import DirectorScriptGenerator
+    from director_matcher import DirectorMatcher
+    from voice_director import VoiceDirector
+    from director_video import DirectorVideoComposer
+
+    async with aio_connect() as db:
+        async with db.execute(
+            "SELECT creative_status FROM clip_groups WHERE id = ?", (group_id,)
+        ) as cur:
+            row = await cur.fetchone()
+    if row and row[0] == 2:
+        return
+
+    async def _fail(reason: str):
+        logger.error(f"Creative pipeline group {group_id} failed: {reason}")
+        async with aio_connect() as db:
+            await db.execute(
+                "UPDATE clip_groups SET creative_status = -1, creative_error = ? WHERE id = ?",
+                (reason[:400], group_id),
+            )
+            await db.commit()
+
+    async with aio_connect() as db:
+        await db.execute(
+            "UPDATE clip_groups SET creative_status = 1, creative_error = NULL WHERE id = ?",
+            (group_id,)
+        )
+        await db.commit()
+
+    try:
+        async with aio_connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """SELECT cg.wig_model, cg.wig_color, r.name as room_name
+                   FROM clip_groups cg LEFT JOIN rooms r ON cg.room_id = r.id
+                   WHERE cg.id = ?""",
+                (group_id,),
+            ) as cur:
+                grp = await cur.fetchone()
+        if not grp:
+            return await _fail("group not found")
+
+        # creative vibe: prompt ignores SRT, passes empty string
+        script_gen = DirectorScriptGenerator()
+        result = await script_gen.generate_script(
+            srt_content="",
+            wig_model=grp["wig_model"] or "",
+            wig_color=grp["wig_color"] or "",
+            room_name=grp["room_name"] or "",
+            vibe="creative",
+        )
+        if not result.get("success"):
+            return await _fail(f"script generation: {result.get('error', 'unknown')}")
+        script = result["script"]
+        async with aio_connect() as db:
+            await db.execute(
+                "UPDATE clip_groups SET creative_script = ? WHERE id = ?",
+                (json.dumps(script), group_id),
+            )
+            await db.commit()
+
+        matcher = DirectorMatcher(DB_PATH)
+        script_segments = script.get("scenes") or script.get("segments") or []
+        matched_segments = await matcher.match_segments_to_recordings(script_segments, group_id)
+        if not matched_segments:
+            return await _fail("segment matching returned empty")
+
+        voice_dir = VoiceDirector()
+        vo_result = await voice_dir.generate_voiceover(script=script, group_id=group_id, reference_audio_path=None)
+        if not vo_result.get("success"):
+            return await _fail(f"voiceover: {vo_result.get('error', 'unknown')}")
+        async with aio_connect() as db:
+            await db.execute(
+                "UPDATE clip_groups SET creative_audio_path = ? WHERE id = ?",
+                (vo_result.get("merged_audio_path"), group_id),
+            )
+            await db.commit()
+
+        audio_path = vo_result.get("merged_audio_path")
+        tts_audio_segments = vo_result.get("audio_segments", [])
+        config = {
+            "video_style": "trendy",
+            "script_type": script.get("script_type", "product_showcase"),
+            "wig_model": grp["wig_model"] or "",
+            "wig_color": grp["wig_color"] or "",
+        }
+        video_dir = DirectorVideoComposer(RECORDINGS_DIR)
+        out_path = await video_dir.compose_final_video(
+            matched_segments, audio_path, config, tts_audio_segments=tts_audio_segments
+        )
+        if not out_path:
+            return await _fail("video composition returned no output")
+
+        async with aio_connect() as db:
+            await db.execute(
+                "UPDATE clip_groups SET creative_status = 2, creative_final_video = ? WHERE id = ?",
+                (out_path, group_id),
+            )
+            await db.commit()
+        logger.info(f"Creative pipeline complete for group {group_id}: {os.path.basename(out_path)}")
+
+    except Exception as e:
+        await _fail(str(e))
 
 
 async def backfill_auto_merge():
-    """On startup, trigger auto-merge for groups whose clips are all done but
-    merge_status is still 0 (e.g. recorded before auto-merge was introduced)."""
+    """On startup, recover only groups that were actively in-progress when the server crashed.
+    Do NOT re-trigger all groups with status=0 — that would flood the queue on every restart
+    since the default value for new columns is 0."""
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aio_connect() as db:
             db.row_factory = aiosqlite.Row
-            async with db.execute(
-                "SELECT id FROM clip_groups WHERE merge_status = 0"
-            ) as cur:
-                groups = [r["id"] for r in await cur.fetchall()]
+            # Identify groups that were mid-run before resetting them
+            async with db.execute("SELECT id FROM clip_groups WHERE classic_status = 1") as cur:
+                classic_crashed = [r["id"] for r in await cur.fetchall()]
+            async with db.execute("SELECT id FROM clip_groups WHERE director_status = 1") as cur:
+                director_crashed = [r["id"] for r in await cur.fetchall()]
+            async with db.execute("SELECT id FROM clip_groups WHERE creative_status = 1") as cur:
+                creative_crashed = [r["id"] for r in await cur.fetchall()]
+
+            # Reset crashed pipelines back to 0 so they can be re-triggered
+            await db.execute("UPDATE clip_groups SET classic_status = 0 WHERE classic_status = 1")
+            await db.execute("UPDATE clip_groups SET director_status = 0 WHERE director_status = 1")
+            await db.execute("UPDATE clip_groups SET creative_status = 0 WHERE creative_status = 1")
+            await db.execute(
+                "UPDATE clip_groups SET merge_status = 0 "
+                "WHERE merge_status = 1 AND merged_filename IS NULL AND director_final_video IS NULL"
+            )
+            await db.commit()
+
+        # Only re-trigger the groups that were actually crashed mid-run
+        groups = list(set(classic_crashed) | set(director_crashed) | set(creative_crashed))
+        if classic_crashed:
+            logger.info(f"Backfill: {len(classic_crashed)} classic pipelines crashed, will retry: {classic_crashed}")
+        if director_crashed:
+            logger.info(f"Backfill: {len(director_crashed)} director pipelines crashed, will retry: {director_crashed}")
+        if creative_crashed:
+            logger.info(f"Backfill: {len(creative_crashed)} creative pipelines crashed, will retry: {creative_crashed}")
 
         triggered = 0
         for gid in groups:
-            async with aiosqlite.connect(DB_PATH) as db:
+            async with aio_connect() as db:
                 db.row_factory = aiosqlite.Row
                 if await _auto_merge_group(db, gid):
                     triggered += 1
-                    await asyncio.sleep(0.5)   # brief gap to avoid thundering herd
+                    await asyncio.sleep(0.5)
 
         if triggered:
-            logger.info(f"Backfill auto-merge: triggered {triggered}/{len(groups)} groups")
+            logger.info(f"Backfill auto-merge: triggered {triggered}/{len(groups)} crash-recovered groups")
+        else:
+            logger.info("Backfill auto-merge: no crashed pipelines to recover")
     except Exception as e:
         logger.error(f"Backfill auto-merge error: {e}")

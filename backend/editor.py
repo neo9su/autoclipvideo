@@ -14,6 +14,7 @@ import os
 import random
 import re
 import tempfile
+import time
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
@@ -47,10 +48,14 @@ def _pick_music() -> Optional[str]:
     except Exception as e:
         logger.warning(f"BGM generation failed: {e}")
         return None
-CLIP_MIN = 30.0   # seconds (巨量千川优质标准：15-60s为佳，30s确保完整三段式)
-CLIP_MAX = 60.0   # seconds (原240s完播率极低，降至60s对齐平台优质上限)
+CLIP_MIN = 30.0   # seconds (三段式叙事最短时长)
+CLIP_MAX = 90.0   # seconds (平台优质上限)
 MAX_CLIP_SEGMENTS = 50  # cap to avoid ffmpeg resource exhaustion
-SEG_PAD = 0.5     # seconds of audio/video to retain before/after each SRT segment
+SEG_PAD = 0.0     # no padding — avoids duplicate audio at segment boundaries
+
+# v2 引擎参数（发型边界识别模式）
+CLIP_MIN_V2 = 46.0   # 抖音竖屏短视频最优完播区间下限
+CLIP_MAX_V2 = 90.0   # 上限
 
 # ── Patterns that trigger segment removal ────────────────────────────────────
 _REMOVE_PATTERNS = [
@@ -108,30 +113,244 @@ _REMOVE_PATTERNS = [
 ]
 
 # ── Keyword scoring (higher = more valuable to keep) ─────────────────────────
-# 注：「戴之前/戴之后/对比/变美」已移除 —— 巨量千川禁止展示佩戴前后对比暗示改变外貌
 _SCORES: dict[str, float] = {
-    # Pain points（痛点共鸣）
-    '发缝宽': 10, '秃头': 10, '发量少': 10, '头型不好看': 9,
-    '扁头': 9, '显脸大': 9, '贴头皮': 8,
-    # Visual impact / transformation（视觉冲击，描述真实观感非效果承诺）
-    '秒变': 10, '小V脸': 10, '变身': 9, '背影杀': 9,
-    '头包脸': 9, '高颅顶': 9, '一梳到底': 9,
-    '氛围感': 8, '蓬松': 8,
-    # Product endorsement（产品卖点）
-    '真人发丝': 8, '递针': 8, '无痕': 8, '不掉色': 7,
-    '免打理': 7, '仿真': 8, '轻薄': 7, '透气': 6,
-    # CTA / conversion（转化号召）
-    '炸福利': 10, '上车': 9, '运费险': 8,
-    '不满意包退': 9, '包退': 7, '点购物车': 9, '加购': 7,
-    # Emotion peak（情绪峰值）
+    # ── 痛点（pain points）—— 片段必须选入 ────────────────────────────────────
+    '发量少': 10, '发缝宽': 10, '发缝大': 10, '头顶塌': 10, '秃顶': 10, '秃头': 10,
+    '贴头皮': 9, '显脸大': 9, '显老': 9, '稀疏': 9, '扁塌': 9, '扁头': 9,
+    '油头塌': 9, '细软发': 9, '发际线高': 9, '头顶空': 10, '头型不好看': 9,
+    '不敢低头': 9, '不敢扎头发': 9, '没自信': 8, '形象差': 8, '气质差': 8,
+    '白发': 10, '遮白发': 11, '白头发': 10,
+    '头发稀': 10, '发丝少': 10, '发量太少': 10, '头皮': 9, '油头': 8,
+    '显白': 9,
+    '出门快': 10, '五分钟': 10, '1分钟': 10, '一分钟': 10,
+    '十五分钟': 9, '15分钟': 9, '省时': 9, '不用打理': 9, '每天都可以': 8,
+    # 变化明显/瞬间变多/立刻蓬松 保留（视觉效果词）
+    # 戴前/戴后/前后对比 已删除（巨量千川禁止佩戴前后对比暗示改变外貌）
+    '变化明显': 10, '瞬间变多': 10, '立刻蓬松': 10,
+    # ── 情绪刺激 / 社交证明（social proof）──────────────────────────────────
+    '以为烫头': 10, '以为整容': 10, '同事以为': 10, '朋友以为': 9,
+    '老公以为': 9, '男朋友以为': 9, '认不出来': 9, '以为变了': 8,
+    '路人以为': 8, '都以为': 9, '以为去': 8,
     '大笑': 7, '惊讶': 7, '天啊': 7,
+    # ── 产品核心卖点（product features）─────────────────────────────────────
+    '自然': 7, '仿真头皮': 10, '无痕': 9, '看不出': 9, '真实感': 9,
+    '蓬松': 9, '增加发量': 10, '遮盖发缝': 10, '高颅顶': 9,
+    '显脸小': 9, '修饰脸型': 8,
+    '真人发丝': 9, '递针': 8, '不掉色': 8, '免打理': 8,
+    '仿真': 8, '一梳到底': 9, '秒变': 10, '小V脸': 10,
+    '变身': 9, '背影杀': 9, '头包脸': 9, '氛围感': 8,
+    # 产品参数
+    '头围': 9, '大头围': 9, '小头围': 9,
+    '人发': 8, '真人发': 9, '化纤': 7,
+    '发根': 8, '发尾': 7,
+    '色号': 8, '颜色': 7, '挑染': 8, '渐变色': 8,
+    '学生头': 7, '梨花头': 7, 'bob头': 7, 'BOB头': 7,
+    '短发': 7, '长发': 7, '卷发': 7, '直发': 7,
+    # ── 佩戴过程（wearing process）───────────────────────────────────────────
+    '一秒佩戴': 10, '快速戴上': 9, '新手可用': 9, '简单方便': 8,
+    '不费时间': 9, '不挑人': 9, '轻松上手': 9,
+    '戴上去': 8, '这样戴': 8, '夹一下': 7, '梳开': 7, '调整一下': 7,
+    '戴好': 10, '套上去': 9, '摘下来': 8, '取下来': 8, '试试': 8, '试一下': 8,
+    # ── 细节特写（detail closeup）—— 最高优先级 ──────────────────────────────
+    '发缝真实': 11, '发根清晰': 11, '分缝自然': 11, '发丝细腻': 11,
+    '贴合头皮': 10, '边缘自然': 10, '顺滑': 9, '不打结': 9,
+    '不反光': 9, '颜色自然': 9,
+    '特写': 11, '近景': 9, '细节': 11, '发丝质感': 12,
+    '侧面': 7, '从侧面': 8, '侧边': 6, '正面': 5, '背面': 6,
+    '整体': 7, '整体造型': 8, '全貌': 7,
+    '头顶': 6, '顶部': 5, '俯视': 6,
+    '360': 9, '转一圈': 8, '转一下': 7,
+    # ── 身体部位细节（需放大对应区域）──────────────────────────────────────────
+    '耳后': 11, '耳朵': 9, '耳边': 10, '耳侧': 10,
+    '后脑勺': 11, '后脑': 10, '枕骨': 9, '后颈': 9,
+    '鬓角': 11, '鬓边': 10, '两鬓': 10,
+    '发际线': 10,
+    '颈部': 8, '脖子': 8, '颈后': 9,
+    '看这里': 9, '看这边': 9, '这个位置': 8, '放大': 10, '拉近': 10,
+    # ── 舒适度（comfort）─────────────────────────────────────────────────────
+    '透气': 8, '不闷': 9, '不勒头': 9, '轻薄': 8,
+    '无负担': 8, '夏天可戴': 9, '久戴不累': 8,
+    '怕热': 9, '夏天': 8, '夏日': 8, '网底': 9, '透气网': 9,
+    '晒黑': 8, '戴着凉快': 9, '通风': 8, '散热': 7,
+    # ── 稳固性（stability）───────────────────────────────────────────────────
+    '不掉': 9, '不滑': 9, '不移位': 9, '卡扣固定': 9,
+    '稳固贴合': 9, '牢固': 8, '跑步不掉': 10, '风吹不掉': 10,
+    # ── 场景代入（usage scene）───────────────────────────────────────────────
+    '上班': 8, '通勤': 8, '出门': 7, '约会': 9,
+    '聚会': 8, '逛街': 8, '拍照': 7,
+    '见客户': 8, '面试': 8, '相亲': 9, '婚礼': 8,
+    '日常': 7, '懒人': 8, '早起赶时间': 9, '外出旅行': 8,
+    '前任': 9, '见前任': 9, '见家长': 8, '毕业': 7,
+    '男朋友': 8, '旅游': 8, '旅行': 8, '出游': 7, '早上': 6,
+    # ── 转化引导（conversion CTA）────────────────────────────────────────────
+    '炸福利': 10, '上车': 9, '运费险': 8,
+    '不满意包退': 9, '包退': 8, '点购物车': 9, '加购': 7,
+    '看到最后': 10, '一定要看': 10, '别划走': 10, '后面更夸张': 9,
+    '真的有用': 8, '我放评论区了': 8, '链接在评论区': 8,
+    '直接入': 9, '闭眼买': 9, '强烈推荐': 8,
+    # ── 材质工艺（materials & craft）────────────────────────────────────────
+    '全真发': 9, '哑光真发': 10, '顺削发': 9,
+    '高仿真发丝': 11, '记忆丝': 9, '蛋白丝': 9,
+    '蕾丝内网': 10, '全蕾丝': 10, '仿生头皮': 11,
+    '递针工艺': 11, '单根勾织': 11, '仿生毛孔': 10,
+    '防滑条': 8, '可调节扣': 8, '轻薄透气': 9,
+    # ── 佩戴体验（wear comfort）──────────────────────────────────────────────
+    '不闷汗': 9, '不扎头': 9, '无胶佩戴': 10,
+    # ── 视觉效果（visual result）─────────────────────────────────────────────
+    '一秒变发量': 12, '视觉增发': 11,
+    '发际线逼真': 11, '无痕隐形': 11,
+    '蓬松自然': 10, '不显头大': 9,
+    '可随意分缝': 10, '发色均匀': 9, '无化学反光': 10,
+    # ── 痛点补充（pain points extended）─────────────────────────────────────
+    '细软塌': 9, '秃头星人': 10,
+    '产后脱发': 10, '压力脱发': 9, '遗传性脱发': 10,
+    'M型额头': 10, '秃鬓角': 10,
+    '白发遮盖': 11, '不想染发': 9,
+    '发型单调': 9, '不敢换造型': 9,
+    '戴假发怕假': 10, '怕掉': 8, '怕闷': 8,
+    '化疗': 10, '医疗性脱发': 10,
+    # ── 场景补充（scene extended）────────────────────────────────────────────
+    '日常通勤': 8, '上班上学': 8,
+    '约会聚餐': 9, '同学聚会': 8,
+    '婚礼敬酒': 9, '伴娘发型': 9,
+    '舞台演出': 8, '年会活动': 8,
+    '拍照上镜': 9, '短视频出镜': 8,
+    # ── 转化补充（conversion extended）──────────────────────────────────────
+    '真人发同效果': 10, '几分之一的价格': 10,
+    '送全套工具': 9, '护理液': 8, '支架': 7,
+    '7天试戴': 10, '首单优惠': 9, '直播间专属价': 10,
+    '顺丰发货': 8, '隐私包装': 9,
+    # ── 产品维护（maintenance）───────────────────────────────────────────────
+    '不毛躁': 9, '少掉发': 9,
+    '可烫可染': 10, '可修剪': 8, '可改短': 8,
+    '送保养视频': 9, '终身护理建议': 10,
+    '送防尘袋': 8, '发网': 8, '钢梳': 7,
 }
 
-# ── Segment category tags (for A-B-A structure) ───────────────────────────────
-_PROBLEM_KW   = {'发缝宽', '秃头', '发量少', '扁头', '显脸大', '贴头皮', '头型不好看'}
-_SOLUTION_KW  = {'真人发丝', '递针', '无痕', '不掉色', '免打理', '仿真', '一梳到底', '轻薄', '透气'}
-_RESULT_KW    = {'秒变', '小V脸', '变身', '高颅顶', '头包脸', '背影杀', '氛围感', '蓬松'}
-_CONVERT_KW   = {'炸福利', '上车', '运费险', '包退', '点购物车', '加购'}
+# ── Segment category tags (10-category narrative system) ─────────────────────
+# Narrative order: problem → comparison → social_proof → product → wearing →
+#                  detail  → comfort    → result       → scene   → convert
+_PROBLEM_KW = {
+    '发量少', '发缝宽', '发缝大', '头顶塌', '秃顶', '秃头',
+    '贴头皮', '显脸大', '显老', '稀疏', '扁塌', '扁头',
+    '油头塌', '细软发', '发际线高', '头顶空', '头型不好看',
+    '不敢低头', '不敢扎头发', '没自信', '形象差', '气质差',
+    '白发', '遮白发', '白头发', '头发稀', '发丝少', '发量太少', '头皮', '油头',
+    '出门快', '五分钟', '1分钟', '一分钟', '十五分钟', '15分钟', '省时', '不用打理',
+    '细软塌', '秃头星人', '产后脱发', '压力脱发', '遗传性脱发',
+    'M型额头', '秃鬓角', '白发遮盖', '不想染发',
+    '发型单调', '不敢换造型', '戴假发怕假', '怕掉', '怕闷',
+    '化疗', '医疗性脱发',
+}
+_COMPARISON_KW = {
+    # 戴前/戴后/前后对比 已移除（巨量千川合规：不得展示佩戴前后对比）
+    '变化明显', '瞬间变多', '立刻蓬松',
+}
+_SOCIAL_PROOF_KW = {
+    '以为烫头', '以为整容', '同事以为', '朋友以为', '老公以为',
+    '男朋友以为', '认不出来', '以为变了', '路人以为', '都以为', '以为去',
+}
+_PRODUCT_KW = {
+    '仿真头皮', '无痕', '看不出', '真实感', '增加发量', '遮盖发缝',
+    '高颅顶', '显脸小', '修饰脸型', '蓬松',
+    '真人发丝', '递针', '不掉色', '免打理', '仿真', '一梳到底',
+    '秒变', '小V脸', '变身', '背影杀', '头包脸', '氛围感',
+    '头围', '大头围', '小头围', '人发', '真人发', '化纤',
+    '发根', '发尾', '色号', '颜色', '挑染', '渐变色',
+    '学生头', '梨花头', 'bob头', 'BOB头', '短发', '长发', '卷发', '直发',
+    '全真发', '哑光真发', '顺削发', '高仿真发丝', '记忆丝', '蛋白丝',
+    '蕾丝内网', '全蕾丝', '仿生头皮', '递针工艺', '单根勾织', '仿生毛孔',
+    '防滑条', '可调节扣', '轻薄透气', '发色均匀', '无化学反光',
+    '可烫可染', '可修剪', '可改短',
+}
+_WEARING_KW = {
+    '一秒佩戴', '快速戴上', '新手可用', '简单方便', '不费时间', '不挑人', '轻松上手',
+    '戴上去', '这样戴', '夹一下', '梳开', '调整一下',
+    '戴好', '套上去', '摘下来', '取下来', '试试', '试一下',
+}
+_DETAIL_KW = {
+    '发缝真实', '发根清晰', '分缝自然', '发丝细腻',
+    '贴合头皮', '边缘自然', '顺滑', '不打结', '不反光', '颜色自然',
+    '特写', '近景', '细节', '发丝质感',
+    # 身体部位细节 → 分类为 detail，触发 push_in_strong
+    '耳后', '耳边', '耳侧', '后脑勺', '后脑', '鬓角', '鬓边', '两鬓',
+    '发际线', '颈后', '看这里', '看这边', '放大', '拉近',
+}
+_COMFORT_KW = {
+    '透气', '不闷', '不勒头', '轻薄', '无负担', '夏天可戴', '久戴不累',
+    '怕热', '夏天', '夏日', '网底', '透气网', '晒黑', '戴着凉快', '通风', '散热',
+    '不掉', '不滑', '不移位', '卡扣固定', '稳固贴合', '牢固', '跑步不掉', '风吹不掉',
+    '不闷汗', '不扎头', '无胶佩戴', '不显头大', '不毛躁',
+}
+_RESULT_KW = {
+    '秒变', '小V脸', '变身', '高颅顶', '头包脸', '背影杀', '氛围感', '蓬松',
+    '变化明显', '立刻蓬松', '瞬间变多',
+    '一秒变发量', '视觉增发', '发际线逼真', '无痕隐形',
+    '蓬松自然', '可随意分缝',
+}
+_SCENE_KW = {
+    '上班', '通勤', '出门', '约会', '聚会', '逛街', '拍照',
+    '见客户', '面试', '相亲', '婚礼', '日常', '懒人', '早起赶时间', '外出旅行',
+    '前任', '见前任', '见家长', '毕业', '男朋友', '旅游', '旅行', '出游', '早上',
+    '日常通勤', '上班上学', '约会聚餐', '同学聚会',
+    '婚礼敬酒', '伴娘发型', '舞台演出', '年会活动',
+    '拍照上镜', '短视频出镜',
+}
+_CONVERT_KW = {
+    '炸福利', '上车', '运费险', '包退', '点购物车', '加购',
+    '看到最后', '一定要看', '别划走', '后面更夸张',
+    '真的有用', '我放评论区了', '链接在评论区', '直接入', '闭眼买', '强烈推荐',
+    '真人发同效果', '几分之一的价格', '送全套工具', '护理液', '支架',
+    '7天试戴', '首单优惠', '直播间专属价', '顺丰发货', '隐私包装',
+    '送保养视频', '终身护理建议', '送防尘袋', '发网', '钢梳', '少掉发',
+}
+# Legacy alias
+_SOLUTION_KW = _PRODUCT_KW | _WEARING_KW
+
+# Keyword → category mapping (used by segment_scorer.py)
+_KW_TO_CAT: dict[str, str] = {}
+for _kw in _PROBLEM_KW:       _KW_TO_CAT[_kw] = "problem"
+for _kw in _COMPARISON_KW:    _KW_TO_CAT[_kw] = "comparison"
+for _kw in _SOCIAL_PROOF_KW:  _KW_TO_CAT[_kw] = "social_proof"
+for _kw in _PRODUCT_KW:       _KW_TO_CAT[_kw] = "product"
+for _kw in _WEARING_KW:       _KW_TO_CAT[_kw] = "wearing"
+for _kw in _DETAIL_KW:        _KW_TO_CAT[_kw] = "detail"
+for _kw in _COMFORT_KW:       _KW_TO_CAT[_kw] = "comfort"
+for _kw in _RESULT_KW:        _KW_TO_CAT[_kw] = "result"
+for _kw in _SCENE_KW:         _KW_TO_CAT[_kw] = "scene"
+for _kw in _CONVERT_KW:       _KW_TO_CAT[_kw] = "convert"
+for _kw in _SCORES:
+    if _kw not in _KW_TO_CAT:
+        _KW_TO_CAT[_kw] = "neutral"
+
+# Effective scoring table — _SCORES base + rule_overrides from DB applied at startup.
+# score_and_tag() uses this dict so human-approved score changes take effect immediately.
+_SCORES_EFFECTIVE: dict[str, float] = dict(_SCORES)
+
+
+async def load_rule_overrides() -> int:
+    """
+    Load accepted rule overrides from the rule_overrides table and apply them
+    to _SCORES_EFFECTIVE in-place.  Called once at server startup.
+    Returns number of overrides applied.
+    """
+    try:
+        import aiosqlite
+        from db import DB_PATH
+        async with aiosqlite.connect(DB_PATH, timeout=30) as db:
+            async with db.execute("SELECT keyword, score FROM rule_overrides") as cur:
+                rows = await cur.fetchall()
+        applied = 0
+        for kw, score in rows:
+            _SCORES_EFFECTIVE[kw] = float(score)
+            applied += 1
+        if applied:
+            logger.info(f"load_rule_overrides: applied {applied} overrides "
+                        f"({', '.join(f'{kw}→{sc}' for kw, sc in rows)})")
+        return applied
+    except Exception as e:
+        logger.warning(f"load_rule_overrides failed (non-fatal): {e}")
+        return 0
 
 
 @dataclass
@@ -142,7 +361,10 @@ class Seg:
     text: str
     score: float = 0.0
     valid: bool = True
-    category: str = "neutral"   # problem / solution / result / convert / neutral
+    category: str = "neutral"   # problem/comparison/social_proof/product/wearing/detail/comfort/result/scene/convert/neutral
+    motion: str = "static"      # camera motion style: push_in / push_in_strong / pull_out / pan_right / pan_left / tilt_up / tilt_down / static
+    transition: str = "dissolve:0.35"  # xfade transition INTO this segment: "type:duration"
+    reject_reason: str = ""     # why this seg was marked invalid (used by segment_scorer)
 
     @property
     def duration(self) -> float:
@@ -151,54 +373,96 @@ class Seg:
 
 # ── ASS subtitle generation ────────────────────────────────────────────────────
 
-# Map each keyword to its semantic category
-_KW_TO_CAT: dict[str, str] = {}
-for _kw in _PROBLEM_KW:   _KW_TO_CAT[_kw] = "problem"
-for _kw in _RESULT_KW:    _KW_TO_CAT[_kw] = "result"
-for _kw in _CONVERT_KW:   _KW_TO_CAT[_kw] = "convert"
-for _kw in _SOLUTION_KW:  _KW_TO_CAT[_kw] = "solution"
-for _kw in _SCORES:
-    if _kw not in _KW_TO_CAT:
-        _KW_TO_CAT[_kw] = "neutral"
+# ── Font ──────────────────────────────────────────────────────────────────────
+# Internal family name from the OTF (nameID=1 platformID=3)
+_XQNT_FONT = "WenYue XinQingNianTi (Authorization Required) W8-J"
 
-# ASS colors: &HAABBGGRR& (AA=00 opaque; bytes in Blue-Green-Red order)
-_KW_COLORS: dict[str, str] = {
-    "problem":  "&H000055FF&",   # orange-red  #FF5500
-    "result":   "&H0000D7FF&",   # gold        #FFD700
-    "convert":  "&H0044FF00&",   # lime green  #00FF44
-    "solution": "&H00FFDD00&",   # cyan        #00DDFF
-    "neutral":  "&H0000CCFF&",   # yellow      #FFCC00
+# ── Highlight keywords: product descriptors + scene nouns ─────────────────────
+# ASS colors: &HAABBGGRR& (AA=00 opaque, bytes in B-G-R order)
+# Warm gold #FFCC00 → R=FF G=CC B=00 → BGR 00,CC,FF → &H0000CCFF&
+_HIGHLIGHT_COLOR = "&H0000CCFF&"   # warm gold
+
+_HIGHLIGHT_PRODUCT: set[str] = {
+    # 效果形容词
+    '显白', '自然', '柔顺', '蓬松', '透气', '服帖', '轻盈', '轻薄',
+    '减龄', '显年轻', '氛围感', '背影杀', '高颅顶', '小V脸', '头包脸',
+    # 产品/工艺特性
+    '真发', '仿真', '真人发丝', '递针', '无痕', '一梳到底',
+    '不打结', '不起静电', '不脱色', '免打理', '全遮盖',
+    # 视觉冲击
+    '秒变', '变身',
 }
+_HIGHLIGHT_SCENE: set[str] = {
+    '通勤', '派对', '同学会', '逛街', '约会', '婚礼',
+    '拍照', '聚会', '旅游', '日常', '出行', '上班', '上课',
+}
+_HIGHLIGHT_ACTION: set[str] = {
+    # 佩戴/安装步骤
+    '分两份', '往里塞', '皮扣一勾', '防风扣', '固定好', '戴上去', '套上去',
+    '扎球球', '别上去', '夹好', '梳顺', '摘下来', '取下来',
+    # 造型操作
+    '分缝', '拨开', '盘发', '卷发', '编发', '做造型',
+    # 通用动作（足够长避免误匹配）
+    '固定', '戴上', '套上', '梳开', '夹住', '扎起',
+}
+_HIGHLIGHT_PROMO: set[str] = {
+    # 价格/促销
+    '限时', '限量', '秒杀', '专属', '直播间价', '今天特价', '只要',
+    '买一送一', '免费', '折扣', '优惠', '最低价', '史低', '清仓',
+    '抢', '冲', '下单', '点链接', '立刻',
+    # 效果承诺
+    '包邮', '7天退', '无理由', '保证', '放心买',
+}
+_HIGHLIGHT_KW: set[str] = _HIGHLIGHT_PRODUCT | _HIGHLIGHT_SCENE | _HIGHLIGHT_ACTION | _HIGHLIGHT_PROMO
+
+# Longest-first so "真人发丝" matches before "真发", "高颅顶" before "颅顶" etc.
+_SORTED_HIGHLIGHT_KWS: list[str] = sorted(_HIGHLIGHT_KW, key=len, reverse=True)
 
 
-# ── ASS subtitle style pool ───────────────────────────────────────────────────
-# Each tuple: (style_name, fontname, fontsize, bold, italic, spacing, outline, shadow)
-# Fonts: PingFang SC=clean; STHeiti=bold; Xingkai SC=brush; Yuanti SC=round;
-#        STKaiti=calligraphy; Baoli SC=slab; Microsoft YaHei=modern
+# ── Gradient border constants (3-layer stacking) ──────────────────────────────
+# Layer 0 (back)  : blue  outer ring bord=7, transparent fill
+#   Blue  #0066FF → R=00 G=66 B=FF → BGR FF,66,00 → &H00FF6600&
+# Layer 1 (middle): purple inner ring bord=4, transparent fill
+#   Purple #8800FF → R=88 G=00 B=FF → BGR FF,00,88 → &H00FF0088&
+# Layer 2 (front) : white text, thin dark border bord=2 + subtle shadow
+_BORDER_BLUE   = r"{\1a&HFF&\3a&H80&\3c&H00FF6600&\bord8\shad0}"
+_BORDER_PURPLE = r"{\1a&HFF&\3a&H80&\3c&H00FF0088&\bord5\shad0}"
+_BORDER_TEXT   = r"{\3a&H80&\3c&H00141414&\bord2\shad1}"
+
+
+# ── ASS subtitle style ────────────────────────────────────────────────────────
+# Single consistent style — 新青年体, no built-in outline (handled by inline layer tags).
+# (style_name, fontname, fontsize, bold, italic, spacing, outline, shadow)
 _SUBTITLE_STYLES = [
-    # 字体大小降至 72–88px（原 92–102px），避免大字报低质判定（巨量千川要求字幕不超画面 1/3）
-    ("Clean",   "PingFang SC",     76,  0, 0,  1, 6, 2),
-    ("Bold",    "STHeiti",         84,  1, 0,  0, 8, 3),
-    ("Brush",   "Xingkai SC",      86,  1, 0,  2, 5, 3),
-    ("Round",   "Yuanti SC",       80,  0, 0,  2, 5, 2),
-    ("Kaiti",   "STKaiti",         80,  0, 1,  1, 6, 2),
-    ("Slab",    "Baoli SC",        82,  0, 0,  1, 7, 3),
-    ("Modern",  "Microsoft YaHei", 80,  0, 0,  1, 6, 2),
+    ("XQN",    _XQNT_FONT, 104, 0, 0, 1, 0, 0),   # 80 × 1.3 = 104
+    # 右上角大艺术字：高亮关键词弹出层（Alignment=9 右上角，MarginR=60, MarginV=120）
+    ("KWPOP",  _XQNT_FONT, 169, 1, 0, 0, 0, 0),   # 130 × 1.3 = 169
 ]
 
 def _build_ass_styles() -> str:
-    """Build the [V4+ Styles] section with all font variants."""
-    fmt = "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+    fmt = (
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+        "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+        "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+        "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+    )
     lines = [fmt]
     for name, font, size, bold, italic, spacing, outline, shadow in _SUBTITLE_STYLES:
-        lines.append(
-            f"Style: {name},{font},{size},"
-            f"&H00FFFFFF,&H000000FF,&H00141414,&H80000000,"
-            f"{bold},{italic},0,0,100,100,{spacing},0,1,{outline},{shadow},2,80,80,120,1\n"
-        )
+        if name == "KWPOP":
+            # 右上角大艺术字：金色，半透明描边，Alignment=9（右上），MarginR=60，MarginV=120
+            lines.append(
+                f"Style: {name},{font},{size},"
+                f"&H0000CCFF,&H000000FF,&H80141414,&H80000000,"
+                f"{bold},{italic},0,0,100,100,{spacing},0,1,6,4,9,0,60,120,1\n"
+            )
+        else:
+            lines.append(
+                f"Style: {name},{font},{size},"
+                f"&H00FFFFFF,&H000000FF,&H80141414,&H80000000,"
+                f"{bold},{italic},0,0,100,100,{spacing},0,1,{outline},{shadow},2,80,80,120,1\n"
+            )
     return "".join(lines)
 
-_STYLE_NAMES = [s[0] for s in _SUBTITLE_STYLES]
 
 _ASS_HEADER_BASE = """\
 [Script Info]
@@ -224,13 +488,11 @@ def _sec_to_ass(s: float) -> str:
 
 
 def _annotate_text(text: str) -> tuple[str, bool]:
-    """Wrap scoring keywords in ASS color+bold tags. Returns (tagged_text, had_keyword)."""
-    kws = sorted(_KW_TO_CAT.keys(), key=len, reverse=True)
+    """Wrap highlight keywords in gold+bold ASS tags. Returns (tagged_text, had_keyword)."""
     has_kw = False
-    for kw in kws:
+    for kw in _SORTED_HIGHLIGHT_KWS:
         if kw in text:
-            color = _KW_COLORS[_KW_TO_CAT[kw]]
-            open_tag  = "{" + "\\c" + color + "\\b1" + "}"
+            open_tag  = "{\\c" + _HIGHLIGHT_COLOR + "\\b1}"
             close_tag = "{\\r}"
             text = text.replace(kw, open_tag + kw + close_tag, 1)
             has_kw = True
@@ -240,51 +502,76 @@ def _annotate_text(text: str) -> tuple[str, bool]:
 _ANIM_STYLES = [
     # style 1: gentle scale pulse
     r"{\fad(120,80)\t(0,300,\fscx105\fscy105)\t(300,600,\fscx100\fscy100)}",
-    # style 2: slide up from below (approximate via pos)
+    # style 2: soft scale
     r"{\fad(100,80)\t(0,200,\fscx102\fscy102)\t(200,400,\fscx100\fscy100)}",
     # style 3: bounce
     r"{\fad(80,60)\t(0,150,\fscx108\fscy108)\t(150,300,\fscx97\fscy97)\t(300,450,\fscx103\fscy103)\t(450,600,\fscx100\fscy100)}",
-    # style 4: color pulse (yellow → white)
-    r"{\fad(100,80)\t(0,300,\c&H00FFFF44&)\t(300,600,\c&H00FFFFFF&)}",
+    # style 4: fill flash gold→white on entrance
+    r"{\fad(100,80)\t(0,300,\c&H0000CCFF&)\t(300,600,\c&H00FFFFFF&)}",
 ]
+# Keyword lines: bigger pop + keep animation synced across all 3 layers
 _ANIM_KW = r"{\fad(150,100)\t(0,200,\fscx112\fscy112)\t(200,400,\fscx100\fscy100)}"
+
+
+# Cache the ASS header — it never changes between clips.
+_ASS_HEADER: str = _make_ass_header()
 
 
 def build_ass(selected: List[Seg], all_segs: List[Seg]) -> str:
     """
-    Generate ASS subtitle string with keyword highlights.
-    Remaps SRT timestamps to the clip's output timeline.
-    Each segment picks a random font style; keyword lines get a stronger bounce.
+    Generate ASS subtitle string with 3-layer gradient border.
+
+    Each SRT line becomes 3 stacked Dialogue events:
+      Layer 0: blue  outer ring (bord=7, transparent fill)
+      Layer 1: purple inner ring (bord=4, transparent fill)
+      Layer 2: white text       (bord=2, thin dark outline)
+
+    Highlight keywords on Layer 2 are coloured warm-gold + bold.
     """
-    header = _make_ass_header()
+    MAX_SUB_CHARS = 14  # 每屏最多14字，超出则截断（保留完整词）
+
+    def _truncate(text: str) -> str:
+        """Keep at most MAX_SUB_CHARS characters."""
+        return text[:MAX_SUB_CHARS] if len(text) > MAX_SUB_CHARS else text
+
+    header = _ASS_HEADER
     dialogue: list[str] = []
     cursor = 0.0
     line_idx = 0
-    rng = random.Random()
-    for sel_seg in selected:
+    rendered_srt_ids: set = set()   # track (srt.idx, sel_seg_idx) to avoid duplicates
+    for sel_idx, sel_seg in enumerate(selected):
         offset = cursor
-        pad_b = min(SEG_PAD, sel_seg.start)   # actual pre-buffer for this segment
-        cursor += pad_b + sel_seg.duration + SEG_PAD
-        # Pick one style for the entire segment (visual consistency within a scene)
-        seg_style = rng.choice(_STYLE_NAMES)
+        cursor += sel_seg.duration  # SEG_PAD=0, no padding
         for srt in all_segs:
             ov_start = max(srt.start, sel_seg.start)
             ov_end   = min(srt.end,   sel_seg.end)
-            if ov_end - ov_start < 0.1:
+            if ov_end - ov_start < 0.15:  # require at least 150ms overlap
                 continue
-            # pad_b shifts speech forward in the output timeline (after pre-buffer)
-            t0 = offset + pad_b + (ov_start - sel_seg.start)
-            t1 = offset + pad_b + (ov_end   - sel_seg.start)
-            annotated, has_kw = _annotate_text(srt.text)
-            if has_kw:
-                prefix = _ANIM_KW
-            else:
-                prefix = _ANIM_STYLES[line_idx % len(_ANIM_STYLES)]
+            dedup_key = (srt.idx, sel_idx)
+            if dedup_key in rendered_srt_ids:
+                continue
+            rendered_srt_ids.add(dedup_key)
+            t0 = offset + (ov_start - sel_seg.start)
+            t1 = offset + (ov_end   - sel_seg.start)
+            raw_text = _truncate(srt.text)
+            annotated, has_kw = _annotate_text(raw_text)
+            anim = _ANIM_KW if has_kw else _ANIM_STYLES[line_idx % len(_ANIM_STYLES)]
             line_idx += 1
-            dialogue.append(
-                f"Dialogue: 0,{_sec_to_ass(t0)},{_sec_to_ass(t1)},"
-                f"{seg_style},,0,0,0,,{prefix}{annotated}"
-            )
+            ts0, ts1 = _sec_to_ass(t0), _sec_to_ass(t1)
+            # Layer 0: white text + keyword highlights (半透明深色描边，无蓝/紫色)
+            dialogue.append(f"Dialogue: 0,{ts0},{ts1},XQN,,0,0,0,,{anim}{_BORDER_TEXT}{annotated}")
+            # Layer 3: 右上角关键词大艺术字弹出（仅含高亮词的句子）
+            if has_kw:
+                kw_match = next((kw for kw in _SORTED_HIGHLIGHT_KWS if kw in raw_text), None)
+                if kw_match:
+                    kw_anim = (r"{\fad(0,200)"
+                               r"\t(0,150,\fscx130\fscy130)"
+                               r"\t(150,300,\fscx95\fscy95)"
+                               r"\t(300,450,\fscx108\fscy108)"
+                               r"\t(450,600,\fscx100\fscy100)}")
+                    dialogue.append(
+                        f"Dialogue: 3,{ts0},{ts1},KWPOP,,0,0,0,,{kw_anim}{kw_match}"
+                    )
     return header + "\n".join(dialogue) + "\n"
 
 
@@ -307,35 +594,109 @@ ZOOM_H = int(OUT_H / ZOOM_FACTOR)   # 2560
 ZOOM_X = (OUT_W - ZOOM_W) // 2      # 360 – centred horizontally
 ZOOM_Y = 0                           # start from top → captures face/wig
 
-# Transition pool – cycled across segment boundaries, 5 visual styles:
-#   前后叠加: dissolve / fade
-#   聚焦:     zoomin / radial / hblur
-#   画中画:   squeezeh / squeezev
-#   人物重叠: fadeblack  (rembg gives true BG separation)
-#   运镜:     zoom_punch (snap zoom-in to face, snap back)
+# Fallback transition pool — used when a segment has no assigned transition.
+# Includes slide/zoom effects for more dynamic feels.
 _TR_POOL = [
-    "dissolve",    # 前后叠加
+    "slideleft",   # 滑移
     "zoomin",      # 聚焦
     "squeezeh",    # 画中画
     "fadeblack",   # 人物重叠
-    "zoom_punch",  # 运镜
-    "fade",        # 前后叠加
-    "radial",      # 聚焦
-    "hblur",       # 聚焦
-    "squeezev",    # 画中画
+    "slideright",  # 滑移反向
+    "radial",      # 聚焦放射
+    "hblur",       # 运动模糊
+    "squeezev",    # 画中画竖
+    "dissolve",    # 叠加
+    "wipeleft",    # 擦入
 ]
+
+# Map style-assigned transition names to valid ffmpeg xfade transitions.
+# Custom names (phone_zoom, shadow_sweep, etc.) get mapped here.
+_TR_REMAP: dict[str, str] = {
+    "phone_zoom":    "zoomin",       # 手机放大 → zoom聚焦
+    "shadow_sweep":  "fadeblack",    # 阴影扫过
+    "polaroid":      "fadewhite",    # 拍立得闪白
+    "camera_zoomout":"fadewhite",    # 镜头拉远
+    "center_fade":   "dissolve",     # 中心淡入
+    "pixel_dissolve":"pixelize",     # 像素溶解
+    "diagonal_wipe": "diagtl",       # 对角擦入
+    "zoom_punch":    "dissolve",     # 由 _gen_zoom_punch_clips 处理，xfade用dissolve
+}
+
+
+def _motion_vf(seg: Seg, w: int = OUT_W, h: int = OUT_H) -> str:
+    """Return a ffmpeg vf filter string that applies the segment's camera motion."""
+    base = (
+        f"scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos,"
+        f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2"
+    )
+    sharp = "unsharp=5:5:0.8:5:5:0.0"
+    motion = seg.motion
+    dur = max(seg.duration, 1.0)
+    fps = 25
+    n = int(dur * fps)
+
+    if motion in ("push_in", "push_in_strong"):
+        # 缓慢推进放大：1.0x → 1.12x（push_in）or 1.0x → 1.20x（push_in_strong，细节放大）
+        end_zoom = 1.20 if motion == "push_in_strong" else 1.12
+        # zoompan: zoom from 1.0 to end_zoom, centered on upper-center (face/wig)
+        zp = (
+            f"zoompan=z='min(1+({end_zoom-1:.3f})*on/{n},  {end_zoom:.3f})':"
+            f"x='(iw/2)-(iw/zoom/2)':y='(ih*0.3)-(ih/zoom*0.3)':"
+            f"d={n}:s={w}x{h}:fps={fps}"
+        )
+        return f"{base},{zp},{sharp}"
+    elif motion == "pull_out":
+        # 缓慢拉远：1.12x → 1.0x
+        start_zoom = 1.12
+        zp = (
+            f"zoompan=z='max({start_zoom:.3f}-({start_zoom-1:.3f})*on/{n}, 1.0)':"
+            f"x='(iw/2)-(iw/zoom/2)':y='(ih*0.3)-(ih/zoom*0.3)':"
+            f"d={n}:s={w}x{h}:fps={fps}"
+        )
+        return f"{base},{zp},{sharp}"
+    elif motion == "pan_right":
+        # 从左向右缓慢平移
+        zp = (
+            f"zoompan=z=1.08:"
+            f"x='(iw/2 - iw/zoom/2) + (iw/zoom*0.05)*on/{n}':"
+            f"y='(ih*0.3)-(ih/zoom*0.3)':"
+            f"d={n}:s={w}x{h}:fps={fps}"
+        )
+        return f"{base},{zp},{sharp}"
+    elif motion == "pan_left":
+        zp = (
+            f"zoompan=z=1.08:"
+            f"x='(iw/2 - iw/zoom/2) - (iw/zoom*0.05)*on/{n}':"
+            f"y='(ih*0.3)-(ih/zoom*0.3)':"
+            f"d={n}:s={w}x{h}:fps={fps}"
+        )
+        return f"{base},{zp},{sharp}"
+    elif motion == "tilt_up":
+        zp = (
+            f"zoompan=z=1.06:"
+            f"x='(iw/2)-(iw/zoom/2)':"
+            f"y='(ih*0.4 - ih/zoom*0.4) - (ih/zoom*0.06)*on/{n}':"
+            f"d={n}:s={w}x{h}:fps={fps}"
+        )
+        return f"{base},{zp},{sharp}"
+    elif motion == "tilt_down":
+        zp = (
+            f"zoompan=z=1.06:"
+            f"x='(iw/2)-(iw/zoom/2)':"
+            f"y='(ih*0.3 - ih/zoom*0.3) + (ih/zoom*0.06)*on/{n}':"
+            f"d={n}:s={w}x{h}:fps={fps}"
+        )
+        return f"{base},{zp},{sharp}"
+    else:
+        # static — no motion
+        return f"{base},fps={fps},{sharp}"
 
 
 async def _preprocess_segments(mp4: str, selected: List[Seg], tmp_dir: str, on_progress=None) -> List[Optional[str]]:
     """Pre-encode each segment to 4K temp file in parallel to reduce filter-graph memory.
     Audio: apply noisereduce (voice isolation) when available, else ffmpeg-only denoising.
-    Video: lanczos upscale + mild sharpening.
+    Video: lanczos upscale + motion filter (zoom/pan per segment) + sharpening.
     """
-    _SF = (
-        f"scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease:flags=lanczos,"
-        f"pad={OUT_W}:{OUT_H}:(ow-iw)/2:(oh-ih)/2,"
-        f"unsharp=5:5:0.6:5:5:0.0"   # mild luma sharpening
-    )
 
     from denoise import extract_and_denoise
 
@@ -355,12 +716,14 @@ async def _preprocess_segments(mp4: str, selected: List[Seg], tmp_dir: str, on_p
         denoised_wav = os.path.join(tmp_dir, f"seg{i}_dn.wav")
         has_denoised = await extract_and_denoise(mp4, audio_start, padded_dur + 0.15, denoised_wav)
 
+        motion_vf = _motion_vf(seg)
+
         if has_denoised:
             cmd = [
                 "ffmpeg", "-y",
                 "-ss", f"{pre:.3f}", "-i", mp4,
                 "-i", denoised_wav,
-                "-vf", f"trim={fs:.3f}:{fe:.3f},setpts=PTS-STARTPTS,{_SF},fps=25",
+                "-vf", f"trim={fs:.3f}:{fe:.3f},setpts=PTS-STARTPTS,{motion_vf}",
                 "-map", "0:v", "-map", "1:a",
                 "-t", f"{duration:.3f}",
                 "-c:v", "h264_videotoolbox", "-b:v", "10M", "-allow_sw", "1",
@@ -377,7 +740,7 @@ async def _preprocess_segments(mp4: str, selected: List[Seg], tmp_dir: str, on_p
             )
             cmd = [
                 "ffmpeg", "-y", "-ss", f"{pre:.3f}", "-i", mp4,
-                "-vf", f"trim={fs:.3f}:{fe:.3f},setpts=PTS-STARTPTS,{_SF},fps=25",
+                "-vf", f"trim={fs:.3f}:{fe:.3f},setpts=PTS-STARTPTS,{motion_vf}",
                 "-af", af,
                 "-t", f"{duration:.3f}",
                 "-c:v", "h264_videotoolbox", "-b:v", "10M", "-allow_sw", "1",
@@ -531,8 +894,14 @@ async def _xfade_merge(
             lf, ldur, llorig, lrorig, ltemp = left
             rf, rdur, rlorig, rrorig, rtemp = right
             bi = lrorig  # boundary index = rightmost original seg of left chunk
-            tr = _TR_POOL[bi % len(_TR_POOL)]
-            xfade_tr = "dissolve" if tr == "zoom_punch" else tr
+            # Use per-segment assigned transition (set by _assign_styles); fall back to pool.
+            next_idx = bi + 1
+            if next_idx < len(selected) and selected[next_idx].transition:
+                raw_tr = selected[next_idx].transition.split(":")[0]
+                tr = _TR_REMAP.get(raw_tr, raw_tr)
+            else:
+                tr = _TR_POOL[bi % len(_TR_POOL)]
+            xfade_tr = _TR_REMAP.get(tr, tr)
             _counter[0] += 1
             dst = os.path.join(tmp_dir, f"tree_{_counter[0]}.mp4")
 
@@ -994,18 +1363,22 @@ async def _gen_person_frames(
             try:
                 from gpu_state import is_online as _gpu_online
                 if _gpu_online():
-                    import httpx as _httpx
+                    import aiohttp as _aiohttp_rembg
                     with open(frame_tmp, "rb") as _f:
                         _img_data = _f.read()
-                    async with _httpx.AsyncClient(timeout=30.0) as _c:
-                        _r = await _c.post(
+                    async with _aiohttp_rembg.ClientSession() as _sess:
+                        _form = _aiohttp_rembg.FormData()
+                        _form.add_field("file", _img_data, filename="frame.jpg", content_type="image/jpeg")
+                        async with _sess.post(
                             f"{_GPU_SERVICE_URL}/rembg",
-                            files={"file": ("frame.jpg", _img_data, "image/jpeg")},
-                        )
-                    if _r.status_code == 200:
-                        with open(person_tmp, "wb") as _f:
-                            _f.write(_r.content)
-                        _used_gpu_rembg = True
+                            data=_form,
+                            timeout=_aiohttp_rembg.ClientTimeout(total=30),
+                        ) as _r:
+                            if _r.status == 200:
+                                _rembg_data = await _r.read()
+                                with open(person_tmp, "wb") as _f:
+                                    _f.write(_rembg_data)
+                                _used_gpu_rembg = True
             except Exception:
                 pass
 
@@ -1016,7 +1389,7 @@ async def _gen_person_frames(
                     result = rembg.remove(data)
                     with open(person_tmp, "wb") as f:
                         f.write(result)
-                await asyncio.get_event_loop().run_in_executor(None, _remove_bg)
+                await asyncio.get_running_loop().run_in_executor(None, _remove_bg)
             if os.path.exists(person_tmp) and os.path.getsize(person_tmp) > 0:
                 return bi, person_tmp
             return bi, None
@@ -1108,20 +1481,25 @@ def score_and_tag(seg: Seg) -> None:
     for pat in _REMOVE_PATTERNS:
         if re.search(pat, text):
             seg.valid = False
+            seg.reject_reason = "remove_pattern"
             return
 
     # Too short to be useful (min 3s per scene)
     if seg.duration < 3.0:
         seg.valid = False
+        seg.reject_reason = "too_short"
         return
 
-    # Trim over-long segments (max 6s per scene)
-    if seg.duration > 6.0:
-        seg.end = seg.start + 6.0
+    # Trim over-long segments — product/wearing/detail keywords allow up to 18s（完整介绍一款假发需要时间）
+    # 普通内容 cap 10s
+    has_product_kw = any(kw in text for kw in (_PRODUCT_KW | _DETAIL_KW | _WEARING_KW | _COMFORT_KW))
+    max_dur = 18.0 if has_product_kw else 10.0
+    if seg.duration > max_dur:
+        seg.end = seg.start + max_dur
 
-    # Keyword score
+    # Keyword score — uses _SCORES_EFFECTIVE which incorporates human-approved rule overrides
     score = 0.0
-    for kw, pts in _SCORES.items():
+    for kw, pts in _SCORES_EFFECTIVE.items():
         if kw in text:
             score += pts
 
@@ -1130,14 +1508,29 @@ def score_and_tag(seg: Seg) -> None:
         score *= 1.2
 
     seg.score = round(score, 2)
+    # 不因 score=0 丢弃片段——demo/佩戴/讲解内容同样有价值，低分段作为 fill 填入
+    # （零分段最终排在高分段之后，靠 fill 逻辑填充时长预算）
 
-    # Category tag (A-B-A)
+    # Category tag — 10-category narrative system
+    # Priority order mirrors narrative arc (higher CTR categories checked first)
     if any(kw in text for kw in _PROBLEM_KW):
         seg.category = "problem"
-    elif any(kw in text for kw in _SOLUTION_KW):
-        seg.category = "solution"
+    elif any(kw in text for kw in _COMPARISON_KW):
+        seg.category = "comparison"
+    elif any(kw in text for kw in _SOCIAL_PROOF_KW):
+        seg.category = "social_proof"
+    elif any(kw in text for kw in _DETAIL_KW):
+        seg.category = "detail"
+    elif any(kw in text for kw in _WEARING_KW):
+        seg.category = "wearing"
+    elif any(kw in text for kw in _PRODUCT_KW):
+        seg.category = "product"
+    elif any(kw in text for kw in _COMFORT_KW):
+        seg.category = "comfort"
     elif any(kw in text for kw in _RESULT_KW):
         seg.category = "result"
+    elif any(kw in text for kw in _SCENE_KW):
+        seg.category = "scene"
     elif any(kw in text for kw in _CONVERT_KW):
         seg.category = "convert"
 
@@ -1185,107 +1578,266 @@ def _pick_by_category(segs: List[Seg], cat: str, budget: float) -> List[Seg]:
     return chosen
 
 
-def _select_from_valid(valid: List[Seg], clip_min: float = CLIP_MIN, clip_max: float = CLIP_MAX) -> List[Seg]:
-    """Three-part selection: 黄金开场 → 核心展示 → 强制 CTA 结尾.
+# ── Composite style presets ────────────────────────────────────────────────────
+# Each preset = (motion, transition_type, transition_dur)
+_STYLES: dict[str, tuple] = {
+    # ── 抓注意 (attention-grabbing) ──
+    "attention_r":  ("push_in_strong",  "fadewhite",      0.20),
+    "attention_l":  ("zoom_pan_left",   "fadewhite",      0.20),
+    "hook_shake":   ("shake",           "zoomin",         0.28),
+    "diag_in":      ("push_in_strong",  "diagtl",         0.25),
+    # ── 展示细节 (detail showcase) ──
+    "detail_r":     ("zoom_pan_right",  "smoothleft",     0.40),
+    "detail_l":     ("zoom_pan_left",   "smoothright",    0.40),
+    "center_r":     ("zoom_pan_right",  "center_fade",    0.40),
+    "radial_in":    ("push_in",         "radial",         0.35),
+    # ── 种草 (seeding/pull-back) ──
+    "seed":         ("pull_out",        "fadegrays",      0.40),
+    "seed_tilt":    ("tilt_down",       "fadegrays",      0.40),
+    "pixel_mix":    ("pull_out",        "pixel_dissolve", 0.40),
+    # ── 叙事转折 (narrative pivot) ──
+    "pivot":        ("rotate_ccw",      "fadeblack",      0.50),
+    "pivot_push":   ("pull_out",        "fadeblack",      0.45),
+    "shadow_push":  ("push_in",         "shadow_sweep",   0.35),
+    # ── 社交证明 (social proof) ──
+    "social_up":    ("tilt_up",         "wipeleft",       0.35),
+    "social_down":  ("tilt_down",       "wipeleft",       0.35),
+    "slide_in_r":   ("pan_right",       "slideleft",      0.30),
+    "slide_in_l":   ("pan_left",        "slideright",     0.30),
+    "squeeze_r":    ("tilt_up",         "squeezeh",       0.35),
+    # ── 快切填充 (fast fill cuts) ──
+    "quick_r":      ("pan_right",       "dissolve",       0.22),
+    "quick_l":      ("pan_left",        "dissolve",       0.22),
+    "quick_in":     ("push_in",         "hblur",          0.28),
+    "quick_rot":    ("rotate_cw",       "dissolve",       0.25),
+    "diag_wipe":    ("pan_right",       "diagonal_wipe",  0.28),
+    # ── CTA 结尾 ──
+    "cta":          ("pull_out",        "fadegrays",      0.40),
+    # ── 特效转场 (overlay composites) ──
+    "polaroid_tr":     ("push_in",  "polaroid",       0.40),
+    "phone_zoom_tr":   ("push_in",  "phone_zoom",     0.40),
+    "camera_out_tr":   ("pull_out", "camera_zoomout", 0.40),
+}
 
-    Structure (巨量千川优质三段式):
-      Opening  (15%): highest-score result/convert — visual hook in first 3s
-      Mid      (70%): problem → solution → result  — product value exposition
-      Closer   (15%): forced convert CTA           — required for quality rating
+# Style pools by narrative position — random selection within the pool
+# 每个 pool 均加入 slide/zoom 类转场，增强视觉流动感
+_STYLE_POOLS: dict[str, list] = {
+    "hook":         ["hook_shake",  "attention_r",  "attention_l",  "diag_in",      "phone_zoom_tr"],
+    "problem":      ["hook_shake",  "pivot",        "pivot_push",   "shadow_push",  "attention_r",   "slide_in_r"],
+    "comparison":   ["attention_r", "attention_l",  "diag_in",      "hook_shake",   "polaroid_tr",   "phone_zoom_tr"],
+    "social_proof": ["social_up",   "social_down",  "slide_in_r",   "slide_in_l",   "squeeze_r",     "phone_zoom_tr"],
+    "product":      ["detail_r",    "detail_l",     "center_r",     "radial_in",    "seed",          "phone_zoom_tr", "slide_in_r"],
+    "wearing":      ["detail_r",    "detail_l",     "radial_in",    "quick_in",     "center_r",      "phone_zoom_tr", "slide_in_l"],
+    "detail":       ["radial_in",   "center_r",     "detail_r",     "quick_in",     "phone_zoom_tr"],
+    "comfort":      ["seed",        "seed_tilt",    "pixel_mix",    "quick_l",      "slide_in_l",    "slide_in_r"],
+    "result":       ["seed",        "seed_tilt",    "pixel_mix",    "center_r",     "camera_out_tr", "slide_in_r"],
+    "scene":        ["slide_in_r",  "slide_in_l",   "social_up",    "social_down",  "phone_zoom_tr"],
+    "convert":      ["cta",         "slide_in_r"],
+    "solution":     ["detail_r",    "detail_l",     "center_r",     "radial_in",    "phone_zoom_tr"],
+    "neutral":      ["quick_r",     "quick_l",      "quick_in",     "quick_rot",
+                     "slide_in_r",  "slide_in_l",   "radial_in",    "diag_in",
+                     "diag_wipe",   "detail_r",     "detail_l",     "phone_zoom_tr"],
+}
+
+
+def _assign_styles(assembled: List[Seg], seed: int = 0) -> None:
+    """Assign motion + transition to every segment using composite style presets."""
+    import random as _random
+    rng = _random.Random(seed)
+
+    # 细节特写关键词 → 强制 push_in_strong（对准发丝/发根区域推进放大）
+    # 同时覆盖 detail 类段落的所有核心词
+    _HAIR_DETAIL_KW = frozenset([
+        "发丝", "发根", "发纹", "仿真皮", "仿递针", "仿头皮", "头皮",
+        "发质", "头顶", "分缝", "发缝", "毛流", "毛鳞片",
+        # _DETAIL_KW 同步（detail类段落一律 push_in_strong）
+        "发缝真实", "发根清晰", "分缝自然", "发丝细腻",
+        "贴合头皮", "边缘自然", "顺滑", "不打结", "不反光", "颜色自然",
+        "特写", "近景", "细节", "发丝质感",
+        # 额外细节词
+        "仿真头皮", "仿生头皮", "递针工艺", "单根勾织", "仿生毛孔",
+        "中分", "抠一抠", "往后", "往前", "拨一拨", "翻一翻",
+        "扒开", "掀开", "扯开", "挑开",
+        # 身体部位细节词 → 镜头放大对应区域
+        "耳后", "耳朵", "耳边", "耳侧",
+        "后脑勺", "后脑", "枕骨", "后颈",
+        "鬓角", "鬓边", "两鬓",
+        "侧面", "侧边", "从侧面", "侧边线",
+        "发际线", "边缘", "轮廓",
+        "颈部", "脖子", "颈后",
+        "看这里", "看这边", "这个位置", "这里", "这边",
+        "放大", "拉近", "近一点",
+    ])
+
+    def _pos(seg: Seg, idx: int) -> str:
+        return "hook" if idx == 0 else seg.category
+
+    for i, seg in enumerate(assembled):
+        pool_key = _pos(seg, i)
+        pool = _STYLE_POOLS.get(pool_key, _STYLE_POOLS["neutral"])
+        seg_seed = seed + i * 31 + (hash(seg.text[:16]) & 0xFFFF)
+        rng.seed(seg_seed)
+        style_name = rng.choice(pool)
+        motion, t_type, t_dur = _STYLES[style_name]
+        if any(kw in seg.text for kw in _HAIR_DETAIL_KW) or seg.category == "detail":
+            motion = "push_in_strong"
+        seg.motion = motion
+        if i > 0:
+            seg.transition = f"{t_type}:{t_dur:.2f}"
+
+    MIN_MOTION_SEGS = 4
+    motion_count = sum(1 for s in assembled if s.motion != "static")
+    if motion_count < MIN_MOTION_SEGS:
+        static_segs = sorted(
+            [s for s in assembled if s.motion == "static"],
+            key=lambda s: getattr(s, "score", 0)
+        )
+        replacements = ["push_in", "pull_out"]
+        for idx_r, seg in enumerate(static_segs):
+            if motion_count >= MIN_MOTION_SEGS:
+                break
+            seg.motion = replacements[idx_r % 2]
+            motion_count += 1
+
+
+def _select_from_valid(valid: List[Seg], clip_min: float = CLIP_MIN, clip_max: float = CLIP_MAX) -> List[Seg]:
+    """10-step narrative arc for 假发 short-form video (巨量千川优质短视频结构).
+
+    Assembly order (skips slots with no matching content):
+      1. 痛点开头   problem      — viewer self-identifies with the problem
+      2. 对比强化   comparison   — before state / contrast to amplify urgency
+      3. 情绪刺激   social_proof — "同事以为我去烫头了" — social validation hook
+      4. 产品展示   product      — core features / visual transformation
+      5. 佩戴过程   wearing      — step-by-step demo; builds confidence
+      6. 细节特写   detail       — close-up of hair quality; purchase trigger
+      7. 舒适稳固   comfort      — addresses heat/stability doubts
+      8. 戴后效果   result       — after-wearing visual impression
+      9. 场景代入   scene        — specific use case (约会/通勤/婚礼 etc.)
+     10. 转化收口   convert      — CTA forced last; shortest available
     """
     if not valid:
         return []
 
-    # Budget allocation (巨量千川优质标准: 短视频三段式)
-    opening_budget  = clip_max * 0.15   # ~9s  开场钩子
-    mid_budget      = clip_max * 0.70   # ~42s 核心展示 (problem 30% + solution 30% + result 10%)
-    closer_budget   = clip_max * 0.15   # ~9s  结尾 CTA（强制）
+    used_ids: set = set()
 
-    problem_budget  = clip_max * 0.30
-    solution_budget = clip_max * 0.30
-    result_budget   = clip_max * 0.10
-
-    # ── Opening: single highest-score result/convert segment ─────────────────
-    opening_pool = sorted(
-        [s for s in valid if s.category in ("result", "convert") and s.score > 0],
-        key=lambda s: s.score, reverse=True
-    ) or sorted(valid, key=lambda s: s.score, reverse=True)
-    opening = [opening_pool[0]] if opening_pool and opening_pool[0].duration <= opening_budget else []
-
-    exclude = {id(s) for s in opening}
-    remaining = [s for s in valid if id(s) not in exclude]
-
-    def pick(cat, budget):
+    def _pick_block(cat: str, budget: float, max_segs: int = 2) -> List[Seg]:
         pool = sorted(
-            [s for s in remaining if s.category == cat],
-            key=lambda s: s.score, reverse=True
+            [s for s in valid if id(s) not in used_ids and s.category == cat and s.score > 0],
+            key=lambda s: s.score, reverse=True,
         )
         chosen, used = [], 0.0
         for s in pool:
-            if used + s.duration <= budget:
-                chosen.append(s)
-                used += s.duration
-        return chosen
+            if len(chosen) >= max_segs:
+                break
+            # 允许最后一个片段轻微超出budget（最多超2s），避免话说到一半被截断
+            if used > 0 and used + s.duration > budget + 2.0:
+                continue
+            chosen.append(s)
+            used += s.duration
+        # 按时序重排，保持叙事连贯
+        return sorted(chosen, key=lambda s: s.start)
 
-    problems  = pick("problem",  problem_budget)
-    solutions = pick("solution", solution_budget)
-    results   = pick("result",   result_budget)
+    # ── Narrative slots (category, budget_s, max_segs) ───────────────────────
+    # 每类预算足够大，保证一款假发产品的完整介绍不被截断
+    _NARRATIVE_SLOTS = [
+        ("problem",      15.0, 4),
+        ("comparison",    8.0, 2),
+        ("social_proof", 10.0, 3),
+        ("product",      20.0, 6),   # 产品介绍最关键，给足预算
+        ("wearing",      20.0, 6),   # 佩戴过程同等重要
+        ("detail",       12.0, 4),
+        ("comfort",      12.0, 4),
+        ("result",        8.0, 2),
+        ("scene",         8.0, 2),
+        # "convert" handled separately as forced-last
+    ]
 
-    # ── Closer: forced CTA — must exist for 巨量千川 quality rating ───────────
-    mid_ids = {id(s) for s in opening + problems + solutions + results}
-    closer_pool = sorted(
-        [s for s in valid if s.category == "convert" and id(s) not in mid_ids],
-        key=lambda s: s.score, reverse=True
+    structured: List[Seg] = []
+    for cat, budget, max_segs in _NARRATIVE_SLOTS:
+        block = _pick_block(cat, budget, max_segs)
+        structured.extend(block)
+        used_ids.update(id(s) for s in block)
+
+    # 按时间顺序排列 structured，避免跨时间点拼接导致内容跳跃
+    structured = sorted(structured, key=lambda s: s.start)
+
+    # ── Convert: forced last, always a convert segment ───────────────────────
+    # Prefer unused convert segment; if none, reuse any convert segment;
+    # only fall back to non-convert if no convert segments exist at all.
+    convert_unused = sorted(
+        [s for s in valid if id(s) not in used_ids and s.category == "convert"],
+        key=lambda s: s.duration,
     )
-    if not closer_pool:
-        # Fallback: use highest-score remaining segment as CTA closer
-        closer_pool = sorted(
-            [s for s in valid if id(s) not in mid_ids],
-            key=lambda s: s.score, reverse=True
-        )
-    closer = [closer_pool[0]] if closer_pool and closer_pool[0].duration <= closer_budget else []
-
-    # ── Mid: problems + solutions + results (exclude opening and closer) ──────
-    closer_ids = {id(s) for s in closer}
-    mid = [s for s in (problems + solutions + results) if id(s) not in closer_ids]
-
-    # Fill mid with neutrals if under minimum
-    total = sum(s.duration for s in opening) + sum(s.duration for s in mid) + sum(s.duration for s in closer)
-    if total < clip_min:
-        used_ids = {id(s) for s in opening + mid + closer}
-        neutrals = sorted(
+    convert_any = sorted(
+        [s for s in valid if s.category == "convert"],
+        key=lambda s: s.duration,
+    )
+    if convert_unused:
+        closer = [convert_unused[0]]
+    elif convert_any:
+        closer = [convert_any[0]]
+    else:
+        fallback = sorted(
             [s for s in valid if id(s) not in used_ids],
-            key=lambda s: s.score, reverse=True
+            key=lambda s: s.score, reverse=True,
         )
-        for s in neutrals:
+        closer = [fallback[0]] if fallback else []
+    used_ids.update(id(s) for s in closer)
+
+    # ── Fill remaining budget with unused segments ────────────────────────────
+    used_dur = sum(s.duration for s in structured) + sum(s.duration for s in closer)
+    fill_budget = clip_max - used_dur
+    fill: List[Seg] = []
+    if fill_budget > 0:
+        fill_pool = sorted(
+            [s for s in valid if id(s) not in used_ids],
+            key=lambda s: s.score, reverse=True,
+        )
+        used = 0.0
+        for s in fill_pool:
+            # 允许轻微超出（+2s），避免截断
+            if used + s.duration > fill_budget + 2.0:
+                continue
+            fill.append(s)
+            used += s.duration
+    fill = sorted(fill, key=lambda s: s.start)
+
+    # 将 structured + fill 合并后按时间顺序排列，closer 强制置尾
+    # 保持时序连贯性，减少前后内容跳跃感
+    body = sorted(structured + fill, key=lambda s: s.start)
+    assembled = body + closer
+
+    # ── Pad to clip_min ───────────────────────────────────────────────────────
+    total = sum(s.duration for s in assembled)
+    if total < clip_min:
+        all_used = {id(s) for s in assembled}
+        extras = sorted(
+            [s for s in valid if id(s) not in all_used],
+            key=lambda s: s.score, reverse=True,
+        )
+        extra_added = []
+        for s in extras:
             if total >= clip_max:
                 break
-            mid.append(s)
+            extra_added.append(s)
             total += s.duration
+        # 把补充片段合入 body 并按时序重排
+        body_new = sorted(body + extra_added, key=lambda s: s.start)
+        assembled = body_new + closer
 
-    # Sort mid by original time order
-    mid = sorted(mid, key=lambda s: s.start)
-
-    # ── Trim mid to fit budget (preserve opening + closer) ───────────────────
-    open_dur   = sum(s.duration for s in opening)
-    closer_dur = sum(s.duration for s in closer)
-    avail      = clip_max - open_dur - closer_dur
-    mid_final, used = [], 0.0
-    for s in mid:
-        if used + s.duration > avail:
-            break
-        mid_final.append(s)
-        used += s.duration
-
-    # ── Final assembly: opening (fixed first) + mid + closer (fixed last) ────
-    assembled = opening + mid_final + closer
-
-    # Cap segment count to avoid ffmpeg resource exhaustion
+    # ── Cap segment count ─────────────────────────────────────────────────────
     if len(assembled) > MAX_CLIP_SEGMENTS:
-        keep = MAX_CLIP_SEGMENTS - len(opening) - len(closer)
-        trimmed = sorted(mid_final, key=lambda s: s.score, reverse=True)[:keep]
-        trimmed = sorted(trimmed, key=lambda s: s.start)
-        assembled = opening + trimmed + closer
+        # 超限时，按得分保留最优片段（closer 固定保留）
+        body_segs = assembled[:-len(closer)] if closer else assembled
+        body_trimmed = sorted(
+            sorted(body_segs, key=lambda s: s.score, reverse=True)[:MAX_CLIP_SEGMENTS - len(closer)],
+            key=lambda s: s.start,
+        )
+        assembled = body_trimmed + closer
+
+    # ── Assign camera motion + transitions ────────────────────────────────────
+    _seed = hash(assembled[0].text[:16]) & 0xFFFF if assembled else 0
+    _assign_styles(assembled, seed=_seed)
 
     return assembled
 
@@ -1421,6 +1973,10 @@ def _apply_hints(segs: List[Seg], hints: dict) -> None:
 _GPU_SERVICE_URL  = os.environ.get("GPU_SERVICE_URL",  "http://10.190.0.203:8877")
 _GPU_WAIT_TIMEOUT = float(os.environ.get("GPU_WAIT_TIMEOUT", "600"))  # seconds to wait for GPU before local fallback
 
+# Maps local clip output path → GPU clip job_id; populated by _gpu_clip_variant
+# Used by transcribe.py to persist job_ids in DB for later GPU-side concat
+_clip_job_id_cache: dict[str, str] = {}
+
 
 async def _edit_via_gpu(
     mp4_filename: str,
@@ -1437,29 +1993,51 @@ async def _edit_via_gpu(
     uploaded automatically and the job is retried.
     Returns out_path on success, None on failure.
     """
-    import httpx
-
     ass_content = build_ass(selected, segs)
     best_seg = max(selected, key=lambda s: s.score) if any(s.score > 0 for s in selected) \
                else selected[max(0, len(selected) // 4)]
 
+    def _seg_tr(seg: "Seg") -> str:
+        """Extract xfade transition name from seg.transition ('type:dur' or plain name)."""
+        if not seg.transition:
+            return "dissolve"
+        raw = seg.transition.split(":")[0]
+        return _TR_REMAP.get(raw, raw) if raw in _TR_REMAP else raw
+
     payload = {
         "mp4_filename": mp4_filename,
         "room_id": room_id,
-        "segments": [{"start": s.start, "end": s.end} for s in selected],
+        "segments": [
+            {
+                "start": s.start,
+                "end": s.end,
+                "transition": _seg_tr(s),
+                "transition_duration": float(s.transition.split(":")[1]) if s.transition and ":" in s.transition else 0.35,
+            }
+            for s in selected
+        ],
         "ass_content": ass_content,
         "thumb_seek": best_seg.start + 1.0,
     }
 
-    async def _submit(client) -> Optional[str]:
-        """POST /clip-jobs; returns job_id or None."""
+    import aiohttp as _aiohttp
+
+    async def _submit_aio() -> Optional[str]:
+        """POST /clip-jobs via aiohttp; returns job_id or None."""
         nonlocal mp4_path
         try:
-            resp = await client.post(f"{_GPU_SERVICE_URL}/clip-jobs", json=payload)
+            async with _aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{_GPU_SERVICE_URL}/clip-jobs",
+                    json=payload,
+                    timeout=_aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    status_code = resp.status
+                    resp_text = await resp.text()
         except Exception as e:
             logger.warning(f"GPU clip job submission failed: {e}")
             return None
-        if resp.status_code == 404 and mp4_path and os.path.exists(mp4_path):
+        if status_code == 404 and mp4_path and os.path.exists(mp4_path):
             # File not on GPU server — upload it, then retry once
             logger.info(f"GPU 404: auto-uploading {mp4_filename} to GPU server then retrying...")
             try:
@@ -1469,90 +2047,108 @@ async def _edit_via_gpu(
                 logger.warning(f"Auto-upload for {mp4_filename} failed: {ue}")
                 return None
             try:
-                resp = await client.post(f"{_GPU_SERVICE_URL}/clip-jobs", json=payload)
+                async with _aiohttp.ClientSession() as session:
+                    async with session.post(
+                        f"{_GPU_SERVICE_URL}/clip-jobs",
+                        json=payload,
+                        timeout=_aiohttp.ClientTimeout(total=30),
+                    ) as resp:
+                        status_code = resp.status
+                        resp_text = await resp.text()
             except Exception as e:
                 logger.warning(f"GPU clip job retry after upload failed: {e}")
                 return None
-        if resp.status_code != 201:
-            logger.warning(f"GPU clip job rejected: {resp.status_code} {resp.text[:200]}")
+        if status_code != 201:
+            logger.warning(f"GPU clip job rejected: {status_code} {resp_text[:200]}")
             return None
-        jid = resp.json()["job_id"]
+        import json as _json
+        jid = _json.loads(resp_text)["job_id"]
         logger.info(f"GPU clip job created: {jid} for {mp4_filename}")
         return jid
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        job_id = await _submit(client)
+    job_id = await _submit_aio()
     if not job_id:
         return None
 
     # Poll until done or 25-minute timeout; recover if GPU goes offline mid-job
-    deadline = asyncio.get_event_loop().time() + 1500
+    deadline = time.time() + 1500
     consecutive_errors = 0
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        while asyncio.get_event_loop().time() < deadline:
-            await asyncio.sleep(5.0)
-            try:
-                data = (await client.get(f"{_GPU_SERVICE_URL}/clip-jobs/{job_id}")).json()
-                consecutive_errors = 0
-            except Exception:
-                consecutive_errors += 1
-                if consecutive_errors >= 6:   # ~30s of consecutive failures
-                    from gpu_state import is_online as _gpu_is_online, wait_until_online as _gpu_wait
-                    if not _gpu_is_online():
-                        logger.info(f"GPU offline during clip job {job_id} — waiting for recovery...")
-                        try:
-                            await asyncio.wait_for(_gpu_wait(), timeout=600)
-                        except asyncio.TimeoutError:
-                            logger.warning(f"GPU stayed offline; abandoning clip job {job_id}")
-                            return None
-                        # GPU is back — check if job still exists
-                        consecutive_errors = 0
-                        try:
-                            r = await client.get(f"{_GPU_SERVICE_URL}/clip-jobs/{job_id}")
-                            if r.status_code == 404:
-                                # Job was lost in restart — resubmit
-                                logger.info(f"Clip job {job_id} lost after GPU restart, resubmitting...")
-                                async with httpx.AsyncClient(timeout=30.0) as sc:
-                                    new_jid = await _submit(sc)
-                                if new_jid:
-                                    job_id = new_jid
-                                else:
-                                    return None
-                        except Exception:
-                            pass
-                continue
+    while time.time() < deadline:
+        await asyncio.sleep(5.0)
+        try:
+            async with _aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{_GPU_SERVICE_URL}/clip-jobs/{job_id}",
+                    timeout=_aiohttp.ClientTimeout(total=15),
+                ) as resp:
+                    data = await resp.json()
+            consecutive_errors = 0
+        except Exception:
+            consecutive_errors += 1
+            if consecutive_errors >= 6:   # ~30s of consecutive failures
+                from gpu_state import is_online as _gpu_is_online, wait_until_online as _gpu_wait
+                if not _gpu_is_online():
+                    logger.info(f"GPU offline during clip job {job_id} — waiting for recovery...")
+                    try:
+                        await asyncio.wait_for(_gpu_wait(), timeout=600)
+                    except asyncio.TimeoutError:
+                        logger.warning(f"GPU stayed offline; abandoning clip job {job_id}")
+                        return None
+                    # GPU is back — check if job still exists
+                    consecutive_errors = 0
+                    try:
+                        async with _aiohttp.ClientSession() as session:
+                            async with session.get(
+                                f"{_GPU_SERVICE_URL}/clip-jobs/{job_id}",
+                                timeout=_aiohttp.ClientTimeout(total=15),
+                            ) as r:
+                                if r.status == 404:
+                                    # Job was lost in restart — resubmit
+                                    logger.info(f"Clip job {job_id} lost after GPU restart, resubmitting...")
+                                    new_jid = await _submit_aio()
+                                    if new_jid:
+                                        job_id = new_jid
+                                    else:
+                                        return None
+                    except Exception:
+                        pass
+            continue
 
-            status = data.get("status")
-            pct    = data.get("pct", 0)
-            phase  = data.get("phase", "")
+        status = data.get("status")
+        pct    = data.get("pct", 0)
+        phase  = data.get("phase", "")
 
-            if on_progress and pct > 0:
-                if phase == "preprocess":
-                    await on_progress("preprocess", pct, 40)
-                elif phase == "merge":
-                    await on_progress("merge", pct - 40, 35)
-                elif phase in ("final", "thumbnail", "done"):
-                    await on_progress("final", 1, 1)
+        if on_progress and pct > 0:
+            if phase == "preprocess":
+                await on_progress("preprocess", pct, 40)
+            elif phase == "merge":
+                await on_progress("merge", pct - 40, 35)
+            elif phase in ("final", "thumbnail", "done"):
+                await on_progress("final", 1, 1)
 
-            if status == "done":
-                break
-            if status == "error":
-                logger.warning(f"GPU clip job {job_id} error: {data.get('error')}")
-                return None
-        else:
-            logger.warning(f"GPU clip job {job_id} timed out")
+        if status == "done":
+            break
+        if status == "error":
+            logger.warning(f"GPU clip job {job_id} error: {data.get('error')}")
             return None
+    else:
+        logger.warning(f"GPU clip job {job_id} timed out")
+        return None
 
     # Download result
     try:
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            r = await client.get(f"{_GPU_SERVICE_URL}/clip-jobs/{job_id}/mp4")
-            if r.status_code != 200:
-                logger.warning(f"GPU clip download failed: {r.status_code}")
-                return None
-            os.makedirs(os.path.dirname(out_path), exist_ok=True)
-            with open(out_path, "wb") as f:
-                f.write(r.content)
+        async with _aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{_GPU_SERVICE_URL}/clip-jobs/{job_id}/mp4",
+                timeout=_aiohttp.ClientTimeout(total=300),
+            ) as r:
+                if r.status != 200:
+                    logger.warning(f"GPU clip download failed: {r.status}")
+                    return None
+                os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                content = await r.read()
+        with open(out_path, "wb") as f:
+            f.write(content)
     except Exception as e:
         logger.warning(f"GPU clip download error: {e}")
         return None
@@ -1563,6 +2159,7 @@ async def _edit_via_gpu(
 
     size_mb = os.path.getsize(out_path) / 1024 / 1024
     logger.info(f"GPU clip downloaded: {out_path} ({size_mb:.1f} MB)")
+    _clip_job_id_cache[out_path] = job_id  # store for GPU-side concat later
     return out_path
 
 
@@ -1686,11 +2283,12 @@ async def _fast_local_clip(
 
 # ── Main entry ────────────────────────────────────────────────────────────────
 
-async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown", record_date: str = "", clip_duration: Optional[float] = None, on_progress=None, feedback: Optional[str] = None, room_id: Optional[int] = None) -> Optional[str]:
+async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown", record_date: str = "", clip_duration: Optional[float] = None, on_progress=None, feedback: Optional[str] = None, room_id: Optional[int] = None, clip_engine: str = "legacy") -> Optional[str]:
     """
-    Produce a 15-30s highlight clip from a recording + its SRT.
+    Produce a highlight clip from a recording + its SRT.
+    clip_engine='legacy' uses keyword-based 10-step narrative selection.
+    clip_engine='v2'     uses hairstyle-boundary detection — picks the best single wig intro window.
     Returns local path to the output _clip.mp4, or None on failure.
-    Output is organised as recordings/{room_name}/{date}/{room}_{date}_{seq}_clip.mp4.
     """
     if not os.path.exists(mp4_path):
         logger.error(f"MP4 not found: {mp4_path}")
@@ -1718,17 +2316,70 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
     except Exception as e:
         logger.warning(f"Silence detection skipped: {e}")
 
+    # Phase B: Audio energy scoring
+    try:
+        from segment_scorer import enrich_audio_scores
+        await enrich_audio_scores(mp4_path, segs)
+    except Exception as e:
+        logger.warning(f"Audio scoring skipped: {e}")
+
+    # Phase C: Visual quality scoring (OpenCV sharpness + face detection)
+    try:
+        from segment_scorer import enrich_visual_scores
+        await enrich_visual_scores(mp4_path, segs)
+    except Exception as e:
+        logger.warning(f"Visual scoring skipped: {e}")
+
+    # Phase D: Claude Haiku visual semantic scoring (wig visibility + demo quality)
+    try:
+        from segment_scorer import enrich_semantic_scores
+        await enrich_semantic_scores(mp4_path, segs)
+    except Exception as e:
+        logger.warning(f"Semantic scoring skipped: {e}")
+
+    # Phase 2: LLM text scoring — rescues zero-score segments with narrative value,
+    # and generates rule_suggestions when LLM disagrees with keyword scores
+    try:
+        from segment_scorer import enrich_llm_text_scores
+        await enrich_llm_text_scores(segs, recording_id=room_id)
+    except Exception as e:
+        logger.warning(f"LLM text scoring skipped: {e}")
+
+    # v2: 发型边界识别，仅在识别到的发型窗口内选段
+    if clip_engine == "v2":
+        try:
+            from wig_boundary import detect_boundaries, pick_best_window
+            boundaries = await detect_boundaries(srt_path)
+            window = pick_best_window(boundaries)
+            if window:
+                logger.info(
+                    f"[v2] Wig window: {window['wig']} "
+                    f"({window['start_sec']:.0f}s–{window['end_sec']:.0f}s, "
+                    f"complete={window['complete']})"
+                )
+                segs = [s for s in segs if s.start >= window["start_sec"] and s.end <= window["end_sec"]]
+                if not segs:
+                    logger.warning("[v2] No segments in wig window, falling back to all segs")
+            else:
+                logger.warning("[v2] No wig boundaries detected, using full recording")
+        except Exception as e:
+            logger.warning(f"[v2] Boundary detection error: {e}, continuing with all segs")
+
     # Apply feedback hints if provided
     if feedback:
         hints = await _feedback_to_hints(srt_path, feedback)
         _apply_hints(segs, hints)
-        c_min = hints.get("clip_min_override") or ((clip_duration * 0.85) if clip_duration else CLIP_MIN)
-        c_max = hints.get("clip_max_override") or (clip_duration if clip_duration else CLIP_MAX)
+        c_min = hints.get("clip_min_override") or ((clip_duration * 0.85) if clip_duration else (CLIP_MIN_V2 if clip_engine == "v2" else CLIP_MIN))
+        c_max = hints.get("clip_max_override") or (clip_duration if clip_duration else (CLIP_MAX_V2 if clip_engine == "v2" else CLIP_MAX))
         if hints.get("prefer_longer"):
             c_min = max(c_min, CLIP_MIN * 1.3)
     else:
-        c_min = (clip_duration * 0.85) if clip_duration else CLIP_MIN
-        c_max = clip_duration if clip_duration else CLIP_MAX
+        if clip_engine == "v2":
+            c_min = clip_duration * 0.85 if clip_duration else CLIP_MIN_V2
+            c_max = clip_duration if clip_duration else CLIP_MAX_V2
+        else:
+            c_min = (clip_duration * 0.85) if clip_duration else CLIP_MIN
+            c_max = clip_duration if clip_duration else CLIP_MAX
 
     # Select clips
     selected = select_clips(segs, clip_min=c_min, clip_max=c_max)
@@ -1738,7 +2389,7 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
 
     total_dur = sum(s.duration for s in selected)
     logger.info(
-        f"Selected {len(selected)} segments, {total_dur:.1f}s "
+        f"[{clip_engine}] Selected {len(selected)} segments, {total_dur:.1f}s "
         f"[{', '.join(s.category for s in selected)}]"
     )
 
@@ -1819,6 +2470,7 @@ async def edit_recording_multi(
     on_progress=None,
     feedback: Optional[str] = None,
     room_id: Optional[int] = None,
+    clip_engine: str = "legacy",
 ) -> List[str]:
     """
     Produce `count` distinct highlight clips from the same recording.
@@ -1849,13 +2501,52 @@ async def edit_recording_multi(
     except Exception as e:
         logger.warning(f"Silence detection skipped: {e}")
 
+    # Phase B/C/D: enrich scores once for all variants
+    try:
+        from segment_scorer import enrich_audio_scores
+        await enrich_audio_scores(mp4_path, segs)
+    except Exception as e:
+        logger.warning(f"Audio scoring skipped: {e}")
+    try:
+        from segment_scorer import enrich_visual_scores
+        await enrich_visual_scores(mp4_path, segs)
+    except Exception as e:
+        logger.warning(f"Visual scoring skipped: {e}")
+    try:
+        from segment_scorer import enrich_semantic_scores
+        await enrich_semantic_scores(mp4_path, segs)
+    except Exception as e:
+        logger.warning(f"Semantic scoring skipped: {e}")
+    try:
+        from segment_scorer import enrich_llm_text_scores
+        await enrich_llm_text_scores(segs, recording_id=room_id)
+    except Exception as e:
+        logger.warning(f"LLM text scoring skipped: {e}")
+
+    # v2: 发型边界识别
+    if clip_engine == "v2":
+        try:
+            from wig_boundary import detect_boundaries, pick_best_window
+            boundaries = await detect_boundaries(srt_path)
+            window = pick_best_window(boundaries)
+            if window:
+                segs = [s for s in segs if s.start >= window["start_sec"] and s.end <= window["end_sec"]]
+                if not segs:
+                    logger.warning("[v2 multi] No segments in wig window, falling back to all segs")
+        except Exception as e:
+            logger.warning(f"[v2 multi] Boundary detection error: {e}")
+
     # Apply feedback hints if provided
     if feedback:
         hints = await _feedback_to_hints(srt_path, feedback)
         _apply_hints(segs, hints)
 
-    c_min = (clip_duration * 0.85) if clip_duration else CLIP_MIN
-    c_max = clip_duration if clip_duration else CLIP_MAX
+    if clip_engine == "v2":
+        c_min = clip_duration * 0.85 if clip_duration else CLIP_MIN_V2
+        c_max = clip_duration if clip_duration else CLIP_MAX_V2
+    else:
+        c_min = (clip_duration * 0.85) if clip_duration else CLIP_MIN
+        c_max = clip_duration if clip_duration else CLIP_MAX
 
     from datetime import datetime
     date_str  = record_date or datetime.utcnow().strftime("%Y%m%d")

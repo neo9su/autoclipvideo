@@ -4,19 +4,29 @@ import logging
 import os
 import re
 from contextlib import asynccontextmanager
+
+# Load .env file if present (before any module reads os.environ)
+_env_path = os.path.join(os.path.dirname(__file__), ".env")
+if os.path.exists(_env_path):
+    with open(_env_path) as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _k, _v = _line.split("=", 1)
+                os.environ.setdefault(_k.strip(), _v.strip())
 from typing import Optional, Set
 
 import aiosqlite
 import httpx
 from datetime import datetime
 
-from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from db import init_db, DB_PATH
+from db import init_db, DB_PATH, aio_connect
 from models import RoomCreate, Room, Recording, ProductCreate, ProductUpdate, PublishAccountCreate, PublishTaskCreate, BatchScheduleCreate
 from monitor import MonitorManager
 from transcribe import poll_transcriptions, _run_editor, _clip_progress, get_clip_queue, update_job_priority, cancel_clip_job, pause_clip_job, resume_clip_job, _job_submit_times, _job_durations, _poll_state, flush_poll, POLL_INTERVAL, RECORDINGS_DIR, backfill_auto_merge
@@ -48,8 +58,12 @@ monitor = MonitorManager(broadcast_fn=broadcast)
 
 async def _reset_stuck_clip_tasks():
     """On startup, reset recordings stuck at clipped=1 (server killed mid-clip).
-    If clip_filename is already set → mark done (clipped=2); otherwise reset to pending (clipped=0)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    If clip_filename is already set → mark done (clipped=2); otherwise reset to pending (clipped=0).
+    Also verify clipped=2 recordings still have their files on disk (GPU server may have restarted
+    and purged clips); if the file is missing, reset to clipped=0 so it gets re-queued."""
+    recordings_dir = os.path.join(os.path.dirname(__file__), "..", "recordings")
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
         r1 = await db.execute(
             "UPDATE recordings SET clipped=2 WHERE clipped=1 AND clip_filename IS NOT NULL"
         )
@@ -61,6 +75,40 @@ async def _reset_stuck_clip_tasks():
             logger.info(f"Reset {r1.rowcount} stuck clip task(s) to done (clip_filename present)")
         if r2.rowcount:
             logger.info(f"Reset {r2.rowcount} stuck clip task(s) to pending (no clip_filename)")
+
+        # Verify clipped=2 files actually exist on disk.
+        # Only reset if the source MP4 still exists (otherwise can't re-clip anyway).
+        # Skip local_deleted=1 recordings (user intentionally cleared them).
+        async with db.execute(
+            """SELECT id, filename, clip_filename FROM recordings
+               WHERE clipped = 2 AND clip_filename IS NOT NULL AND local_deleted = 0"""
+        ) as cur:
+            done_rows = await cur.fetchall()
+
+        missing = [
+            r["id"] for r in done_rows
+            if not os.path.exists(os.path.join(recordings_dir, r["clip_filename"]))
+            and os.path.exists(os.path.join(recordings_dir, r["filename"]))
+        ]
+        if missing:
+            placeholders = ",".join("?" * len(missing))
+            await db.execute(
+                f"UPDATE recordings SET clipped=0, clip_filename=NULL WHERE id IN ({placeholders})",
+                missing,
+            )
+            await db.commit()
+            logger.warning(f"Reset {len(missing)} recording(s) with missing clip files back to pending (MP4 still present)")
+
+        # Reset clip_groups stuck at merge_status=1 (server killed mid-merge).
+        # Re-check: if any recording in the group is now clipped=2, leave it — the
+        # merge may have actually completed; otherwise reset to 0 so it can retry.
+        r3 = await db.execute(
+            """UPDATE clip_groups SET merge_status = 0
+               WHERE merge_status = 1 AND merged_filename IS NULL AND director_final_video IS NULL"""
+        )
+        await db.commit()
+        if r3.rowcount:
+            logger.info(f"Reset {r3.rowcount} stuck merge(s) to pending")
 
 
 async def _memory_monitor(broadcast_fn=None):
@@ -75,9 +123,11 @@ async def _memory_monitor(broadcast_fn=None):
     """
     import gc
 
-    MEM_WARN_GB    = 5   # M2 8GB: 超过 5GB 即触发警告（62% of 8GB）
-    MEM_RECOVER_GB = 4   # 恢复阈值
-    INTERVAL       = 10  # seconds（缩短轮询间隔，ffmpeg峰值持续时间短）
+    # macOS: vm.used includes file cache; vm.available is what actually matters
+    # GPU jobs run on remote server — local memory cost is minimal (file upload/download only)
+    MEM_AVAIL_MIN_GB = 0.5  # pause only when truly critical (< 500 MB free)
+    MEM_AVAIL_OK_GB  = 0.8  # recover when > 800 MB available
+    INTERVAL         = 10   # seconds
 
     try:
         import psutil
@@ -91,34 +141,34 @@ async def _memory_monitor(broadcast_fn=None):
     while True:
         try:
             vm = psutil.virtual_memory()
-            used_gb = vm.used / 1024 ** 3
+            avail_gb = vm.available / 1024 ** 3
 
-            if used_gb > MEM_WARN_GB:
+            if avail_gb < MEM_AVAIL_MIN_GB:
                 gc.collect()
                 vm2 = psutil.virtual_memory()
-                used_after = vm2.used / 1024 ** 3
+                avail_after = vm2.available / 1024 ** 3
                 set_memory_pressure(True)
                 msg = (
-                    f"[内存警告] 系统内存占用 {used_gb:.1f}GB 超过 {MEM_WARN_GB}GB 阈值，"
-                    f"已暂停新剪辑任务派发 (gc后 {used_after:.1f}GB)"
+                    f"[内存警告] 可用内存 {avail_gb:.1f}GB 低于 {MEM_AVAIL_MIN_GB}GB 阈值，"
+                    f"已暂停新剪辑任务派发 (gc后 {avail_after:.1f}GB)"
                 )
                 logger.warning(msg)
                 if broadcast_fn and not warned:
                     await broadcast_fn({
                         "type": "memory_warning",
-                        "used_gb": round(used_gb, 1),
-                        "limit_gb": MEM_WARN_GB,
+                        "avail_gb": round(avail_gb, 1),
+                        "limit_gb": MEM_AVAIL_MIN_GB,
                         "msg": msg,
                     })
                 warned = True
 
-            elif warned and used_gb < MEM_RECOVER_GB:
+            elif warned and avail_gb > MEM_AVAIL_OK_GB:
                 set_memory_pressure(False)
-                logger.info(f"[内存恢复] 系统内存 {used_gb:.1f}GB < {MEM_RECOVER_GB}GB，已恢复剪辑任务派发")
+                logger.info(f"[内存恢复] 可用内存 {avail_gb:.1f}GB > {MEM_AVAIL_OK_GB}GB，已恢复剪辑任务派发")
                 if broadcast_fn:
                     await broadcast_fn({
                         "type": "memory_recovered",
-                        "used_gb": round(used_gb, 1),
+                        "avail_gb": round(avail_gb, 1),
                     })
                 warned = False
 
@@ -139,7 +189,7 @@ async def _on_gpu_online():
         from datetime import timedelta
         cutoff = (datetime.utcnow() - timedelta(hours=24)).isoformat()
         recordings_dir = os.path.join(os.path.dirname(__file__), "..", "recordings")
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aio_connect() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 "SELECT id, filename, clip_count FROM recordings "
@@ -156,7 +206,7 @@ async def _on_gpu_online():
             srt_path = os.path.splitext(mp4_path)[0] + ".srt"
             if not (os.path.exists(mp4_path) and os.path.exists(srt_path)):
                 continue
-            async with aiosqlite.connect(DB_PATH) as db:
+            async with aio_connect() as db:
                 await db.execute(
                     "UPDATE recordings SET clipped = 0, clip_error = NULL WHERE id = ?",
                     (rec["id"],),
@@ -178,10 +228,102 @@ async def _on_gpu_online():
         await flush_poll()
 
 
+async def _periodic_cleanup():
+    """Every 6 hours: clean up stale enhance jobs, GPU clip files, and old local recordings."""
+    gpu_url = os.environ.get("GPU_SERVICE_URL", "http://10.190.0.203:8877")
+    recordings_dir = os.path.join(os.path.dirname(__file__), "..", "recordings")
+    while True:
+        await asyncio.sleep(6 * 3600)
+        try:
+            # Remove all terminal-state enhance jobs (done/error/cancelled)
+            stale = [
+                jid for jid, j in list(_enhance_jobs.items())
+                if j.get("status") in ("done", "error", "cancelled")
+            ]
+            for jid in stale:
+                _enhance_jobs.pop(jid, None)
+            if stale:
+                logger.info(f"[cleanup] Removed {len(stale)} stale enhance jobs from memory")
+
+            # Ask GPU server to delete completed clip output dirs
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(f"{gpu_url}/maintenance/cleanup-clips")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    logger.info(f"[cleanup] GPU clips: deleted={data.get('deleted',0)} freed={data.get('freed_gb',0):.2f}GB")
+
+            # Auto-delete local source MP4s for recordings whose publish task
+            # completed more than 7 days ago (keeps disk from filling up).
+            async with aio_connect() as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute(
+                    """SELECT DISTINCT r.id, r.filename
+                       FROM recordings r
+                       JOIN publish_tasks pt ON pt.group_id = r.group_id
+                       WHERE pt.status = 'done'
+                         AND pt.published_at <= datetime('now', '-7 days')
+                         AND r.local_deleted = 0
+                         AND r.filename IS NOT NULL"""
+                ) as cur:
+                    old_recs = await cur.fetchall()
+
+            deleted_ids = []
+            deleted_count = 0
+            for rec in old_recs:
+                filepath = os.path.join(recordings_dir, rec["filename"])
+                if os.path.exists(filepath):
+                    try:
+                        os.unlink(filepath)
+                        deleted_count += 1
+                    except OSError as e:
+                        logger.warning(f"[cleanup] Could not delete {rec['filename']}: {e}")
+                deleted_ids.append(rec["id"])
+
+            if deleted_ids:
+                placeholders = ",".join("?" * len(deleted_ids))
+                async with aio_connect() as db:
+                    await db.execute(
+                        f"UPDATE recordings SET local_deleted = 1 WHERE id IN ({placeholders})",
+                        deleted_ids,
+                    )
+                    await db.commit()
+                logger.info(f"[cleanup] Auto-deleted {deleted_count} local source MP4s (published >7 days ago)")
+
+            # Remove recording_clips rows whose files no longer exist on disk.
+            # GPU cleanup can delete clip output dirs without cleaning up DB rows.
+            async with aio_connect() as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute("SELECT id, clip_filename FROM recording_clips") as cur:
+                    all_clips = await cur.fetchall()
+            stale_rc_ids = [
+                r["id"] for r in all_clips
+                if r["clip_filename"] and not os.path.exists(
+                    os.path.join(recordings_dir, r["clip_filename"])
+                )
+            ]
+            if stale_rc_ids:
+                placeholders = ",".join("?" * len(stale_rc_ids))
+                async with aio_connect() as db:
+                    await db.execute(
+                        f"DELETE FROM recording_clips WHERE id IN ({placeholders})",
+                        stale_rc_ids,
+                    )
+                    await db.commit()
+                logger.info(f"[cleanup] Removed {len(stale_rc_ids)} stale recording_clips rows")
+
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            logger.debug(f"Periodic cleanup error: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
     await _reset_stuck_clip_tasks()
+    # Load human-approved keyword score overrides into the scoring table
+    from editor import load_rule_overrides
+    await load_rule_overrides()
     await monitor.start_all()
     asyncio.create_task(backfill_auto_merge())
     from gpu_state import watch_gpu_service, register_online_callback
@@ -191,13 +333,15 @@ async def lifespan(app: FastAPI):
     scheduler_task = asyncio.create_task(poll_publish_tasks(broadcast_fn=broadcast))
     memory_task = asyncio.create_task(_memory_monitor(broadcast_fn=broadcast))
     enhance_worker_task = asyncio.create_task(_enhance_worker())
+    cleanup_task = asyncio.create_task(_periodic_cleanup())
     yield
     gpu_watcher_task.cancel()
     transcribe_task.cancel()
     scheduler_task.cancel()
     memory_task.cancel()
     enhance_worker_task.cancel()
-    for t in [gpu_watcher_task, transcribe_task, scheduler_task, memory_task, enhance_worker_task]:
+    cleanup_task.cancel()
+    for t in [gpu_watcher_task, transcribe_task, scheduler_task, memory_task, enhance_worker_task, cleanup_task]:
         try:
             await t
         except asyncio.CancelledError:
@@ -217,12 +361,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# 集成导演模式API路由
+try:
+    from api_v2 import director_router, set_broadcast_fn
+    app.include_router(director_router)
+    set_broadcast_fn(broadcast)
+    logger.info("导演模式API路由已加载")
+except ImportError as e:
+    logger.warning(f"导演模式API加载失败: {e}")
+
 
 # ── Rooms ────────────────────────────────────────────────────────────────────
 
 @app.get("/api/rooms")
 async def list_rooms():
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM rooms ORDER BY created_at DESC") as cur:
             rows = await cur.fetchall()
@@ -243,7 +396,7 @@ async def list_rooms():
 @app.post("/api/rooms", status_code=201)
 async def add_room(body: RoomCreate):
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aio_connect() as db:
             cur = await db.execute(
                 "INSERT INTO rooms (name, url) VALUES (?, ?)",
                 (body.name, body.url)
@@ -258,7 +411,7 @@ async def add_room(body: RoomCreate):
 
 @app.delete("/api/rooms/{room_id}", status_code=204)
 async def delete_room(room_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         await db.execute("DELETE FROM rooms WHERE id = ?", (room_id,))
         await db.commit()
     await monitor.remove_room(room_id)
@@ -266,7 +419,7 @@ async def delete_room(room_id: int):
 
 @app.patch("/api/rooms/{room_id}/toggle")
 async def toggle_room(room_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM rooms WHERE id = ?", (room_id,)) as cur:
             room = await cur.fetchone()
@@ -277,7 +430,7 @@ async def toggle_room(room_id: int):
         await db.commit()
 
     if new_enabled:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aio_connect() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute("SELECT * FROM rooms WHERE id = ?", (room_id,)) as cur:
                 room = await cur.fetchone()
@@ -301,7 +454,7 @@ async def _upload_gpu_then_edit(recording_id: int, filepath: str, srt_path: str,
 
 @app.post("/api/rooms/{room_id}/upload", status_code=201)
 async def upload_recording(room_id: int, file: UploadFile = File(...), srt: Optional[UploadFile] = File(None), duration_sec: Optional[float] = Form(None), clip_count: int = Form(1)):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT id FROM rooms WHERE id = ?", (room_id,)) as cur:
             if not await cur.fetchone():
@@ -328,7 +481,7 @@ async def upload_recording(room_id: int, file: UploadFile = File(...), srt: Opti
             size_bytes += len(chunk)
 
     start_time = now.isoformat()
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         cur = await db.execute(
             "INSERT INTO recordings (room_id, filename, start_time, end_time, size_bytes, synced, clip_count) VALUES (?, ?, ?, ?, ?, 0, ?)",
             (room_id, filename, start_time, start_time, size_bytes, clip_count),
@@ -345,7 +498,7 @@ async def upload_recording(room_id: int, file: UploadFile = File(...), srt: Opti
         srt_content = await srt.read()
         with open(srt_path, "wb") as f:
             f.write(srt_content)
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aio_connect() as db:
             await db.execute(
                 "UPDATE recordings SET transcribed = 2, synced = 1 WHERE id = ?",
                 (recording_id,),
@@ -359,7 +512,7 @@ async def upload_recording(room_id: int, file: UploadFile = File(...), srt: Opti
     await free_vram()
     job_id = await sync_file(filepath, room_id)
     if job_id:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aio_connect() as db:
             await db.execute(
                 "UPDATE recordings SET transcribed = 1, synced = 1, gpu_job_id = ? WHERE id = ?",
                 (job_id, recording_id),
@@ -374,7 +527,7 @@ async def upload_recording(room_id: int, file: UploadFile = File(...), srt: Opti
 async def _generate_upload_thumb(recording_id: int, mp4_path: str):
     thumb = await generate_thumbnail(mp4_path, offset=5.0)
     if thumb:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aio_connect() as db:
             await db.execute(
                 "UPDATE recordings SET thumbnail = ? WHERE id = ?",
                 (os.path.relpath(thumb, os.path.join(os.path.dirname(__file__), "..", "recordings")), recording_id),
@@ -384,7 +537,7 @@ async def _generate_upload_thumb(recording_id: int, mp4_path: str):
 
 @app.get("/api/rooms/{room_id}/recordings")
 async def list_recordings(room_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM recordings WHERE room_id = ? ORDER BY start_time DESC",
@@ -427,7 +580,7 @@ async def list_all_recordings(
     where = f"WHERE {_STATUS_WHERE[status]}" if status in _STATUS_WHERE else ""
     col = _SORT_COLS.get(sort, "r.start_time")
     direction = "ASC" if order.lower() == "asc" else "DESC"
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(f"SELECT COUNT(*) FROM recordings r {where}") as cur:
             (total,) = await cur.fetchone()
@@ -455,7 +608,7 @@ async def bulk_recording_clips(ids: str = ""):
     if not id_list:
         return {}
     placeholders = ",".join("?" * len(id_list))
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         # Only return the latest retry's clips (highest id per recording+variant)
         async with db.execute(
@@ -478,7 +631,7 @@ async def bulk_recording_clips(ids: str = ""):
 
 @app.get("/api/clips")
 async def list_clips():
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("""
             SELECT r.id, r.filename, r.clip_filename, r.start_time, r.end_time,
@@ -503,7 +656,7 @@ async def list_clips():
 
 @app.get("/api/recordings/{recording_id}/clip")
 async def download_clip(recording_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM recordings WHERE id = ?", (recording_id,)) as cur:
             rec = await cur.fetchone()
@@ -519,7 +672,7 @@ async def download_clip(recording_id: int):
 
 @app.get("/api/recordings/{recording_id}/clips")
 async def list_recording_clips(recording_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM recording_clips WHERE recording_id = ? ORDER BY variant_idx ASC",
@@ -531,7 +684,7 @@ async def list_recording_clips(recording_id: int):
 
 @app.get("/api/recording-clips/{clip_id}/download")
 async def download_recording_clip(clip_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM recording_clips WHERE id = ?", (clip_id,)) as cur:
             clip = await cur.fetchone()
@@ -547,7 +700,7 @@ async def download_recording_clip(clip_id: int):
 async def reclip_recording(recording_id: int, body: dict = Body({})):
     """Reset a completed clip and re-run the editor, optionally with user feedback."""
     feedback = (body.get("feedback") or "").strip() or None
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM recordings WHERE id=?", (recording_id,)
@@ -569,7 +722,7 @@ async def reclip_recording(recording_id: int, body: dict = Body({})):
             logger.warning(f"Could not delete old clip {old_clip}: {e}")
 
     # Delete old recording_clips rows
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         await db.execute("DELETE FROM recording_clips WHERE recording_id=?", (recording_id,))
         await db.execute(
             "UPDATE recordings SET clipped=0, clip_filename=NULL, thumbnail=NULL, reclip_feedback=? WHERE id=?",
@@ -591,7 +744,7 @@ async def reclip_recording(recording_id: int, body: dict = Body({})):
 
 @app.get("/api/recordings/{recording_id}/thumbnail")
 async def get_thumbnail(recording_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT thumbnail FROM recordings WHERE id = ?", (recording_id,)) as cur:
             rec = await cur.fetchone()
@@ -607,7 +760,7 @@ async def get_thumbnail(recording_id: int):
 
 @app.get("/api/recordings/{recording_id}/srt")
 async def download_srt(recording_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM recordings WHERE id = ?", (recording_id,)) as cur:
             rec = await cur.fetchone()
@@ -622,22 +775,213 @@ async def download_srt(recording_id: int):
     return FileResponse(srt_path, media_type="text/plain", filename=srt_filename)
 
 
+# ── Human Review & Learning System ───────────────────────────────────────────
+
+@app.get("/api/recordings/{recording_id}/review-candidates")
+async def get_review_candidates(recording_id: int):
+    """Return all scored segments from the SRT for human review.
+
+    Segments are returned as a flat list with idx/text/start/end/score/category/valid.
+    If review_candidates is already cached in DB, return it directly.
+    """
+    from editor import parse_srt, score_and_tag, _merge_short_segs
+
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM recordings WHERE id = ?", (recording_id,)) as cur:
+            rec = await cur.fetchone()
+    if not rec:
+        raise HTTPException(status_code=404, detail="Recording not found")
+    if rec["transcribed"] != 2:
+        raise HTTPException(status_code=409, detail="Transcription not ready")
+
+    # Build segments (recompute fresh each call to reflect latest _SCORES_EFFECTIVE)
+    srt_filename = os.path.splitext(rec["filename"])[0] + ".srt"
+    srt_path = os.path.join(os.path.dirname(__file__), "..", "recordings", srt_filename)
+    if not os.path.exists(srt_path):
+        raise HTTPException(status_code=404, detail="SRT file missing")
+
+    raw_segs = parse_srt(srt_path)
+    segs = _merge_short_segs(raw_segs)
+    for seg in segs:
+        score_and_tag(seg)
+
+    all_segs = [
+        {
+            "idx":      seg.idx,
+            "start":    round(seg.start, 2),
+            "end":      round(seg.end, 2),
+            "text":     seg.text,
+            "score":    round(getattr(seg, "score", 0.0), 2),
+            "category": getattr(seg, "category", ""),
+            "valid":    getattr(seg, "valid", True),
+        }
+        for seg in segs
+    ]
+    result = {"all_segs": all_segs, "total": len(all_segs)}
+
+    # Cache in DB
+    async with aio_connect() as db:
+        await db.execute(
+            "UPDATE recordings SET review_candidates=? WHERE id=?",
+            (json.dumps(result, ensure_ascii=False), recording_id)
+        )
+        await db.commit()
+
+    # Attach latest clip_review data if exists
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT algo_segments, user_segments, user_added, user_removed FROM clip_reviews WHERE recording_id=? ORDER BY id DESC LIMIT 1",
+            (recording_id,)
+        ) as cur:
+            existing = await cur.fetchone()
+
+    if existing:
+        result["prev_review"] = {
+            "algo_segments":  json.loads(existing["algo_segments"]  or "[]"),
+            "user_segments":  json.loads(existing["user_segments"]  or "[]"),
+            "user_added":     json.loads(existing["user_added"]     or "[]"),
+            "user_removed":   json.loads(existing["user_removed"]   or "[]"),
+        }
+    result["review_status"] = rec["review_status"] or 0
+
+    return result
+
+
+@app.post("/api/recordings/{recording_id}/review", status_code=200)
+async def submit_review(recording_id: int, body: dict = Body({})):
+    """Save human review result and trigger training cycle.
+
+    body: {
+        algo_segments: [idx, ...],   # indices the algo selected
+        user_segments: [idx, ...],   # indices user kept after review
+        user_added:    [idx, ...],   # indices user added (algo missed)
+        user_removed:  [idx, ...],   # indices user removed (algo wrong)
+        user_segments_full: [{idx, text, start, end, ...}, ...]  # full segment data for added
+    }
+    """
+    from rule_trainer import run_training_cycle
+
+    algo_segs    = body.get("algo_segments", [])
+    user_segs    = body.get("user_segments", [])
+    user_added   = body.get("user_added", [])
+    user_removed = body.get("user_removed", [])
+    user_segs_full = body.get("user_segments_full", [])
+
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT id FROM recordings WHERE id=?", (recording_id,)) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(status_code=404, detail="Recording not found")
+
+        # Upsert: replace any existing review for this recording
+        await db.execute("DELETE FROM clip_reviews WHERE recording_id=?", (recording_id,))
+        await db.execute("""
+            INSERT INTO clip_reviews
+                (recording_id, algo_segments, user_segments, user_added, user_removed, is_valid_sample, user_segments_full)
+            VALUES (?, ?, ?, ?, ?, 1, ?)
+        """, (
+            recording_id,
+            json.dumps(algo_segs),
+            json.dumps(user_segs),
+            json.dumps(user_added),
+            json.dumps(user_removed),
+            json.dumps(user_segs_full, ensure_ascii=False),
+        ))
+        # Mark review_status=1 (reviewed)
+        await db.execute("UPDATE recordings SET review_status=1 WHERE id=?", (recording_id,))
+        await db.commit()
+
+    # Trigger training asynchronously (don't block the response)
+    asyncio.create_task(run_training_cycle())
+
+    return {"ok": True, "recording_id": recording_id, "user_kept": len(user_segs)}
+
+
+@app.get("/api/rule-suggestions")
+async def list_rule_suggestions(status: str = "pending"):
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM rule_suggestions WHERE status=? ORDER BY created_at DESC",
+            (status,)
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/rule-suggestions/{suggestion_id}/accept", status_code=200)
+async def accept_rule_suggestion(suggestion_id: int):
+    """Accept a suggestion: write to rule_overrides and hot-reload _SCORES_EFFECTIVE."""
+    from editor import _SCORES_EFFECTIVE
+
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM rule_suggestions WHERE id=?", (suggestion_id,)) as cur:
+            sug = await cur.fetchone()
+        if not sug:
+            raise HTTPException(status_code=404, detail="Suggestion not found")
+        if sug["status"] != "pending":
+            raise HTTPException(status_code=409, detail=f"Already {sug['status']}")
+
+        # Write / update rule_overrides
+        await db.execute("""
+            INSERT INTO rule_overrides (keyword, score, note, updated_at)
+            VALUES (?, ?, ?, datetime('now'))
+            ON CONFLICT(keyword) DO UPDATE SET
+                score=excluded.score,
+                note=excluded.note,
+                updated_at=datetime('now')
+        """, (sug["keyword"], sug["suggested_score"], sug["reason"]))
+
+        await db.execute(
+            "UPDATE rule_suggestions SET status='accepted', resolved_at=datetime('now') WHERE id=?",
+            (suggestion_id,)
+        )
+        await db.commit()
+
+    # Hot-reload _SCORES_EFFECTIVE
+    _SCORES_EFFECTIVE[sug["keyword"]] = sug["suggested_score"]
+    logger.info(f"rule_override accepted: {sug['keyword']} → {sug['suggested_score']}")
+
+    return {"ok": True, "keyword": sug["keyword"], "new_score": sug["suggested_score"]}
+
+
+@app.post("/api/rule-suggestions/{suggestion_id}/reject", status_code=200)
+async def reject_rule_suggestion(suggestion_id: int):
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT id, status FROM rule_suggestions WHERE id=?", (suggestion_id,)) as cur:
+            sug = await cur.fetchone()
+        if not sug:
+            raise HTTPException(status_code=404, detail="Suggestion not found")
+        if sug["status"] != "pending":
+            raise HTTPException(status_code=409, detail=f"Already {sug['status']}")
+        await db.execute(
+            "UPDATE rule_suggestions SET status='rejected', resolved_at=datetime('now') WHERE id=?",
+            (suggestion_id,)
+        )
+        await db.commit()
+    return {"ok": True}
+
+
 # ── Groups ───────────────────────────────────────────────────────────────────
 
 @app.get("/api/groups")
 async def list_groups():
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("""
             SELECT g.*,
                    rm.name as room_name,
-                   COUNT(r.id) as clip_count,
+                   COUNT(DISTINCT r.id) as clip_count,
                    SUM(CASE WHEN r.clipped = 2 THEN 1 ELSE 0 END) as ready_count,
-                   (SELECT COUNT(*) FROM publish_tasks pt
-                    WHERE pt.group_id = g.id AND pt.status IN ('done','publishing','pending','scheduled')) as published_count
+                   COUNT(DISTINCT CASE WHEN pt.status IN ('done','publishing','pending','scheduled') THEN pt.id END) as published_count
             FROM clip_groups g
             LEFT JOIN rooms rm ON g.room_id = rm.id
             LEFT JOIN recordings r ON r.group_id = g.id
+            LEFT JOIN publish_tasks pt ON pt.group_id = g.id
             GROUP BY g.id
             ORDER BY g.created_at DESC
         """) as cur:
@@ -647,7 +991,7 @@ async def list_groups():
 
 @app.get("/api/groups/{group_id}")
 async def get_group(group_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT g.*, rm.name as room_name FROM clip_groups g LEFT JOIN rooms rm ON g.room_id = rm.id WHERE g.id = ?",
@@ -668,25 +1012,52 @@ async def get_group(group_id: int):
 
 @app.post("/api/groups/{group_id}/merge")
 async def trigger_merge(group_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM clip_groups WHERE id = ?", (group_id,)) as cur:
             group = await cur.fetchone()
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
-    if group["merge_status"] == 1:
-        raise HTTPException(status_code=409, detail="Merge already in progress")
-    # Clear any previous quality issue when re-merging
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE clip_groups SET quality_issue = NULL WHERE id = ?", (group_id,))
+    if group["classic_status"] == 1 and group["director_status"] == 1 and (group["creative_status"] or 0) == 1:
+        raise HTTPException(status_code=409, detail="All pipelines already in progress")
+    # Reset all three pipelines (unless already completed) and clear errors
+    async with aio_connect() as db:
+        await db.execute(
+            """UPDATE clip_groups SET
+               quality_issue = NULL, director_error = NULL, merge_error = NULL, creative_error = NULL,
+               classic_status  = CASE WHEN classic_status  != 2 THEN 0 ELSE classic_status  END,
+               director_status = CASE WHEN director_status != 2 THEN 0 ELSE director_status END,
+               creative_status = CASE WHEN (creative_status IS NULL OR creative_status != 2) THEN 0 ELSE creative_status END
+               WHERE id = ?""",
+            (group_id,)
+        )
         await db.commit()
-    asyncio.create_task(merge_group(group_id))
+    from transcribe import _run_director_pipeline, _run_creative_pipeline
+    if group["classic_status"] != 2:
+        asyncio.create_task(merge_group(group_id))
+    if group["director_status"] != 2:
+        asyncio.create_task(_run_director_pipeline(group_id))
+    if (group["creative_status"] or 0) != 2:
+        asyncio.create_task(_run_creative_pipeline(group_id))
     return {"group_id": group_id, "merge_status": 1}
+
+
+@app.patch("/api/groups/{group_id}/publish-versions")
+async def set_publish_versions(group_id: int, body: dict):
+    versions = body.get("publish_versions", "both")
+    if versions not in ("classic", "director", "creative", "both"):
+        raise HTTPException(status_code=400, detail="publish_versions must be 'classic', 'director', 'creative', or 'both'")
+    async with aio_connect() as db:
+        await db.execute(
+            "UPDATE clip_groups SET publish_versions = ? WHERE id = ?", (versions, group_id)
+        )
+        await db.commit()
+    return {"group_id": group_id, "publish_versions": versions}
 
 
 @app.get("/api/groups/{group_id}/download")
 async def download_merged(group_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM clip_groups WHERE id = ?", (group_id,)) as cur:
             group = await cur.fetchone()
@@ -711,6 +1082,132 @@ async def download_merged(group_id: int):
     return FileResponse(path, media_type="video/mp4", filename=filename)
 
 
+@app.get("/api/groups/{group_id}/director-download")
+async def download_director_video(group_id: int, request: Request):
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT director_final_video FROM clip_groups WHERE id = ?", (group_id,)
+        ) as cur:
+            row = await cur.fetchone()
+    if not row or not row["director_final_video"]:
+        raise HTTPException(status_code=404, detail="No director video available")
+    path = row["director_final_video"]
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Director video file missing")
+    filename = os.path.basename(path)
+    file_size = os.path.getsize(path)
+
+    # Support Range requests for browser <video> seek
+    range_header = request.headers.get("range")
+    if range_header:
+        try:
+            range_val = range_header.strip().replace("bytes=", "")
+            start_str, end_str = range_val.split("-")
+            start = int(start_str)
+            end = int(end_str) if end_str else file_size - 1
+        except Exception:
+            raise HTTPException(status_code=416, detail="Invalid Range header")
+        end = min(end, file_size - 1)
+        chunk_size = end - start + 1
+
+        def iter_range():
+            with open(path, "rb") as f:
+                f.seek(start)
+                remaining = chunk_size
+                while remaining > 0:
+                    data = f.read(min(65536, remaining))
+                    if not data:
+                        break
+                    remaining -= len(data)
+                    yield data
+
+        headers = {
+            "Content-Range": f"bytes {start}-{end}/{file_size}",
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(chunk_size),
+            "Content-Disposition": f'inline; filename="{filename}"',
+        }
+        return StreamingResponse(iter_range(), status_code=206, media_type="video/mp4", headers=headers)
+
+    # Full file response
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(file_size),
+        "Content-Disposition": f'inline; filename="{filename}"',
+    }
+    def iter_file():
+        with open(path, "rb") as f:
+            while True:
+                data = f.read(65536)
+                if not data:
+                    break
+                yield data
+    return StreamingResponse(iter_file(), media_type="video/mp4", headers=headers)
+
+
+@app.get("/api/groups/{group_id}/creative-download")
+async def download_creative_video(group_id: int, request: Request):
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT creative_final_video FROM clip_groups WHERE id = ?", (group_id,)
+        ) as cur:
+            row = await cur.fetchone()
+    if not row or not row["creative_final_video"]:
+        raise HTTPException(status_code=404, detail="No creative video available")
+    path = row["creative_final_video"]
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Creative video file missing")
+    filename = os.path.basename(path)
+    file_size = os.path.getsize(path)
+
+    range_header = request.headers.get("range")
+    if range_header:
+        try:
+            range_val = range_header.strip().replace("bytes=", "")
+            start_str, end_str = range_val.split("-")
+            start = int(start_str)
+            end = int(end_str) if end_str else file_size - 1
+        except Exception:
+            raise HTTPException(status_code=416, detail="Invalid Range header")
+        end = min(end, file_size - 1)
+        chunk_size = end - start + 1
+
+        def iter_range_creative():
+            with open(path, "rb") as f:
+                f.seek(start)
+                remaining = chunk_size
+                while remaining > 0:
+                    data = f.read(min(65536, remaining))
+                    if not data:
+                        break
+                    remaining -= len(data)
+                    yield data
+
+        headers = {
+            "Content-Range": f"bytes {start}-{end}/{file_size}",
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(chunk_size),
+            "Content-Disposition": f'inline; filename="{filename}"',
+        }
+        return StreamingResponse(iter_range_creative(), status_code=206, media_type="video/mp4", headers=headers)
+
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(file_size),
+        "Content-Disposition": f'inline; filename="{filename}"',
+    }
+    def iter_file_creative():
+        with open(path, "rb") as f:
+            while True:
+                data = f.read(65536)
+                if not data:
+                    break
+                yield data
+    return StreamingResponse(iter_file_creative(), media_type="video/mp4", headers=headers)
+
+
 @app.get("/api/recordings/processing-progress")
 async def get_processing_progress():
     """Return progress for all currently processing recordings (transcribing + clipping)."""
@@ -727,7 +1224,7 @@ async def get_processing_progress():
         }
 
     # ── Transcription progress (time-based estimate) ──────────────────────────
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT id, gpu_job_id FROM recordings WHERE transcribed = 1 AND gpu_job_id IS NOT NULL"
@@ -761,7 +1258,7 @@ async def get_processing_progress():
 
 @app.get("/api/recordings/{recording_id}")
 async def get_recording(recording_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT r.*, rm.name as room_name FROM recordings r "
@@ -778,7 +1275,7 @@ async def get_recording(recording_id: int):
 
 @app.post("/api/recordings/{recording_id}/retry-transcribe")
 async def retry_transcribe(recording_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM recordings WHERE id = ?", (recording_id,)) as cur:
             rec = await cur.fetchone()
@@ -787,30 +1284,25 @@ async def retry_transcribe(recording_id: int):
     filepath = os.path.join(os.path.dirname(__file__), "..", "recordings", rec["filename"])
     if not os.path.exists(filepath):
         raise HTTPException(status_code=404, detail="Recording file missing on disk")
-    async with aiosqlite.connect(DB_PATH) as db:
+    # Reset to unsynced/untranscribed so the poll loop picks it up via maybe_merge_before_upload
+    # (which handles large-file splitting before GPU upload)
+    async with aio_connect() as db:
         await db.execute(
-            "UPDATE recordings SET transcribed = 0, synced = 0, gpu_job_id = NULL WHERE id = ?",
+            "UPDATE recordings SET transcribed = 0, synced = 0, gpu_job_id = NULL, clipped = 0 WHERE id = ?",
             (recording_id,)
         )
         await db.commit()
     from comfyui_client import free_vram
+    from transcribe import flush_poll
     await free_vram()
-    job_id = await sync_file(filepath, rec["room_id"])
-    if job_id:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute(
-                "UPDATE recordings SET transcribed = 1, synced = 1, gpu_job_id = ? WHERE id = ?",
-                (job_id, recording_id)
-            )
-            await db.commit()
-        return {"recording_id": recording_id, "transcribed": 1}
-    raise HTTPException(status_code=500, detail="Failed to submit transcription job")
+    await flush_poll()   # wake the poll loop immediately
+    return {"recording_id": recording_id, "status": "queued"}
 
 
 @app.post("/api/recordings/clip-missing")
 async def clip_missing():
     """查找所有已转录但未剪辑的记录，批量发起剪辑任务。"""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         rows = await db.execute_fetchall(
             "SELECT * FROM recordings WHERE transcribed = 2 AND clipped IN (0, -1)"
@@ -831,7 +1323,7 @@ async def clip_missing():
 
 @app.post("/api/recordings/{recording_id}/retry-clip")
 async def retry_clip(recording_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM recordings WHERE id = ?", (recording_id,)) as cur:
             rec = await cur.fetchone()
@@ -855,7 +1347,7 @@ async def retry_clip(recording_id: int):
 
 @app.post("/api/recordings/{recording_id}/reveal-clip")
 async def reveal_clip(recording_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM recordings WHERE id = ?", (recording_id,)) as cur:
             rec = await cur.fetchone()
@@ -901,7 +1393,7 @@ class CustomGroupCreate(BaseModel):
 
 async def _get_custom_room_id() -> int:
     """Get or create the special '自定义上传' room used for custom groups."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT id FROM rooms WHERE url = '__custom__'") as cur:
             row = await cur.fetchone()
@@ -917,7 +1409,7 @@ async def _get_custom_room_id() -> int:
 @app.post("/api/groups/custom", status_code=201)
 async def create_custom_group(body: CustomGroupCreate):
     room_id = await _get_custom_room_id()
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         cur = await db.execute(
             "INSERT INTO clip_groups (room_id, label, wig_model, wig_color, is_custom) VALUES (?, ?, ?, ?, 1)",
             (room_id, body.label, body.wig_model or None, body.wig_color or None),
@@ -930,7 +1422,7 @@ async def create_custom_group(body: CustomGroupCreate):
 @app.post("/api/groups/{group_id}/upload-video", status_code=201)
 async def upload_custom_group_video(group_id: int, file: UploadFile = File(...), clip_count: int = Form(1)):
     """Upload a video file directly to a custom group and trigger the clip pipeline."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM clip_groups WHERE id = ? AND is_custom = 1", (group_id,)) as cur:
             group = await cur.fetchone()
@@ -957,7 +1449,7 @@ async def upload_custom_group_video(group_id: int, file: UploadFile = File(...),
             size_bytes += len(chunk)
 
     start_time = now.isoformat()
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         cur = await db.execute(
             "INSERT INTO recordings (room_id, filename, start_time, end_time, size_bytes, synced, clip_count, group_id) VALUES (?, ?, ?, ?, ?, 0, ?, ?)",
             (room_id, filename, start_time, start_time, size_bytes, clip_count, group_id),
@@ -971,7 +1463,7 @@ async def upload_custom_group_video(group_id: int, file: UploadFile = File(...),
     await free_vram()
     job_id = await sync_file(filepath, room_id)
     if job_id:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aio_connect() as db:
             await db.execute(
                 "UPDATE recordings SET transcribed = 1, synced = 1, gpu_job_id = ? WHERE id = ?",
                 (job_id, recording_id),
@@ -983,7 +1475,7 @@ async def upload_custom_group_video(group_id: int, file: UploadFile = File(...),
 
 @app.post("/api/groups", status_code=201)
 async def create_group(body: GroupCreate):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         cur = await db.execute(
             "INSERT INTO clip_groups (room_id, label, wig_model, wig_color) VALUES (?, ?, ?, ?)",
             (body.room_id, body.label, body.wig_model or None, body.wig_color or None),
@@ -999,7 +1491,7 @@ async def import_group_videos(group_id: int, body: ImportVideosRequest):
     recordings_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "recordings"))
     imported = 0
     skipped = []
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT room_id FROM clip_groups WHERE id = ?", (group_id,)) as cur:
             grp = await cur.fetchone()
@@ -1050,7 +1542,7 @@ async def import_group_videos(group_id: int, body: ImportVideosRequest):
 
 @app.patch("/api/groups/{group_id}")
 async def update_group(group_id: int, body: GroupUpdate):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         async with db.execute("SELECT id FROM clip_groups WHERE id = ?", (group_id,)) as cur:
             if not await cur.fetchone():
                 raise HTTPException(status_code=404, detail="Group not found")
@@ -1065,7 +1557,7 @@ async def update_group(group_id: int, body: GroupUpdate):
 
 @app.delete("/api/groups/{group_id}", status_code=204)
 async def delete_group(group_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         async with db.execute("SELECT id FROM clip_groups WHERE id = ?", (group_id,)) as cur:
             if not await cur.fetchone():
                 raise HTTPException(status_code=404, detail="Group not found")
@@ -1077,7 +1569,7 @@ async def delete_group(group_id: int):
 
 @app.delete("/api/recordings/{recording_id}/local-file", status_code=204)
 async def delete_local_file(recording_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM recordings WHERE id = ?", (recording_id,)) as cur:
             rec = await cur.fetchone()
@@ -1090,7 +1582,7 @@ async def delete_local_file(recording_id: int):
     filepath = os.path.join(os.path.dirname(__file__), "..", "recordings", rec["filename"])
     if os.path.exists(filepath):
         os.unlink(filepath)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         await db.execute("UPDATE recordings SET local_deleted = 1 WHERE id = ?", (recording_id,))
         await db.commit()
 
@@ -1098,7 +1590,7 @@ async def delete_local_file(recording_id: int):
 @app.post("/api/cleanup/local-files")
 async def bulk_cleanup_local_files():
     """Delete local MP4s for recordings that are fully processed."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("""
             SELECT * FROM recordings
@@ -1114,7 +1606,7 @@ async def bulk_cleanup_local_files():
         if os.path.exists(filepath):
             os.unlink(filepath)
             deleted += 1
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aio_connect() as db:
             await db.execute("UPDATE recordings SET local_deleted = 1 WHERE id = ?", (rec["id"],))
             await db.commit()
     return {"deleted": deleted, "total_eligible": len(candidates)}
@@ -1122,7 +1614,7 @@ async def bulk_cleanup_local_files():
 
 @app.patch("/api/recordings/{recording_id}/group")
 async def reassign_recording_group(recording_id: int, body: RecordingGroupUpdate):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         async with db.execute("SELECT id FROM recordings WHERE id = ?", (recording_id,)) as cur:
             if not await cur.fetchone():
                 raise HTTPException(status_code=404, detail="Recording not found")
@@ -1144,7 +1636,7 @@ class ReclipRequest(BaseModel):
 
 @app.post("/api/reclip")
 async def reclip(req: ReclipRequest):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT r.* FROM recordings r JOIN rooms rm ON r.room_id = rm.id "
@@ -1159,9 +1651,54 @@ async def reclip(req: ReclipRequest):
         mp4_path = os.path.join(os.path.dirname(__file__), "..", "recordings", rec["filename"])
         srt_path = os.path.splitext(mp4_path)[0] + ".srt"
         if os.path.exists(mp4_path) and os.path.exists(srt_path):
-            asyncio.create_task(_run_editor(rec["id"], mp4_path, srt_path, clip_duration=req.duration_sec, clip_count=req.clip_count, broadcast_fn=broadcast))
+            asyncio.create_task(_run_editor(rec["id"], mp4_path, srt_path, clip_duration=req.duration_sec, clip_count=req.clip_count, feedback=rec["reclip_feedback"], broadcast_fn=broadcast))
             queued.append(rec["id"])
     return {"queued": queued}
+
+
+@app.post("/api/groups/{group_id}/reclip-all")
+async def reclip_group_all(group_id: int):
+    """Reset every clipped recording in a group back to pending and re-enqueue all."""
+    recordings_dir = os.path.join(os.path.dirname(__file__), "..", "recordings")
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, filename, clip_count FROM recordings "
+            "WHERE group_id = ? AND transcribed = 2",
+            (group_id,),
+        ) as cur:
+            recs = await cur.fetchall()
+        if not recs:
+            raise HTTPException(status_code=404, detail="No transcribed recordings in group")
+        ids = [r["id"] for r in recs]
+        placeholders = ",".join("?" * len(ids))
+        await db.execute(
+            f"UPDATE recordings SET clipped=0, clip_filename=NULL, clip_error=NULL, skip_reason=NULL "
+            f"WHERE id IN ({placeholders})",
+            ids,
+        )
+        await db.execute(
+            """UPDATE clip_groups SET
+               merge_status=0, merged_filename=NULL, merged_at=NULL, merge_error=NULL,
+               classic_status=0, director_status=0, director_error=NULL, director_final_video=NULL
+               WHERE id=?""",
+            (group_id,),
+        )
+        await db.commit()
+
+    queued = []
+    for rec in recs:
+        mp4_path = os.path.join(recordings_dir, rec["filename"])
+        srt_path = os.path.splitext(mp4_path)[0] + ".srt"
+        if os.path.exists(mp4_path) and os.path.exists(srt_path):
+            asyncio.create_task(_run_editor(
+                rec["id"], mp4_path, srt_path,
+                clip_count=rec["clip_count"] or 1,
+                broadcast_fn=broadcast,
+            ))
+            queued.append(rec["id"])
+
+    return {"group_id": group_id, "queued": queued, "total": len(recs)}
 
 
 # ── GPU Status ────────────────────────────────────────────────────────────────
@@ -1187,23 +1724,36 @@ async def gpu_status():
     # still probe ComfyUI independently.
     skip_gpu_probe = not gpu_is_online()
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            comfy_r, queue_r = await asyncio.gather(
-                client.get(f"{COMFYUI_URL}/system_stats"),
-                client.get(f"{COMFYUI_URL}/queue"),
-                return_exceptions=True,
-            )
-            # Only probe GPU service if watcher thinks it may be online
-            if not skip_gpu_probe:
-                try:
-                    health_r = await client.get(f"{GPU_SERVICE_URL}/health", timeout=5.0)
-                    if health_r.status_code == 200:
-                        result["reachable"] = True
-                        result["health"] = health_r.json()
-                except Exception:
-                    pass
-        if not isinstance(comfy_r, Exception) and comfy_r.status_code == 200:
-            cs = comfy_r.json()
+        import aiohttp as _aio_status
+        _to = _aio_status.ClientTimeout(total=5)
+
+        async def _aio_get(url):
+            try:
+                async with _aio_status.ClientSession() as _s:
+                    async with _s.get(url, timeout=_to) as _r:
+                        return _r.status, await _r.json()
+            except Exception as _e:
+                return None, _e
+
+        comfy_r, queue_r = await asyncio.gather(
+            _aio_get(f"{COMFYUI_URL}/system_stats"),
+            _aio_get(f"{COMFYUI_URL}/queue"),
+            return_exceptions=True,
+        )
+        # Only probe GPU service if watcher thinks it may be online
+        if not skip_gpu_probe:
+            try:
+                _st, _body = await _aio_get(f"{GPU_SERVICE_URL}/health")
+                if _st == 200:
+                    result["reachable"] = True
+                    result["health"] = _body
+            except Exception:
+                pass
+        # Unpack aio_get tuples
+        comfy_status, comfy_body = comfy_r if isinstance(comfy_r, tuple) else (None, None)
+        queue_status, queue_body = queue_r if isinstance(queue_r, tuple) else (None, None)
+        if comfy_status == 200 and isinstance(comfy_body, dict):
+            cs = comfy_body
             dev = cs.get("devices", [{}])[0]
             sys_ = cs.get("system", {})
             # Use torch_vram (dedicated/allocated by PyTorch) rather than the
@@ -1227,15 +1777,14 @@ async def gpu_status():
                 "queue_running": 0,
                 "queue_pending": 0,
             }
-        if not isinstance(queue_r, Exception) and queue_r.status_code == 200:
-            q = queue_r.json()
-            result["comfyui"]["queue_running"] = len(q.get("queue_running", []))
-            result["comfyui"]["queue_pending"] = len(q.get("queue_pending", []))
+        if queue_status == 200 and isinstance(queue_body, dict):
+            result["comfyui"]["queue_running"] = len(queue_body.get("queue_running", []))
+            result["comfyui"]["queue_pending"] = len(queue_body.get("queue_pending", []))
     except Exception as e:
         logger.error(f"GPU status check failed: {e}")
 
     # Pending transcription jobs: in-flight on GPU + waiting to upload (exclude live segments)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         async with db.execute(
             """SELECT COUNT(*) FROM recordings
                WHERE (transcribed = 1 AND gpu_job_id IS NOT NULL)
@@ -1336,7 +1885,7 @@ async def watchdog_restart(service: str):
 @app.get("/api/gpu/logs")
 async def gpu_logs():
     """Recent transcription activity for the GPU log marquee."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT r.id, r.filename, r.transcribed, r.transcribe_error, r.start_time, rm.name as room_name
@@ -1383,7 +1932,7 @@ def get_version():
 
 @app.get("/api/status")
 async def system_status():
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         async with db.execute("SELECT COUNT(*) FROM rooms WHERE enabled = 1") as cur:
             (enabled_rooms,) = await cur.fetchone()
         async with db.execute("SELECT COUNT(*) FROM recordings") as cur:
@@ -1440,7 +1989,7 @@ async def get_transcribe_queue():
     timing = transcribe_timing()
     now = _time.time()
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT r.id, r.filename, r.transcribed, r.transcribe_error, r.start_time,
@@ -1528,7 +2077,7 @@ async def cancel_clip_queue_job(recording_id: int):
     if not removed:
         raise HTTPException(status_code=404, detail="Job not found in queue (may be running or already completed)")
     # Reset clipped status so the job can be re-dispatched later
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         await db.execute("UPDATE recordings SET clipped = 0 WHERE id = ? AND clipped = 1", (recording_id,))
         await db.commit()
     return {"ok": True, "recording_id": recording_id}
@@ -1558,7 +2107,7 @@ async def start_clip_queue_job(recording_id: int):
 @app.post("/api/clip-queue/{recording_id}/retry")
 async def retry_clip_queue_job(recording_id: int):
     """Re-enqueue a failed clip job (clipped=-1)."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT r.*, rm.name as room_name FROM recordings r "
@@ -1580,7 +2129,7 @@ async def retry_clip_queue_job(recording_id: int):
         raise HTTPException(status_code=404, detail="SRT file not found — re-transcribe first")
 
     # Reset failed state and re-enqueue
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         await db.execute("UPDATE recordings SET clipped = 0, clip_error = NULL WHERE id = ?", (recording_id,))
         await db.commit()
 
@@ -1592,7 +2141,7 @@ async def retry_clip_queue_job(recording_id: int):
 @app.post("/api/clip-queue/{recording_id}/dismiss")
 async def dismiss_clip_job(recording_id: int):
     """Permanently dismiss a failed clip job so it no longer appears in the failed list."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         async with db.execute("SELECT clipped FROM recordings WHERE id = ?", (recording_id,)) as cur:
             rec = await cur.fetchone()
         if not rec:
@@ -1657,9 +2206,9 @@ async def _enhance_worker():
             job.update({"gpu_job_id": gpu_job_id, "status": "running", "msg": "GPU 处理中…"})
 
             # 轮询直到完成
-            deadline = asyncio.get_event_loop().time() + 7200
+            deadline = _time.time() + 7200
             consecutive_failures = 0
-            while asyncio.get_event_loop().time() < deadline:
+            while _time.time() < deadline:
                 await asyncio.sleep(5)
                 if job.get("status") == "cancelled":
                     from enhance import delete_enhance_job
@@ -1791,7 +2340,7 @@ async def enhance_service_status():
 
 @app.get("/api/stats")
 async def get_stats():
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         rows = await db.execute_fetchall("""
             SELECT
@@ -1824,7 +2373,7 @@ async def ws_events(websocket: WebSocket):
 
 @app.get("/api/products")
 async def list_products(keyword: Optional[str] = None):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         base = """SELECT p.*, rm.name as room_name
                   FROM products p
@@ -1843,12 +2392,12 @@ async def list_products(keyword: Optional[str] = None):
 
 @app.post("/api/products", status_code=201)
 async def create_product(body: ProductCreate):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         cur = await db.execute(
-            """INSERT INTO products (platform, product_id, product_name, product_url, keywords, enabled, room_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO products (platform, product_id, product_name, product_url, product_thumb, keywords, enabled, room_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (body.platform, body.product_id, body.product_name,
-             body.product_url, body.keywords, int(body.enabled), body.room_id),
+             body.product_url, body.product_thumb, body.keywords, int(body.enabled), body.room_id),
         )
         await db.commit()
     return {"id": cur.lastrowid, **body.model_dump()}
@@ -1857,13 +2406,13 @@ async def create_product(body: ProductCreate):
 @app.post("/api/products/bulk", status_code=201)
 async def bulk_create_products(body: list[ProductCreate]):
     ids = []
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         for p in body:
             cur = await db.execute(
-                """INSERT INTO products (platform, product_id, product_name, product_url, keywords, enabled, room_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                """INSERT INTO products (platform, product_id, product_name, product_url, product_thumb, keywords, enabled, room_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (p.platform, p.product_id, p.product_name,
-                 p.product_url, p.keywords, int(p.enabled), p.room_id),
+                 p.product_url, p.product_thumb, p.keywords, int(p.enabled), p.room_id),
             )
             ids.append(cur.lastrowid)
         await db.commit()
@@ -1872,7 +2421,7 @@ async def bulk_create_products(body: list[ProductCreate]):
 
 @app.patch("/api/products/{product_id}")
 async def update_product(product_id: int, body: ProductUpdate):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         async with db.execute("SELECT id FROM products WHERE id = ?", (product_id,)) as cur:
             if not await cur.fetchone():
                 raise HTTPException(status_code=404, detail="Product not found")
@@ -1890,9 +2439,130 @@ async def update_product(product_id: int, body: ProductUpdate):
 
 @app.delete("/api/products/{product_id}", status_code=204)
 async def delete_product(product_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         await db.execute("DELETE FROM products WHERE id = ?", (product_id,))
         await db.commit()
+
+
+@app.get("/api/products/check-url")
+async def check_product_url(url: str):
+    """Check if a product_url already exists. Returns matched products."""
+    if not url or not url.strip():
+        return {"duplicates": []}
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, product_name, product_url FROM products WHERE product_url = ?",
+            (url.strip(),),
+        ) as cur:
+            rows = await cur.fetchall()
+    return {"duplicates": [dict(r) for r in rows]}
+
+
+@app.get("/api/products/duplicate-urls")
+async def list_duplicate_urls():
+    """Return all products whose product_url appears more than once."""
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT p.id, p.product_name, p.product_url, rm.name as room_name
+               FROM products p
+               LEFT JOIN rooms rm ON p.room_id = rm.id
+               WHERE p.product_url IS NOT NULL AND p.product_url != ''
+                 AND p.product_url IN (
+                     SELECT product_url FROM products
+                     WHERE product_url IS NOT NULL AND product_url != ''
+                     GROUP BY product_url HAVING COUNT(*) > 1
+                 )
+               ORDER BY p.product_url, p.id"""
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/products/import-excel", status_code=201)
+async def import_products_excel(file: UploadFile = File(...)):
+    """Import products from an Excel file (.xlsx/.xls).
+    Columns: product_name(必填), product_id, product_url, keywords, platform, room_id
+    Returns created count and list of skipped rows (missing product_name).
+    """
+    import openpyxl, io
+    content = await file.read()
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+        ws = wb.active
+        rows = list(ws.iter_rows(values_only=True))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"无法解析Excel文件: {e}")
+
+    if not rows:
+        raise HTTPException(status_code=400, detail="Excel文件为空")
+
+    # First row = header
+    header = [str(c).strip().lower() if c else "" for c in rows[0]]
+    col = {name: idx for idx, name in enumerate(header)}
+
+    def get(row, key, default=""):
+        idx = col.get(key)
+        if idx is None:
+            return default
+        v = row[idx] if idx < len(row) else None
+        return str(v).strip() if v is not None else default
+
+    created_ids = []
+    skipped = []
+    async with aio_connect() as db:
+        for i, row in enumerate(rows[1:], start=2):
+            name = get(row, "product_name") or get(row, "商品名称")
+            if not name:
+                skipped.append(i)
+                continue
+            pid    = get(row, "product_id")    or get(row, "平台商品id") or get(row, "商品id")
+            url    = get(row, "product_url")   or get(row, "商品链接")
+            thumb  = get(row, "product_thumb") or get(row, "缩略图")
+            kw     = get(row, "keywords")      or get(row, "匹配关键词") or get(row, "关键词")
+            plat   = get(row, "platform")      or get(row, "平台") or "douyin"
+            rid_s  = get(row, "room_id")       or get(row, "直播间id")
+            try:
+                rid = int(float(rid_s)) if rid_s else None
+            except Exception:
+                rid = None
+            cur2 = await db.execute(
+                """INSERT INTO products (platform, product_id, product_name, product_url, product_thumb, keywords, enabled, room_id)
+                   VALUES (?, ?, ?, ?, ?, ?, 1, ?)""",
+                (plat, pid or None, name, url or None, thumb or None, kw or None, rid),
+            )
+            created_ids.append(cur2.lastrowid)
+        await db.commit()
+
+    return {"created": len(created_ids), "skipped_rows": skipped, "ids": created_ids}
+
+
+@app.get("/api/products/template.xlsx")
+async def download_products_template():
+    """Return an Excel template for bulk product import."""
+    import openpyxl, io
+    from fastapi.responses import Response as FastAPIResponse
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "商品导入模板"
+    headers = ["product_name", "product_id", "product_url", "product_thumb", "keywords", "platform", "room_id"]
+    display = ["商品名称(必填)", "平台商品ID", "商品链接", "缩略图URL", "匹配关键词(逗号分隔)", "平台(默认douyin)", "直播间ID"]
+    ws.append(headers)
+    ws.append(display)
+    # Example row
+    ws.append(["蓬松波波头假发", "7123456789", "https://haohuo.jinritemai.com/...", "https://p3-aio.ecombdimg.com/img/xxx.jpg", "假发,波波头,黑色", "douyin", "1"])
+    # Column widths
+    for i, _ in enumerate(headers, 1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = 22
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return FastAPIResponse(
+        content=buf.read(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=products_template.xlsx"},
+    )
 
 
 # ── Publish Accounts ──────────────────────────────────────────────────────────
@@ -1902,7 +2572,7 @@ COOKIES_DIR = os.path.expanduser("~/.douyin-publisher/cookies")
 
 @app.get("/api/publish-accounts")
 async def list_publish_accounts():
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM publish_accounts ORDER BY created_at DESC") as cur:
             rows = await cur.fetchall()
@@ -1911,7 +2581,7 @@ async def list_publish_accounts():
 
 @app.post("/api/publish-accounts", status_code=201)
 async def create_publish_account(body: PublishAccountCreate):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         cur = await db.execute(
             "INSERT INTO publish_accounts (platform, account_name) VALUES (?, ?)",
             (body.platform, body.account_name),
@@ -1923,7 +2593,7 @@ async def create_publish_account(body: PublishAccountCreate):
 
 @app.delete("/api/publish-accounts/{account_id}", status_code=204)
 async def delete_publish_account(account_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         await db.execute("DELETE FROM publish_accounts WHERE id = ?", (account_id,))
         await db.commit()
 
@@ -1931,7 +2601,7 @@ async def delete_publish_account(account_id: int):
 @app.post("/api/publish-accounts/{account_id}/login")
 async def login_publish_account(account_id: int):
     """Launch a headed Playwright browser for the user to log in manually."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM publish_accounts WHERE id = ?", (account_id,)) as cur:
             account = await cur.fetchone()
@@ -1964,7 +2634,7 @@ async def _do_login(publisher, account: dict, cookie_file: str, account_id: int)
         await broadcast({"type": "login_done", "account_id": account_id, "success": False})
         return
     if success:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aio_connect() as db:
             await db.execute(
                 "UPDATE publish_accounts SET cookie_file = ? WHERE id = ?",
                 (cookie_file, account_id),
@@ -1979,7 +2649,7 @@ async def _do_login(publisher, account: dict, cookie_file: str, account_id: int)
 
 @app.get("/api/publish-tasks")
 async def list_publish_tasks(status: Optional[str] = None):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         if status:
             async with db.execute(
@@ -2015,17 +2685,35 @@ async def list_publish_tasks(status: Optional[str] = None):
 @app.post("/api/publish-tasks", status_code=201)
 async def create_publish_task(body: PublishTaskCreate):
     # Validate group exists and has a merged video
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM clip_groups WHERE id = ?", (body.group_id,)) as cur:
             group = await cur.fetchone()
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
-    if group["merge_status"] != 2 or not group["merged_filename"]:
-        raise HTTPException(status_code=409, detail="Group merged video not ready (merge_status must be 2)")
+    # Determine which video to publish based on publish_versions preference
+    publish_versions = group["publish_versions"] or "both"
+    _dir_ok = group["director_final_video"] and os.path.exists(group["director_final_video"])
+    _cr_ok = group["creative_final_video"] and os.path.exists(group["creative_final_video"])
+    # Priority: explicit creative/director > "both" prefers director > creative > classic
+    use_creative = publish_versions == "creative" or (publish_versions == "both" and _cr_ok and not _dir_ok)
+    use_director = not use_creative and (publish_versions == "director" or (publish_versions == "both" and _dir_ok))
+    if use_creative:
+        if not _cr_ok:
+            raise HTTPException(status_code=409, detail="Creative video not ready")
+    elif use_director:
+        if not _dir_ok:
+            raise HTTPException(status_code=409, detail="Director video not ready — compose video first")
+    else:
+        if group["merge_status"] != 2 or not group["merged_filename"]:
+            raise HTTPException(status_code=409, detail="Classic video not ready (merge_status must be 2)")
+        _classic_path = os.path.join(os.path.dirname(__file__), "..", "recordings", group["merged_filename"])
+        if not os.path.exists(_classic_path):
+            raise HTTPException(status_code=409, detail=f"Classic video file missing from disk: {group['merged_filename']}")
 
     # Duplicate publish guard: same group + platform already has an active or completed task
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT id, status FROM publish_tasks
                WHERE group_id=? AND platform=? AND status IN ('pending','scheduled','publishing','done')
@@ -2051,16 +2739,21 @@ async def create_publish_task(body: PublishTaskCreate):
             description = description or meta.get("description")
             tags = tags or meta.get("tags")
 
-    video_path = os.path.join(
-        os.path.dirname(__file__), "..", "recordings", group["merged_filename"]
-    )
+    if use_creative:
+        video_path = group["creative_final_video"]
+    elif use_director:
+        video_path = group["director_final_video"]
+    else:
+        video_path = os.path.join(
+            os.path.dirname(__file__), "..", "recordings", group["merged_filename"]
+        )
 
     status = "scheduled" if body.scheduled_at else "pending"
     product_ids_str = ",".join(str(i) for i in body.product_ids) if body.product_ids else None
     # keep product_id as first item for backward compat
     first_product_id = body.product_ids[0] if body.product_ids else body.product_id
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         cur = await db.execute(
             """INSERT INTO publish_tasks
                (group_id, platform, account_id, status, scheduled_at,
@@ -2090,14 +2783,15 @@ async def get_unscheduled_groups(platform: str = "douyin", room_id: Optional[int
     Return merged groups that have no active/done publish task for the given platform.
     Used by the batch-schedule UI to preview how many groups will be queued.
     """
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         sql = """
-            SELECT g.id, g.label, g.merged_filename, g.room_id, rm.name as room_name
+            SELECT g.id, g.label, g.merged_filename, g.director_final_video,
+                   g.creative_final_video, g.publish_versions, g.room_id, rm.name as room_name
             FROM clip_groups g
             LEFT JOIN rooms rm ON g.room_id = rm.id
-            WHERE g.merge_status = 2
-              AND g.merged_filename IS NOT NULL
+            WHERE (g.merge_status = 2 OR g.classic_status = 2 OR g.director_status = 2 OR g.creative_status = 2)
+              AND (g.merged_filename IS NOT NULL OR g.director_final_video IS NOT NULL OR g.creative_final_video IS NOT NULL)
               AND NOT EXISTS (
                   SELECT 1 FROM publish_tasks pt
                   WHERE pt.group_id = g.id
@@ -2130,13 +2824,14 @@ async def batch_schedule_tasks(body: BatchScheduleCreate):
         raise HTTPException(status_code=422, detail="start_datetime must be ISO format, e.g. 2026-03-25T10:00:00")
 
     # Fetch eligible groups (same logic as unscheduled-groups endpoint)
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         sql = """
-            SELECT g.id, g.label, g.merged_filename, g.room_id
+            SELECT g.id, g.label, g.merged_filename, g.director_final_video,
+                   g.creative_final_video, g.publish_versions, g.room_id
             FROM clip_groups g
-            WHERE g.merge_status = 2
-              AND g.merged_filename IS NOT NULL
+            WHERE (g.merge_status = 2 OR g.classic_status = 2 OR g.director_status = 2 OR g.creative_status = 2)
+              AND (g.merged_filename IS NOT NULL OR g.director_final_video IS NOT NULL OR g.creative_final_video IS NOT NULL)
               AND NOT EXISTS (
                   SELECT 1 FROM publish_tasks pt
                   WHERE pt.group_id = g.id
@@ -2161,22 +2856,31 @@ async def batch_schedule_tasks(body: BatchScheduleCreate):
     video_base = os.path.join(os.path.dirname(__file__), "..", "recordings")
     created_tasks = []
 
-    async with aiosqlite.connect(DB_PATH) as db:
+    # Phase 1: insert all tasks immediately without waiting for LLM meta
+    async with aio_connect() as db:
         for i, group in enumerate(groups):
             scheduled_at = (start_dt + timedelta(minutes=body.interval_minutes * i)).isoformat()
-            video_path = os.path.join(video_base, group["merged_filename"])
-
-            # LLM meta generation per group if requested
-            title = description = tags = None
-            if body.auto_meta:
-                try:
-                    meta = await generate_meta(group["id"])
-                    if meta:
-                        title = meta.get("title")
-                        description = meta.get("description")
-                        tags = meta.get("tags")
-                except Exception:
-                    pass  # non-fatal; task created without meta
+            # Pick video based on publish_versions
+            pub_ver = group["publish_versions"] or "both"
+            use_creative = pub_ver == "creative" or (
+                pub_ver == "both"
+                and group["creative_final_video"]
+                and os.path.exists(group["creative_final_video"])
+                and not (group["director_final_video"] and os.path.exists(group["director_final_video"]))
+            )
+            use_dir = not use_creative and (pub_ver == "director" or (
+                pub_ver == "both"
+                and group["director_final_video"]
+                and os.path.exists(group["director_final_video"])
+            ))
+            if use_creative:
+                video_path = group["creative_final_video"]
+            elif use_dir:
+                video_path = group["director_final_video"]
+            elif group["merged_filename"]:
+                video_path = os.path.join(video_base, group["merged_filename"])
+            else:
+                continue  # no video available, skip
 
             cur = await db.execute(
                 """INSERT INTO publish_tasks
@@ -2184,7 +2888,7 @@ async def batch_schedule_tasks(body: BatchScheduleCreate):
                     title, description, tags, product_id, product_ids, video_path, no_cart)
                    VALUES (?, ?, ?, 'scheduled', ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (group["id"], body.platform, body.account_id, scheduled_at,
-                 title, description, tags,
+                 None, None, None,
                  first_product_id, product_ids_str, video_path,
                  1 if body.no_cart else 0),
             )
@@ -2196,6 +2900,35 @@ async def batch_schedule_tasks(body: BatchScheduleCreate):
             })
         await db.commit()
 
+    # Phase 2: if auto_meta requested, generate titles in background (non-blocking)
+    if body.auto_meta and created_tasks:
+        async def _fill_meta_background(task_list):
+            for item in task_list:
+                try:
+                    meta = await generate_meta(item["group_id"])
+                    if not meta:
+                        continue
+                    # generate_meta returns {"schemes": [...]} — pick first scheme
+                    schemes = meta.get("schemes", [])
+                    if schemes:
+                        best = schemes[0]
+                    else:
+                        best = meta  # legacy single-scheme
+                    title = best.get("title") or meta.get("title")
+                    description = best.get("description") or meta.get("description")
+                    tags = best.get("tags") or meta.get("tags")
+                    if not title:
+                        continue
+                    async with aio_connect() as db2:
+                        await db2.execute(
+                            "UPDATE publish_tasks SET title=?, description=?, tags=? WHERE id=?",
+                            (title, description, tags, item["task_id"]),
+                        )
+                        await db2.commit()
+                except Exception:
+                    pass
+        asyncio.create_task(_fill_meta_background(list(created_tasks)))
+
     return {
         "created": len(created_tasks),
         "tasks": created_tasks,
@@ -2205,7 +2938,7 @@ async def batch_schedule_tasks(body: BatchScheduleCreate):
 
 @app.get("/api/publish-tasks/{task_id}")
 async def get_publish_task(task_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT t.*, g.label as group_label, g.merged_filename,
@@ -2223,9 +2956,41 @@ async def get_publish_task(task_id: int):
     return dict(task)
 
 
+@app.delete("/api/publish-tasks/bulk-cancel", status_code=200)
+async def bulk_cancel_publish_tasks(body: dict):
+    """Bulk cancel pending/scheduled tasks. body: {status: 'all'|'scheduled'|'pending', ids: [int, ...]}
+    If ids is provided, cancel only those. Otherwise cancel by status filter."""
+    ids = body.get("ids")
+    status_filter = body.get("status", "all")
+    async with aio_connect() as db:
+        if ids:
+            placeholders = ",".join("?" * len(ids))
+            async with db.execute(
+                f"SELECT id FROM publish_tasks WHERE id IN ({placeholders}) AND status IN ('pending','scheduled','failed')",
+                ids,
+            ) as cur:
+                valid_ids = [r[0] for r in await cur.fetchall()]
+            if valid_ids:
+                await db.execute(
+                    f"DELETE FROM publish_tasks WHERE id IN ({','.join('?' * len(valid_ids))})",
+                    valid_ids,
+                )
+        else:
+            if status_filter == "all":
+                await db.execute("DELETE FROM publish_tasks WHERE status IN ('pending','scheduled','failed')")
+            elif status_filter in ("pending", "scheduled", "failed"):
+                await db.execute("DELETE FROM publish_tasks WHERE status = ?", (status_filter,))
+            else:
+                raise HTTPException(status_code=400, detail="status must be all/scheduled/pending/failed")
+        await db.commit()
+        async with db.execute("SELECT changes()") as cur:
+            deleted = (await cur.fetchone())[0]
+    return {"deleted": deleted}
+
+
 @app.delete("/api/publish-tasks/{task_id}", status_code=204)
 async def cancel_publish_task(task_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT status FROM publish_tasks WHERE id = ?", (task_id,)) as cur:
             task = await cur.fetchone()
@@ -2233,14 +2998,14 @@ async def cancel_publish_task(task_id: int):
         raise HTTPException(status_code=404, detail="Task not found")
     if task["status"] not in ("pending", "scheduled", "failed"):
         raise HTTPException(status_code=409, detail="Can only cancel pending/scheduled/failed tasks")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         await db.execute("DELETE FROM publish_tasks WHERE id = ?", (task_id,))
         await db.commit()
 
 
 @app.post("/api/publish-tasks/{task_id}/retry")
 async def retry_publish_task(task_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM publish_tasks WHERE id = ?", (task_id,)) as cur:
             task = await cur.fetchone()
@@ -2248,7 +3013,7 @@ async def retry_publish_task(task_id: int):
         raise HTTPException(status_code=404, detail="Task not found")
     if task["status"] != "failed":
         raise HTTPException(status_code=409, detail="Can only retry failed tasks")
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         await db.execute(
             "UPDATE publish_tasks SET status = 'pending', error_msg = NULL WHERE id = ?",
             (task_id,),
@@ -2257,11 +3022,39 @@ async def retry_publish_task(task_id: int):
     return {"task_id": task_id, "status": "pending"}
 
 
+@app.post("/api/publish-tasks/{task_id}/regen-meta")
+async def regen_publish_task_meta(task_id: int):
+    """Re-generate title/description/tags for a single publish task via LLM."""
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT group_id FROM publish_tasks WHERE id = ?", (task_id,)) as cur:
+            task = await cur.fetchone()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    meta = await generate_meta(task["group_id"])
+    if not meta:
+        raise HTTPException(status_code=500, detail="LLM metadata generation failed")
+    schemes = meta.get("schemes", [])
+    best = schemes[0] if schemes else meta
+    title = best.get("title") or meta.get("title")
+    description = best.get("description") or meta.get("description")
+    tags = best.get("tags") or meta.get("tags")
+    if not title:
+        raise HTTPException(status_code=500, detail="No title generated")
+    async with aio_connect() as db:
+        await db.execute(
+            "UPDATE publish_tasks SET title=?, description=?, tags=? WHERE id=?",
+            (title, description, tags, task_id),
+        )
+        await db.commit()
+    return {"task_id": task_id, "title": title, "description": description, "tags": tags}
+
+
 # ── Meta generation ───────────────────────────────────────────────────────────
 
 @app.post("/api/groups/{group_id}/generate-meta")
 async def generate_group_meta(group_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT id FROM clip_groups WHERE id = ?", (group_id,)) as cur:
             if not await cur.fetchone():
@@ -2279,7 +3072,7 @@ async def generate_group_thumbnail(group_id: int, body: dict = {}):
     """Regenerate the thumbnail for a group's merged video with a specific scheme."""
     scheme_type = body.get("scheme_type", "种草") if body else "种草"
     title = body.get("title", "") if body else ""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT merged_filename FROM clip_groups WHERE id = ?", (group_id,)
@@ -2301,7 +3094,7 @@ async def generate_group_thumbnail(group_id: int, body: dict = {}):
 
 @app.post("/api/groups/{group_id}/match-product")
 async def match_group_product(group_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT id FROM clip_groups WHERE id = ?", (group_id,)) as cur:
             if not await cur.fetchone():
@@ -2408,5 +3201,19 @@ async def stream_login_refresh():
 
 frontend_dist = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
 if os.path.exists(frontend_dist):
-    app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
+    # Serve compiled assets directly (JS/CSS/images)
+    assets_dir = os.path.join(frontend_dist, "assets")
+    if os.path.exists(assets_dir):
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+    # SPA catch-all: serve index.html for every unmatched path so Vue Router works
+    _spa_index = os.path.join(frontend_dist, "index.html")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_spa(full_path: str):
+        # Serve any file that actually exists in dist (e.g. favicon.ico)
+        candidate = os.path.join(frontend_dist, full_path)
+        if os.path.isfile(candidate):
+            return FileResponse(candidate)
+        return FileResponse(_spa_index)
 

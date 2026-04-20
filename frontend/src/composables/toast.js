@@ -12,5 +12,5 @@ export function useToast() {
       if (i !== -1) toasts.splice(i, 1)
     }, duration)
   }
-  return { toasts, showToast }
+  return { toasts, showToast, show: showToast }
 }
