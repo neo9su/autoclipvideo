@@ -324,6 +324,22 @@ export async function cancelPublishTask(id) {
   if (!res.ok) throw new Error(await res.text())
 }
 
+export async function regenPublishTaskMeta(id) {
+  const res = await fetch(`${BASE}/api/publish-tasks/${id}/regen-meta`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function reschedulePublishTask(id, scheduledAt) {
+  const res = await fetch(`${BASE}/api/publish-tasks/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scheduled_at: scheduledAt }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
 export async function bulkCancelPublishTasks(body) {
   const res = await fetch(`${BASE}/api/publish-tasks/bulk-cancel`, {
     method: 'DELETE',

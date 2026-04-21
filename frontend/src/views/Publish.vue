@@ -28,6 +28,8 @@
             <span v-if="t.no_cart" class="badge badge-no-cart">无车</span>
             <button v-if="['failed','publishing'].includes(t.status)"
               class="btn-xs btn-retry" @click.stop="retryTask(t.id)" title="重试">↺</button>
+            <button v-if="t.status === 'scheduled' && isExpired(t.scheduled_at)"
+              class="btn-xs btn-retry" @click.stop="openReschedule(t)" title="重新排期">↻</button>
             <button v-if="t.status === 'failed'"
               class="btn-xs btn-danger btn-del-failed" @click.stop="deleteFailedTask(t.id)" title="删除">×</button>
           </div>
@@ -53,6 +55,8 @@
           </div>
           <div class="detail-actions">
             <button v-if="['failed','publishing'].includes(selectedTask.status)" class="btn-primary" @click="retryTask(selectedTask.id)">重试</button>
+            <button v-if="selectedTask.status === 'scheduled' && isExpired(selectedTask.scheduled_at)" class="btn-warning" @click="openReschedule(selectedTask)">重新排期</button>
+            <button class="btn-secondary" @click="regenMeta(selectedTask.id)" :disabled="regenning" title="重新生成标题和文案">{{ regenning ? '生成中…' : '重生成文案' }}</button>
             <button v-if="selectedTask.status === 'failed'" class="btn-danger" @click="deleteFailedTask(selectedTask.id)">删除</button>
             <button v-if="['pending','scheduled'].includes(selectedTask.status)" class="btn-danger" @click="cancelTask(selectedTask.id)">取消</button>
           </div>
@@ -311,6 +315,20 @@
       </div>
     </div>
 
+    <!-- Reschedule modal -->
+    <div v-if="showRescheduleModal" class="modal-overlay" @click.self="showRescheduleModal = false">
+      <div class="modal" style="max-width:360px">
+        <h3>重新排期</h3>
+        <p class="muted" style="font-size:13px;margin:4px 0 12px">为「{{ rescheduleTask?.title || rescheduleTask?.id }}」设置新的发布时间</p>
+        <label>新发布时间 *</label>
+        <input v-model="rescheduleTime" type="datetime-local" class="input" />
+        <div class="modal-actions" style="margin-top:16px">
+          <button class="btn-secondary" @click="showRescheduleModal = false">取消</button>
+          <button class="btn-primary" @click="submitReschedule" :disabled="!rescheduleTime">确认</button>
+        </div>
+      </div>
+    </div>
+
     <!-- Batch schedule modal -->
     <div v-if="showBatchModal" class="modal-overlay" @click.self="showBatchModal = false">
       <div class="modal">
@@ -421,7 +439,7 @@ import {
   getRooms, getGroups, getGroup, getPublishTasks, createPublishTask, retryPublishTask, cancelPublishTask, bulkCancelPublishTasks,
   getProducts, getPublishAccounts, createPublishAccount, deletePublishAccount, loginPublishAccount,
   generatePublishMeta, matchGroupProduct, createWS, deleteGroup, reclipRecording,
-  getUnscheduledGroups, batchSchedulePublish,
+  getUnscheduledGroups, batchSchedulePublish, regenPublishTaskMeta, reschedulePublishTask,
 } from '../api.js'
 import { useToast } from '../composables/toast.js'
 
@@ -429,6 +447,10 @@ const { showToast } = useToast()
 
 const tasks = ref([])
 const selectedTask = ref(null)
+const regenning = ref(false)
+const showRescheduleModal = ref(false)
+const rescheduleTask = ref(null)
+const rescheduleTime = ref('')
 const showCreateModal = ref(false)
 watch(showCreateModal, (v) => { if (v) refreshGroups() })
 const statusFilter = ref('')
@@ -687,6 +709,50 @@ async function deleteFailedTask(id) {
     showToast('已删除', 'success')
   } catch (e) {
     showToast('删除失败: ' + e.message, 'error')
+  }
+}
+
+function isExpired(iso) {
+  if (!iso) return false
+  return new Date(iso) < new Date()
+}
+
+function openReschedule(task) {
+  rescheduleTask.value = task
+  // Default to 30 minutes from now
+  const d = new Date(Date.now() + 30 * 60000)
+  rescheduleTime.value = d.toISOString().slice(0, 16)
+  showRescheduleModal.value = true
+}
+
+async function submitReschedule() {
+  if (!rescheduleTask.value || !rescheduleTime.value) return
+  try {
+    await reschedulePublishTask(rescheduleTask.value.id, new Date(rescheduleTime.value).toISOString())
+    showRescheduleModal.value = false
+    await loadTasks()
+    if (selectedTask.value?.id === rescheduleTask.value.id) {
+      selectedTask.value = tasks.value.find(t => t.id === rescheduleTask.value.id) || null
+    }
+    showToast('已重新排期', 'success')
+  } catch (e) {
+    showToast('重新排期失败: ' + e.message, 'error')
+  }
+}
+
+async function regenMeta(id) {
+  regenning.value = true
+  try {
+    const result = await regenPublishTaskMeta(id)
+    await loadTasks()
+    if (selectedTask.value?.id === id) {
+      selectedTask.value = tasks.value.find(t => t.id === id) || null
+    }
+    showToast('文案已更新: ' + (result.title || ''), 'success')
+  } catch (e) {
+    showToast('重生成失败: ' + e.message, 'error')
+  } finally {
+    regenning.value = false
   }
 }
 
@@ -1073,6 +1139,7 @@ label { display: block; font-size: 12px; color: #888; margin: 12px 0 4px; }
 .btn-xs { background: #2a2a2a; color: #ccc; border: 1px solid #444; border-radius: 4px; padding: 3px 8px; cursor: pointer; font-size: 11px; margin-right: 4px; }
 .btn-xs.btn-danger { color: #fe2c55; border-color: #fe2c55; }
 .btn-xs.btn-retry { color: #60a5fa; border-color: #60a5fa; padding: 2px 6px; margin-left: auto; }
+.btn-warning { background: transparent; color: #f59e0b; border: 1px solid #f59e0b; border-radius: 6px; padding: 7px 16px; cursor: pointer; font-size: 13px; }
 .btn-xs.btn-del-failed { color: #fe2c55; border-color: #fe2c55; padding: 2px 7px; margin-left: 4px; font-size: 13px; line-height: 1; }
 
 .badge { border-radius: 4px; padding: 2px 8px; font-size: 11px; }

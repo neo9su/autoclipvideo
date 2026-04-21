@@ -3022,6 +3022,34 @@ async def retry_publish_task(task_id: int):
     return {"task_id": task_id, "status": "pending"}
 
 
+@app.patch("/api/publish-tasks/{task_id}")
+async def update_publish_task(task_id: int, body: dict):
+    """Partial update: currently supports scheduled_at (reschedule) and status reset."""
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM publish_tasks WHERE id = ?", (task_id,)) as cur:
+            task = await cur.fetchone()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    updates = {}
+    if "scheduled_at" in body:
+        updates["scheduled_at"] = body["scheduled_at"]
+        # Reset status to 'scheduled' when rescheduling an expired task
+        if task["status"] in ("scheduled", "failed"):
+            updates["status"] = "scheduled"
+            updates["error_msg"] = None
+    if not updates:
+        raise HTTPException(status_code=400, detail="No valid fields to update")
+    set_clause = ", ".join(f"{k} = ?" for k in updates)
+    async with aio_connect() as db:
+        await db.execute(
+            f"UPDATE publish_tasks SET {set_clause} WHERE id = ?",
+            (*updates.values(), task_id),
+        )
+        await db.commit()
+    return {"task_id": task_id, **updates}
+
+
 @app.post("/api/publish-tasks/{task_id}/regen-meta")
 async def regen_publish_task_meta(task_id: int):
     """Re-generate title/description/tags for a single publish task via LLM."""

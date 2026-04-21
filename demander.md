@@ -1,7 +1,7 @@
 # 需求清单 — douyin-recorder
 
 > 本文件由 Claude Code 自动维护。每次对话结束前回写，新对话开始时优先读取。
-> 最后更新：2026-04-21（阶段十一）
+> 最后更新：2026-04-21（阶段十二）
 
 ---
 
@@ -10,7 +10,8 @@
 | 版本 | Tag | 日期 | 说明 |
 |------|-----|------|------|
 | v1.4.0 | `v1.4.0` | 2026-04-16 | 巨量千川合规改造 + 剪辑质量升级 |
-| **v1.5.0** | **`v1.5.0`** | **2026-04-21** | **SQLite并发锁修复 + 自编版发布 + 批量排期重构 + 商品购物车直播间筛选修复** |
+| v1.5.0 | `v1.5.0` | 2026-04-21 | SQLite并发锁修复 + 自编版发布 + 批量排期重构 + 购物车筛选修复 |
+| **v1.6.0** | **`v1.6.0`** | **2026-04-21** | **发布任务过期重排期 + 文案重生成按钮 + 批量排期 meta 解析修复** |
 
 ### 回退方法
 ```bash
@@ -58,6 +59,23 @@ git checkout main
 4. VideoToolbox 在 Apple Silicon 上分配 Metal buffer，无法 Swap，直接吃统一内存
 5. 输出分辨率 4K(2160×3840)，每路 VideoToolbox 需 1~2GB → 6 路 = 6~12GB，严重超出 8GB
 6. 内存监控阈值 `MEM_WARN_GB=20` 在 8GB 机器上永远触发不了（形同虚设）
+
+---
+
+## 阶段十二：发布任务 UX 修复（已完成 2026-04-21）
+
+### 问题
+1. 批量排期创建的所有任务无标题（meta schemes 格式解析错误，`meta["title"]` 为 None）
+2. 过期的定时任务没有重新排期入口
+3. 无法手动重生成单条任务的文案
+
+### 改动清单
+
+| 文件 | 改动 |
+|------|------|
+| `backend/main.py` | 新增 `PATCH /api/publish-tasks/{id}`（修改 scheduled_at，自动重置 status=scheduled）；修复 `_fill_meta_background` 和 `regen_publish_task_meta` 的 schemes 格式解析（取 `schemes[0]["title"]` 而非 `meta["title"]`）；新增 `POST /api/publish-tasks/{id}/regen-meta` |
+| `frontend/src/api.js` | 新增 `regenPublishTaskMeta()`、`reschedulePublishTask()` |
+| `frontend/src/views/Publish.vue` | 任务列表行：过期 scheduled 任务加「↻」重新排期按钮；详情面板：加「重新排期」（黄色）+ 「重生成文案」按钮；新增重新排期弹窗；新增 `isExpired()`、`openReschedule()`、`submitReschedule()`、`regenMeta()` 函数 |
 
 ---
 
