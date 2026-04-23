@@ -20,6 +20,8 @@ import time
 import aiohttp
 import httpx
 
+from notifier import notify
+
 logger = logging.getLogger(__name__)
 
 GPU_SERVICE_URL = os.environ.get("GPU_SERVICE_URL", "http://10.190.0.203:8877")
@@ -156,6 +158,10 @@ async def watch_gpu_service(broadcast_fn=None) -> None:
                     logger.info(f"GPU service online ✓" + (f" (was down {down}s)" if down else ""))
                     if broadcast_fn:
                         await _safe_broadcast(broadcast_fn, {"type": "gpu_online"})
+                    if down > 60:
+                        asyncio.create_task(notify(
+                            f"✅ GPU服务器已恢复上线（离线了 {down//60} 分 {down%60} 秒）"
+                        ))
                     backoff = MIN_BACKOFF
                     last_autostart = 0.0  # reset so next outage triggers fresh
                     # Fire recovery callbacks (e.g. auto-retry failed clip jobs)
@@ -185,6 +191,11 @@ async def watch_gpu_service(broadcast_fn=None) -> None:
                         if broadcast_fn:
                             await _safe_broadcast(broadcast_fn, {"type": "gpu_offline", "since": down})
                         last_reminder = now
+                        # 离线超过5分钟时告警（每5分钟最多发一次）
+                        if down >= 300 and down % 300 < MAX_BACKOFF:
+                            asyncio.create_task(notify(
+                                f"⚠️ GPU服务器离线已 {down//60} 分钟 ({GPU_SERVICE_URL})"
+                            ))
 
                     # auto-start via watchdog
                     if (down >= AUTO_START_AFTER

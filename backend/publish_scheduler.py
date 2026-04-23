@@ -12,6 +12,7 @@ from typing import Callable, Optional
 import aiosqlite
 
 from db import DB_PATH, aio_connect
+from notifier import notify
 
 logger = logging.getLogger(__name__)
 
@@ -177,10 +178,33 @@ async def _execute_task(task: dict, broadcast_fn: Optional[Callable] = None):
         published_at = datetime.now(timezone.utc).isoformat()
         await _set_status("done", published_at=published_at)
         logger.info(f"Task {task_id} published: {url}")
+        title = task.get("title") or f"任务#{task_id}"
+        asyncio.create_task(notify(f"✅ 抖音发布成功：{title}"))
 
     except Exception as e:
-        logger.error(f"Task {task_id} failed: {e}")
-        await _set_status("failed", error_msg=str(e)[:500])
+        err_msg = str(e)
+        logger.error(f"Task {task_id} failed: {err_msg}")
+        # 不可重试的错误类型
+        non_retryable = ["视频质量不达标", "Video file not found", "video file not found"]
+        is_retryable = not any(kw in err_msg for kw in non_retryable)
+        retry_count = task.get("retry_count", 0) or 0
+        if is_retryable and retry_count < 2:
+            new_retry = retry_count + 1
+            logger.info(f"Task {task_id} will retry ({new_retry}/2) in 30s")
+            await asyncio.sleep(30)
+            async with aio_connect() as db:
+                await db.execute(
+                    "UPDATE publish_tasks SET status='pending', retry_count=?, error_msg=? WHERE id=?",
+                    (new_retry, f"[重试{new_retry}/2] {err_msg[:400]}", task_id),
+                )
+                await db.commit()
+        else:
+            await _set_status("failed", error_msg=err_msg[:500])
+            title = task.get("title") or f"任务#{task_id}"
+            retry_info = f"（已重试{retry_count}次）" if retry_count > 0 else ""
+            asyncio.create_task(notify(
+                f"🚨 抖音发布失败{retry_info}：{title}\n原因：{err_msg[:200]}"
+            ))
 
 
 async def _reset_stuck_publishing_tasks():

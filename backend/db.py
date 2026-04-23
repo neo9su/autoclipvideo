@@ -174,6 +174,8 @@ async def init_db():
             "ALTER TABLE clip_groups ADD COLUMN creative_final_video TEXT",
             # 商品缩略图
             "ALTER TABLE products ADD COLUMN product_thumb TEXT",
+            # 发布重试计数
+            "ALTER TABLE publish_tasks ADD COLUMN retry_count INTEGER DEFAULT 0",
         ]:
             try:
                 await db.execute(migration)
