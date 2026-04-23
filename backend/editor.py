@@ -1718,6 +1718,17 @@ def _select_from_valid(valid: List[Seg], clip_min: float = CLIP_MIN, clip_max: f
     if not valid:
         return []
 
+    # If total valid material is shorter than clip_min, include ALL valid segments
+    # (scoring/filtering cannot help when there simply isn't enough content)
+    total_valid_dur = sum(s.duration for s in valid)
+    if total_valid_dur <= clip_min:
+        logger.warning(
+            f"Valid material ({total_valid_dur:.1f}s) shorter than clip_min ({clip_min:.1f}s) — "
+            f"returning all valid segments as-is"
+        )
+        _assign_styles(valid, seed=0)
+        return sorted(valid, key=lambda s: s.start)
+
     used_ids: set = set()
 
     def _pick_block(cat: str, budget: float, max_segs: int = 2) -> List[Seg]:
@@ -1786,7 +1797,8 @@ def _select_from_valid(valid: List[Seg], clip_min: float = CLIP_MIN, clip_max: f
 
     # ── Fill remaining budget with unused segments ────────────────────────────
     used_dur = sum(s.duration for s in structured) + sum(s.duration for s in closer)
-    fill_budget = clip_max - used_dur
+    # fill_budget must be at least enough to reach clip_min
+    fill_budget = max(clip_max - used_dur, clip_min - used_dur)
     fill: List[Seg] = []
     if fill_budget > 0:
         fill_pool = sorted(
@@ -1795,8 +1807,11 @@ def _select_from_valid(valid: List[Seg], clip_min: float = CLIP_MIN, clip_max: f
         )
         used = 0.0
         for s in fill_pool:
-            # 允许轻微超出（+2s），避免截断
-            if used + s.duration > fill_budget + 2.0:
+            if used >= fill_budget + 2.0:
+                break
+            # Don't skip segments that are needed to reach clip_min
+            needed = max(0.0, clip_min - used_dur - used)
+            if needed <= 0 and used + s.duration > fill_budget + 2.0:
                 continue
             fill.append(s)
             used += s.duration
@@ -1817,7 +1832,7 @@ def _select_from_valid(valid: List[Seg], clip_min: float = CLIP_MIN, clip_max: f
         )
         extra_added = []
         for s in extras:
-            if total >= clip_max:
+            if total >= clip_min:  # stop once we've reached clip_min (not clip_max)
                 break
             extra_added.append(s)
             total += s.duration
@@ -1834,6 +1849,19 @@ def _select_from_valid(valid: List[Seg], clip_min: float = CLIP_MIN, clip_max: f
             key=lambda s: s.start,
         )
         assembled = body_trimmed + closer
+        # After cap, re-check clip_min: restore any dropped segments if needed
+        capped_dur = sum(s.duration for s in assembled)
+        if capped_dur < clip_min:
+            dropped = [s for s in body_segs if id(s) not in {id(x) for x in assembled}]
+            dropped_sorted = sorted(dropped, key=lambda s: s.score, reverse=True)
+            restore = []
+            for s in dropped_sorted:
+                if capped_dur >= clip_min:
+                    break
+                restore.append(s)
+                capped_dur += s.duration
+            body_final = sorted([s for s in assembled if s not in (closer if closer else [])] + restore, key=lambda s: s.start)
+            assembled = body_final + closer
 
     # ── Assign camera motion + transitions ────────────────────────────────────
     _seed = hash(assembled[0].text[:16]) & 0xFFFF if assembled else 0
@@ -2381,6 +2409,10 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
             c_min = (clip_duration * 0.85) if clip_duration else CLIP_MIN
             c_max = clip_duration if clip_duration else CLIP_MAX
 
+    # Enforce hard floor: never select below CLIP_MIN regardless of clip_duration
+    c_min = max(c_min, CLIP_MIN)
+    c_max = max(c_max, c_min)
+
     # Select clips
     selected = select_clips(segs, clip_min=c_min, clip_max=c_max)
     if not selected:
@@ -2547,6 +2579,10 @@ async def edit_recording_multi(
     else:
         c_min = (clip_duration * 0.85) if clip_duration else CLIP_MIN
         c_max = clip_duration if clip_duration else CLIP_MAX
+
+    # Enforce hard floor
+    c_min = max(c_min, CLIP_MIN)
+    c_max = max(c_max, c_min)
 
     from datetime import datetime
     date_str  = record_date or datetime.utcnow().strftime("%Y%m%d")
