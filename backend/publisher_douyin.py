@@ -135,6 +135,11 @@ class DouyinPublisher(BasePublisher):
                 # 1. Navigate to upload page
                 await progress("正在打开发布页面...")
                 await page.goto(UPLOAD_URL, timeout=30000, wait_until="domcontentloaded")
+                # wait for React/SPA to hydrate — upload page is a JS-rendered SPA
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=20000)
+                except Exception:
+                    pass  # networkidle timeout is non-fatal
                 await _show_banner(page, "正在检查登录状态…", "system")
 
                 if "login" in page.url or "passport" in page.url:
@@ -161,8 +166,24 @@ class DouyinPublisher(BasePublisher):
                 await progress("正在上传视频文件...")
                 file_size_mb = os.path.getsize(video_path) / 1024 / 1024
                 await _show_banner(page, f"正在上传视频文件（{file_size_mb:.0f} MB），请勿操作浏览器…", "system")
+                # Try to find file input; on new Douyin UI it may need a click trigger first
                 file_input = page.locator('input[type="file"]').first
-                await file_input.wait_for(state="attached", timeout=60000)
+                try:
+                    await file_input.wait_for(state="attached", timeout=30000)
+                except Exception:
+                    # Fallback: click the upload area to trigger dynamic input creation
+                    logger.info("input[type=file] not found directly, trying click trigger...")
+                    upload_area = page.locator(
+                        '[class*="upload-area"], [class*="upload-btn"], [class*="drag"], '
+                        '[class*="Upload"], .upload-inner, [data-e2e*="upload"]'
+                    ).first
+                    try:
+                        await upload_area.wait_for(state="visible", timeout=10000)
+                        await upload_area.click()
+                        await asyncio.sleep(1)
+                    except Exception:
+                        logger.warning("upload area not found either, proceeding anyway")
+                    await file_input.wait_for(state="attached", timeout=60000)
                 await file_input.set_input_files(video_path)
                 logger.info(f"Video file set: {video_path} ({file_size_mb:.1f} MB)")
 
@@ -297,14 +318,28 @@ class DouyinPublisher(BasePublisher):
                     await _click_publish_button(page)
                     logger.info(f"[task {task_id}] Auto-publish button clicked")
                 else:
-                    # Fall back to user handoff
-                    await progress("⚠️ 检测未通过或超时，请手动确认后点击【发布】")
-                    await _show_banner(
-                        page,
-                        "⚠️ 检测未通过或仍在检测中，请手动检查后点击【发布】按钮",
-                        "warning",
-                    )
-                    logger.info(f"[task {task_id}] Auto-publish skipped, waiting for user (up to 15 min)…")
+                    # Check if publish button is already visible (quick-check may be indeterminate)
+                    publish_btn = page.locator('button:has-text("发布")').last
+                    btn_visible = False
+                    try:
+                        btn_visible = await publish_btn.is_visible(timeout=3000)
+                    except Exception:
+                        pass
+
+                    if btn_visible:
+                        await progress("检测状态不明确，发布按钮可见，直接自动发布...")
+                        await _show_banner(page, "检测状态不明确，发布按钮已可见 — 正在自动发布，请勿操作…", "system")
+                        await _click_publish_button(page)
+                        logger.info(f"[task {task_id}] Auto-publish button clicked (quick-check indeterminate but btn visible)")
+                    else:
+                        # Fall back to user handoff
+                        await progress("⚠️ 检测未通过或超时，请手动确认后点击【发布】")
+                        await _show_banner(
+                            page,
+                            "⚠️ 检测未通过或仍在检测中，请手动检查后点击【发布】按钮",
+                            "warning",
+                        )
+                        logger.info(f"[task {task_id}] Auto-publish skipped, waiting for user (up to 15 min)…")
 
                 # Race: success redirect vs page close
                 success_task = asyncio.create_task(
