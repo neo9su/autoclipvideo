@@ -261,6 +261,15 @@ async def poll_publish_tasks(broadcast_fn: Optional[Callable] = None, interval: 
                 ) as cur:
                     tasks = await cur.fetchall()
 
+            # ── 低活跃时段检查：00:00~07:00 期间跳过发布 ────────────────────
+            _now_local = datetime.now()  # 本地时间
+            _hour = _now_local.hour
+            if 0 <= _hour < 7:
+                logger.info(f"当前时间 {_hour:02d}:{_now_local.minute:02d}，处于低活跃时段（00:00-07:00），跳过本次调度")
+                await asyncio.sleep(interval)
+                continue
+            # ────────────────────────────────────────────────────────────────────
+
             task_started = False
             for task in tasks:
                 logger.info(f"Starting single task {task['id']}")
