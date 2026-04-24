@@ -249,25 +249,32 @@ async def _gpu_classic_concat(gpu_url: str, clip_paths: list, out_path: str, gro
     This path is always available regardless of GPU service restarts because
     it sends the actual clip files rather than relying on in-memory job IDs.
     """
-    import httpx
-
     logger.info(f"Group {group_id}: uploading {len(clip_paths)} clips to GPU for NVENC classic-concat")
 
     # Upload all clip files as multipart
-    files = []
+    fds = []
     try:
+        form = aiohttp.FormData()
         for p in clip_paths:
-            files.append(("files", (os.path.basename(p), open(p, "rb"), "video/mp4")))
+            fd = open(p, "rb")
+            fds.append(fd)
+            form.add_field("files", fd, filename=os.path.basename(p), content_type="video/mp4")
 
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            resp = await client.post(f"{gpu_url}/classic-concat-jobs", files=files)
-        if resp.status_code != 201:
-            raise RuntimeError(f"classic-concat-jobs POST failed: {resp.status_code} {resp.text[:200]}")
-        job_id = resp.json()["job_id"]
+        async with aiohttp.ClientSession() as client:
+            async with client.post(
+                f"{gpu_url}/classic-concat-jobs",
+                data=form,
+                timeout=aiohttp.ClientTimeout(total=300),
+            ) as resp:
+                if resp.status != 201:
+                    text = await resp.text()
+                    raise RuntimeError(f"classic-concat-jobs POST failed: {resp.status} {text[:200]}")
+                body = await resp.json()
+                job_id = body["job_id"]
     finally:
-        for _, (_, fobj, _) in files:
+        for fd in fds:
             try:
-                fobj.close()
+                fd.close()
             except Exception:
                 pass
 
@@ -275,12 +282,15 @@ async def _gpu_classic_concat(gpu_url: str, clip_paths: list, out_path: str, gro
 
     # Poll for completion (20 min max; NVENC per-clip encoding takes time)
     deadline = time.time() + 1200
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with aiohttp.ClientSession() as client:
         while time.time() < deadline:
             await asyncio.sleep(8)
             try:
-                resp = await client.get(f"{gpu_url}/classic-concat-jobs/{job_id}")
-                data = resp.json()
+                async with client.get(
+                    f"{gpu_url}/classic-concat-jobs/{job_id}",
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as r:
+                    data = await r.json()
             except Exception as e:
                 logger.warning(f"Group {group_id}: GPU classic-concat poll error: {e}")
                 continue
@@ -294,12 +304,15 @@ async def _gpu_classic_concat(gpu_url: str, clip_paths: list, out_path: str, gro
     # Download result
     out_filename = os.path.basename(out_path)
     logger.info(f"Group {group_id}: downloading GPU classic-concat {job_id}")
-    async with httpx.AsyncClient(timeout=300.0) as client:
-        async with client.stream("GET", f"{gpu_url}/classic-concat-jobs/{job_id}/mp4") as resp:
-            if resp.status_code != 200:
-                raise RuntimeError(f"classic-concat MP4 download failed: {resp.status_code}")
+    async with aiohttp.ClientSession() as client:
+        async with client.get(
+            f"{gpu_url}/classic-concat-jobs/{job_id}/mp4",
+            timeout=aiohttp.ClientTimeout(total=300),
+        ) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"classic-concat MP4 download failed: {resp.status}")
             with open(out_path, "wb") as f:
-                async for chunk in resp.aiter_bytes(65536):
+                async for chunk in resp.content.iter_chunked(65536):
                     f.write(chunk)
 
     if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
