@@ -2856,10 +2856,38 @@ async def batch_schedule_tasks(body: BatchScheduleCreate):
     video_base = os.path.join(os.path.dirname(__file__), "..", "recordings")
     created_tasks = []
 
+    # ── 黄金时段对齐辅助函数 ───────────────────────────────────────────
+    def _snap_to_golden_hour(dt: datetime) -> datetime:
+        """将时间对齐到最近的黄金时段起始点。
+        黄金时段：12:00-13:00 / 18:00-20:00 / 21:00-22:00
+        如果已在黄金时段内，不调整。
+        如果在低活跃时段（00:00-07:00），顺延到当天 12:00。
+        """
+        # 黄金时段区间 (start_hour, end_hour)
+        GOLDEN = [(12, 13), (18, 20), (21, 22)]
+        h = dt.hour
+        # 已在黄金时段内
+        for gs, ge in GOLDEN:
+            if gs <= h < ge:
+                return dt
+        # 低活跃时段 00-07，跳到当天 12:00
+        if 0 <= h < 7:
+            return dt.replace(hour=12, minute=0, second=0, microsecond=0)
+        # 其他时段，找下一个黄金时段起始点
+        from datetime import date as _date
+        for gs, ge in GOLDEN:
+            if h < gs:
+                return dt.replace(hour=gs, minute=dt.minute % 60, second=0, microsecond=0)
+        # 超过最晚黄金时段，顺延到明天 12:00
+        next_day = dt.replace(hour=12, minute=0, second=0, microsecond=0) + timedelta(days=1)
+        return next_day
+    # ────────────────────────────────────────────────────────────────────
+
     # Phase 1: insert all tasks immediately without waiting for LLM meta
     async with aio_connect() as db:
         for i, group in enumerate(groups):
-            scheduled_at = (start_dt + timedelta(minutes=body.interval_minutes * i)).isoformat()
+            raw_dt = start_dt + timedelta(minutes=body.interval_minutes * i)
+            scheduled_at = _snap_to_golden_hour(raw_dt).isoformat()
             # Pick video based on publish_versions
             pub_ver = group["publish_versions"] or "both"
             use_creative = pub_ver == "creative" or (

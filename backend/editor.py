@@ -49,13 +49,13 @@ def _pick_music() -> Optional[str]:
         logger.warning(f"BGM generation failed: {e}")
         return None
 CLIP_MIN = 30.0   # seconds (三段式叙事最短时长)
-CLIP_MAX = 90.0   # seconds (平台优质上限)
+CLIP_MAX = 60.0   # seconds（抖音完播率最佳上限 60s，>60s 完播率明显下降）
 MAX_CLIP_SEGMENTS = 50  # cap to avoid ffmpeg resource exhaustion
 SEG_PAD = 0.0     # no padding — avoids duplicate audio at segment boundaries
 
 # v2 引擎参数（发型边界识别模式）
 CLIP_MIN_V2 = 46.0   # 抖音竖屏短视频最优完播区间下限
-CLIP_MAX_V2 = 90.0   # 上限
+CLIP_MAX_V2 = 60.0   # 上限（抖音完播率最佳 ≤60s）
 
 # ── Patterns that trigger segment removal ────────────────────────────────────
 _REMOVE_PATTERNS = [
