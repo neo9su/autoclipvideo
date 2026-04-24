@@ -89,12 +89,12 @@ VIBE_CONFIGS = {
         "description": "完全创作型文案，不受直播内容约束，自由发挥产品卖点，节奏紧凑有力",
         "narrative": "吸引开场 → 产品亮点 → 使用效果 → 限量紧迫 → 催单收尾",
         "pacing": "fast",
-        "scene_count_range": (5, 6),
+        "scene_count_range": (6, 8),
         "music_style": "动感电子、节拍清晰",
         "default_scene_sequence": [
             "hook", "demonstration", "transformation", "social_proof", "urgency", "cta"
         ],
-        "copywriting_style": "短句为主、节奏紧凑、自然口语、不叠词、每句话独立完整",
+        "copywriting_style": "每句20~30字、句子饱满完整、自然口语、不叠词、每句话独立完整",
     },
 }
 
@@ -273,7 +273,7 @@ warm / clear / natural / persuasive / confident / storytelling"""
     def _build_creative_prompt(self, wig_model: str, wig_color: str,
                                min_scenes: int, max_scenes: int, script_type: str) -> str:
         """自编文案 prompt：完全创作型，不依赖直播内容，允许编造卖点和催单。"""
-        return f"""你是抖音假发短视频文案编辑，为一款假发产品写一条45-55秒的配音脚本。
+        return f"""你是抖音假发短视频文案编辑，为一款假发产品写一条50-60秒的配音脚本。
 
 【产品信息】
 款式：{wig_model or "时尚假发"}  颜色：{wig_color or "自然色"}
@@ -281,11 +281,11 @@ warm / clear / natural / persuasive / confident / storytelling"""
 【写作要求】
 1. 完全自由创作——根据产品款式和颜色，发挥想象力写出吸引人的卖点
 2. 可以编造销量、好评、断货紧迫感，增加购买冲动
-3. 每句话15字以内，短句为主，节奏紧凑
+3. 每句话20~30字，句子要完整、饱满，不要过短，朗读出来至少需要3秒
 4. 严禁叠词开场——不能用「等等等等」「你看你看」「哇哦哇哦」「姐妹姐妹」等重复词，每个词只说一次
 5. 每个场景的配音是完整独立的一句话，朗读出来语义完整、不截断
 6. 口语化，像朋友推荐，不像广告播音腔
-7. 结尾固定用：「喜欢的姐妹赶紧冲，点关注不迷路！」
+7. 结尾固定用：「喜欢的姐妹，赶紧点小黄车，点关注不迷路！」
 
 叙事顺序：产品亮相 → 外观/颜色/质感亮点 → 上头效果 → 销量/好评/断货 → 催单收尾
 

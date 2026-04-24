@@ -298,6 +298,32 @@ class VoiceDirector:
                     pass
             return {"success": False, "error": "音频合并失败"}
 
+        # ── 时长保底：自编/导演模式合成音频 < 30s 时自动降速拉长 ──────────────
+        _MIN_AUDIO_DUR = 30.0
+        actual_merged_dur = await self._probe_duration(merged)
+        if actual_merged_dur > 0 and actual_merged_dur < _MIN_AUDIO_DUR:
+            stretch_ratio = _MIN_AUDIO_DUR / actual_merged_dur  # e.g. 16s→30s = 1.875x 拉慢
+            stretch_ratio = min(stretch_ratio, 2.0)  # atempo 下限 0.5，即最多拉慢2倍
+            atempo_val = 1.0 / stretch_ratio          # atempo<1 = 降速
+            stretched_path = merged + "_stretched.wav"
+            logger.info(f"Creative audio too short ({actual_merged_dur:.1f}s < {_MIN_AUDIO_DUR}s), "
+                        f"stretching {stretch_ratio:.2f}x (atempo={atempo_val:.3f})")
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y", "-i", merged,
+                "-filter:a", f"atempo={atempo_val:.3f}",
+                stretched_path,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.communicate()
+            if os.path.exists(stretched_path) and os.path.getsize(stretched_path) > 0:
+                os.replace(stretched_path, merged)
+                total_duration = await self._probe_duration(merged)
+                logger.info(f"Audio stretched to {total_duration:.1f}s")
+            else:
+                logger.warning("Audio stretch failed, keeping original (may be too short)")
+        # ─────────────────────────────────────────────────────────────────────
+
         return {
             "success":             True,
             "audio_segments":      audio_segments,
