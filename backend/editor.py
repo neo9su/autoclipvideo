@@ -1878,8 +1878,82 @@ def _select_from_valid(valid: List[Seg], clip_min: float = CLIP_MIN, clip_max: f
     return assembled
 
 
+def _expand_to_meet_minimum(
+    segs: List[Seg],
+    valid: List[Seg],
+    clip_min: float = CLIP_MIN,
+) -> List[Seg]:
+    """Progressively relax rejection filters until total duration >= clip_min.
+
+    Relaxation tiers (applied in order, stop when enough material is found):
+      Tier 1 — add segments rejected only for being too short (<3 s) or high
+               silence ratio; they are structurally intact and safe to include.
+      Tier 2 — add zero-score / negative-score segments (no keyword match,
+               or mildly penalised by avoid_kw); neutral content.
+      Tier 3 — allow ALL non-remove_pattern segments (silent, short, low-score).
+
+    Segments with reject_reason='remove_pattern' (链接/下播/催单硬广) are NEVER
+    included regardless of tier.
+    """
+    cur_dur = sum(s.duration for s in valid)
+    if cur_dur >= clip_min:
+        return valid  # already enough, nothing to do
+
+    valid_ids = {id(s) for s in valid}
+
+    # Build candidate pools per tier (excluding already-valid and remove_pattern)
+    tier1 = [
+        s for s in segs
+        if id(s) not in valid_ids
+        and s.reject_reason != "remove_pattern"
+        and s.reject_reason in ("too_short", "silence")
+        and s.duration >= 1.0   # ignore sub-second flickers
+    ]
+    tier2 = [
+        s for s in segs
+        if id(s) not in valid_ids
+        and s.reject_reason != "remove_pattern"
+        and s.reject_reason not in ("too_short", "silence")
+        and not s.valid          # any other invalidity (score<0, etc.)
+    ]
+    # Tier 3: everything that isn't remove_pattern and not already in pool
+    all_ids = valid_ids | {id(s) for s in tier1} | {id(s) for s in tier2}
+    tier3 = [
+        s for s in segs
+        if id(s) not in all_ids
+        and s.reject_reason != "remove_pattern"
+    ]
+
+    expanded = list(valid)
+    for tier_label, pool in [(1, tier1), (2, tier2), (3, tier3)]:
+        if cur_dur >= clip_min:
+            break
+        # Sort by time position so added segments read chronologically
+        pool_sorted = sorted(pool, key=lambda s: s.start)
+        for s in pool_sorted:
+            if cur_dur >= clip_min:
+                break
+            expanded.append(s)
+            cur_dur += s.duration
+        if cur_dur >= clip_min:
+            logger.info(
+                f"Padding: reached {cur_dur:.1f}s >= {clip_min:.0f}s after relaxing tier {tier_label}"
+            )
+
+    if cur_dur < clip_min:
+        logger.warning(
+            f"Padding exhausted all tiers: only {cur_dur:.1f}s available "
+            f"(hard minimum {clip_min:.0f}s — clip will be rejected)"
+        )
+
+    return expanded
+
+
 def select_clips(segs: List[Seg], clip_min: float = CLIP_MIN, clip_max: float = CLIP_MAX) -> List[Seg]:
     valid = [s for s in segs if s.valid]
+    # If strict-valid pool is insufficient, progressively relax filters
+    if sum(s.duration for s in valid) < CLIP_MIN:
+        valid = _expand_to_meet_minimum(segs, valid, clip_min)
     return _select_from_valid(valid, clip_min, clip_max)
 
 
@@ -1897,6 +1971,8 @@ def select_clips_variant(
         rng = random.Random(seed)
         valid = [s for s in segs if s.valid]
         rng.shuffle(valid)
+    if sum(s.duration for s in valid) < CLIP_MIN:
+        valid = _expand_to_meet_minimum(segs, valid, clip_min)
     return _select_from_valid(valid, clip_min, clip_max)
 
 
@@ -1994,6 +2070,7 @@ def _apply_hints(segs: List[Seg], hints: dict) -> None:
                 seg.score -= 5.0
                 if seg.score < 0:
                     seg.valid = False
+                    seg.reject_reason = seg.reject_reason or "low_score"
         # Time-range preferences
         mid = (seg.start + seg.end) / 2
         for s, e in preferred:
@@ -2002,6 +2079,7 @@ def _apply_hints(segs: List[Seg], hints: dict) -> None:
         for s, e in avoided:
             if s <= mid <= e:
                 seg.valid = False
+                seg.reject_reason = seg.reject_reason or "avoided_range"
 
 
 # ── GPU offload path ──────────────────────────────────────────────────────────
@@ -2348,6 +2426,7 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
         for seg in segs:
             if seg.valid and _silence_ratio(seg, silences) > 0.6:
                 seg.valid = False
+                seg.reject_reason = "silence"
                 logger.debug(f"Silence removed: [{seg.start:.1f}-{seg.end:.1f}] {seg.text[:30]}")
     except Exception as e:
         logger.warning(f"Silence detection skipped: {e}")
@@ -2546,6 +2625,7 @@ async def edit_recording_multi(
         for seg in segs:
             if seg.valid and _silence_ratio(seg, silences) > 0.6:
                 seg.valid = False
+                seg.reject_reason = "silence"
     except Exception as e:
         logger.warning(f"Silence detection skipped: {e}")
 
