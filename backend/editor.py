@@ -1718,13 +1718,21 @@ def _select_from_valid(valid: List[Seg], clip_min: float = CLIP_MIN, clip_max: f
     if not valid:
         return []
 
-    # If total valid material is shorter than clip_min, include ALL valid segments
-    # (scoring/filtering cannot help when there simply isn't enough content)
+    # Hard requirement: total valid material must be >= CLIP_MIN (30s).
+    # If there isn't enough content, return empty so the caller can reject the clip
+    # rather than produce an under-length video.
     total_valid_dur = sum(s.duration for s in valid)
-    if total_valid_dur <= clip_min:
+    if total_valid_dur < CLIP_MIN:
         logger.warning(
+            f"Valid material ({total_valid_dur:.1f}s) < hard minimum {CLIP_MIN:.0f}s — "
+            f"refusing to produce under-length clip"
+        )
+        return []
+    # If valid material is between CLIP_MIN and clip_min, use all of it
+    if total_valid_dur <= clip_min:
+        logger.info(
             f"Valid material ({total_valid_dur:.1f}s) shorter than clip_min ({clip_min:.1f}s) — "
-            f"returning all valid segments as-is"
+            f"returning all valid segments (still >= {CLIP_MIN:.0f}s hard floor)"
         )
         _assign_styles(valid, seed=0)
         return sorted(valid, key=lambda s: s.start)
@@ -2425,6 +2433,14 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
         f"[{', '.join(s.category for s in selected)}]"
     )
 
+    # Hard output duration gate: reject clips shorter than CLIP_MIN
+    if total_dur < CLIP_MIN:
+        logger.warning(
+            f"[{clip_engine}] Selected duration {total_dur:.1f}s < hard minimum {CLIP_MIN:.0f}s — "
+            f"refusing to encode under-length clip for {os.path.basename(mp4_path)}"
+        )
+        return None
+
     from datetime import datetime
     date_str  = record_date or datetime.utcnow().strftime("%Y%m%d")
     safe_name = re.sub(r'[\\/:*?"<>|]', '_', room_name)
@@ -2610,6 +2626,13 @@ async def edit_recording_multi(
         out_path = os.path.join(out_dir, f"{safe_name}_{date_str}_{base_seq:03d}_clip_v{k+1}.mp4")
         total_dur = sum(s.duration for s in selected)
         logger.info(f"Variant {k+1}: {len(selected)} segs, {total_dur:.1f}s")
+
+        # Hard output duration gate: skip variants shorter than CLIP_MIN
+        if total_dur < CLIP_MIN:
+            logger.warning(
+                f"Variant {k+1}: duration {total_dur:.1f}s < hard minimum {CLIP_MIN:.0f}s — skipping"
+            )
+            continue
 
         # ── Try GPU NVENC path first ──────────────────────────────────────────
         gpu_used = False
