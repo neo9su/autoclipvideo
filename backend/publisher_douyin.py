@@ -342,21 +342,24 @@ class DouyinPublisher(BasePublisher):
                         )
                         logger.info(f"[task {task_id}] Auto-publish skipped, waiting for user (up to 15 min)…")
 
-                # Race: success redirect vs page close
-                success_task = asyncio.create_task(
-                    page.wait_for_url("**/content/manage**", timeout=900000)
-                )
-                close_task = asyncio.create_task(page.wait_for_event("close", timeout=900000))
+                # Handle possible scan-to-verify popup after clicking publish
+                await _handle_scan_verify(page, progress)
 
-                done, pending = await asyncio.wait(
-                    [success_task, close_task],
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                for t in pending:
-                    t.cancel()
-
-                if close_task in done:
-                    raise RuntimeError("浏览器页面已被关闭，发布未完成")
+                # Wait for success redirect (up to 15 min)
+                try:
+                    await page.wait_for_url("**/content/manage**", timeout=900000)
+                except Exception as e:
+                    # Check if page was closed or navigated away unexpectedly
+                    try:
+                        current_url = page.url
+                    except Exception:
+                        current_url = "(page closed)"
+                    if "content/manage" in current_url:
+                        pass  # Already there
+                    else:
+                        raise RuntimeError(
+                            f"等待发布跳转超时（15分钟），发布未完成。当前URL={current_url}"
+                        ) from e
 
                 if "content/manage" not in page.url:
                     raise RuntimeError(
@@ -810,6 +813,67 @@ async def _click_publish_button(page):
             await asyncio.sleep(1)
     except Exception:
         pass
+
+
+async def _handle_scan_verify(page, progress=None) -> bool:
+    """
+    After clicking publish, Douyin may show a phone scan-to-verify QR dialog.
+    If detected, show a banner asking user to scan and wait up to 5 minutes
+    for the dialog to disappear before proceeding.
+
+    Returns True if scan was detected and completed, False if not needed.
+    """
+    # Common selectors for the scan-to-verify modal
+    SCAN_SELECTORS = [
+        ':text("手机扫码验证")',
+        ':text("扫码验证")',
+        ':text("安全验证")',
+        ':text("请扫码验证")',
+        '[class*="verify"][class*="qr"]',
+        '[class*="scan"][class*="modal"]',
+    ]
+    # Wait up to 4 seconds to see if scan dialog appears
+    scan_visible = False
+    for sel in SCAN_SELECTORS:
+        try:
+            loc = page.locator(sel).first
+            if await loc.is_visible(timeout=1500):
+                scan_visible = True
+                logger.info(f"Scan-to-verify dialog detected: {sel}")
+                break
+        except Exception:
+            continue
+
+    if not scan_visible:
+        return False
+
+    # Notify user
+    msg = "📱 抖音要求手机扫码验证，请打开抖音 APP 扫描二维码完成验证…"
+    if progress:
+        await progress(msg)
+    await _show_banner(page, msg, "warning")
+    logger.info("Waiting for scan-to-verify dialog to be dismissed (up to 5 min)…")
+
+    # Wait for all scan selectors to disappear (up to 5 min)
+    for _ in range(100):  # 100 × 3s = 5 min
+        await asyncio.sleep(3)
+        still_visible = False
+        for sel in SCAN_SELECTORS:
+            try:
+                if await page.locator(sel).first.is_visible(timeout=500):
+                    still_visible = True
+                    break
+            except Exception:
+                continue
+        if not still_visible:
+            logger.info("Scan-to-verify dialog dismissed, continuing…")
+            if progress:
+                await progress("✅ 扫码验证完成，继续等待发布跳转…")
+            await _show_banner(page, "✅ 扫码验证完成，等待发布跳转…", "system")
+            return True
+
+    logger.warning("Scan-to-verify dialog still visible after 5 min — proceeding anyway")
+    return True
 
 
 async def _click_btn_by_text(page, text: str, timeout: int = 3000) -> bool:
