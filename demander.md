@@ -1,7 +1,7 @@
 # 需求清单 — douyin-recorder
 
 > 本文件由 Claude Code 自动维护。每次对话结束前回写，新对话开始时优先读取。
-> 最后更新：2026-04-26（阶段十三）
+> 最后更新：2026-04-26（阶段十四）
 
 ---
 
@@ -12,7 +12,8 @@
 | v1.4.0 | `v1.4.0` | 2026-04-16 | 巨量千川合规改造 + 剪辑质量升级 |
 | v1.5.0 | `v1.5.0` | 2026-04-21 | SQLite并发锁修复 + 自编版发布 + 批量排期重构 + 购物车筛选修复 |
 | v1.6.0 | `v1.6.0` | 2026-04-21 | 发布任务过期重排期 + 文案重生成按钮 + 批量排期 meta 解析修复 |
-| **v1.7.0** | **`v1.7.0`** | **2026-04-26** | **视频时长校验 + SRT合并生成 + 无效分组合并保护** |
+| v1.7.0 | `v1.7.0` | 2026-04-26 | 视频时长校验 + SRT合并生成 + 无效分组合并保护 |
+| **v1.8.0** | **`v1.8.0`** | **2026-04-26** | **发布自动重试+通知+GPU告警 + 扫码验证检测 + AI文案8维度随机化** |
 
 ### 回退方法
 ```bash
@@ -60,6 +61,42 @@ git checkout main
 4. VideoToolbox 在 Apple Silicon 上分配 Metal buffer，无法 Swap，直接吃统一内存
 5. 输出分辨率 4K(2160×3840)，每路 VideoToolbox 需 1~2GB → 6 路 = 6~12GB，严重超出 8GB
 6. 内存监控阈值 `MEM_WARN_GB=20` 在 8GB 机器上永远触发不了（形同虚设）
+
+---
+
+## 阶段十四：发布自动重试 + 杂详修复 + AI文案随机化（已完成 2026-04-26）
+
+### 问题
+1. **发布失败无重试**：发布失败后直接标记失败，无通知运维人员
+2. **GPU 离线无预警**：GPU 连接断开后应用静默失败，没有任何告警
+3. **发布后扫码验证弹窗无法处理**：押下发布后平台偶尔弹出扫码安全验证，代码未处理
+4. **AI文案同质化**：固定 4 种方案（种草/催单/产品介绍/教学），每次文案风格局限，标题开头套话重复
+5. **登录失效重试浪费**：登录失效错误列为可重试，白白重试 2 次
+6. **`input[type="file"]` 超时**：抖音上传页为 React SPA，`domcontentloaded` 后元素未渲染，文件选择器找不到
+7. **quick-check indeterminate 卡死**：快速检查状态不确定时进入手动流程，实际应自动发布
+
+### 改动清单
+
+| 文件 | 改动 |
+|------|------|
+| `backend/notifier.py` | 新增：封装 `openclaw system event --text "..." --mode now` 推送 OpenClaw 通知 |
+| `backend/publish_scheduler.py` | 发布自动重试最多 2 次（间隔 30s）；成功/失败均通知；新增 `retry_count` 字段 |
+| `backend/gpu_state.py` | GPU 离线 ≥ 5min 自动推送告警通知；恢复时推送恢复通知 |
+| `backend/db.py` | `publish_tasks` 表迪移 `retry_count INTEGER DEFAULT 0` |
+| `backend/publisher_douyin.py` | `domcontentloaded` 后追加 `networkidle` 等待 SPA hydration；`input[type="file"]` 先直接等 30s，失败则点击上传区域触发动态生成，再等 60s |
+| `backend/publisher_douyin.py` | `_wait_for_quick_check` indeterminate 时，发布按鈕可见则自动点击，不进手动流程 |
+| `backend/publisher_douyin.py` | `non_retryable` 增加 `"Not logged in"`/`"login QR code"`/`"Cookie may have expired"` |
+| `backend/publisher_douyin.py` | 新增 `_handle_scan_verify()`：点击发布后 1.5s 内检测扫码验证弹窗，出现则 banner 提示用户扫码，最多等待 5 分钟 |
+| `backend/publisher_douyin.py` | 移除 `page.wait_for_event("close")` race；改为 `wait_for_url` + URL 检查 |
+| `backend/meta_generator.py` | `_SCHEME_POOL` 8 个方案维度（社交认可/自我改变/场合穿搭/细节种草/产品介绍/使用教学/价值催单/疑问引发） |
+| `backend/meta_generator.py` | `_build_meta_prompt()`：每次用 `random.sample` 随机抖 4 个组合，动态填充 prompt；`generate_meta` 改用新函数并记录 log |
+
+### git commits
+- `da13871` feat: 发布自动重试(2次) + OpenClaw失败/成功/GPU离线通知
+- `0ab1532` fix: 抖音上传页networkidle等待 + input[type=file]点击触发fallback + quick-check indeterminate时自动发布
+- `66055fd` fix: 登录失效错误列为不可重试，避免无意义重试两次
+- `5ed4943` fix: 点击发布后等待扫码验证弹窗 + 移除误触发的page close race
+- `38687eb` feat: AI文案方案池扩展到8维度，每次随机扠4个，消除同质化
 
 ---
 
