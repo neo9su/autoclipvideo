@@ -439,9 +439,11 @@ _VISION_PROMPT = """你正在分析假发直播间的视频帧。请评估以下
 5. product_quality: 画面呈现质量（光线、构图、产品展示完整性）(0-10)
 6. angle_variety: 画面是否展示了非正面角度（侧面/背面/俯视）true/false
 7. has_scene_context: 画面是否有场景感（非纯白背景/有生活场景）true/false
+8. lighting_quality: 画面光线是否充足、均匀，不过暗或过曝 (0-10，0=曝光严重失调，10=光线完美)
+9. motion_stability: 画面运动是否稳定，镜头是否有明显抖动 (0-10，0=严重抖动，10=完全稳定)
 
 只返回JSON，不含其他内容：
-{"wig_visible": 数字, "is_closeup": 布尔, "is_demo": 布尔, "facing_camera": 布尔, "product_quality": 数字, "angle_variety": 布尔, "has_scene_context": 布尔}"""
+{"wig_visible": 数字, "is_closeup": 布尔, "is_demo": 布尔, "facing_camera": 布尔, "product_quality": 数字, "angle_variety": 布尔, "has_scene_context": 布尔, "lighting_quality": 数字, "motion_stability": 数字}"""
 
 
 def _semantic_bonus(result: dict) -> float:
@@ -476,6 +478,16 @@ def _semantic_bonus(result: dict) -> float:
         bonus += 3.0
     if result.get("has_scene_context"):
         bonus += 2.0
+    lighting = result.get("lighting_quality", 5)
+    if lighting > 7:
+        bonus += (lighting - 7) * 0.8   # max +2.4
+    elif lighting < 4:
+        bonus -= (4 - lighting) * 1.2   # max -4.8
+    motion = result.get("motion_stability", 7)
+    if motion < 5:
+        bonus -= (5 - motion) * 1.5     # max -7.5
+    elif motion > 7:
+        bonus += (motion - 7) * 0.5     # max +1.5
     return round(bonus, 2)
 
 
@@ -524,7 +536,7 @@ async def _call_bedrock_vision(frame_paths: list[str]) -> dict | None:
 
     payload = {
         "messages": [{"role": "user", "content": content}],
-        "inferenceConfig": {"maxTokens": 200, "temperature": 0},
+        "inferenceConfig": {"maxTokens": 250, "temperature": 0},
     }
     url = f"{_BEDROCK_URL}/model/{_VISION_MODEL}/converse"
     try:

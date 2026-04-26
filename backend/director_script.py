@@ -96,6 +96,16 @@ VIBE_CONFIGS = {
         ],
         "copywriting_style": "每句20~30字、句子饱满完整、自然口语、不叠词、每句话独立完整",
     },
+    "kuku": {
+        "label": "KUKU人设",
+        "description": "专业假发博主视角，有态度、有品味，像朋友推荐而非推销员，擅长发现细节美",
+        "narrative": "细节发现 → 专业解读 → 真实体感 → 场景代入 → 自然收尾",
+        "pacing": "medium",
+        "scene_count_range": (4, 5),
+        "music_style": "轻电子、节奏感适中、不喧宾夺主",
+        "default_scene_sequence": ["hook", "detail", "demonstration", "scene", "cta"],
+        "copywriting_style": "第一人称、有见解、具体细节、口语自然不做作",
+    },
 }
 
 # 场景类型说明（供 Claude 参考）
@@ -209,6 +219,10 @@ class DirectorScriptGenerator:
         if vibe == "creative":
             return self._build_creative_prompt(wig_model, wig_color, min_scenes, max_scenes, script_type)
 
+        # kuku vibe 使用独立 prompt
+        if vibe == "kuku":
+            return self._build_kuku_prompt(srt_content, wig_model, wig_color, min_scenes, max_scenes, script_type)
+
         # 提取 SRT 纯文字（去掉时间码行，保留内容）
         import re
         text_lines = [
@@ -228,7 +242,11 @@ class DirectorScriptGenerator:
 
 【核心要求】
 1. 文案必须100%来源于直播内容——主播说了什么，你就提炼什么，不要编造、不要夸大
-2. 叙事结构：开场介绍产品是什么 → 讲外观/颜色/款式特点 → 演示效果/质感/戴法 → 适合人群/使用场景 → 引导关注
+2. 叙事结构：根据直播内容选择最适合的叙事线，从以下3种中选一种：
+   A) 痛点驱动型：「你有没有遇到过...」痛点共情 → 「我找到了一个方法」解决方案 → 具体展示 → 场景代入 → 轻收尾
+   B) 细节发现型：从最打动人的一个细节切入（颜色/质感/工艺）→ 延伸到整体 → 适合场景 → 互动收尾
+   C) 社交验证型：从他人反应切入（同事问/朋友夸）→ 揭秘是什么 → 展示产品 → 同类人群 → 收尾
+   根据直播SRT内容，选择最匹配的那条叙事线并在 narrative_structure 里注明选了哪条。
 3. 每句话独立完整，能单独朗读出来让人听懂，不允许出现语义截断或上下文跳跃
 4. 口语化但不用网络套话——禁止使用「等等等等」「你看你看」「注意注意」「哇哦」「OMG」「绝绝子」等无意义填充词
 5. 不要有库存/断货/紧迫感等催单内容，除非直播录音里明确提到
@@ -236,7 +254,16 @@ class DirectorScriptGenerator:
 7. 开场第一句（hook）必须在 3 秒内吸引注意，用提问/悬念/场景代入开场，禁止「大家好我是」「今天给大家介绍」等无聊开场
 8. 禁止「限时/最后X件/仅剩X单/抢完就没了」等虚假紧迫感措辞（平台直接降流）
 9. 禁止「绝绝子/yyds/爱了爱了/好家伙/破防了」等过时网络词
-10. 禁止以下需要授权书或数据证据才能使用的表述：“已销售XX单”“卖出X万单”“XX博主都在用”“明星同款”“达人推荐”“粉丝强烈推荐”“万人好评”“全网最火”“抖音TOP1”“同类第一”“官方认证”
+10. 禁止以下需要授权书或数据证据才能使用的表述：”已销售XX单””卖出X万单””XX博主都在用””明星同款””达人推荐””粉丝强烈推荐””万人好评””全网最火””抖音TOP1””同类第一””官方认证”
+11. 独特视角优先：每条视频尝试找一个别人没说过的角度切入，避免「这款假发非常好看」式的开场
+12. 细节代替形容词：「发丝递针工艺，贴近头皮3mm」比「非常真实自然」更有说服力
+13. 场景具体化：「约会前5分钟」「开部门会议」「带娃逛街」比「日常场合」更有画面感
+14. 情感弧线完整：有开头情绪触点（共情/好奇/惊喜），中间情绪递进，结尾情绪落点，不能平铺直叙
+15. 信息完整性：每条视频必须覆盖至少以下3个维度：
+    - 外观维度：颜色/款式/发丝特点（具体描述，不用「好看」代替）
+    - 功能维度：解决什么痛点/适合什么头型/使用场景
+    - 体验维度：佩戴手感/稳固性/日常使用感受（来自直播实际演示）
+16. 增值内容优先：如直播里有对比（「这款比XXX多了一圈蕾丝边」「比普通假发轻了30g」），优先提炼为卖点；对比信息比单独介绍更有说服力
 
 【节奏风格参考】{vc["label"]}：{vc["description"]}
 
@@ -293,7 +320,11 @@ warm / clear / natural / persuasive / confident / storytelling"""
 8. 开场第一句必须是强钉子：用提问（「你知道为什么这款这么火吗？」）、悬念（「很多人第一次看到这个颜色都怠住了」）或场景代入，禁止无聊开场
 9. 禁止虚假紧迫感：不写「限时/最后X件/仅剩X单/抢完就没了」，催单用「直播间小黄车/点关注」代替
 
-叙事顺序：产品亮相 → 外观/颜色/质感亮点 → 上头效果 → 适合人群/使用场景 → 催单收尾
+叙事结构：根据产品款式和颜色选择最适合的叙事线，从以下3种中选一种：
+   A) 痛点驱动型：「你有没有遇到过...」痛点共情 → 「我找到了一个方法」解决方案 → 具体展示 → 场景代入 → 轻收尾
+   B) 细节发现型：从最打动人的一个细节切入（颜色/质感/工艺）→ 延伸到整体 → 适合场景 → 互动收尾
+   C) 社交验证型：从他人反应切入（同事问/朋友夸）→ 揭秘是什么 → 展示产品 → 同类人群 → 收尾
+   在 narrative_structure 字段注明选了哪条叙事线。
 
 请输出严格的JSON，直接输出{{}}不要前言：
 
@@ -328,6 +359,80 @@ warm / clear / natural / persuasive / confident / storytelling"""
 
 场景数量：{min_scenes}~{max_scenes}个，emotion 从以下选择：
 warm / clear / natural / persuasive / confident / urgent"""
+
+    def _build_kuku_prompt(self, srt_content: str, wig_model: str, wig_color: str,
+                           min_scenes: int, max_scenes: int, script_type: str) -> str:
+        """KUKU直播间专属 prompt：专业假发博主视角，有态度有品味，像朋友推荐。"""
+        import re
+        text_lines = [
+            ln.strip()
+            for ln in srt_content.splitlines()
+            if ln.strip() and not re.match(r"^\d+$", ln.strip()) and "-->" not in ln
+        ]
+        srt_summary = " ".join(text_lines)[:2500]
+
+        return f"""你是KUKU假发直播间的内容编辑，任务是把直播录音提炼成一条45-60秒的产品介绍视频配音脚本。
+
+【直播原始转录】
+{srt_summary}
+
+【产品信息】
+款式：{wig_model or "假发"}  颜色：{wig_color or "自然色"}  平台：抖音  时长：45-60秒
+
+【KUKU人设风格要求】
+- 以「专业假发爱好者」视角说话，不是推销员，是真心喜欢这款才推荐
+- 至少有1句带有个人观点的表述（「我觉得这个颜色比XXX更适合日常」「个人更喜欢这款的...」）
+- 语气亲切但有自己的判断力，不是所有东西都夸，要有「这款特别适合XXX人」的针对性建议
+- 避免过度催单语气，收尾用「感兴趣的可以了解一下」代替「赶紧抢」
+
+【叙事结构】细节发现 → 专业解读 → 真实体感 → 场景代入 → 自然收尾
+从最打动人的一个细节切入（颜色/质感/工艺）→ 结合直播内容做专业解读 → 描述真实佩戴感受 → 点出最适合的场景 → 自然收尾
+
+【核心要求】
+1. 文案必须100%来源于直播内容，不要编造、不要夸大
+2. 每句话独立完整，能单独朗读出来让人听懂
+3. 口语化，第一人称，像在跟朋友聊天
+4. 细节代替形容词：「发丝递针工艺，贴近头皮3mm」比「非常真实自然」更有说服力
+5. 场景具体化：「约会前5分钟」比「日常场合」更有画面感
+6. 开场第一句必须在3秒内吸引注意，用细节发现/个人体验/好奇钩子开场
+7. 禁止「限时/最后X件/仅剩X单/抢完就没了」等虚假紧迫感
+8. 禁止「绝绝子/yyds/爱了爱了/破防了」等过时网络词
+9. 禁止「已销售XX单/明星同款/万人好评/全网最火」等无授权声称
+10. 信息覆盖：外观（颜色/款式）+ 功能（解决什么/适合谁）+ 体验（佩戴感受）三个维度都要有
+
+请输出严格的JSON，直接输出{{}}不要前言：
+
+{{
+    "vibe": "kuku",
+    "vibe_label": "KUKU人设",
+    "script_type": "{script_type}",
+    "narrative_structure": "细节发现型——从[具体细节]切入",
+    "total_duration": 55,
+    "music_style": "轻电子、节奏感适中、不喧宾夺主",
+    "pacing": "medium",
+    "scenes": [
+        {{
+            "scene_id": 1,
+            "timestamp_start": 0,
+            "timestamp_end": 8,
+            "scene_type": "hook",
+            "description": "画面描述",
+            "voiceover_text": "配音文案（完整一句话，来自直播内容提炼）",
+            "emotion": "natural",
+            "visual_requirements": ["镜头描述"],
+            "camera_angle": "特写/中景/全景",
+            "transition": "快切/淡入/叠化"
+        }}
+    ],
+    "emotional_arc": ["场景1情绪"],
+    "key_messages": ["卖点1", "卖点2"],
+    "viral_hook": "开头第一句话",
+    "call_to_action": "感兴趣的可以了解一下",
+    "style_notes": "执行备注"
+}}
+
+场景数量：{min_scenes}~{max_scenes}个，emotion 从以下选择：
+warm / clear / natural / persuasive / confident / storytelling"""
 
     def _parse_script_response(self, script_text: str, vibe: str) -> Dict:
         """解析Claude返回的脚本JSON"""
