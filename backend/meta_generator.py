@@ -166,16 +166,7 @@ async def _call_bedrock(prompt: str, max_tokens: int = 600) -> Optional[dict]:
     return None
 
 
-def _get_srt_excerpt(merged_filename: Optional[str], max_chars: int = 800) -> str:
-    """Extract a short text sample from the group's merged SRT if available."""
-    if not merged_filename:
-        return ""
-    srt_path = os.path.join(
-        RECORDINGS_DIR,
-        os.path.splitext(merged_filename)[0] + ".srt",
-    )
-    if not os.path.exists(srt_path):
-        return ""
+def _read_srt_text(srt_path: str, max_chars: int) -> str:
     try:
         with open(srt_path, encoding="utf-8") as f:
             content = f.read()
@@ -185,10 +176,51 @@ def _get_srt_excerpt(merged_filename: Optional[str], max_chars: int = 800) -> st
             if not line or re.match(r"^\d+$", line) or re.match(r"^\d{2}:\d{2}:\d{2}", line):
                 continue
             lines.append(line)
-        text = " ".join(lines)
-        return text[:max_chars]
+        return " ".join(lines)[:max_chars]
     except Exception:
         return ""
+
+
+def _get_srt_excerpt(merged_filename: Optional[str], max_chars: int = 800) -> str:
+    """Extract a short text sample from the group's merged SRT if available."""
+    if merged_filename:
+        srt_path = os.path.join(
+            RECORDINGS_DIR,
+            os.path.splitext(merged_filename)[0] + ".srt",
+        )
+        if os.path.exists(srt_path):
+            text = _read_srt_text(srt_path, max_chars)
+            if text:
+                return text
+    return ""
+
+
+async def _get_srt_excerpt_with_fallback(group_id: int, merged_filename: Optional[str], max_chars: int = 800) -> str:
+    """Try merged SRT first, then fall back to first available per-recording SRT."""
+    text = _get_srt_excerpt(merged_filename, max_chars)
+    if text:
+        return text
+
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT filename FROM recordings
+               WHERE group_id = ? AND clipped = 2
+               ORDER BY start_time ASC""",
+            (group_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+
+    for row in rows:
+        srt_path = os.path.join(
+            RECORDINGS_DIR,
+            os.path.splitext(row["filename"])[0] + ".srt",
+        )
+        if os.path.exists(srt_path):
+            text = _read_srt_text(srt_path, max_chars)
+            if text:
+                return text
+    return ""
 
 
 def _generate_fallback_title(wig_model: str, wig_color: str, room_labels: str) -> dict:
@@ -247,7 +279,7 @@ async def generate_meta(group_id: int) -> Optional[dict]:
         logger.error(f"Group {group_id} not found")
         return None
 
-    srt_excerpt = _get_srt_excerpt(group["merged_filename"])
+    srt_excerpt = await _get_srt_excerpt_with_fallback(group_id, group["merged_filename"])
     prompt = _META_PROMPT.format(
         wig_model=group["wig_model"] or "未知款式",
         wig_color=group["wig_color"] or "未知颜色",

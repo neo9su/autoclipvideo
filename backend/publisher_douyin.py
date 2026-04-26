@@ -66,7 +66,8 @@ class DouyinPublisher(BasePublisher):
                 cookies = []
                 while loop.time() < deadline:
                     cookies = await ctx.cookies()
-                    if {c["name"] for c in cookies} & AUTH_COOKIE_NAMES:
+                    cookie_names = {c["name"] for c in cookies}
+                    if AUTH_COOKIE_NAMES.issubset(cookie_names):
                         logger.info("Auth cookies detected, login successful")
                         break
                     await asyncio.sleep(2)

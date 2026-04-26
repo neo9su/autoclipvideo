@@ -185,6 +185,25 @@ async def analyze_recording(recording_id: int, filename: str, room_id: int):
 # ── Group merge ───────────────────────────────────────────────────────────────
 
 _GPU_SERVICE_URL = os.environ.get("GPU_SERVICE_URL", "http://10.190.0.203:8877")
+_MIN_DURATION_SEC = 30
+
+
+class _ShortDurationError(RuntimeError):
+    pass
+
+
+async def _probe_duration(path: str) -> float:
+    proc = await asyncio.create_subprocess_exec(
+        "ffprobe", "-v", "error", "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1", path,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    stdout, _ = await proc.communicate()
+    try:
+        return float(stdout.decode().strip())
+    except Exception:
+        return 0.0
 
 
 async def _gpu_concat(gpu_url: str, job_ids: list, out_path: str, group_id: int) -> Optional[str]:
@@ -228,6 +247,11 @@ async def _gpu_concat(gpu_url: str, job_ids: list, out_path: str, group_id: int)
 
     if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
         raise RuntimeError("Downloaded merged file is empty")
+
+    dur = await _probe_duration(out_path)
+    if dur < _MIN_DURATION_SEC:
+        os.remove(out_path)
+        raise _ShortDurationError(f"合并视频时长 {dur:.1f}s < {_MIN_DURATION_SEC}s")
 
     size_mb = os.path.getsize(out_path) / 1024 / 1024
     logger.info(f"Group {group_id}: GPU concat done → {out_filename} ({size_mb:.1f} MB)")
@@ -318,6 +342,11 @@ async def _gpu_classic_concat(gpu_url: str, clip_paths: list, out_path: str, gro
     if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
         raise RuntimeError("Downloaded classic-concat file is empty")
 
+    dur = await _probe_duration(out_path)
+    if dur < _MIN_DURATION_SEC:
+        os.remove(out_path)
+        raise _ShortDurationError(f"合并视频时长 {dur:.1f}s < {_MIN_DURATION_SEC}s")
+
     size_mb = os.path.getsize(out_path) / 1024 / 1024
     logger.info(f"Group {group_id}: GPU classic-concat done → {out_filename} ({size_mb:.1f} MB)")
 
@@ -330,6 +359,50 @@ async def _gpu_classic_concat(gpu_url: str, clip_paths: list, out_path: str, gro
         )
         await db.commit()
     return out_filename
+
+
+async def _build_merged_srt(group_id: int, merged_filename: str) -> None:
+    """Concatenate SRT text from all clipped recordings into a single SRT file alongside the merged video."""
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT filename FROM recordings
+               WHERE group_id = ? AND clipped = 2
+               ORDER BY start_time ASC""",
+            (group_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+
+    text_parts = []
+    for row in rows:
+        srt_path = os.path.join(
+            RECORDINGS_DIR, os.path.splitext(row["filename"])[0] + ".srt"
+        )
+        if not os.path.exists(srt_path):
+            continue
+        try:
+            with open(srt_path, encoding="utf-8") as f:
+                content = f.read()
+            for line in content.splitlines():
+                line = line.strip()
+                if not line or re.match(r"^\d+$", line) or re.match(r"^\d{2}:\d{2}:\d{2}", line):
+                    continue
+                text_parts.append(line)
+        except Exception as e:
+            logger.warning(f"SRT read error for {srt_path}: {e}")
+
+    if not text_parts:
+        return
+
+    out_srt = os.path.join(
+        RECORDINGS_DIR, os.path.splitext(merged_filename)[0] + ".srt"
+    )
+    try:
+        with open(out_srt, "w", encoding="utf-8") as f:
+            f.write(" ".join(text_parts))
+        logger.info(f"Group {group_id}: wrote merged SRT → {os.path.basename(out_srt)}")
+    except Exception as e:
+        logger.warning(f"Failed to write merged SRT for group {group_id}: {e}")
 
 
 async def merge_group(group_id: int) -> Optional[str]:
@@ -407,7 +480,18 @@ async def merge_group(group_id: int) -> Optional[str]:
         try:
             result = await _gpu_classic_concat(_GPU_SERVICE_URL, parts, out_path, group_id)
             if result:
+                await _build_merged_srt(group_id, result)
                 return result
+        except _ShortDurationError as e:
+            err_msg = str(e)
+            logger.error(f"Group {group_id} merge rejected (classic-concat): {err_msg}")
+            async with aio_connect() as db:
+                await db.execute(
+                    "UPDATE clip_groups SET classic_status = -2, merge_error = ? WHERE id = ?",
+                    (err_msg, group_id),
+                )
+                await db.commit()
+            return None
         except Exception as e:
             logger.warning(f"GPU classic-concat failed for group {group_id}: {e} — trying stream-copy fallback")
 
@@ -420,7 +504,18 @@ async def merge_group(group_id: int) -> Optional[str]:
         try:
             result = await _gpu_concat(_GPU_SERVICE_URL, ordered_job_ids, out_path, group_id)
             if result:
+                await _build_merged_srt(group_id, result)
                 return result
+        except _ShortDurationError as e:
+            err_msg = str(e)
+            logger.error(f"Group {group_id} merge rejected (stream-copy): {err_msg}")
+            async with aio_connect() as db:
+                await db.execute(
+                    "UPDATE clip_groups SET classic_status = -2, merge_error = ? WHERE id = ?",
+                    (err_msg, group_id),
+                )
+                await db.commit()
+            return None
         except Exception as e:
             logger.warning(f"GPU stream-copy concat failed for group {group_id}: {e} — falling back to local")
 
@@ -446,6 +541,18 @@ async def merge_group(group_id: int) -> Optional[str]:
     os.unlink(list_file)
 
     if proc.returncode == 0 and os.path.exists(out_path):
+        dur = await _probe_duration(out_path)
+        if dur < _MIN_DURATION_SEC:
+            os.remove(out_path)
+            err_msg = f"合并视频时长 {dur:.1f}s < {_MIN_DURATION_SEC}s 最低要求"
+            logger.error(f"Group {group_id} merge rejected: {err_msg}")
+            async with aio_connect() as db:
+                await db.execute(
+                    "UPDATE clip_groups SET classic_status = -2, merge_error = ? WHERE id = ?",
+                    (err_msg, group_id),
+                )
+                await db.commit()
+            return None
         size_mb = os.path.getsize(out_path) / 1024 / 1024
         logger.info(f"Group {group_id} merged (local fallback): {out_filename} ({size_mb:.1f} MB)")
         async with aio_connect() as db:
@@ -456,6 +563,7 @@ async def merge_group(group_id: int) -> Optional[str]:
                 (out_filename, group_id),
             )
             await db.commit()
+        await _build_merged_srt(group_id, out_filename)
         return out_filename
     else:
         err_msg = stderr.decode(errors="replace")[-400:].strip()

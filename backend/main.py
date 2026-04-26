@@ -1034,7 +1034,24 @@ async def trigger_merge(group_id: int):
         await db.commit()
     from transcribe import _run_director_pipeline, _run_creative_pipeline
     if group["classic_status"] != 2:
-        asyncio.create_task(merge_group(group_id))
+        async with aio_connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT COUNT(*) as done FROM recordings WHERE group_id = ? AND clipped = 2",
+                (group_id,),
+            ) as cur:
+                row = await cur.fetchone()
+        valid_clips = row["done"] if row else 0
+        if valid_clips == 0:
+            async with aio_connect() as db:
+                await db.execute(
+                    "UPDATE clip_groups SET classic_status = -1, merge_error = ? WHERE id = ?",
+                    ("无有效剪辑片段，无法合并", group_id),
+                )
+                await db.commit()
+            logger.warning(f"Group {group_id}: no valid clips (all clipped=-1), skipping classic merge")
+        else:
+            asyncio.create_task(merge_group(group_id))
     if group["director_status"] != 2:
         asyncio.create_task(_run_director_pipeline(group_id))
     if (group["creative_status"] or 0) != 2:

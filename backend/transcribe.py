@@ -1016,6 +1016,19 @@ async def _run_director_pipeline_inner(group_id: int):
         if not out_path:
             return await _fail("video composition returned no output")
 
+        import subprocess as _sp
+        _dur_result = _sp.run(
+            ["ffprobe", "-v", "quiet", "-show_entries", "format=duration", "-of", "csv=p=0", out_path],
+            capture_output=True, text=True,
+        )
+        _dur = float(_dur_result.stdout.strip()) if _dur_result.stdout.strip() else 0.0
+        if _dur < 30.0:
+            try:
+                os.remove(out_path)
+            except Exception:
+                pass
+            return await _fail(f"导演版视频时长 {_dur:.1f}s < 30s 最低要求")
+
         async with aio_connect() as db:
             await db.execute(
                 """UPDATE clip_groups SET
@@ -1144,6 +1157,19 @@ async def _run_creative_pipeline_inner(group_id: int):
         )
         if not out_path:
             return await _fail("video composition returned no output")
+
+        import subprocess as _sp
+        _dur_result = _sp.run(
+            ["ffprobe", "-v", "quiet", "-show_entries", "format=duration", "-of", "csv=p=0", out_path],
+            capture_output=True, text=True,
+        )
+        _dur = float(_dur_result.stdout.strip()) if _dur_result.stdout.strip() else 0.0
+        if _dur < 30.0:
+            try:
+                os.remove(out_path)
+            except Exception:
+                pass
+            return await _fail(f"自编版视频时长 {_dur:.1f}s < 30s 最低要求")
 
         async with aio_connect() as db:
             await db.execute(
