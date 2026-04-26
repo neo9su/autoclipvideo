@@ -185,7 +185,8 @@ async def _execute_task(task: dict, broadcast_fn: Optional[Callable] = None):
         err_msg = str(e)
         logger.error(f"Task {task_id} failed: {err_msg}")
         # 不可重试的错误类型
-        non_retryable = ["视频质量不达标", "Video file not found", "video file not found"]
+        non_retryable = ["视频质量不达标", "Video file not found", "video file not found",
+                          "Not logged in", "login QR code", "Cookie may have expired"]
         is_retryable = not any(kw in err_msg for kw in non_retryable)
         retry_count = task.get("retry_count", 0) or 0
         if is_retryable and retry_count < 2:
