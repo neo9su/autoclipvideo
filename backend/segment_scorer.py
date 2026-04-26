@@ -437,9 +437,11 @@ _VISION_PROMPT = """你正在分析假发直播间的视频帧。请评估以下
 3. is_demo: 是否正在演示佩戴过程（戴上/摘下/展示假发效果）true/false
 4. facing_camera: 主播是否正对镜头（而非侧对或背对）true/false
 5. product_quality: 画面呈现质量（光线、构图、产品展示完整性）(0-10)
+6. angle_variety: 画面是否展示了非正面角度（侧面/背面/俯视）true/false
+7. has_scene_context: 画面是否有场景感（非纯白背景/有生活场景）true/false
 
 只返回JSON，不含其他内容：
-{"wig_visible": 数字, "is_closeup": 布尔, "is_demo": 布尔, "facing_camera": 布尔, "product_quality": 数字}"""
+{"wig_visible": 数字, "is_closeup": 布尔, "is_demo": 布尔, "facing_camera": 布尔, "product_quality": 数字, "angle_variety": 布尔, "has_scene_context": 布尔}"""
 
 
 def _semantic_bonus(result: dict) -> float:
@@ -452,8 +454,10 @@ def _semantic_bonus(result: dict) -> float:
     - is_demo → +3.5 (demonstrating beats describing)
     - is_closeup → +4.0 / -0.5 (close-up detail = highest purchase intent driver)
     - facing_camera → +1.5 / -0.5 (direct engagement)
+    - angle_variety → +3.0 (multi-angle = platform-recommended differentiation)
+    - has_scene_context → +2.0 (scene context increases viewer retention)
 
-    Typical range: -5 to +15.
+    Typical range: -5 to +20.
     """
     bonus = 0.0
     bonus += (result.get("wig_visible",     5) - 5) * 1.2
@@ -468,6 +472,10 @@ def _semantic_bonus(result: dict) -> float:
         bonus += 1.5
     else:
         bonus -= 0.5
+    if result.get("angle_variety"):
+        bonus += 3.0
+    if result.get("has_scene_context"):
+        bonus += 2.0
     return round(bonus, 2)
 
 
@@ -660,7 +668,13 @@ _LLM_TEXT_PROMPT = """\
 3-4: 轻度相关（一般性描述）
 5-7: 中度相关（使用场景/产品功能）
 8-10: 高价值（痛点/演示/社交证明）
-11-12: 极高价值（核心卖点/强烈转化信号）"""
+11-12: 极高价值（核心卖点/强烈转化信号）
+
+加分维度（在0-12基础上综合考量）：
+- 多角度展示：提到侧面/背面/360展示/转一圈 → 倾向高分
+- 具体参数：提到重量/材质/克数/头围/具体数值 → 倾向高分
+- 痛点解决：先点痛点（头大/发量少/显假）再给解法 → 倾向高分
+- 真实口语：第一人称真实叙事，有具体时间/次数/细节动作 → 倾向高分"""
 
 _NARRATIVE_TO_CATEGORY = {
     "problem":         "problem",
