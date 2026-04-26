@@ -1,7 +1,7 @@
 # 需求清单 — douyin-recorder
 
 > 本文件由 Claude Code 自动维护。每次对话结束前回写，新对话开始时优先读取。
-> 最后更新：2026-04-21（阶段十二）
+> 最后更新：2026-04-26（阶段十三）
 
 ---
 
@@ -11,7 +11,8 @@
 |------|-----|------|------|
 | v1.4.0 | `v1.4.0` | 2026-04-16 | 巨量千川合规改造 + 剪辑质量升级 |
 | v1.5.0 | `v1.5.0` | 2026-04-21 | SQLite并发锁修复 + 自编版发布 + 批量排期重构 + 购物车筛选修复 |
-| **v1.6.0** | **`v1.6.0`** | **2026-04-21** | **发布任务过期重排期 + 文案重生成按钮 + 批量排期 meta 解析修复** |
+| v1.6.0 | `v1.6.0` | 2026-04-21 | 发布任务过期重排期 + 文案重生成按钮 + 批量排期 meta 解析修复 |
+| **v1.7.0** | **`v1.7.0`** | **2026-04-26** | **视频时长校验 + SRT合并生成 + 无效分组合并保护** |
 
 ### 回退方法
 ```bash
@@ -59,6 +60,32 @@ git checkout main
 4. VideoToolbox 在 Apple Silicon 上分配 Metal buffer，无法 Swap，直接吃统一内存
 5. 输出分辨率 4K(2160×3840)，每路 VideoToolbox 需 1~2GB → 6 路 = 6~12GB，严重超出 8GB
 6. 内存监控阈值 `MEM_WARN_GB=20` 在 8GB 机器上永远触发不了（形同虚设）
+
+---
+
+## 阶段十三：视频质量保障 + AI文案优化（已完成 2026-04-26）
+
+### 问题
+1. 分组合并视频时长 < 30s：`merge_group` 三条合并路径合并后未校验总时长，短视频照样写入 DB 并流入发布队列
+2. AI 生成标题/描述质量差：`meta_generator` 期望读取 `merged_XXX.srt` 但从未生成该文件，Bedrock 收到「无字幕」，生成通用模板文案，款式/颜色张冠李戴
+3. `clipped=-1` 时 `merge_group` 仍被调用：手动触发合并（`trigger_merge`）缺少前置检查，产生无意义的空分组
+4. 导演版/自编版缺少时长校验：经典版已有校验，但 `_run_director_pipeline` 和 `_run_creative_pipeline` 写 status=2 前没有 ffprobe 验证
+
+### 改动清单
+
+| 文件 | 改动 |
+|------|------|
+| `backend/analyzer.py` | 新增 `_probe_duration()`（async ffprobe）+ `_ShortDurationError`；三条合并路径（GPU concat/classic-concat/本地ffmpeg）下载完成后校验时长，< 30s → 删文件 + `classic_status=-2` + `merge_error` |
+| `backend/analyzer.py` | 新增 `_build_merged_srt(group_id, merged_filename)`：合并成功后拼接各录像 SRT（去序号/时间戳），写 `recordings/<merged_name>.srt`；三条路径均调用 |
+| `backend/meta_generator.py` | 提取 `_read_srt_text()` 辅助；新增 `_get_srt_excerpt_with_fallback()`：先读 merged SRT，再逐条录像 SRT 回退；`generate_meta()` 改用新函数 |
+| `backend/main.py` | `trigger_merge` 手动触发前查 `clipped=2` 录像数，为 0 则跳过经典版合并，写 `classic_status=-1` + `merge_error='无有效剪辑片段，无法合并'` |
+| `backend/transcribe.py` | `_run_director_pipeline_inner`：`compose_final_video` 返回后加 ffprobe 时长校验，< 30s → 删文件 + `director_status=-1` |
+| `backend/transcribe.py` | `_run_creative_pipeline_inner`：同上，< 30s → 删文件 + `creative_status=-1` |
+
+### 历史数据清理
+- 批量为 1095 个已有分组生成了 merged SRT（Python 脚本直接拼接）
+- 26 个历史短视频（经典版 < 30s）标记为 `classic_status=-2`
+- 发现历史导演版也有 < 30s 的（如 group 2517：11.7s），已通过 Claude Code 清理
 
 ---
 
