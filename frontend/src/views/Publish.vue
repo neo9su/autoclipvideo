@@ -133,6 +133,7 @@
               <span v-if="g.room_name" class="group-room-tag">{{ g.room_name }}</span>{{ g.wig_model }} · {{ g.wig_color }}
               <span v-if="g.director_status === 2" class="vbadge vbadge-director">🎬</span>
               <span v-if="g.classic_status === 2" class="vbadge vbadge-classic">📹</span>
+              <span v-if="g.creative_status === 2" class="vbadge vbadge-creative">✍️</span>
             </div>
             <span v-if="publishedGroupIds.has(g.id)" class="group-published-badge">✓ 已发布</span>
             <div class="group-item-actions" @click.stop>
@@ -144,7 +145,7 @@
         </div>
 
         <!-- Version selector: shown when selected group has both versions -->
-        <template v-if="selectedGroup && selectedGroup.classic_status === 2 && selectedGroup.director_status === 2">
+        <template v-if="selectedGroup && ((selectedGroup.classic_status === 2 ? 1 : 0) + (selectedGroup.director_status === 2 ? 1 : 0) + (selectedGroup.creative_status === 2 ? 1 : 0)) >= 2">
           <label>发布版本</label>
           <div class="version-switcher">
             <div :class="['vsw-option', selectedPublishVersion === 'director' && 'vsw-active']"
@@ -156,6 +157,12 @@
                  @click="setPublishVersion('classic')">
               <span class="vsw-label">📹 经典版</span>
               <span class="vsw-preview-btn" @click.stop="previewGroup = selectedGroup; previewVersion = 'classic'">▶ 预览</span>
+            </div>
+            <div v-if="selectedGroup && selectedGroup.creative_status === 2"
+                 :class="['vsw-option', selectedPublishVersion === 'creative' && 'vsw-active']"
+                 @click="setPublishVersion('creative')">
+              <span class="vsw-label">✍️ 自编版</span>
+              <span class="vsw-preview-btn" @click.stop="previewGroup = selectedGroup; previewVersion = 'creative'">▶ 预览</span>
             </div>
           </div>
         </template>
@@ -658,7 +665,7 @@ async function refreshGroups() {
   groupsRefreshing.value = true
   try {
     const [groups, prods] = await Promise.all([getGroups(), getProducts()])
-    mergedGroups.value = groups.filter(g => (g.merge_status === 2 || g.classic_status === 2 || g.director_status === 2) && (g.merged_filename || g.director_final_video))
+    mergedGroups.value = groups.filter(g => (g.merge_status === 2 || g.classic_status === 2 || g.director_status === 2 || g.creative_status === 2) && (g.merged_filename || g.director_final_video || g.creative_final_video))
     products.value = prods.filter(p => p.enabled)
   } finally {
     groupsRefreshing.value = false
@@ -783,7 +790,7 @@ const previewVideoUrl = computed(() => {
 
 watch(previewGroup, (g) => {
   if (!g) return
-  previewVersion.value = g.director_status === 2 ? 'director' : 'classic'
+  previewVersion.value = g.director_status === 2 ? 'director' : g.creative_status === 2 ? 'creative' : 'classic'
 })
 
 function groupVideoUrl(groupId) {
@@ -981,7 +988,7 @@ async function loginAccount(id) {
 onMounted(async () => {
   await loadTasks()
   const [groups, roomList] = await Promise.all([getGroups(), getRooms()])
-  mergedGroups.value = groups.filter(g => (g.merge_status === 2 || g.classic_status === 2 || g.director_status === 2) && (g.merged_filename || g.director_final_video))
+  mergedGroups.value = groups.filter(g => (g.merge_status === 2 || g.classic_status === 2 || g.director_status === 2 || g.creative_status === 2) && (g.merged_filename || g.director_final_video || g.creative_final_video))
   rooms.value = roomList
   accounts.value = await getPublishAccounts()
   const defaultAccount = accounts.value.find(a => a.account_name === '颜遇生活')
@@ -1120,6 +1127,7 @@ label { display: block; font-size: 12px; color: #888; margin: 12px 0 4px; }
 .vbadge { font-size: 10px; border-radius: 3px; padding: 0 3px; }
 .vbadge-director { color: #a78bfa; }
 .vbadge-classic { color: #34d399; }
+.vbadge-creative { color: #f59e0b; }
 
 .version-switcher { display: flex; gap: 8px; margin-bottom: 4px; }
 .vsw-option { flex: 1; display: flex; align-items: center; justify-content: space-between; background: #111; border: 1px solid #333; border-radius: 8px; padding: 8px 12px; cursor: pointer; transition: all 0.15s; }
