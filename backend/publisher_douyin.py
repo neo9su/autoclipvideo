@@ -51,13 +51,17 @@ class DouyinPublisher(BasePublisher):
 
         os.makedirs(os.path.dirname(cookie_file), exist_ok=True)
 
-        AUTH_COOKIE_NAMES = {"sessionid", "uid_tt", "user_unique_id", "sid_guard"}
+        AUTH_COOKIE_NAMES = {"sessionid", "uid_tt", "sid_guard"}
 
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=False)
+            browser = await p.chromium.launch(
+                headless=False,
+                args=["--window-size=1200,800", "--window-position=100,100"]
+            )
             try:
-                ctx = await browser.new_context()
+                ctx = await browser.new_context(viewport={"width": 1200, "height": 800})
                 page = await ctx.new_page()
+                await page.bring_to_front()
                 await page.goto(LOGIN_URL, timeout=30000, wait_until="domcontentloaded")
                 logger.info("Browser opened — waiting for user to log in (max 5 min)...")
 
@@ -78,6 +82,26 @@ class DouyinPublisher(BasePublisher):
                 with open(cookie_file, "w", encoding="utf-8") as f:
                     json.dump(cookies, f, ensure_ascii=False, indent=2)
                 logger.info(f"Cookies saved to {cookie_file}")
+
+                # Notify user and wait for them to close the browser (max 2 min)
+                try:
+                    await page.evaluate(
+                        "() => { document.title = '✅ 登录成功 — 可以关闭此窗口'; }"
+                    )
+                    await page.evaluate(
+                        "() => { document.body.insertAdjacentHTML('afterbegin',"
+                        "\"<div style='position:fixed;top:0;left:0;right:0;background:#52c41a;"
+                        "color:#fff;text-align:center;padding:12px;font-size:18px;z-index:99999'>"
+                        "✅ 登录成功，Cookie 已保存，可以关闭此窗口</div>\"); }"
+                    )
+                except Exception:
+                    pass
+                logger.info("Login successful — waiting for user to close the browser (max 2 min)...")
+                try:
+                    await page.wait_for_event("close", timeout=120000)
+                except Exception:
+                    pass  # timeout or already closed — both are fine
+
                 return True
             except Exception as e:
                 logger.error(f"Login browser error: {e}")
@@ -372,6 +396,15 @@ class DouyinPublisher(BasePublisher):
                 return page.url
 
             finally:
+                # Save refreshed cookies back to file before closing
+                try:
+                    refreshed = await ctx.cookies()
+                    if refreshed and account_cookie:
+                        with open(account_cookie, "w", encoding="utf-8") as _f:
+                            json.dump(refreshed, _f, ensure_ascii=False, indent=2)
+                        logger.info(f"Cookies refreshed and saved to {account_cookie} ({len(refreshed)} cookies)")
+                except Exception as e:
+                    logger.warning(f"Cookie refresh save error: {e}")
                 try:
                     await browser.close()
                 except Exception as e:
