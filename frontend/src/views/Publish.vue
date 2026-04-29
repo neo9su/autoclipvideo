@@ -287,9 +287,10 @@
       <div class="preview-modal">
         <div class="preview-header">
           <span>{{ previewGroup.label }}</span>
-          <div v-if="previewGroup.classic_status === 2 && previewGroup.director_status === 2" class="preview-tabs">
-            <button :class="['ptab', previewVersion === 'director' && 'ptab-active']" @click="previewVersion = 'director'">🎬 导演版</button>
-            <button :class="['ptab', previewVersion === 'classic' && 'ptab-active']" @click="previewVersion = 'classic'">📹 经典版</button>
+          <div v-if="((previewGroup.classic_status === 2 ? 1 : 0) + (previewGroup.director_status === 2 ? 1 : 0) + (previewGroup.creative_status === 2 ? 1 : 0)) >= 2" class="preview-tabs">
+            <button v-if="previewGroup.director_status === 2" :class="['ptab', previewVersion === 'director' && 'ptab-active']" @click="previewVersion = 'director'">🎬 导演版</button>
+            <button v-if="previewGroup.classic_status === 2" :class="['ptab', previewVersion === 'classic' && 'ptab-active']" @click="previewVersion = 'classic'">📹 经典版</button>
+            <button v-if="previewGroup.creative_status === 2" :class="['ptab', previewVersion === 'creative' && 'ptab-active']" @click="previewVersion = 'creative'">✍️ 自编版</button>
           </div>
           <button class="preview-close" @click="previewGroup = null">✕</button>
         </div>
@@ -785,6 +786,7 @@ const previewVideoUrl = computed(() => {
   if (!previewGroup.value) return ''
   if (previewVersion.value === 'classic') return `${BASE_URL}/api/groups/${previewGroup.value.id}/download`
   if (previewVersion.value === 'director') return `${BASE_URL}/api/groups/${previewGroup.value.id}/director-download`
+  if (previewVersion.value === 'creative') return `${BASE_URL}/api/groups/${previewGroup.value.id}/creative-download`
   return `${BASE_URL}/api/groups/${previewGroup.value.id}/download`
 })
 
