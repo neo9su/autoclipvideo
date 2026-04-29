@@ -417,7 +417,7 @@
           <span :class="['badge', a.cookie_file ? 'badge-green' : 'badge-gray']">
             {{ a.cookie_file ? '已登录' : '未登录' }}
           </span>
-          <button class="btn-xs" @click="loginAccount(a.id)">登录</button>
+          <button class="btn-xs" @click="loginAccount(a.id)" :disabled="loggingInId === a.id">{{ loggingInId === a.id ? '登录中…' : '登录' }}</button>
           <button class="btn-xs btn-danger" @click="deleteAccount(a.id)">删除</button>
         </div>
         <div class="add-account">
@@ -477,6 +477,7 @@ const scheduleInterval = ref(60)
 const showAccounts = ref(false)
 
 // ── Batch schedule ─────────────────────────────────────────────────────────────
+const loggingInId = ref(null)
 const showBatchModal = ref(false)
 const batchSubmitting = ref(false)
 const batchLoading = ref(false)
@@ -966,10 +967,13 @@ async function deleteAccount(id) {
 }
 
 async function loginAccount(id) {
+  if (loggingInId.value === id) return  // 防重复点击
+  loggingInId.value = id
   try {
     await loginPublishAccount(id)
-    showToast('浏览器已启动，请手动扫码登录', 'info')
+    showToast('浏览器已启动，请扫码登录，登录成功后自动关闭', 'info')
   } catch (e) {
+    loggingInId.value = null
     showToast('启动失败: ' + e.message, 'error')
   }
 }
@@ -996,6 +1000,14 @@ onMounted(async () => {
     } else if (msg.type === 'clip_progress' && msg.phase === 'done') {
       // A clip group just finished merging — refresh group list
       refreshGroups()
+    } else if (msg.type === 'login_done') {
+      loggingInId.value = null
+      if (msg.success) {
+        getPublishAccounts().then(list => { accounts.value = list })
+        showToast('登录成功，Cookie 已更新', 'success')
+      } else {
+        showToast('登录失败或超时，请重试', 'error')
+      }
     }
   })
 })

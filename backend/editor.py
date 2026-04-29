@@ -298,7 +298,7 @@ _WEARING_KW = {
 _DETAIL_KW = {
     '发缝真实', '发根清晰', '分缝自然', '发丝细腻',
     '贴合头皮', '边缘自然', '顺滑', '不打结', '不反光', '颜色自然',
-    '特写', '近景', '细节', '发丝质感',
+    '特写', '近景', '细节', '发丝质感', '网底',
     # 身体部位细节 → 分类为 detail，触发 push_in_strong
     '耳后', '耳边', '耳侧', '后脑勺', '后脑', '鬓角', '鬓边', '两鬓',
     '发际线', '颈后', '看这里', '看这边', '放大', '拉近',
@@ -667,9 +667,9 @@ def _motion_vf(seg: Seg, w: int = OUT_W, h: int = OUT_H) -> str:
     fps = 25
     n = int(dur * fps)
 
-    if motion in ("push_in", "push_in_strong"):
-        # 缓慢推进放大：1.0x → 1.12x（push_in）or 1.0x → 1.20x（push_in_strong，细节放大）
-        end_zoom = 1.20 if motion == "push_in_strong" else 1.12
+    if motion in ("push_in", "push_in_strong", "push_in_slight"):
+        # push_in_slight: 1.0x → 1.06x；push_in: 1.0x → 1.12x；push_in_strong: 1.0x → 1.20x
+        end_zoom = 1.20 if motion == "push_in_strong" else (1.06 if motion == "push_in_slight" else 1.12)
         # zoompan: zoom from 1.0 to end_zoom, centered on upper-center (face/wig)
         zp = (
             f"zoompan=z='min(1+({end_zoom-1:.3f})*on/{n},  {end_zoom:.3f})':"
@@ -677,9 +677,9 @@ def _motion_vf(seg: Seg, w: int = OUT_W, h: int = OUT_H) -> str:
             f"d={n}:s={w}x{h}:fps={fps}"
         )
         return f"{base},{zp},{sharp}"
-    elif motion == "pull_out":
-        # 缓慢拉远：1.12x → 1.0x
-        start_zoom = 1.12
+    elif motion in ("pull_out", "pull_out_slight"):
+        # pull_out_slight: 1.06x → 1.0x；pull_out: 1.12x → 1.0x
+        start_zoom = 1.06 if motion == "pull_out_slight" else 1.12
         zp = (
             f"zoompan=z='max({start_zoom:.3f}-({start_zoom-1:.3f})*on/{n}, 1.0)':"
             f"x='(iw/2)-(iw/zoom/2)':y='(ih*0.3)-(ih/zoom*0.3)':"
@@ -1643,6 +1643,10 @@ _STYLES: dict[str, tuple] = {
     "quick_in":     ("push_in",         "hblur",          0.28),
     "quick_rot":    ("rotate_cw",       "dissolve",       0.25),
     "diag_wipe":    ("pan_right",       "diagonal_wipe",  0.28),
+    # ── 轻推/轻拉（wearing 步骤用，幅度小不喧宾夺主）──
+    "slight_in_r":  ("push_in_slight",  "smoothleft",     0.40),
+    "slight_in_l":  ("push_in_slight",  "smoothright",    0.40),
+    "slight_out":   ("pull_out_slight", "fadegrays",      0.40),
     # ── CTA 结尾 ──
     "cta":          ("pull_out",        "fadegrays",      0.40),
     # ── 特效转场 (overlay composites) ──
@@ -1659,7 +1663,9 @@ _STYLE_POOLS: dict[str, list] = {
     "comparison":   ["attention_r", "attention_l",  "diag_in",      "hook_shake",   "polaroid_tr",   "phone_zoom_tr"],
     "social_proof": ["social_up",   "social_down",  "slide_in_r",   "slide_in_l",   "squeeze_r",     "phone_zoom_tr"],
     "product":      ["detail_r",    "detail_l",     "center_r",     "radial_in",    "seed",          "phone_zoom_tr", "slide_in_r"],
-    "wearing":      ["detail_r",    "detail_l",     "radial_in",    "quick_in",     "center_r",      "phone_zoom_tr", "slide_in_l"],
+    "wearing":      ["detail_r",    "detail_l",     "slide_in_r",   "slide_in_l",   "social_up",
+                     "social_down",  "seed_tilt",    "quick_r",      "quick_l",       "center_r",
+                     "slight_in_r", "slight_in_l",  "slight_out",   "diag_wipe"],
     "detail":       ["radial_in",   "center_r",     "detail_r",     "quick_in",     "phone_zoom_tr"],
     "comfort":      ["seed",        "seed_tilt",    "pixel_mix",    "quick_l",      "slide_in_l",    "slide_in_r"],
     "result":       ["seed",        "seed_tilt",    "pixel_mix",    "center_r",     "camera_out_tr", "slide_in_r"],
