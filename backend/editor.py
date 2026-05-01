@@ -719,6 +719,15 @@ def _motion_vf(seg: Seg, w: int = OUT_W, h: int = OUT_H) -> str:
             f"d={n}:s={w}x{h}:fps={fps}"
         )
         return f"{base},{zp},{sharp}"
+    elif motion == "detail_zoom":
+        # 细节特写：强推进放大 1.0→1.40x，聚焦画面上 22% 区域（发型/发丝细节）
+        end_zoom = 1.40
+        zp = (
+            f"zoompan=z='min(1+({end_zoom-1:.3f})*on/{n}, {end_zoom:.3f})':"
+            f"x='(iw/2)-(iw/zoom/2)':y='(ih*0.22)-(ih/zoom*0.22)':"
+            f"d={n}:s={w}x{h}:fps={fps}"
+        )
+        return f"{base},{zp},{sharp}"
     else:
         # static — no motion
         return f"{base},fps={fps},{sharp}"
@@ -1058,60 +1067,129 @@ async def _build_clip(
         # ── Phase 3: final encode – subtitles + music ─────────────────────────
         if on_progress:
             await on_progress("final", 0, 1)
-        music_path = _pick_music()
-        cmd = ["ffmpeg", "-y", "-i", merged_file]
-        parts: List[str] = []
-        music_idx: Optional[int] = None
 
-        if music_path:
-            cmd += ["-stream_loop", "-1", "-i", music_path]
-            music_idx = 1
-            parts.append(
-                # Compress voice, normalize loudness, force stereo before mixing
-                f"[0:a]acompressor=threshold=-25dB:ratio=3:attack=5:release=100:makeup=4dB,"
-                f"loudnorm=I=-16:TP=-1.5:LRA=11,"
-                f"aformat=channel_layouts=stereo[voice];"
-                f"[{music_idx}:a]volume=0.40,aformat=channel_layouts=stereo[bgm];"
-                f"[voice][bgm]amix=inputs=2:duration=first:normalize=0[aout]"
+        # Generate detail PiP frames (circular overlays for hair-detail segments)
+        pip_frames: dict = {}
+        try:
+            pip_frames = await _gen_detail_pip_frames(mp4, selected)
+        except Exception as _pip_err:
+            logger.debug(f"Detail PiP generation skipped: {_pip_err}")
+        pip_cleanup: list = [v for v in pip_frames.values() if v]
+
+        # Compute each segment's start time in the merged output (for PiP enable window)
+        def _tr_dur(seg: Seg) -> float:
+            if not seg.transition:
+                return 0.0
+            try:
+                return float(seg.transition.split(":")[1])
+            except Exception:
+                return 0.0
+
+        seg_starts: list = []
+        t_acc = 0.0
+        for i, seg in enumerate(selected):
+            seg_starts.append(t_acc)
+            t_acc += seg_durations[i]
+            if i + 1 < len(selected):
+                t_acc -= _tr_dur(selected[i + 1])
+
+        ok = False
+        try:
+            music_path = _pick_music()
+            cmd = ["ffmpeg", "-y", "-i", merged_file]
+            parts: List[str] = []
+            music_idx: Optional[int] = None
+            extra_inputs: list = []
+
+            # Pre-calculate pip input indices
+            pip_input_map: dict = {}  # seg_idx -> ffmpeg input index
+            for seg_idx in sorted(pip_frames.keys()):
+                input_idx = 1 + len(extra_inputs)
+                if music_path:
+                    input_idx += 1  # music will be input 1
+                extra_inputs.append(pip_frames[seg_idx])
+                pip_input_map[seg_idx] = input_idx
+
+            if music_path:
+                cmd += ["-stream_loop", "-1", "-i", music_path]
+                music_idx = 1
+                if pip_frames:
+                    pip_input_map = {k: v + 1 for k, v in pip_input_map.items()}
+                parts.append(
+                    f"[0:a]acompressor=threshold=-25dB:ratio=3:attack=5:release=100:makeup=4dB,"
+                    f"loudnorm=I=-16:TP=-1.5:LRA=11,"
+                    f"aformat=channel_layouts=stereo[voice];"
+                    f"[{music_idx}:a]volume=0.40,aformat=channel_layouts=stereo[bgm];"
+                    f"[voice][bgm]amix=inputs=2:duration=first:normalize=0[aout]"
+                )
+                audio_map = "[aout]"
+            else:
+                parts.append(
+                    "[0:a]acompressor=threshold=-25dB:ratio=3:attack=5:release=100:makeup=4dB,"
+                    "loudnorm=I=-16:TP=-1.5:LRA=11,"
+                    "aformat=channel_layouts=stereo[aout]"
+                )
+                audio_map = "[aout]"
+
+            # Add PiP image inputs to command
+            for png_path in extra_inputs:
+                cmd += ["-i", png_path]
+
+            # Build video filter chain: pip overlays → then subtitles
+            PIP_X, PIP_Y = 60, 60
+            PIP_DUR = 0.8
+            PIP_DELAY = 0.2
+
+            if pip_input_map:
+                prev_out = "[0:v]"
+                for i, (seg_idx, inp_idx) in enumerate(sorted(pip_input_map.items())):
+                    t_start = seg_starts[seg_idx] + PIP_DELAY
+                    t_end   = t_start + PIP_DUR
+                    cur_out = f"[vpip{i}]"
+                    parts.append(
+                        f"{prev_out}[{inp_idx}:v]overlay={PIP_X}:{PIP_Y}"
+                        f":enable='between(t,{t_start:.2f},{t_end:.2f})'{cur_out}"
+                    )
+                    prev_out = cur_out
+                vbase = prev_out
+            else:
+                vbase = "[0:v]"
+
+            if has_subs:
+                escaped = ass_path.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+                parts.append(f"{vbase}ass={escaped}[vout]")
+                vmap = "[vout]"
+            else:
+                vmap = vbase if pip_input_map else "0:v"
+
+            if parts:
+                cmd += ["-filter_complex", ";".join(parts)]
+
+            cmd += [
+                "-map", vmap, "-map", audio_map,
+                "-pix_fmt", "yuv420p",
+                "-c:v", "h264_videotoolbox", "-b:v", "10M", "-allow_sw", "1",
+                "-ar", "44100", "-ac", "2",
+                "-c:a", "aac", "-b:a", "192k",
+                out,
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
             )
-            audio_map = "[aout]"
-        else:
-            # No music: still normalise voice loudness
-            parts.append(
-                "[0:a]acompressor=threshold=-25dB:ratio=3:attack=5:release=100:makeup=4dB,"
-                "loudnorm=I=-16:TP=-1.5:LRA=11,"
-                "aformat=channel_layouts=stereo[aout]"
-            )
-            audio_map = "[aout]"
-
-        if has_subs:
-            escaped = ass_path.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
-            parts.append(f"[0:v]ass={escaped}[vout]")
-            vmap = "[vout]"
-        else:
-            vmap = "0:v"
-
-        if parts:
-            cmd += ["-filter_complex", ";".join(parts)]
-
-        cmd += [
-            "-map", vmap, "-map", audio_map,
-            "-pix_fmt", "yuv420p",
-            "-c:v", "h264_videotoolbox", "-b:v", "10M", "-allow_sw", "1",
-            "-ar", "44100", "-ac", "2",
-            "-c:a", "aac", "-b:a", "192k",
-            out,
-        ]
-        proc = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
-        )
-        _, stderr = await proc.communicate()
-        ok = proc.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 0
-        if not ok:
-            decoded = stderr.decode(errors="replace")
-            logger.error(f"_build_clip final encode rc={proc.returncode}")
-            logger.error(f"_build_clip stderr:\n{decoded[-2000:]}")
+            _, stderr = await proc.communicate()
+            ok = proc.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 0
+            if not ok:
+                decoded = stderr.decode(errors="replace")
+                logger.error(f"_build_clip final encode rc={proc.returncode}")
+                logger.error(f"_build_clip stderr:\n{decoded[-2000:]}")
+        finally:
+            for _pf in pip_cleanup:
+                try:
+                    os.remove(_pf)
+                except Exception:
+                    pass
         return ok
+
 
 
 async def _prepend_thumbnail(clip_path: str, thumb_path: str) -> bool:
@@ -1349,6 +1427,112 @@ async def _gen_zoom_punch_clips(
     result = {bi: path for bi, path in pairs if path}
     logger.info(f"Zoom punch clips: {len(result)}/{len(boundaries)} generated")
     return result
+
+
+async def _gen_detail_pip_frames(
+    mp4: str, selected: List[Seg]
+) -> dict:
+    """
+    For each detail-category segment, extract a mid-frame from the upper-centre
+    area (the wig/hair region), apply a circular mask with white border, and
+    return {seg_idx: PNG_path} for PiP overlay in the final encode.
+    Requires Pillow; silently returns {} if unavailable.
+    """
+    PIP_DIAM   = 480          # circle diameter in pixels (output video coords)
+    PIP_BORDER = 6            # white border thickness
+    # Source crop: upper-centre 40% of frame (hair/wig area)
+    CROP_W_RATIO = 0.55
+    CROP_H_RATIO = 0.38
+    CROP_Y_RATIO = 0.04       # start near top
+
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        logger.debug("Pillow not available — skipping detail PiP generation")
+        return {}
+
+    # 细节关键词（与 _HAIR_DETAIL_KW 同步）
+    _DETAIL_TRIGGERS = frozenset([
+        "发丝", "发根", "发纹", "仿真皮", "仿递针", "仿头皮", "头皮",
+        "发质", "头顶", "分缝", "发缝", "毛流", "网底",
+        "发缝真实", "发根清晰", "分缝自然", "发丝细腻",
+        "特写", "近景", "细节", "放大", "拉近",
+        "仿真头皮", "仿生头皮", "递针工艺", "单根勾织",
+    ])
+
+    sem = asyncio.Semaphore(1)
+    out: dict = {}
+
+    async def _one(idx: int, seg: Seg) -> tuple:
+        if seg.category != "detail" and not any(kw in seg.text for kw in _DETAIL_TRIGGERS):
+            return idx, None
+        ts = seg.start + seg.duration * 0.4   # 40% 处提取帧面更稳定
+        raw_jpg = tempfile.mktemp(suffix="_pip_raw.jpg")
+        pip_png = tempfile.mktemp(suffix="_pip.png")
+        try:
+            async with sem:
+                pre = max(0.0, ts - 3.0)
+                fine = ts - pre
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-ss", f"{pre:.3f}", "-i", mp4,
+                    "-ss", f"{fine:.3f}", "-frames:v", "1",
+                    "-vf", (
+                        f"scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease,"
+                        f"pad={OUT_W}:{OUT_H}:(ow-iw)/2:(oh-ih)/2,"
+                        # Crop upper-centre hair area
+                        f"crop=w={OUT_W}*{CROP_W_RATIO:.2f}:h={OUT_H}*{CROP_H_RATIO:.2f}"
+                        f":x=({OUT_W}-{OUT_W}*{CROP_W_RATIO:.2f})/2"
+                        f":y={OUT_H}*{CROP_Y_RATIO:.2f},"
+                        # Scale to square for circular crop
+                        f"scale={PIP_DIAM}:{PIP_DIAM}:flags=lanczos"
+                    ),
+                    "-q:v", "2", raw_jpg,
+                ]
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await proc.communicate()
+            if proc.returncode != 0 or not os.path.exists(raw_jpg):
+                return idx, None
+
+            # Apply circular mask + white border with Pillow
+            img = Image.open(raw_jpg).convert("RGBA")
+            img = img.resize((PIP_DIAM, PIP_DIAM), Image.LANCZOS)
+
+            # Create circular mask
+            mask = Image.new("L", (PIP_DIAM, PIP_DIAM), 0)
+            draw = ImageDraw.Draw(mask)
+            draw.ellipse((0, 0, PIP_DIAM - 1, PIP_DIAM - 1), fill=255)
+            img.putalpha(mask)
+
+            # Add white border
+            total = PIP_DIAM + PIP_BORDER * 2
+            bordered = Image.new("RGBA", (total, total), (0, 0, 0, 0))
+            # White circle background
+            bg_draw = ImageDraw.Draw(bordered)
+            bg_draw.ellipse((0, 0, total - 1, total - 1), fill=(255, 255, 255, 255))
+            bordered.paste(img, (PIP_BORDER, PIP_BORDER), mask=img)
+
+            bordered.save(pip_png, "PNG")
+            return idx, pip_png
+        except Exception as e:
+            logger.debug(f"Detail PiP frame error seg {idx}: {e}")
+            return idx, None
+        finally:
+            try:
+                os.remove(raw_jpg)
+            except Exception:
+                pass
+
+    pairs = await asyncio.gather(*[_one(i, seg) for i, seg in enumerate(selected)])
+    for idx, path in pairs:
+        if path:
+            out[idx] = path
+    logger.info(f"Detail PiP frames: {len(out)}/{len(selected)} generated")
+    return out
 
 
 async def _gen_person_frames(
@@ -1718,7 +1902,7 @@ def _assign_styles(assembled: List[Seg], seed: int = 0) -> None:
         style_name = rng.choice(pool)
         motion, t_type, t_dur = _STYLES[style_name]
         if any(kw in seg.text for kw in _HAIR_DETAIL_KW) or seg.category == "detail":
-            motion = "push_in_strong"
+            motion = "detail_zoom" if rng.random() < 0.5 else "push_in_strong"
         seg.motion = motion
         if i > 0:
             seg.transition = f"{t_type}:{t_dur:.2f}"
