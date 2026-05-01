@@ -343,7 +343,9 @@ async def poll_transcriptions(broadcast_fn=None):
                 ) as cur:
                     pending = await cur.fetchall()
                 async with db.execute(
-                    "SELECT * FROM recordings WHERE synced = 0 AND transcribed = 0 AND local_deleted = 0"
+                    """SELECT * FROM recordings
+                       WHERE synced = 0 AND transcribed = 0 AND local_deleted = 0
+                         AND end_time IS NOT NULL AND end_time != start_time"""
                 ) as cur:
                     unsynced = await cur.fetchall()
 
