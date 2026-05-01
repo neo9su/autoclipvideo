@@ -28,6 +28,7 @@ import torchaudio
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
+import shutil as _shutil
 
 _DEFAULT_STORAGE = (
     r"C:\Users\neo\douyin_recordings" if os.name == "nt" else "/data/douyin-recordings"
@@ -37,7 +38,12 @@ os.makedirs(STORAGE_DIR, exist_ok=True)
 
 DB_PATH = os.path.join(STORAGE_DIR, "jobs.db")
 
-# Directory containing custom subtitle fonts (e.g. 新青年 OTF).
+# ffmpeg binary with libass support (needed for subtitle burn-in).
+# On Windows, the conda/miniconda ffmpeg often lacks libass; prefer the
+# Chocolatey-installed build which is compiled with --enable-libass.
+_CHOCO_FFMPEG = r"C:\ProgramData\chocolatey\bin\ffmpeg.exe"
+FFMPEG_ASS = _CHOCO_FFMPEG if os.name == "nt" else (_shutil.which("ffmpeg") or "ffmpeg")
+
 # Falls back to the known location inside STORAGE_DIR/fonts.
 _DEFAULT_FONTS_DIR = os.path.join(_DEFAULT_STORAGE, "fonts")
 FONTS_DIR = os.environ.get("FONTS_DIR", _DEFAULT_FONTS_DIR if os.path.isdir(_DEFAULT_FONTS_DIR) else "")
@@ -572,9 +578,9 @@ async def _do_clip_job(job_id: str, mp4_path: str, segments: list, ass_content: 
                     fonts_escaped = fonts_fwd[0] + "\\:" + fonts_fwd[2:]
                 else:
                     fonts_escaped = fonts_fwd
-                video_filter = f"[0:v]ass='{escaped}':fontsdir='{fonts_escaped}'[vout]"
+                video_filter = f"[0:v]ass=filename='{escaped}':fontsdir='{fonts_escaped}',format=yuv420p[vout]"
             else:
-                video_filter = f"[0:v]ass='{escaped}'[vout]"
+                video_filter = f"[0:v]ass=filename='{escaped}',format=yuv420p[vout]"
             filter_complex = f"{audio_filter};{video_filter}"
             vmap, amap = "[vout]", "[aout]"
         else:
@@ -582,7 +588,7 @@ async def _do_clip_job(job_id: str, mp4_path: str, segments: list, ass_content: 
             vmap, amap = "0:v", "[aout]"
 
         rc = await _run_ffmpeg(
-            "ffmpeg", "-y", "-i", merged,
+            FFMPEG_ASS, "-y", "-i", merged,
             "-filter_complex", filter_complex,
             "-map", vmap, "-map", amap,
             "-pix_fmt", "yuv420p",
@@ -1744,9 +1750,9 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
             if FONTS_DIR:
                 ff = FONTS_DIR.replace("\\", "/")
                 fonts_esc = (ff[0] + "\\:" + ff[2:]) if len(ff) > 1 and ff[1] == ":" else ff
-                video_filter = f"[0:v]ass='{escaped}':fontsdir='{fonts_esc}'[vout]"
+                video_filter = f"[0:v]ass=filename='{escaped}':fontsdir='{fonts_esc}',format=yuv420p[vout]"
             else:
-                video_filter = f"[0:v]ass='{escaped}'[vout]"
+                video_filter = f"[0:v]ass=filename='{escaped}',format=yuv420p[vout]"
             if audio_filter:
                 filter_complex = f"{audio_filter};{video_filter}"
             else:
@@ -1759,7 +1765,7 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
                 filter_complex = None
             vmap = "0:v"
 
-        ff_args = ["ffmpeg", "-y", *inputs]
+        ff_args = [FFMPEG_ASS, "-y", *inputs]
         if filter_complex:
             ff_args += ["-filter_complex", filter_complex]
         ff_args += ["-map", vmap]
