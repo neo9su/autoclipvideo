@@ -425,21 +425,38 @@ async def generate_meta(group_id: int) -> Optional[dict]:
 async def match_product(group_id: int) -> Optional[dict]:
     """
     Match a product from the products table for a clip_group.
+    Only considers products belonging to the same room as the clip_group.
+    Falls back to all enabled products if the group has no room_id or no
+    room-specific products exist.
     Returns the best-matching product dict, or None.
     """
     async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT wig_model, wig_color FROM clip_groups WHERE id = ?", (group_id,)
+            "SELECT wig_model, wig_color, room_id FROM clip_groups WHERE id = ?", (group_id,)
         ) as cur:
             group = await cur.fetchone()
         if not group:
             return None
 
-        async with db.execute(
-            "SELECT * FROM products WHERE enabled = 1"
-        ) as cur:
-            products = await cur.fetchall()
+        room_id = group["room_id"]
+        if room_id:
+            # Prefer products scoped to the same room
+            async with db.execute(
+                "SELECT * FROM products WHERE enabled = 1 AND room_id = ?", (room_id,)
+            ) as cur:
+                products = await cur.fetchall()
+            # Fall back to all enabled products if no room-specific products found
+            if not products:
+                async with db.execute(
+                    "SELECT * FROM products WHERE enabled = 1"
+                ) as cur:
+                    products = await cur.fetchall()
+        else:
+            async with db.execute(
+                "SELECT * FROM products WHERE enabled = 1"
+            ) as cur:
+                products = await cur.fetchall()
 
     keywords = [k for k in [group["wig_model"], group["wig_color"]] if k]
     if not keywords:
