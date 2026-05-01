@@ -162,7 +162,7 @@ class DouyinPublisher(BasePublisher):
                 await page.goto(UPLOAD_URL, timeout=30000, wait_until="domcontentloaded")
                 # wait for React/SPA to hydrate — upload page is a JS-rendered SPA
                 try:
-                    await page.wait_for_load_state("networkidle", timeout=20000)
+                    await page.wait_for_load_state("networkidle", timeout=5000)
                 except Exception:
                     pass  # networkidle timeout is non-fatal
                 await _show_banner(page, "正在检查登录状态…", "system")
@@ -865,17 +865,21 @@ async def _handle_scan_verify(page, progress=None) -> bool:
         '[class*="verify"][class*="qr"]',
         '[class*="scan"][class*="modal"]',
     ]
-    # Wait up to 4 seconds to see if scan dialog appears
+    # Wait up to 20 seconds for scan dialog to appear (it may take a moment after publish click)
     scan_visible = False
-    for sel in SCAN_SELECTORS:
-        try:
-            loc = page.locator(sel).first
-            if await loc.is_visible(timeout=1500):
-                scan_visible = True
-                logger.info(f"Scan-to-verify dialog detected: {sel}")
-                break
-        except Exception:
-            continue
+    deadline = asyncio.get_event_loop().time() + 20
+    while asyncio.get_event_loop().time() < deadline and not scan_visible:
+        for sel in SCAN_SELECTORS:
+            try:
+                loc = page.locator(sel).first
+                if await loc.is_visible(timeout=800):
+                    scan_visible = True
+                    logger.info(f"Scan-to-verify dialog detected: {sel}")
+                    break
+            except Exception:
+                continue
+        if not scan_visible:
+            await asyncio.sleep(1)
 
     if not scan_visible:
         return False
