@@ -904,7 +904,12 @@ async def create_job(
     """Receive MP4 file and start transcription."""
     job_id = os.path.splitext(file.filename)[0]
     room_dir = os.path.join(STORAGE_DIR, str(room_id))
-    os.makedirs(room_dir, exist_ok=True)
+    # exist_ok=True doesn't suppress WinError 183 on Windows when the path is a junction/symlink;
+    # catch the OSError explicitly so the endpoint doesn't return 500.
+    try:
+        os.makedirs(room_dir, exist_ok=True)
+    except OSError:
+        pass  # directory already exists — safe to continue
 
     mp4_path = os.path.join(room_dir, file.filename)
     srt_path = os.path.join(room_dir, job_id + ".srt")
@@ -1952,6 +1957,58 @@ async def cleanup_clips():
             except Exception:
                 pass
         _tts_jobs.pop(jid, None)
+
+    # Clean up director job temp dirs not referenced by any active job
+    active_director_ids = {
+        jid for jid, j in list(_director_jobs.items())
+        if j.get("status") not in ("done", "error")
+    }
+    director_base = os.path.join(STORAGE_DIR, "director")
+    if os.path.isdir(director_base):
+        for entry in os.listdir(director_base):
+            entry_path = os.path.join(director_base, entry)
+            if not os.path.isdir(entry_path):
+                continue
+            if entry in active_director_ids:
+                continue
+            try:
+                size = sum(
+                    os.path.getsize(os.path.join(dp, f))
+                    for dp, _, files in os.walk(entry_path)
+                    for f in files
+                    if os.path.exists(os.path.join(dp, f))
+                )
+                shutil.rmtree(entry_path, ignore_errors=True)
+                freed_bytes += size
+                deleted += 1
+            except Exception:
+                pass
+
+    # Clean up classic_concat job temp dirs not referenced by active jobs
+    active_classic_ids = {
+        jid for jid, j in list(_classic_concat_jobs.items())
+        if j.get("status") not in ("done", "error")
+    }
+    classic_base = os.path.join(STORAGE_DIR, "classic_concat")
+    if os.path.isdir(classic_base):
+        for entry in os.listdir(classic_base):
+            entry_path = os.path.join(classic_base, entry)
+            if not os.path.isdir(entry_path):
+                continue
+            if entry in active_classic_ids:
+                continue
+            try:
+                size = sum(
+                    os.path.getsize(os.path.join(dp, f))
+                    for dp, _, files in os.walk(entry_path)
+                    for f in files
+                    if os.path.exists(os.path.join(dp, f))
+                )
+                shutil.rmtree(entry_path, ignore_errors=True)
+                freed_bytes += size
+                deleted += 1
+            except Exception:
+                pass
 
     return {"deleted": deleted, "freed_gb": round(freed_bytes / 1024 ** 3, 3)}
 

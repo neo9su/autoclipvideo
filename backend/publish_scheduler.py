@@ -186,7 +186,8 @@ async def _execute_task(task: dict, broadcast_fn: Optional[Callable] = None):
         logger.error(f"Task {task_id} failed: {err_msg}")
         # 不可重试的错误类型
         non_retryable = ["视频质量不达标", "Video file not found", "video file not found",
-                          "Not logged in", "login QR code", "Cookie may have expired"]
+                          "Not logged in", "login QR code", "Cookie may have expired",
+                          "Re-login timed out"]  # 扫码等待超时，不重试（需要手动处理）
         is_retryable = not any(kw in err_msg for kw in non_retryable)
         retry_count = task.get("retry_count", 0) or 0
         if is_retryable and retry_count < 2:
@@ -203,9 +204,16 @@ async def _execute_task(task: dict, broadcast_fn: Optional[Callable] = None):
             await _set_status("failed", error_msg=err_msg[:500])
             title = task.get("title") or f"任务#{task_id}"
             retry_info = f"（已重试{retry_count}次）" if retry_count > 0 else ""
-            asyncio.create_task(notify(
-                f"🚨 抖音发布失败{retry_info}：{title}\n原因：{err_msg[:200]}"
-            ))
+            # Cookie 失效 / 扫码超时：提示重新登录
+            if any(kw in err_msg for kw in ["Not logged in", "login QR", "Re-login timed out", "Cookie may have expired"]):
+                asyncio.create_task(notify(
+                    f"🔐 抖音 Cookie 已失效！请尽快重新登录抖音创作者中心\n"
+                    f"任务「{title}」已暂停，重新登录后可直接重试"
+                ))
+            else:
+                asyncio.create_task(notify(
+                    f"🚨 抖音发布失败{retry_info}：{title}\n原因：{err_msg[:200]}"
+                ))
 
 
 async def _reset_stuck_publishing_tasks():

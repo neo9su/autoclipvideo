@@ -167,11 +167,11 @@ class DouyinPublisher(BasePublisher):
                     pass  # networkidle timeout is non-fatal
                 await _show_banner(page, "正在检查登录状态…", "system")
 
-                if "login" in page.url or "passport" in page.url:
-                    raise RuntimeError("Not logged in — cookie may have expired")
-                qr_visible = await page.locator('[class*="qrcode"], [class*="login-qr"], :text("扫码登录")').first.is_visible()
-                if qr_visible:
-                    raise RuntimeError("Not logged in — login QR code detected, please re-login")
+                if "login" in page.url or "passport" in page.url or await _check_login_qr(page):
+                    logger.warning(f"[task {task_id}] Cookie 失效，尝试弹出扫码登录流程...")
+                    relogged = await _relogin_in_browser(page, ctx, account_cookie, task_id)
+                    if not relogged:
+                        raise RuntimeError("Not logged in — login QR code detected, please re-login")
 
                 # 1b. Dismiss draft continuation banner
                 await _show_banner(page, "正在处理草稿弹窗…", "system")
@@ -626,6 +626,78 @@ async def _load_cookies(ctx, cookie_file: str):
     with open(cookie_file, encoding="utf-8") as f:
         cookies = json.load(f)
     await ctx.add_cookies(cookies)
+
+
+async def _check_login_qr(page) -> bool:
+    """Return True if the page is showing a QR / login screen."""
+    try:
+        return await page.locator(
+            '[class*="qrcode"], [class*="login-qr"], :text("扫码登录"), :text("Login")'
+        ).first.is_visible(timeout=2000)
+    except Exception:
+        return False
+
+
+async def _relogin_in_browser(
+    page, ctx, cookie_file: str, task_id, max_wait: int = 300
+) -> bool:
+    """当检测到 Cookie 失效时，在已打开的浏览器里直接导航到登录页。
+    用户扫码后自动保存 Cookie 并返回 True。
+    等待超时（默认 5 分钟）返回 False。
+    """
+    import asyncio
+    AUTH_COOKIE_NAMES = {"sessionid", "uid_tt", "sid_guard"}
+
+    try:
+        # 在当前标页导航到登录页，保留浏览器
+        await page.goto(LOGIN_URL, timeout=30000, wait_until="domcontentloaded")
+        await _show_banner(
+            page,
+            f"⚠️ Cookie 已失效，请扫码重新登录（最多等待 {max_wait}秒）",
+            "warning",
+        )
+        logger.info(f"[task {task_id}] Cookie expired — browser redirected to login, waiting for user scan (max {max_wait}s)")
+
+        # 发送 OpenClaw 通知让用户去扫码
+        try:
+            import subprocess
+            subprocess.Popen(
+                ["openclaw", "system", "event",
+                 "--text", f"⚠️ 抹音发布登录已失效，请扫码重新登录（任务#{task_id}）",
+                 "--mode", "now"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max_wait
+        while loop.time() < deadline:
+            cookies = await ctx.cookies()
+            cookie_names = {c["name"] for c in cookies}
+            if AUTH_COOKIE_NAMES.issubset(cookie_names):
+                # 扫码成功——保存新 Cookie
+                with open(cookie_file, "w", encoding="utf-8") as f:
+                    json.dump(cookies, f, ensure_ascii=False, indent=2)
+                logger.info(f"[task {task_id}] Re-login successful, cookies refreshed")
+                try:
+                    await _show_banner(page, "✅ 登录成功！正在返回发布页面...", "success")
+                except Exception:
+                    pass
+                # 跳回发布页
+                await page.goto(UPLOAD_URL, timeout=30000, wait_until="domcontentloaded")
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=5000)
+                except Exception:
+                    pass
+                return True
+            await asyncio.sleep(2)
+
+        logger.warning(f"[task {task_id}] Re-login timed out after {max_wait}s")
+        return False
+    except Exception as e:
+        logger.error(f"[task {task_id}] _relogin_in_browser error: {e}")
+        return False
 
 
 async def _read_tag_dropdown_value(page) -> str:
