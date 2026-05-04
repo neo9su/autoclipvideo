@@ -91,13 +91,6 @@
 
         <!-- 导演模式操作面板（始终显示） -->
         <div class="director-panel">
-          <!-- 一键运行导演+自编（仅当两者均未运行或失败时显示） -->
-          <div v-if="(g.director_status === 0 || g.director_status === -1) && (g.creative_status === 0 || g.creative_status === null || g.creative_status === -1) && g.classic_status === 2" class="retry-modes-row">
-            <button class="btn-retry-modes" @click="doRetryModes(g)">
-              🎬 运行导演 + 自编模式
-            </button>
-            <span class="retry-hint">经典版已完成，点击启动另外两个 AI 模式</span>
-          </div>
           <!-- Vibe 选择器 -->
           <div class="vibe-selector">
             <span class="vibe-label">风格</span>

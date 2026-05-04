@@ -1186,9 +1186,12 @@ async def _run_creative_pipeline_inner(group_id: int):
 
 
 async def backfill_auto_merge():
-    """On startup, recover only groups that were actively in-progress when the server crashed.
-    Do NOT re-trigger all groups with status=0 — that would flood the queue on every restart
-    since the default value for new columns is 0."""
+    """On startup:
+    1. Recover groups that were actively in-progress when the server crashed.
+    2. Auto-trigger director+creative pipelines for groups that have classic_status=2
+       but never ran director/creative (status=0). This handles groups merged before
+       the director/creative pipelines were added.
+    """
     try:
         async with aio_connect() as db:
             db.row_factory = aiosqlite.Row
@@ -1231,5 +1234,31 @@ async def backfill_auto_merge():
             logger.info(f"Backfill auto-merge: triggered {triggered}/{len(groups)} crash-recovered groups")
         else:
             logger.info("Backfill auto-merge: no crashed pipelines to recover")
+
+        # Phase 2: auto-trigger director+creative for groups that have classic done
+        # but never ran the new pipelines (status=0). These are groups merged before
+        # director/creative was added. Skip groups with status != 0 to avoid re-running.
+        await asyncio.sleep(2)  # let Phase 1 tasks settle
+        async with aio_connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """SELECT id FROM clip_groups
+                   WHERE classic_status = 2
+                     AND (director_status = 0 OR director_status = -1)
+                     AND (creative_status = 0 OR creative_status IS NULL OR creative_status = -1)
+                   ORDER BY id DESC"""
+            ) as cur:
+                pending = [r["id"] for r in await cur.fetchall()]
+
+        if pending:
+            logger.info(f"Backfill: {len(pending)} groups with classic done but director/creative not run — scheduling...")
+            for gid in pending:
+                asyncio.create_task(_run_director_pipeline(gid))
+                asyncio.create_task(_run_creative_pipeline(gid))
+                await asyncio.sleep(0.3)  # stagger to avoid flooding
+            logger.info(f"Backfill: director+creative tasks queued for {len(pending)} groups")
+        else:
+            logger.info("Backfill: all groups already have director/creative results or in progress")
+
     except Exception as e:
         logger.error(f"Backfill auto-merge error: {e}")

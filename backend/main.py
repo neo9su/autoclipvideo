@@ -221,6 +221,25 @@ async def _on_gpu_online():
         if queued:
             logger.info(f"GPU online — auto-retrying {len(queued)} failed clip job(s): {queued}")
             await broadcast({"type": "gpu_auto_retry", "recording_ids": queued})
+
+        # Also trigger director+creative for groups that have classic done but pipelines not run
+        from transcribe import _run_director_pipeline, _run_creative_pipeline
+        async with aio_connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """SELECT id FROM clip_groups
+                   WHERE classic_status = 2
+                     AND (director_status = 0 OR director_status = -1)
+                     AND (creative_status = 0 OR creative_status IS NULL OR creative_status = -1)
+                   ORDER BY id DESC"""
+            ) as cur:
+                pending_groups = [r["id"] for r in await cur.fetchall()]
+        if pending_groups:
+            logger.info(f"GPU online — triggering director+creative for {len(pending_groups)} pending group(s)")
+            for gid in pending_groups:
+                asyncio.create_task(_run_director_pipeline(gid))
+                asyncio.create_task(_run_creative_pipeline(gid))
+                await asyncio.sleep(0.2)
     except Exception as e:
         logger.warning(f"_on_gpu_online auto-retry failed: {e}")
     finally:
@@ -1011,52 +1030,79 @@ async def get_group(group_id: int):
 
 
 @app.post("/api/groups/{group_id}/merge")
-async def trigger_merge(group_id: int):
+async def trigger_merge(group_id: int, force: bool = False):
     async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM clip_groups WHERE id = ?", (group_id,)) as cur:
             group = await cur.fetchone()
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
-    if group["classic_status"] == 1 and group["director_status"] == 1 and (group["creative_status"] or 0) == 1:
+    if not force and group["classic_status"] == 1 and group["director_status"] == 1 and (group["creative_status"] or 0) == 1:
         raise HTTPException(status_code=409, detail="All pipelines already in progress")
-    # Reset all three pipelines (unless already completed) and clear errors
+    # Reset all three pipelines and clear errors; force=True resets even completed ones
+    async with aio_connect() as db:
+        if force:
+            await db.execute(
+                """UPDATE clip_groups SET
+                   quality_issue = NULL, director_error = NULL, merge_error = NULL, creative_error = NULL,
+                   classic_status = 0, director_status = 0, creative_status = 0,
+                   merged_filename = NULL, director_final_video = NULL, creative_final_video = NULL,
+                   merge_status = 0, merged_at = NULL
+                   WHERE id = ?""",
+                (group_id,)
+            )
+        else:
+            await db.execute(
+                """UPDATE clip_groups SET
+                   quality_issue = NULL, director_error = NULL, merge_error = NULL, creative_error = NULL,
+                   classic_status  = 0,
+                   director_status = 0,
+                   creative_status = 0
+                   WHERE id = ?""",
+                (group_id,)
+            )
+        await db.commit()
+    from transcribe import _run_director_pipeline, _run_creative_pipeline
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT COUNT(*) as done FROM recordings WHERE group_id = ? AND clipped = 2",
+            (group_id,),
+        ) as cur:
+            row = await cur.fetchone()
+    valid_clips = row["done"] if row else 0
+    if valid_clips == 0:
+        async with aio_connect() as db:
+            await db.execute(
+                "UPDATE clip_groups SET classic_status = -1, merge_error = ? WHERE id = ?",
+                ("无有效剪辑片段，无法合并", group_id),
+            )
+            await db.commit()
+        logger.warning(f"Group {group_id}: no valid clips, skipping classic merge")
+    else:
+        asyncio.create_task(merge_group(group_id))
+    asyncio.create_task(_run_director_pipeline(group_id))
+    asyncio.create_task(_run_creative_pipeline(group_id))
+    return {"group_id": group_id, "merge_status": 1}
+
+
+@app.post("/api/groups/{group_id}/retry-modes")
+async def retry_director_creative(group_id: int):
+    """Re-queue director + creative pipelines only (classic merge not touched)."""
     async with aio_connect() as db:
         await db.execute(
             """UPDATE clip_groups SET
-               quality_issue = NULL, director_error = NULL, merge_error = NULL, creative_error = NULL,
-               classic_status  = CASE WHEN classic_status  != 2 THEN 0 ELSE classic_status  END,
-               director_status = CASE WHEN director_status != 2 THEN 0 ELSE director_status END,
-               creative_status = CASE WHEN (creative_status IS NULL OR creative_status != 2) THEN 0 ELSE creative_status END
+               director_status = 0, director_error = NULL,
+               creative_status = 0, creative_error = NULL,
+               director_final_video = NULL, creative_final_video = NULL
                WHERE id = ?""",
-            (group_id,)
+            (group_id,),
         )
         await db.commit()
     from transcribe import _run_director_pipeline, _run_creative_pipeline
-    if group["classic_status"] != 2:
-        async with aio_connect() as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute(
-                "SELECT COUNT(*) as done FROM recordings WHERE group_id = ? AND clipped = 2",
-                (group_id,),
-            ) as cur:
-                row = await cur.fetchone()
-        valid_clips = row["done"] if row else 0
-        if valid_clips == 0:
-            async with aio_connect() as db:
-                await db.execute(
-                    "UPDATE clip_groups SET classic_status = -1, merge_error = ? WHERE id = ?",
-                    ("无有效剪辑片段，无法合并", group_id),
-                )
-                await db.commit()
-            logger.warning(f"Group {group_id}: no valid clips (all clipped=-1), skipping classic merge")
-        else:
-            asyncio.create_task(merge_group(group_id))
-    if group["director_status"] != 2:
-        asyncio.create_task(_run_director_pipeline(group_id))
-    if (group["creative_status"] or 0) != 2:
-        asyncio.create_task(_run_creative_pipeline(group_id))
-    return {"group_id": group_id, "merge_status": 1}
+    asyncio.create_task(_run_director_pipeline(group_id))
+    asyncio.create_task(_run_creative_pipeline(group_id))
+    return {"group_id": group_id, "status": "queued"}
 
 
 @app.patch("/api/groups/{group_id}/publish-versions")
