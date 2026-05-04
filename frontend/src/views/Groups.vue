@@ -91,6 +91,13 @@
 
         <!-- 导演模式操作面板（始终显示） -->
         <div class="director-panel">
+          <!-- 一键运行导演+自编（仅当两者均未运行或失败时显示） -->
+          <div v-if="(g.director_status === 0 || g.director_status === -1) && (g.creative_status === 0 || g.creative_status === null || g.creative_status === -1) && g.classic_status === 2" class="retry-modes-row">
+            <button class="btn-retry-modes" @click="doRetryModes(g)">
+              🎬 运行导演 + 自编模式
+            </button>
+            <span class="retry-hint">经典版已完成，点击启动另外两个 AI 模式</span>
+          </div>
           <!-- Vibe 选择器 -->
           <div class="vibe-selector">
             <span class="vibe-label">风格</span>
@@ -528,7 +535,7 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { getGroups, getGroup, getRooms, mergeGroup, createGroup, updateGroup, reassignRecording, importGroupVideos, createWS, getThumbnailUrl, createCustomGroup, uploadCustomGroupVideo, deleteGroup, getProcessingProgress, reclipRecording, reclipGroupAll } from '../api.js'
+import { getGroups, getGroup, getRooms, mergeGroup, retryModes, createGroup, updateGroup, reassignRecording, importGroupVideos, createWS, getThumbnailUrl, createCustomGroup, uploadCustomGroupVideo, deleteGroup, getProcessingProgress, reclipRecording, reclipGroupAll } from '../api.js'
 import { useToast } from '../composables/toast.js'
 
 const groups = ref([])
@@ -685,6 +692,16 @@ async function doMerge(g) {
     await load()
   } catch (e) {
     show(e.message || '合并失败', 'error')
+  }
+}
+
+async function doRetryModes(g) {
+  try {
+    await retryModes(g.id)
+    show('导演+自编任务已提交', 'info')
+    await load()
+  } catch (e) {
+    show(e.message || '任务提交失败', 'error')
   }
 }
 
@@ -1217,6 +1234,10 @@ onUnmounted(() => { ws?.close(); stopProgressPolling() })
 .preview-err { text-align: center; color: #fe2c55; padding: 20px; }
 .preview-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 1px solid #222; }
 .director-panel { padding: 10px 16px; background: rgba(99,102,241,0.07); border-top: 1px solid rgba(99,102,241,0.2); border-bottom: 1px solid rgba(99,102,241,0.2); }
+.retry-modes-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; padding: 8px 10px; background: rgba(99,102,241,0.12); border-radius: 6px; border: 1px solid rgba(99,102,241,0.3); }
+.btn-retry-modes { padding: 6px 14px; background: linear-gradient(135deg, #6366f1, #8b5cf6); color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; white-space: nowrap; }
+.btn-retry-modes:hover { opacity: 0.85; }
+.retry-hint { font-size: 11px; color: #a5b4fc; }
 .vibe-selector { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 .vibe-label { font-size: 11px; color: #a5b4fc; font-weight: 600; }
 .vibe-select { padding: 3px 8px; font-size: 12px; border-radius: 6px; border: 1px solid rgba(99,102,241,0.4); background: rgba(99,102,241,0.15); color: #e0e7ff; cursor: pointer; }

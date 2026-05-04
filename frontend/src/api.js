@@ -71,6 +71,12 @@ export async function mergeGroup(id) {
   return res.json()
 }
 
+export async function retryModes(id) {
+  const res = await fetch(`${BASE}/api/groups/${id}/retry-modes`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
 export async function uploadRecording(roomId, file, srtFile = null, durationSec = null, clipCount = 1) {
   const form = new FormData()
   form.append('file', file)
