@@ -512,6 +512,10 @@ warm / clear / natural / persuasive / confident / storytelling"""
         import re
 
         try:
+            # 优先提取 markdown code block 内的 JSON（Bedrock 有时会包裹在 ```json ... ``` 中）
+            code_block = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", script_text)
+            if code_block:
+                script_text = code_block.group(1)
             json_match = re.search(r"\{[\s\S]*\}", script_text)
             if json_match:
                 script_json = json.loads(json_match.group())
@@ -530,11 +534,11 @@ warm / clear / natural / persuasive / confident / storytelling"""
                         "generated_at": time.time(),
                     }
 
-            return self._fallback_script(vibe)
+            return self._fallback_script(vibe, reason="no valid JSON found in response")
 
-        except json.JSONDecodeError:
-            logger.error("Failed to parse script JSON")
-            return self._fallback_script(vibe)
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse script JSON: {e}")
+            return self._fallback_script(vibe, reason=f"JSONDecodeError: {e}")
 
     def _validate_script(self, script: Dict) -> bool:
         """验证脚本结构完整性"""
@@ -547,11 +551,12 @@ warm / clear / natural / persuasive / confident / storytelling"""
                 return False
         return True
 
-    def _fallback_script(self, vibe: str = "trendy") -> Dict:
+    def _fallback_script(self, vibe: str = "trendy", reason: str = "JSON parse failed") -> Dict:
         """生成失败时的备用脚本"""
         vc = VIBE_CONFIGS.get(vibe, VIBE_CONFIGS["trendy"])
         return {
             "success": False,
+            "error": reason,
             "script": {
                 "vibe": vibe,
                 "vibe_label": vc["label"],
