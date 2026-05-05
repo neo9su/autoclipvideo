@@ -160,7 +160,7 @@
               :key="idx"
               :class="['cover-candidate', g.selected_cover === cv && 'cover-candidate-selected']"
               @click="selectCover(g, cv)">
-              <img :src="`${apiBase}/api/groups/${g.id}/cover/${cv}${coverBust[g.id] ? '?t=' + coverBust[g.id] : ''}`"
+              <img :src="`${apiBase}/api/groups/${g.id}/cover/${cv}?t=${coverBust[g.id] || pageLoadTs}`"
                    class="cover-img"
                    @error="e => e.target.src=''" />
               <div class="cover-scheme-label">{{ coverSchemeLabel(idx) }}</div>
@@ -409,7 +409,7 @@
             @click="selectCoverFromPreview">
             {{ coverPreview.selected ? '✓ 已选定' : '选用此封面' }}
           </button>
-          <a :href="`${apiBase}/api/groups/${coverPreview.groupId}/cover/${coverPreview.cv}${coverBust[coverPreview.groupId] ? '?t=' + coverBust[coverPreview.groupId] : ''}`"
+          <a :href="`${apiBase}/api/groups/${coverPreview.groupId}/cover/${coverPreview.cv}?t=${coverBust[coverPreview.groupId] || pageLoadTs}`"
              class="btn-action purple" download title="下载封面图">↓ 下载</a>
           <button class="modal-close" @click="coverPreview = null">✕</button>
         </div>
@@ -417,7 +417,7 @@
       <div class="cover-preview-body">
         <button class="cover-nav cover-nav-prev" @click="coverNavStep(-1)" :disabled="coverPreview.idx === 0">‹</button>
         <img
-          :src="`${apiBase}/api/groups/${coverPreview.groupId}/cover/${coverPreview.cv}${coverBust[coverPreview.groupId] ? '?t=' + coverBust[coverPreview.groupId] : ''}`"
+          :src="`${apiBase}/api/groups/${coverPreview.groupId}/cover/${coverPreview.cv}?t=${coverBust[coverPreview.groupId] || pageLoadTs}`"
           class="cover-preview-img"
         />
         <button class="cover-nav cover-nav-next" @click="coverNavStep(1)" :disabled="coverPreview.idx === coverPreview.total - 1">›</button>
@@ -663,6 +663,7 @@ const vibeHints = {
 }
 
 // Cover generation
+const pageLoadTs = Date.now()           // bust cover URLs on every page load
 const coverGenerating = ref({})
 const coverBust = ref({})   // per-group cache-bust timestamp
 const coverPreview = ref(null)   // { groupId, cv, idx, total, candidates, label, selected }

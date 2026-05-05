@@ -3293,7 +3293,11 @@ async def get_group_cover(group_id: int, filename: str):
     cover_path = os.path.join(RECORDINGS_DIR, filename)
     if not os.path.exists(cover_path):
         raise HTTPException(status_code=404, detail="Cover not found")
-    return FileResponse(cover_path, media_type="image/jpeg")
+    return FileResponse(
+        cover_path,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
 
 
 # ── Product matching ──────────────────────────────────────────────────────────
