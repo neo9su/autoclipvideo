@@ -1430,7 +1430,7 @@ onUnmounted(() => { ws?.close(); stopProgressPolling() })
 .cover-candidate { position: relative; cursor: pointer; border: 2px solid #333; border-radius: 8px; overflow: hidden; transition: border-color 0.15s; }
 .cover-candidate:hover { border-color: #fbbf24; }
 .cover-candidate-selected { border-color: #fbbf24; box-shadow: 0 0 0 2px rgba(245,158,11,0.4); }
-.cover-img { width: 90px; height: 160px; object-fit: cover; display: block; }
+.cover-img { width: 120px; height: 213px; object-fit: cover; display: block; image-rendering: -webkit-optimize-contrast; image-rendering: crisp-edges; }
 .cover-scheme-label { position: absolute; bottom: 0; left: 0; right: 0; background: rgba(0,0,0,0.7); color: #fbbf24; font-size: 10px; text-align: center; padding: 3px 4px; font-weight: 600; }
 .cover-check { position: absolute; top: 4px; right: 4px; width: 18px; height: 18px; border-radius: 50%; background: #fbbf24; color: #000; font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
 .cover-preview-btn { position: absolute; top: 4px; left: 4px; width: 20px; height: 20px; border-radius: 4px; background: rgba(0,0,0,0.6); color: #fff; border: none; cursor: pointer; font-size: 12px; display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity 0.15s; padding: 0; }

@@ -341,11 +341,12 @@ def _composite(frame_path: str, out_path: str, title: str, subtitle: str, seed: 
     # Mild contrast boost only — no colour saturation change
     base_rgb = base.convert("RGB")
     base_rgb = ImageEnhance.Contrast(base_rgb).enhance(1.06)
-    # Slight cool-shift to counteract camera warm bias: reduce R channel by ~3%
+    # Cool-shift to counteract camera warm bias: R -10%, G -2%, B +8%
     import numpy as _np
     arr = _np.array(base_rgb, dtype=_np.float32)
-    arr[:, :, 0] = _np.clip(arr[:, :, 0] * 0.97, 0, 255)  # R -3%
-    arr[:, :, 2] = _np.clip(arr[:, :, 2] * 1.03, 0, 255)  # B +3%
+    arr[:, :, 0] = _np.clip(arr[:, :, 0] * 0.90, 0, 255)  # R -10%
+    arr[:, :, 1] = _np.clip(arr[:, :, 1] * 0.98, 0, 255)  # G -2%
+    arr[:, :, 2] = _np.clip(arr[:, :, 2] * 1.08, 0, 255)  # B +8%
     base_rgb = Image.fromarray(arr.astype(_np.uint8))
     base = base_rgb.convert("RGBA")
 
