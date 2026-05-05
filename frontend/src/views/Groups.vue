@@ -141,6 +141,35 @@
           <div v-if="g.director_error" class="director-error">⚠ {{ g.director_error }}</div>
         </div>
 
+        <!-- 封面生成面板 -->
+        <div class="cover-panel" v-if="g.classic_status === 2 || g.director_status === 2 || g.creative_status === 2">
+          <div class="cover-panel-header">
+            <span class="cover-panel-title">封面</span>
+            <button
+              class="btn-sm btn-cover-gen"
+              :disabled="coverGenerating[g.id]"
+              @click="generateCovers(g)">
+              {{ coverGenerating[g.id] ? '生成中…' : (g.cover_candidates ? '↺ 重新生成' : '生成封面') }}
+            </button>
+            <span v-if="g.selected_cover" class="cover-selected-hint">✓ 已选封面</span>
+          </div>
+          <!-- 3张候选图 -->
+          <div v-if="g.cover_candidates" class="cover-candidates">
+            <div
+              v-for="(cv, idx) in parseCandidates(g.cover_candidates)"
+              :key="idx"
+              :class="['cover-candidate', g.selected_cover === cv && 'cover-candidate-selected']"
+              @click="selectCover(g, cv)">
+              <img :src="`${apiBase}/api/groups/${g.id}/cover/${cv}${coverBust[g.id] ? '?t=' + coverBust[g.id] : ''}`"
+                   class="cover-img"
+                   @error="e => e.target.src=''" />
+              <div class="cover-scheme-label">{{ coverSchemeLabel(idx) }}</div>
+              <div v-if="g.selected_cover === cv" class="cover-check">✓</div>
+              <button class="cover-preview-btn" @click.stop="openCoverPreview(g, cv, idx)" title="预览大图">⤢</button>
+            </div>
+          </div>
+        </div>
+
         <!-- Custom group upload -->
         <div v-if="g.is_custom" class="custom-upload-row">
           <label :for="`upload-${g.id}`" class="btn-upload-label">+ 上传视频</label>
@@ -365,6 +394,40 @@
       <div v-if="creativePreviewError" class="preview-err">视频加载失败</div>
       <div class="preview-footer">
         <a :href="`${apiBase}/api/groups/${creativePreviewGroup.id}/creative-download`" class="btn-action green" download>↓ 下载</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- Cover Preview Modal -->
+  <div v-if="coverPreview" class="modal-backdrop" @click.self="coverPreview = null">
+    <div class="cover-preview-modal">
+      <div class="cover-preview-header">
+        <span class="cover-preview-title">{{ coverPreview.label }} · {{ coverSchemeLabel(coverPreview.idx) }}</span>
+        <div class="cover-preview-actions">
+          <button
+            :class="['btn-action', coverPreview.selected ? 'teal' : 'yellow']"
+            @click="selectCoverFromPreview">
+            {{ coverPreview.selected ? '✓ 已选定' : '选用此封面' }}
+          </button>
+          <a :href="`${apiBase}/api/groups/${coverPreview.groupId}/cover/${coverPreview.cv}${coverBust[coverPreview.groupId] ? '?t=' + coverBust[coverPreview.groupId] : ''}`"
+             class="btn-action purple" download title="下载封面图">↓ 下载</a>
+          <button class="modal-close" @click="coverPreview = null">✕</button>
+        </div>
+      </div>
+      <div class="cover-preview-body">
+        <button class="cover-nav cover-nav-prev" @click="coverNavStep(-1)" :disabled="coverPreview.idx === 0">‹</button>
+        <img
+          :src="`${apiBase}/api/groups/${coverPreview.groupId}/cover/${coverPreview.cv}${coverBust[coverPreview.groupId] ? '?t=' + coverBust[coverPreview.groupId] : ''}`"
+          class="cover-preview-img"
+        />
+        <button class="cover-nav cover-nav-next" @click="coverNavStep(1)" :disabled="coverPreview.idx === coverPreview.total - 1">›</button>
+      </div>
+      <div class="cover-preview-dots">
+        <span
+          v-for="i in coverPreview.total" :key="i"
+          :class="['cover-dot', i - 1 === coverPreview.idx && 'cover-dot-active']"
+          @click="coverNavTo(i - 1)">
+        </span>
       </div>
     </div>
   </div>
@@ -597,6 +660,90 @@ const vibeHints = {
   luxury:    '品质感·精致·仪式感',
   contrast:  '反差感·意外·强对比',
   creative:  '自由创作·编造卖点·催单节奏',
+}
+
+// Cover generation
+const coverGenerating = ref({})
+const coverBust = ref({})   // per-group cache-bust timestamp
+const coverPreview = ref(null)   // { groupId, cv, idx, total, candidates, label, selected }
+const COVER_SCHEME_LABELS = ['发量直接翻倍', '换个发型像换脸', '细软塌救星']
+
+function parseCandidates(json) {
+  try { return JSON.parse(json) } catch { return [] }
+}
+
+function coverSchemeLabel(idx) {
+  return COVER_SCHEME_LABELS[idx] ?? `方案${idx + 1}`
+}
+
+function openCoverPreview(g, cv, idx) {
+  const candidates = parseCandidates(g.cover_candidates)
+  coverPreview.value = {
+    groupId: g.id,
+    cv,
+    idx,
+    total: candidates.length,
+    candidates,
+    label: g.label,
+    selected: g.selected_cover === cv,
+    _group: g,
+  }
+}
+
+function coverNavStep(delta) {
+  const p = coverPreview.value
+  if (!p) return
+  const newIdx = Math.max(0, Math.min(p.total - 1, p.idx + delta))
+  const newCv = p.candidates[newIdx]
+  coverPreview.value = { ...p, idx: newIdx, cv: newCv, selected: p._group.selected_cover === newCv }
+}
+
+function coverNavTo(idx) {
+  const p = coverPreview.value
+  if (!p) return
+  const newCv = p.candidates[idx]
+  coverPreview.value = { ...p, idx, cv: newCv, selected: p._group.selected_cover === newCv }
+}
+
+async function selectCoverFromPreview() {
+  const p = coverPreview.value
+  if (!p) return
+  await selectCover(p._group, p.cv)
+  coverPreview.value = { ...p, selected: true }
+}
+
+async function generateCovers(g) {
+  coverGenerating.value[g.id] = true
+  try {
+    const resp = await fetch(`${apiBase}/api/groups/${g.id}/generate-covers`, { method: 'POST' })
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}))
+      throw new Error(err.detail || '封面生成失败')
+    }
+    const result = await resp.json()
+    coverBust.value[g.id] = Date.now()
+    show(`已生成 ${result.covers.length} 张封面候选`, 'success')
+    await load()
+  } catch (e) {
+    show(e.message || '封面生成失败', 'error')
+  } finally {
+    coverGenerating.value[g.id] = false
+  }
+}
+
+async function selectCover(g, coverPath) {
+  try {
+    const resp = await fetch(`${apiBase}/api/groups/${g.id}/select-cover`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cover: coverPath }),
+    })
+    if (!resp.ok) throw new Error('选择失败')
+    g.selected_cover = coverPath
+    show('封面已选定', 'success')
+  } catch (e) {
+    show(e.message || '封面选择失败', 'error')
+  }
 }
 
 // Re-clip all recordings in a group
@@ -1271,4 +1418,36 @@ onUnmounted(() => { ws?.close(); stopProgressPolling() })
 .sug-reason { font-size: 11px; color: #888; margin-bottom: 6px; line-height: 1.5; }
 .sug-score { font-size: 11px; color: #fcd34d; margin-bottom: 8px; font-family: monospace; }
 .sug-actions { display: flex; gap: 8px; }
+/* Cover panel */
+.cover-panel { padding: 10px 16px; background: rgba(245,158,11,0.06); border-top: 1px solid rgba(245,158,11,0.18); }
+.cover-panel-header { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.cover-panel-title { font-size: 12px; font-weight: 700; color: #fbbf24; }
+.btn-cover-gen { padding: 4px 12px; font-size: 12px; border-radius: 6px; border: 1px solid rgba(245,158,11,0.4); background: rgba(245,158,11,0.15); color: #fbbf24; cursor: pointer; white-space: nowrap; }
+.btn-cover-gen:hover:not(:disabled) { background: rgba(245,158,11,0.3); }
+.btn-cover-gen:disabled { opacity: 0.4; cursor: not-allowed; }
+.cover-selected-hint { font-size: 11px; color: #6ee7b7; }
+.cover-candidates { display: flex; gap: 12px; flex-wrap: wrap; }
+.cover-candidate { position: relative; cursor: pointer; border: 2px solid #333; border-radius: 8px; overflow: hidden; transition: border-color 0.15s; }
+.cover-candidate:hover { border-color: #fbbf24; }
+.cover-candidate-selected { border-color: #fbbf24; box-shadow: 0 0 0 2px rgba(245,158,11,0.4); }
+.cover-img { width: 90px; height: 160px; object-fit: cover; display: block; }
+.cover-scheme-label { position: absolute; bottom: 0; left: 0; right: 0; background: rgba(0,0,0,0.7); color: #fbbf24; font-size: 10px; text-align: center; padding: 3px 4px; font-weight: 600; }
+.cover-check { position: absolute; top: 4px; right: 4px; width: 18px; height: 18px; border-radius: 50%; background: #fbbf24; color: #000; font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+.cover-preview-btn { position: absolute; top: 4px; left: 4px; width: 20px; height: 20px; border-radius: 4px; background: rgba(0,0,0,0.6); color: #fff; border: none; cursor: pointer; font-size: 12px; display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity 0.15s; padding: 0; }
+.cover-candidate:hover .cover-preview-btn { opacity: 1; }
+/* Cover preview modal */
+.cover-preview-modal { background: #111; border: 1px solid #333; border-radius: 12px; width: min(480px, 95vw); display: flex; flex-direction: column; overflow: hidden; }
+.cover-preview-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #222; gap: 10px; }
+.cover-preview-title { font-size: 13px; color: #aaa; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.cover-preview-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.cover-preview-body { display: flex; align-items: center; justify-content: center; background: #000; position: relative; padding: 0 40px; }
+.cover-preview-img { width: 100%; max-width: 360px; max-height: 70vh; object-fit: contain; display: block; }
+.cover-nav { position: absolute; top: 50%; transform: translateY(-50%); width: 36px; height: 36px; border-radius: 50%; background: rgba(255,255,255,0.12); border: none; color: #fff; font-size: 22px; cursor: pointer; display: flex; align-items: center; justify-content: center; z-index: 2; transition: background 0.15s; }
+.cover-nav:hover:not(:disabled) { background: rgba(255,255,255,0.25); }
+.cover-nav:disabled { opacity: 0.2; cursor: default; }
+.cover-nav-prev { left: 6px; }
+.cover-nav-next { right: 6px; }
+.cover-preview-dots { display: flex; justify-content: center; gap: 8px; padding: 12px; }
+.cover-dot { width: 8px; height: 8px; border-radius: 50%; background: #444; cursor: pointer; transition: background 0.15s; }
+.cover-dot-active { background: #fbbf24; }
 </style>
