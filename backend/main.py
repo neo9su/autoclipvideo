@@ -3209,6 +3209,82 @@ async def generate_group_thumbnail(group_id: int, body: dict = {}):
     return {"thumbnail": thumb_rel, "scheme_type": scheme_type}
 
 
+@app.post("/api/groups/{group_id}/generate-covers")
+async def generate_group_covers(group_id: int):
+    """Generate 3 cover candidates using different marketing schemes.
+    Frames are extracted from the longest *original* recording (no burned-in subtitles).
+    """
+    from thumbnail import generate_cover_candidates
+    import json as _json
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT merged_filename FROM clip_groups WHERE id = ?",
+            (group_id,),
+        ) as cur:
+            group = await cur.fetchone()
+        if not group:
+            raise HTTPException(status_code=404, detail="Group not found")
+        # Use the longest original recording (no subtitles burned in)
+        async with db.execute(
+            """SELECT filename FROM recordings
+               WHERE group_id = ? AND filename IS NOT NULL
+               ORDER BY (end_time - start_time) DESC LIMIT 1""",
+            (group_id,),
+        ) as cur:
+            orig_row = await cur.fetchone()
+
+    # Prefer original recording (subtitle-free) → fall back to classic merged video
+    mp4_path = None
+    if orig_row and orig_row["filename"]:
+        candidate = os.path.join(RECORDINGS_DIR, orig_row["filename"])
+        if os.path.exists(candidate):
+            mp4_path = candidate
+    if not mp4_path and group["merged_filename"]:
+        # Merged video is concat of clips (with subtitles) — last resort only
+        mp4_path = os.path.join(RECORDINGS_DIR, group["merged_filename"])
+    if not mp4_path or not os.path.exists(mp4_path):
+        raise HTTPException(status_code=404, detail="No video available for cover generation")
+
+    covers_dir = os.path.join(RECORDINGS_DIR, "covers")
+    candidates = await generate_cover_candidates(mp4_path, group_id, covers_dir)
+    if not candidates:
+        raise HTTPException(status_code=500, detail="Cover generation failed")
+
+    rel_paths = [os.path.relpath(p, RECORDINGS_DIR) for p in candidates]
+    async with aio_connect() as db:
+        await db.execute(
+            "UPDATE clip_groups SET cover_candidates = ? WHERE id = ?",
+            (_json.dumps(rel_paths, ensure_ascii=False), group_id),
+        )
+        await db.commit()
+    return {"group_id": group_id, "covers": rel_paths}
+
+
+@app.post("/api/groups/{group_id}/select-cover")
+async def select_group_cover(group_id: int, body: dict):
+    """Set the selected cover for a group."""
+    cover = body.get("cover")
+    if not cover:
+        raise HTTPException(status_code=400, detail="cover field required")
+    async with aio_connect() as db:
+        await db.execute(
+            "UPDATE clip_groups SET selected_cover = ? WHERE id = ?",
+            (cover, group_id),
+        )
+        await db.commit()
+    return {"group_id": group_id, "selected_cover": cover}
+
+
+@app.get("/api/groups/{group_id}/cover/{filename:path}")
+async def get_group_cover(group_id: int, filename: str):
+    """Serve a cover candidate image."""
+    cover_path = os.path.join(RECORDINGS_DIR, filename)
+    if not os.path.exists(cover_path):
+        raise HTTPException(status_code=404, detail="Cover not found")
+    return FileResponse(cover_path, media_type="image/jpeg")
+
+
 # ── Product matching ──────────────────────────────────────────────────────────
 
 @app.post("/api/groups/{group_id}/match-product")

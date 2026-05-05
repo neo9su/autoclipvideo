@@ -1205,8 +1205,9 @@ async def _prepend_thumbnail(clip_path: str, thumb_path: str) -> bool:
     try:
         # Step 1: encode thumbnail JPEG → 0.5s mp4 (same codec as clip)
         _SF = (
-            f"scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease,"
-            f"pad={OUT_W}:{OUT_H}:(ow-iw)/2:(oh-ih)/2,fps=25"
+            f"scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease:flags=lanczos,"
+            f"pad={OUT_W}:{OUT_H}:(ow-iw)/2:(oh-ih)/2,"
+            f"unsharp=lx=3:ly=3:la=0.5,fps=25"
         )
         cmd1 = [
             "ffmpeg", "-y",

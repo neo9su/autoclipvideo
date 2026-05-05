@@ -31,20 +31,53 @@ _SYS_FONTS = [
     "4a418d1fa4860652a3241e8ee457806c8557fc64.asset/AssetData/Yuanti.ttc",
 ]
 
-# ── Anime colour themes ────────────────────────────────────────────────────────
-# Each theme: (grad_top RGBA, grad_bottom RGBA, title_grad_left, title_grad_right, outline, pill_bg, pill_text)
-_THEMES = [
-    # Sakura bloom — warm pink, soft rose bottom
-    ((255, 190, 220, 130), (220,  80, 130, 160), (255, 230, 245), (255, 120, 190), (200,  40, 110), (255, 100, 170, 210), (255, 255, 255)),
-    # Peach sunshine — golden orange top, warm coral bottom
-    ((255, 220, 150, 130), (240, 120,  60, 160), (255, 250, 200), (255, 180,  60), (180,  80,   0), (255, 160,  50, 210), (255, 255, 255)),
-    # Candy sky — cheerful sky blue, warm lemon bottom
-    ((160, 230, 255, 120), (100, 180, 255, 150), (220, 248, 255), (80,  200, 255), ( 30, 120, 200), (60,  190, 255, 210), (255, 255, 255)),
-    # Warm lemon — bright yellow, soft apricot bottom
-    ((255, 240, 130, 120), (255, 190,  80, 150), (255, 255, 200), (255, 210,  60), (160, 120,   0), (255, 210,  60, 210), (255, 255, 255)),
-    # Spring mint — fresh green top, warm lime bottom
-    ((180, 255, 210, 120), (100, 210, 140, 150), (220, 255, 235), (80,  230, 160), ( 20, 140,  80), (70,  220, 150, 210), (255, 255, 255)),
+# ── Colour themes ─────────────────────────────────────────────────────────────
+# Each theme: (grad_top RGBA, grad_bottom RGBA, title_grad_left RGB, title_grad_right RGB, outline RGB, pill_bg RGBA, pill_text RGB)
+# Split into WARM_THEMES (for cool-toned images) and COOL_THEMES (for warm-toned images)
+# so font always contrasts with the background.
+
+_WARM_THEMES = [
+    # Fiery orange-red
+    ((255, 120,  40, 110), (200,  50,  10, 150), (255, 230, 160), (255, 140,  30), (180,  60,   0), (255, 120,  30, 200), (255, 255, 255)),
+    # Vivid yellow-gold
+    ((255, 220,  50, 110), (220, 150,  10, 150), (255, 255, 180), (255, 200,  30), (160, 110,   0), (255, 200,  40, 200), (255, 255, 255)),
+    # Hot pink-red
+    ((255,  80, 100, 110), (200,  20,  60, 150), (255, 200, 210), (255,  60, 100), (180,   0,  60), (255,  60, 100, 200), (255, 255, 255)),
 ]
+
+_COOL_THEMES = [
+    # Electric cyan-blue
+    (( 40, 180, 255, 110), ( 10,  90, 220, 150), (200, 245, 255), ( 40, 200, 255), (  0,  90, 200), ( 30, 190, 255, 200), (255, 255, 255)),
+    # Purple-violet
+    ((160,  80, 255, 110), ( 80,  20, 200, 150), (230, 200, 255), (160,  80, 255), ( 80,   0, 180), (140,  60, 255, 200), (255, 255, 255)),
+    # Mint green
+    (( 60, 220, 180, 110), ( 20, 160, 120, 150), (190, 255, 230), ( 50, 220, 170), (  0, 130,  90), ( 40, 210, 160, 200), (255, 255, 255)),
+]
+
+
+def _image_warmth(img) -> float:
+    """Return a warmth score for img (PIL RGB): >0 warm, <0 cool.
+    Uses the R-B channel difference on a tiny downsampled version for speed.
+    """
+    tiny = img.convert("RGB").resize((32, 32))
+    pixels = list(tiny.getdata())
+    avg_r = sum(p[0] for p in pixels) / len(pixels)
+    avg_b = sum(p[2] for p in pixels) / len(pixels)
+    return avg_r - avg_b  # positive = warm, negative = cool
+
+
+def _pick_theme(frame_path: str, rng: random.Random):
+    """Choose a contrasting theme based on the frame's colour temperature."""
+    from PIL import Image
+    try:
+        img = Image.open(frame_path)
+        warmth = _image_warmth(img)
+        # Warm image (R > B) → use cool-toned font theme
+        # Cool image (B > R) → use warm-toned font theme
+        pool = _COOL_THEMES if warmth > 8 else _WARM_THEMES
+    except Exception:
+        pool = _WARM_THEMES
+    return rng.choice(pool)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -83,26 +116,28 @@ def _draw_gradient_rect(img, x0, y0, x1, y1, color_top, color_bottom):
 
 
 def _draw_sparkles(draw, rng, w, h, count=22):
-    """Draw scattered 4-point star sparkles."""
+    """Draw scattered 4-point star sparkles. Size scales with image width."""
     from PIL import ImageDraw
+    scale = w / 1080  # scale relative to original 1080p design
+    r_min, r_max = int(4 * scale), int(14 * scale)
+    dot = max(2, int(2 * scale))
     for _ in range(count):
         cx = rng.randint(20, w - 20)
         cy = rng.randint(20, h - 20)
-        r  = rng.randint(4, 14)
+        r  = rng.randint(r_min, r_max)
         alpha = rng.randint(160, 255)
         color = (255, 255, 255, alpha)
-        # 4-point star via two thin diamonds
         pts_h = [(cx - r, cy), (cx, cy - r // 3), (cx + r, cy), (cx, cy + r // 3)]
         pts_v = [(cx, cy - r), (cx + r // 3, cy), (cx, cy + r), (cx - r // 3, cy)]
         draw.polygon(pts_h, fill=color)
         draw.polygon(pts_v, fill=color)
-        # Tiny centre dot
-        draw.ellipse([cx - 2, cy - 2, cx + 2, cy + 2], fill=(255, 255, 255, 255))
+        draw.ellipse([cx - dot, cy - dot, cx + dot, cy + dot], fill=(255, 255, 255, 255))
 
 
 def _draw_corner_accents(draw, w, h, color):
-    """Thin L-shaped lines at all four corners."""
-    L, T = 40, 3
+    """Thin L-shaped lines at all four corners. Size scales with image width."""
+    scale = w / 1080
+    L, T = int(40 * scale), max(3, int(3 * scale))
     corners = [
         [(0, T // 2), (L, T // 2), (T // 2, T // 2), (T // 2, L)],
         [(w - L, T // 2), (w, T // 2), (w - T // 2, T // 2), (w - T // 2, L)],
@@ -124,27 +159,25 @@ def _text_with_outline(draw, pos, text, font, fill, outline, outline_width=6):
     draw.text(pos, text, font=font, fill=fill)
 
 
-def _gradient_text(base_img, draw, pos, text, font, color_l, color_r, outline, outline_width=6):
+def _gradient_text(base_img, draw, pos, text, font, color_l, color_r, outline, outline_width=6, alpha=255):
     """
-    Render text with a left→right gradient fill by:
-      1. Drawing text on a temp RGBA layer with the left colour
-      2. Masking it with a horizontal gradient
-      3. Compositing onto base_img
+    Render text with a left→right gradient fill.
+    alpha: overall opacity of the text (0-255).
     """
     from PIL import Image, ImageDraw
-    # Measure text
     bbox = font.getbbox(text)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
     if tw <= 0 or th <= 0:
         draw.text(pos, text, font=font, fill=color_l)
         return
 
-    # Outline pass (on base draw)
+    # Outline pass
     x, y = pos
+    out_alpha = min(255, int(alpha * 0.9))  # slightly more opaque outline for legibility
     for dx in range(-outline_width, outline_width + 1, 2):
         for dy in range(-outline_width, outline_width + 1, 2):
             if dx != 0 or dy != 0:
-                draw.text((x + dx, y + dy), text, font=font, fill=outline + (255,))
+                draw.text((x + dx, y + dy), text, font=font, fill=outline[:3] + (out_alpha,))
 
     # Gradient text layer
     pad = outline_width + 4
@@ -152,14 +185,15 @@ def _gradient_text(base_img, draw, pos, text, font, color_l, color_r, outline, o
     ld = ImageDraw.Draw(layer)
     ld.text((pad - bbox[0], pad - bbox[1]), text, font=font, fill=(255, 255, 255, 255))
 
-    # Horizontal gradient mask colourisation
+    # Horizontal gradient colourisation with alpha scaling
     grad = Image.new("RGBA", (tw + pad * 2, th + pad * 2), (0, 0, 0, 0))
     for px in range(tw + pad * 2):
         t = px / max(tw + pad * 2 - 1, 1)
-        c = _lerp_color(color_l + (255,), color_r + (255,), t)
+        c = _lerp_color(color_l[:3] + (255,), color_r[:3] + (255,), t)
         for py in range(th + pad * 2):
-            if layer.getpixel((px, py))[3] > 0:
-                grad.putpixel((px, py), c[:3] + (layer.getpixel((px, py))[3],))
+            src_a = layer.getpixel((px, py))[3]
+            if src_a > 0:
+                grad.putpixel((px, py), c[:3] + (int(src_a * alpha / 255),))
 
     base_img.alpha_composite(grad, (x - pad + bbox[0], y - pad + bbox[1]))
 
@@ -181,24 +215,47 @@ def _draw_pill(draw, img, text, font, cx, y, bg_color, text_color, pad_x=28, pad
 
 # ── Frame extraction ──────────────────────────────────────────────────────────
 
-async def _extract_frame(mp4_path: str, seek: float, out_jpg: str) -> bool:
-    # Extract at native resolution with lanczos scaling + sharpening for crisp thumbnails
+async def _extract_frame(mp4_path: str, seek: float, out_jpg: str, target_w: int = 1080, target_h: int = 1920) -> bool:
+    """
+    Extract one frame at `seek` seconds.  If the source is smaller than
+    target_w x target_h it is upscaled with lanczos so the compositor
+    always receives a full-resolution base image.
+    """
+    # First pass: extract at native resolution
     cmd = [
         "ffmpeg", "-y", "-ss", f"{seek:.3f}", "-i", mp4_path,
         "-frames:v", "1",
-        "-vf", (
-            "scale=1080:1920:force_original_aspect_ratio=decrease:flags=lanczos,"
-            "pad=1080:1920:(ow-iw)/2:(oh-ih)/2,"
-            "unsharp=5:5:1.2:5:5:0.0"   # luma sharpening: stronger than editor default
-        ),
-        "-q:v", "1",   # JPEG quality 1 = near-lossless (was 2)
+        "-q:v", "1",
         out_jpg,
     ]
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
     )
     await proc.communicate()
-    return proc.returncode == 0 and os.path.exists(out_jpg) and os.path.getsize(out_jpg) > 0
+    if proc.returncode != 0 or not os.path.exists(out_jpg) or os.path.getsize(out_jpg) == 0:
+        return False
+
+    # Upscale if the source is low-resolution (e.g. old 240p recordings)
+    try:
+        from PIL import Image, ImageFilter, ImageEnhance
+        img = Image.open(out_jpg)
+        w, h = img.size
+        if w < target_w or h < target_h:
+            scale = max(target_w / w, target_h / h)
+            new_w, new_h = int(w * scale), int(h * scale)
+            img = img.convert("RGB").resize((new_w, new_h), Image.LANCZOS)
+            # Crop to target (centre)
+            left = (new_w - target_w) // 2
+            top  = (new_h - target_h) // 2
+            img = img.crop((left, top, left + target_w, top + target_h))
+            # Mild sharpening to recover upscale softness
+            img = img.filter(ImageFilter.UnsharpMask(radius=1.5, percent=60, threshold=3))
+            img.save(out_jpg, "JPEG", quality=95)
+            logger.debug(f"Upscaled frame {w}x{h} → {target_w}x{target_h} for {os.path.basename(mp4_path)}")
+    except Exception as e:
+        logger.debug(f"Frame upscale skipped: {e}")
+
+    return True
 
 
 async def _get_duration(mp4_path: str) -> float:
@@ -224,46 +281,36 @@ def _composite(frame_path: str, out_path: str, title: str, subtitle: str, seed: 
     from PIL import Image, ImageDraw, ImageFilter, ImageEnhance
 
     rng = random.Random(seed)
-    theme = rng.choice(_THEMES)
+    theme = _pick_theme(frame_path, rng)
     grad_top, grad_bottom, title_l, title_r, title_outline, pill_bg, pill_text = theme
 
-    W, H = 1080, 1920  # 2K portrait (9:16)
+    # Use native frame resolution — no upscaling to avoid distortion
+    _raw = Image.open(frame_path).convert("RGBA")
+    W, H = _raw.size
 
-    # Base frame — always the sharp raw frame
-    base = Image.open(frame_path).convert("RGBA").resize((W, H), Image.LANCZOS)
+    # Scale factor relative to the 1080p design baseline (width)
+    _scale = W / 1080
 
-    # Sharpen the raw frame for crisp facial/hair detail
+    base = _raw
+
+    # Mild contrast boost only — avoid oversaturation/warmth shift
     base_rgb = base.convert("RGB")
-    base_rgb = base_rgb.filter(ImageFilter.UnsharpMask(radius=1.5, percent=130, threshold=2))
-    # Slight contrast boost to make details pop
     base_rgb = ImageEnhance.Contrast(base_rgb).enhance(1.08)
+    # No Color enhance — preserve original skin/hair tones
     base = base_rgb.convert("RGBA")
 
-    # If ComfyUI anime frame available, blend as style overlay (not base)
-    # This preserves raw frame sharpness while adding anime color grading
-    if anime_overlay_path and os.path.exists(anime_overlay_path):
-        try:
-            anime = Image.open(anime_overlay_path).convert("RGBA").resize((W, H), Image.LANCZOS)
-            # Blend anime style at 35% opacity over raw frame
-            anime_blend = Image.blend(base, anime, alpha=0.35)
-            base = anime_blend
-        except Exception:
-            pass  # keep raw frame on failure
-
-    # Blur only bottom 15% of frame (text area) — keeps person area sharp
-    blur_start = int(H * 0.85)
-    blur_band = base.crop((0, blur_start, W, H)).filter(ImageFilter.GaussianBlur(radius=4))
+    # Blur only bottom 18% of frame (text area) — keeps person area sharp
+    blur_start = int(H * 0.82)
+    blur_band = base.crop((0, blur_start, W, H)).filter(ImageFilter.GaussianBlur(radius=6))
     base.paste(blur_band, (0, blur_start))
 
     overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
 
-    # Bottom gradient veil — lighter to keep overall warmth
+    # Bottom gradient veil for text readability
     _draw_gradient_rect(overlay, 0, H * 3 // 4, W, H,
-                        (0, 0, 0, 0), (0, 0, 0, 140))
+                        (0, 0, 0, 0), (0, 0, 0, 160))
 
-    # Top colour tone strip
-    _draw_gradient_rect(overlay, 0, 0, W, H // 5,
-                        grad_top, (0, 0, 0, 0))
+    # NO top colour tone strip — it shifts warmth and obscures the subject
 
     base.alpha_composite(overlay)
 
@@ -279,10 +326,12 @@ def _composite(frame_path: str, out_path: str, title: str, subtitle: str, seed: 
     _draw_corner_accents(draw, W, H, (255, 255, 255, 180))
 
     # ── Title text ────────────────────────────────────────────────────────────
-    font_title = _load_font(_FONT_TITLE, 148)
-    font_sub   = _load_font(_FONT_SUBTITLE, 68)
+    font_title = _load_font(_FONT_TITLE, int(148 * _scale))
+    font_sub   = _load_font(_FONT_SUBTITLE, int(68 * _scale))
 
-    # Wrap title if too long (max ~8 chars per line for 1440px)
+    ALPHA = 204  # 80% opacity
+
+    # Wrap title if too long (max ~8 chars per line)
     chars_per_line = 8
     if len(title) <= chars_per_line:
         lines = [title]
@@ -290,9 +339,9 @@ def _composite(frame_path: str, out_path: str, title: str, subtitle: str, seed: 
         mid = len(title) // 2
         lines = [title[:mid], title[mid:]]
 
-    line_h = 180
+    line_h = int(180 * _scale)
     total_text_h = len(lines) * line_h
-    text_top = H - 520 - total_text_h
+    text_top = H - int(540 * _scale) - total_text_h
 
     for i, line in enumerate(lines):
         bbox = font_title.getbbox(line)
@@ -301,20 +350,22 @@ def _composite(frame_path: str, out_path: str, title: str, subtitle: str, seed: 
         ty = text_top + i * line_h - bbox[1]
         _gradient_text(base, draw, (tx, ty), line,
                         font_title, title_l, title_r,
-                        title_outline, outline_width=8)
+                        title_outline, outline_width=int(8 * _scale), alpha=ALPHA)
 
     # ── Subtitle pill ─────────────────────────────────────────────────────────
+    pill_bg_a = pill_bg[:3] + (int(pill_bg[3] * 0.8),) if len(pill_bg) == 4 else pill_bg[:3] + (168,)
+    pill_text_a = pill_text[:3] + (ALPHA,) if len(pill_text) == 3 else pill_text[:3] + (ALPHA,)
     _draw_pill(draw, base, subtitle, font_sub,
-               cx=W // 2, y=H - 300,
-               bg_color=pill_bg, text_color=pill_text)
+               cx=W // 2, y=H - int(310 * _scale),
+               bg_color=pill_bg_a, text_color=pill_text_a)
 
     # ── Decorative divider line ───────────────────────────────────────────────
-    line_y = H - 340
-    draw.line([(W // 2 - 180, line_y), (W // 2 + 180, line_y)],
-              fill=(255, 255, 255, 120), width=2)
+    line_y = H - int(360 * _scale)
+    draw.line([(W // 2 - int(180 * _scale), line_y), (W // 2 + int(180 * _scale), line_y)],
+              fill=(255, 255, 255, 100), width=max(2, int(2 * _scale)))
 
     base = base.convert("RGB")
-    base.save(out_path, "JPEG", quality=96, optimize=True, subsampling=0)  # 96 + 4:4:4 for max detail
+    base.save(out_path, "JPEG", quality=96, optimize=True, subsampling=0)
     return True
 
 
@@ -326,6 +377,61 @@ _SCHEME_SUBTITLES = {
     "产品介绍": "了解更多详情",
     "教学": "手把手教你变美",
 }
+
+# Cover schemes for the 3-candidate cover generator
+# Each: (title, subtitle, frame_offset_fraction)
+COVER_SCHEMES = [
+    {"id": "volume",   "title": "发量直接翻倍", "subtitle": "细软塌必看",     "offset_frac": 0.25},
+    {"id": "transform","title": "换个发型像换脸","subtitle": "真的不一样",     "offset_frac": 0.55},
+    {"id": "rescue",   "title": "细软塌救星",   "subtitle": "发量少的看这个", "offset_frac": 0.75},
+]
+
+
+async def generate_cover_candidates(
+    mp4_path: str,
+    group_id: int,
+    out_dir: str,
+) -> list[str]:
+    """
+    Generate 3 cover candidates from different frames of mp4_path.
+    Each scheme uses a different video timestamp and marketing title.
+    ComfyUI anime overlay is NOT used (causes ghosting on real footage).
+
+    Returns list of output JPEG paths (may be fewer than 3 on partial failure).
+    """
+    import os as _os
+    _os.makedirs(out_dir, exist_ok=True)
+    duration = await _get_duration(mp4_path)
+
+    results = []
+    for scheme in COVER_SCHEMES:
+        seek = max(1.0, duration * scheme["offset_frac"])
+        out_path = _os.path.join(out_dir, f"cover_{group_id}_{scheme['id']}.jpg")
+        frame_tmp = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as _tf:
+                frame_tmp = _tf.name
+            ok = await _extract_frame(mp4_path, seek, frame_tmp)
+            if not ok:
+                logger.warning(f"Cover frame extraction failed: {mp4_path} seek={seek}")
+                continue
+            seed = hash(mp4_path + scheme["id"]) & 0xFFFFFF
+            await asyncio.get_running_loop().run_in_executor(
+                None, _composite, frame_tmp, out_path,
+                scheme["title"], scheme["subtitle"], seed, None
+            )
+            if _os.path.exists(out_path) and _os.path.getsize(out_path) > 0:
+                results.append(out_path)
+        except Exception as e:
+            logger.error(f"Cover generation error for scheme {scheme['id']}: {e}")
+        finally:
+            if frame_tmp:
+                try:
+                    _os.remove(frame_tmp)
+                except Exception:
+                    pass
+
+    return results
 
 
 async def generate_thumbnail(mp4_path: str, offset: Optional[float] = None,
