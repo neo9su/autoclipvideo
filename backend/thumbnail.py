@@ -32,26 +32,26 @@ _SYS_FONTS = [
 ]
 
 # ── Colour themes ─────────────────────────────────────────────────────────────
-# Each theme: (grad_top RGBA, grad_bottom RGBA, title_grad_left RGB, title_grad_right RGB, outline RGB, pill_bg RGBA, pill_text RGB)
-# Split into WARM_THEMES (for cool-toned images) and COOL_THEMES (for warm-toned images)
-# so font always contrasts with the background.
+# Each theme: (title_grad_left RGB, title_grad_right RGB, outline RGB, pill_bg RGBA, pill_text RGB)
+# grad_top/grad_bottom are no longer per-theme — bottom veil is always neutral dark.
+# Split into WARM_THEMES (for cool-toned images) and COOL_THEMES (for warm-toned images).
 
 _WARM_THEMES = [
-    # Fiery orange-red
-    ((255, 120,  40, 110), (200,  50,  10, 150), (255, 230, 160), (255, 140,  30), (180,  60,   0), (255, 120,  30, 200), (255, 255, 255)),
-    # Vivid yellow-gold
-    ((255, 220,  50, 110), (220, 150,  10, 150), (255, 255, 180), (255, 200,  30), (160, 110,   0), (255, 200,  40, 200), (255, 255, 255)),
-    # Hot pink-red
-    ((255,  80, 100, 110), (200,  20,  60, 150), (255, 200, 210), (255,  60, 100), (180,   0,  60), (255,  60, 100, 200), (255, 255, 255)),
+    # Crisp white → ice blue (clean, modern)
+    ((255, 255, 255), (200, 235, 255), ( 30,  80, 160), ( 50, 180, 255, 200), (255, 255, 255)),
+    # White → soft gold (luxury)
+    ((255, 255, 255), (255, 235, 160), (140,  90,   0), (255, 200,  60, 200), (255, 255, 255)),
+    # White → rose (feminine)
+    ((255, 255, 255), (255, 200, 210), (160,  20,  80), (255, 100, 140, 200), (255, 255, 255)),
 ]
 
 _COOL_THEMES = [
-    # Electric cyan-blue
-    (( 40, 180, 255, 110), ( 10,  90, 220, 150), (200, 245, 255), ( 40, 200, 255), (  0,  90, 200), ( 30, 190, 255, 200), (255, 255, 255)),
-    # Purple-violet
-    ((160,  80, 255, 110), ( 80,  20, 200, 150), (230, 200, 255), (160,  80, 255), ( 80,   0, 180), (140,  60, 255, 200), (255, 255, 255)),
-    # Mint green
-    (( 60, 220, 180, 110), ( 20, 160, 120, 150), (190, 255, 230), ( 50, 220, 170), (  0, 130,  90), ( 40, 210, 160, 200), (255, 255, 255)),
+    # Bright cyan → white
+    ((180, 245, 255), (255, 255, 255), (  0, 100, 160), ( 30, 200, 255, 200), (255, 255, 255)),
+    # Soft lavender → white
+    ((220, 200, 255), (255, 255, 255), ( 80,   0, 180), (160,  80, 255, 200), (255, 255, 255)),
+    # Mint → white
+    ((190, 255, 230), (255, 255, 255), (  0, 120,  80), ( 40, 210, 160, 200), (255, 255, 255)),
 ]
 
 
@@ -72,12 +72,57 @@ def _pick_theme(frame_path: str, rng: random.Random):
     try:
         img = Image.open(frame_path)
         warmth = _image_warmth(img)
-        # Warm image (R > B) → use cool-toned font theme
-        # Cool image (B > R) → use warm-toned font theme
+        # Warm image (R > B) → use cool-toned font theme to contrast
+        # Cool image (B > R) → use warm-toned font theme to contrast
         pool = _COOL_THEMES if warmth > 8 else _WARM_THEMES
     except Exception:
         pool = _WARM_THEMES
     return rng.choice(pool)
+
+
+# ── SRT keyword extraction ───────────────────────────────────────────────────
+
+_HAIR_KW = [
+    "发量", "发根", "发丝", "发型", "发缝", "头皮", "分缝", "毛躁", "打结",
+    "蓬松", "自然", "轻薄", "厚实", "卷发", "直发", "层次", "显白", "显瘦",
+    "显脸小", "遮白发", "遮发际线", "遮秃", "遮稀疏", "假发", "发套",
+    "比熊", "博美", "马尾", "刘海", "齐刘海", "空气刘海",
+]
+_COLOR_KW = [
+    "橙金", "米金", "棕色", "黑色", "金色", "橘色", "粉色", "白金",
+    "深棕", "浅棕", "亚麻", "灰色", "红棕", "酒红", "焦糖", "摩卡",
+    "奶茶", "香槟", "冷棕", "暖棕", "拿铁",
+]
+_EFFECT_KW = ["发量翻倍", "真人感", "不假", "不显假", "零感", "透气", "好打理", "出片"]
+
+
+def _extract_srt_keywords(srt_text: str) -> dict:
+    """Extract colour, hair type, and effect keywords from SRT text."""
+    found_colors  = [kw for kw in _COLOR_KW  if kw in srt_text]
+    found_hair    = [kw for kw in _HAIR_KW   if kw in srt_text]
+    found_effects = [kw for kw in _EFFECT_KW if kw in srt_text]
+    return {
+        "colors":  found_colors,
+        "hair":    found_hair,
+        "effects": found_effects,
+    }
+
+
+def _build_dynamic_title(template: str, kw: dict, rng: random.Random) -> str:
+    """
+    Fill {color}, {hair}, {effect} placeholders in template.
+    Falls back to safe defaults when no keyword found.
+    """
+    color  = rng.choice(kw["colors"])  if kw["colors"]  else ""
+    hair   = rng.choice(kw["hair"])    if kw["hair"]    else "发量"
+    effect = rng.choice(kw["effects"]) if kw["effects"] else ""
+    title = template.format(color=color, hair=hair, effect=effect)
+    # Strip any leftover empty braces / leading punctuation
+    title = title.replace("{}暴击", "暴击").replace("{}救星", "救星").strip("!！ ")
+    # Fix accidental duplicate suffix e.g. "金色色绝了" → "金色绝了"
+    import re as _re
+    title = _re.sub(r'([一-鿿])色色', r'\1色', title)
+    return title or "这个发型绝了"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -282,7 +327,7 @@ def _composite(frame_path: str, out_path: str, title: str, subtitle: str, seed: 
 
     rng = random.Random(seed)
     theme = _pick_theme(frame_path, rng)
-    grad_top, grad_bottom, title_l, title_r, title_outline, pill_bg, pill_text = theme
+    title_l, title_r, title_outline, pill_bg, pill_text = theme
 
     # Use native frame resolution — no upscaling to avoid distortion
     _raw = Image.open(frame_path).convert("RGBA")
@@ -293,24 +338,29 @@ def _composite(frame_path: str, out_path: str, title: str, subtitle: str, seed: 
 
     base = _raw
 
-    # Mild contrast boost only — avoid oversaturation/warmth shift
+    # Mild contrast boost only — no colour saturation change
     base_rgb = base.convert("RGB")
-    base_rgb = ImageEnhance.Contrast(base_rgb).enhance(1.08)
-    # No Color enhance — preserve original skin/hair tones
+    base_rgb = ImageEnhance.Contrast(base_rgb).enhance(1.06)
+    # Slight cool-shift to counteract camera warm bias: reduce R channel by ~3%
+    import numpy as _np
+    arr = _np.array(base_rgb, dtype=_np.float32)
+    arr[:, :, 0] = _np.clip(arr[:, :, 0] * 0.97, 0, 255)  # R -3%
+    arr[:, :, 2] = _np.clip(arr[:, :, 2] * 1.03, 0, 255)  # B +3%
+    base_rgb = Image.fromarray(arr.astype(_np.uint8))
     base = base_rgb.convert("RGBA")
 
-    # Blur only bottom 18% of frame (text area) — keeps person area sharp
-    blur_start = int(H * 0.82)
-    blur_band = base.crop((0, blur_start, W, H)).filter(ImageFilter.GaussianBlur(radius=6))
+    # Blur only bottom 20% of frame (text area) — keeps person area sharp
+    blur_start = int(H * 0.80)
+    blur_band = base.crop((0, blur_start, W, H)).filter(ImageFilter.GaussianBlur(radius=7))
     base.paste(blur_band, (0, blur_start))
 
     overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
 
-    # Bottom gradient veil for text readability
-    _draw_gradient_rect(overlay, 0, H * 3 // 4, W, H,
-                        (0, 0, 0, 0), (0, 0, 0, 160))
+    # Bottom gradient veil — neutral dark, no colour cast
+    _draw_gradient_rect(overlay, 0, H * 2 // 3, W, H,
+                        (0, 0, 0, 0), (0, 0, 0, 190))
 
-    # NO top colour tone strip — it shifts warmth and obscures the subject
+    # NO top colour tone strip
 
     base.alpha_composite(overlay)
 
@@ -378,12 +428,22 @@ _SCHEME_SUBTITLES = {
     "教学": "手把手教你变美",
 }
 
-# Cover schemes for the 3-candidate cover generator
-# Each: (title, subtitle, frame_offset_fraction)
+# Cover schemes — 6 candidates, each with:
+#   id, title_template, subtitle, offset_frac
+# title_template supports {color}/{hair}/{effect} filled from SRT keywords.
 COVER_SCHEMES = [
-    {"id": "volume",   "title": "发量直接翻倍", "subtitle": "细软塌必看",     "offset_frac": 0.25},
-    {"id": "transform","title": "换个发型像换脸","subtitle": "真的不一样",     "offset_frac": 0.55},
-    {"id": "rescue",   "title": "细软塌救星",   "subtitle": "发量少的看这个", "offset_frac": 0.75},
+    # Scheme 1: Volume shock
+    {"id": "volume",    "title_tpl": "发量直接翻倍",        "subtitle": "细软塌必看",         "offset_frac": 0.22},
+    # Scheme 2: Before/after transformation feel
+    {"id": "transform", "title_tpl": "换个发型像换脸",      "subtitle": "差距真的很大",       "offset_frac": 0.45},
+    # Scheme 3: Rescue narrative
+    {"id": "rescue",    "title_tpl": "细软塌救星来了",      "subtitle": "发量少的姐妹看这个", "offset_frac": 0.68},
+    # Scheme 4: Dynamic — colour-forward
+    {"id": "color",     "title_tpl": "{color}色绝了",       "subtitle": "这个颜色真的显白",   "offset_frac": 0.30},
+    # Scheme 5: Dynamic — naturalness hook
+    {"id": "natural",   "title_tpl": "真人感拉满",          "subtitle": "朋友以为是我真发",   "offset_frac": 0.55},
+    # Scheme 6: Dynamic — question hook
+    {"id": "question",  "title_tpl": "为什么{hair}这么好",  "subtitle": "看完你就懂了",       "offset_frac": 0.80},
 ]
 
 
@@ -391,17 +451,22 @@ async def generate_cover_candidates(
     mp4_path: str,
     group_id: int,
     out_dir: str,
+    srt_text: str = "",
 ) -> list[str]:
     """
-    Generate 3 cover candidates from different frames of mp4_path.
-    Each scheme uses a different video timestamp and marketing title.
+    Generate 6 cover candidates from different frames of mp4_path.
+    Schemes 4-6 use SRT keywords to produce dynamic, content-specific titles.
     ComfyUI anime overlay is NOT used (causes ghosting on real footage).
 
-    Returns list of output JPEG paths (may be fewer than 3 on partial failure).
+    Returns list of output JPEG paths (may be fewer than 6 on partial failure).
     """
     import os as _os
     _os.makedirs(out_dir, exist_ok=True)
     duration = await _get_duration(mp4_path)
+
+    # Extract keywords from SRT for dynamic schemes
+    kw = _extract_srt_keywords(srt_text)
+    base_rng = random.Random(group_id)
 
     results = []
     for scheme in COVER_SCHEMES:
@@ -415,13 +480,17 @@ async def generate_cover_candidates(
             if not ok:
                 logger.warning(f"Cover frame extraction failed: {mp4_path} seek={seek}")
                 continue
+            # Build title — fill dynamic placeholders from SRT keywords
+            title_rng = random.Random(group_id ^ hash(scheme["id"]))
+            title = _build_dynamic_title(scheme["title_tpl"], kw, title_rng)
             seed = hash(mp4_path + scheme["id"]) & 0xFFFFFF
             await asyncio.get_running_loop().run_in_executor(
                 None, _composite, frame_tmp, out_path,
-                scheme["title"], scheme["subtitle"], seed, None
+                title, scheme["subtitle"], seed, None
             )
             if _os.path.exists(out_path) and _os.path.getsize(out_path) > 0:
                 results.append(out_path)
+                logger.debug(f"Cover {scheme['id']}: title='{title}' seek={seek:.1f}s")
         except Exception as e:
             logger.error(f"Cover generation error for scheme {scheme['id']}: {e}")
         finally:

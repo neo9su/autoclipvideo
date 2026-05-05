@@ -3211,8 +3211,9 @@ async def generate_group_thumbnail(group_id: int, body: dict = {}):
 
 @app.post("/api/groups/{group_id}/generate-covers")
 async def generate_group_covers(group_id: int):
-    """Generate 3 cover candidates using different marketing schemes.
+    """Generate 6 cover candidates using different marketing schemes.
     Frames are extracted from the longest *original* recording (no burned-in subtitles).
+    SRT text is passed to enable content-aware dynamic titles.
     """
     from thumbnail import generate_cover_candidates
     import json as _json
@@ -3241,13 +3242,23 @@ async def generate_group_covers(group_id: int):
         if os.path.exists(candidate):
             mp4_path = candidate
     if not mp4_path and group["merged_filename"]:
-        # Merged video is concat of clips (with subtitles) — last resort only
         mp4_path = os.path.join(RECORDINGS_DIR, group["merged_filename"])
     if not mp4_path or not os.path.exists(mp4_path):
         raise HTTPException(status_code=404, detail="No video available for cover generation")
 
+    # Load merged SRT for dynamic title generation
+    srt_text = ""
+    if group["merged_filename"]:
+        srt_path = os.path.join(RECORDINGS_DIR, os.path.splitext(group["merged_filename"])[0] + ".srt")
+        if os.path.exists(srt_path):
+            try:
+                with open(srt_path, "r", encoding="utf-8", errors="ignore") as _f:
+                    srt_text = _f.read()
+            except Exception:
+                pass
+
     covers_dir = os.path.join(RECORDINGS_DIR, "covers")
-    candidates = await generate_cover_candidates(mp4_path, group_id, covers_dir)
+    candidates = await generate_cover_candidates(mp4_path, group_id, covers_dir, srt_text=srt_text)
     if not candidates:
         raise HTTPException(status_code=500, detail="Cover generation failed")
 
