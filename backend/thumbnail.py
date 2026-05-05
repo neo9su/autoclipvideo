@@ -349,6 +349,8 @@ def _composite(frame_path: str, out_path: str, title: str, subtitle: str, seed: 
     arr[:, :, 1] = _np.clip(arr[:, :, 1] * 0.97, 0, 255)  # G -3%
     arr[:, :, 2] = _np.clip(arr[:, :, 2] * 1.15, 0, 255)  # B +15%
     base_rgb = Image.fromarray(arr.astype(_np.uint8))
+    # Sharpen the base frame to compensate for live-stream compression softness
+    base_rgb = base_rgb.filter(ImageFilter.UnsharpMask(radius=1.2, percent=80, threshold=2))
     base = base_rgb.convert("RGBA")
 
     # Blur only bottom 20% of frame (text area) — keeps person area sharp
