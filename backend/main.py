@@ -1774,7 +1774,7 @@ COMFYUI_URL = os.environ.get("COMFYUI_URL", "http://10.190.0.203:8188")
 
 @app.get("/api/gpu/status")
 async def gpu_status():
-    from gpu_state import is_online as gpu_is_online, _offline_since
+    from gpu_state import is_online as gpu_is_online, is_maintenance as gpu_is_maint, _offline_since
     import time as _time
     offline_sec = int(_time.monotonic() - _offline_since) if (not gpu_is_online() and _offline_since) else 0
     result = {
@@ -1783,9 +1783,8 @@ async def gpu_status():
         "gpu_offline_seconds": offline_sec,
         "comfyui": {"reachable": False, "vram_total": 0, "vram_free": 0, "ram_total": 0, "ram_free": 0, "queue_running": 0, "queue_pending": 0},
     }
-    # Skip live probing of GPU service when watcher already knows it is offline;
-    # still probe ComfyUI independently.
-    skip_gpu_probe = not gpu_is_online()
+    # Skip ALL live probing in maintenance mode — server may be fully offline
+    skip_gpu_probe = not gpu_is_online() or gpu_is_maint()
     try:
         import aiohttp as _aio_status
         _to = _aio_status.ClientTimeout(total=5)
@@ -1798,9 +1797,10 @@ async def gpu_status():
             except Exception as _e:
                 return None, _e
 
+        async def _skip(): return (None, None)
         comfy_r, queue_r = await asyncio.gather(
-            _aio_get(f"{COMFYUI_URL}/system_stats"),
-            _aio_get(f"{COMFYUI_URL}/queue"),
+            _aio_get(f"{COMFYUI_URL}/system_stats") if not gpu_is_maint() else _skip(),
+            _aio_get(f"{COMFYUI_URL}/queue") if not gpu_is_maint() else _skip(),
             return_exceptions=True,
         )
         # Only probe GPU service if watcher thinks it may be online

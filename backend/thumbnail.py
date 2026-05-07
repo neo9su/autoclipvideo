@@ -547,8 +547,9 @@ async def generate_thumbnail(mp4_path: str, offset: Optional[float] = None,
         # Raw frame is always the base for sharpness; ComfyUI adds anime colour grading.
         anime_overlay = None
         try:
+            from gpu_state import is_maintenance as _gpu_maint
             from comfyui_client import anime_img2img, health_check
-            if await health_check():
+            if not _gpu_maint() and await health_check():
                 seed = hash(mp4_path) & 0xFFFFFF
                 from PIL import Image as _PIL
                 with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as _tf:
