@@ -1873,7 +1873,28 @@ async def gpu_status():
         "active_job_id": ps["active_job_id"],
         "poll_interval": POLL_INTERVAL,
     }
+    # Maintenance mode flag
+    from gpu_state import is_maintenance
+    result["maintenance"] = is_maintenance()
     return result
+
+
+@app.post("/api/gpu/maintenance")
+async def gpu_maintenance_enable():
+    """Enable GPU maintenance mode: skips all GPU pipelines and silences offline alerts."""
+    from gpu_state import set_maintenance
+    set_maintenance(True)
+    logger.info("GPU maintenance mode enabled via API")
+    return {"ok": True, "maintenance": True}
+
+
+@app.delete("/api/gpu/maintenance")
+async def gpu_maintenance_disable():
+    """Disable GPU maintenance mode: resume normal GPU operation."""
+    from gpu_state import set_maintenance
+    set_maintenance(False)
+    logger.info("GPU maintenance mode disabled via API")
+    return {"ok": True, "maintenance": False}
 
 
 @app.post("/api/transcribe/flush", status_code=200)
@@ -2946,9 +2967,13 @@ async def batch_schedule_tasks(body: BatchScheduleCreate):
         return next_day
     # ────────────────────────────────────────────────────────────────────
 
-    # Phase 1: insert all tasks immediately without waiting for LLM meta
+    # Phase 1: insert tasks immediately without waiting for LLM meta
+    # Limit to 24 hours worth of groups to prevent one account from taking all groups
+    max_groups_per_24h = int(24 * 60 / body.interval_minutes) if body.interval_minutes > 0 else len(groups)
+    groups_to_process = groups[:max_groups_per_24h] if len(groups) > max_groups_per_24h else groups
+    
     async with aio_connect() as db:
-        for i, group in enumerate(groups):
+        for i, group in enumerate(groups_to_process):
             raw_dt = start_dt + timedelta(minutes=body.interval_minutes * i)
             scheduled_at = _snap_to_golden_hour(raw_dt).isoformat()
             # Pick video based on publish_versions

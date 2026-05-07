@@ -888,15 +888,19 @@ async def _run_director_pipeline(group_id: int):
     Runs independently from the classic pipeline; no fallback to classic on failure.
     At most _DIRECTOR_SEM concurrent pipelines to avoid flooding GPU TTS queue.
     """
-    # Skip if already completed (e.g. triggered again on restart)
-    async with aio_connect() as db:
-        async with db.execute(
-            "SELECT director_status FROM clip_groups WHERE id = ?", (group_id,)
-        ) as cur:
-            row = await cur.fetchone()
-    if row and row[0] == 2:
-        logger.info(f"Director pipeline group {group_id} already complete — skipping")
-        return
+    try:
+        # Skip if already completed (e.g. triggered again on restart)
+        async with aio_connect() as db:
+            async with db.execute(
+                "SELECT director_status FROM clip_groups WHERE id = ?", (group_id,)
+            ) as cur:
+                row = await cur.fetchone()
+        if row and row[0] == 2:
+            logger.info(f"Director pipeline group {group_id} already complete — skipping")
+            return
+    except Exception as e:
+        logger.error(f"Director pipeline {group_id} pre-check DB error: {e} — will retry inside sem")
+        # Don't abort; proceed to semaphore where inner will handle it properly
 
     async with _DIRECTOR_SEM:
         try:
@@ -904,12 +908,15 @@ async def _run_director_pipeline(group_id: int):
         except Exception as e:
             import traceback
             logger.error(f"Director pipeline {group_id} unhandled exception: {e}\n{traceback.format_exc()}")
-            async with aio_connect() as db:
-                await db.execute(
-                    "UPDATE clip_groups SET director_status = -1, director_error = ? WHERE id = ?",
-                    (str(e)[:400], group_id),
-                )
-                await db.commit()
+            try:
+                async with aio_connect() as db:
+                    await db.execute(
+                        "UPDATE clip_groups SET director_status = -1, director_error = ? WHERE id = ?",
+                        (str(e)[:400], group_id),
+                    )
+                    await db.commit()
+            except Exception as db_err:
+                logger.error(f"Director pipeline {group_id} failed to write error status: {db_err}")
 
 
 async def _run_director_pipeline_inner(group_id: int):
@@ -1057,12 +1064,15 @@ async def _run_creative_pipeline(group_id: int):
             await _run_creative_pipeline_inner(group_id)
         except Exception as e:
             logger.error(f"Creative pipeline group {group_id} unhandled: {e}")
-            async with aio_connect() as db:
-                await db.execute(
-                    "UPDATE clip_groups SET creative_status = -1, creative_error = ? WHERE id = ?",
-                    (str(e)[:400], group_id),
-                )
-                await db.commit()
+            try:
+                async with aio_connect() as db:
+                    await db.execute(
+                        "UPDATE clip_groups SET creative_status = -1, creative_error = ? WHERE id = ?",
+                        (str(e)[:400], group_id),
+                    )
+                    await db.commit()
+            except Exception as db_err:
+                logger.error(f"Creative pipeline {group_id} failed to write error status: {db_err}")
 
 
 async def _run_creative_pipeline_inner(group_id: int):

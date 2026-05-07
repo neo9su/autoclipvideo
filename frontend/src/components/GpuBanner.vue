@@ -1,5 +1,13 @@
 <template>
-  <div class="gpu-banner" :class="{ offline: !status.reachable && !status.comfyui?.reachable }">
+  <!-- Maintenance mode warning bar -->
+  <div v-if="status.maintenance" class="maintenance-bar">
+    <span class="maint-icon">🔧</span>
+    <span class="maint-text">GPU服务器维护中 — 所有GPU流水线已暂停，新分组仅生成经典版</span>
+    <button class="maint-resume-btn" :disabled="maintBusy" @click="toggleMaintenance">
+      {{ maintBusy ? '处理中…' : '✅ 恢复服务' }}
+    </button>
+  </div>
+  <div class="gpu-banner" :class="{ offline: !status.reachable && !status.comfyui?.reachable, maintenance: status.maintenance }">
     <!-- Left: status indicators -->
     <div class="banner-left">
       <span class="dot" :class="status.reachable ? 'online' : 'offline'"></span>
@@ -80,9 +88,18 @@
       </div>
     </div>
 
-    <!-- Right: logs -->
+    <!-- Right: logs + maintenance -->
     <div class="banner-right">
       <span class="version-tag">{{ appVersion }}</span>
+      <button
+        class="maint-btn"
+        :class="{ active: status.maintenance }"
+        :disabled="maintBusy"
+        @click="toggleMaintenance"
+        :title="status.maintenance ? '点击恢复GPU服务' : '暂停GPU服务（停机维护用）'"
+      >
+        {{ status.maintenance ? '✅ 恢复GPU' : '❇️ 维护GPU' }}
+      </button>
       <button v-if="!logsVisible" class="log-btn" @click="loadLogs">查看日志</button>
       <button v-else class="log-btn active" @click="logsVisible = false; stopLogPoll()">隐藏日志</button>
       <div v-if="logsVisible && logs.length" class="marquee-wrap">
@@ -135,6 +152,7 @@ const watchdogServices = computed(() => {
 })
 
 const wdBusy = ref({})
+const maintBusy = ref(false)
 const flushing = ref(false)
 const now = ref(Date.now())
 let nowTimer = null
@@ -165,6 +183,20 @@ async function doFlush() {
   flushing.value = true
   try { await fetch('/api/transcribe/flush', { method: 'POST' }) } catch {}
   setTimeout(() => { flushing.value = false; fetchStatus() }, 2000)
+}
+
+async function toggleMaintenance() {
+  maintBusy.value = true
+  try {
+    const enabling = !status.value.maintenance
+    const method = enabling ? 'POST' : 'DELETE'
+    await fetch('/api/gpu/maintenance', { method })
+    await fetchStatus()
+  } catch (e) {
+    console.error('maintenance toggle failed', e)
+  } finally {
+    maintBusy.value = false
+  }
 }
 
 async function wdStart(svc) {
@@ -324,4 +356,53 @@ onUnmounted(() => {
 
 @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.5; } }
 @keyframes scroll-left { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+
+/* Maintenance mode */
+.maintenance-bar {
+  background: rgba(251,191,36,0.12);
+  border-bottom: 1px solid rgba(251,191,36,0.4);
+  padding: 5px 24px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: #fbbf24;
+}
+.maint-icon { font-size: 14px; }
+.maint-text { flex: 1; }
+.maint-resume-btn {
+  background: rgba(52,211,153,0.15);
+  border: 1px solid rgba(52,211,153,0.5);
+  color: #34d399;
+  padding: 3px 14px;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: all 0.2s;
+}
+.maint-resume-btn:hover:not(:disabled) { background: rgba(52,211,153,0.3); }
+.maint-resume-btn:disabled { opacity: 0.5; cursor: default; }
+
+.gpu-banner.maintenance { border-bottom-color: rgba(251,191,36,0.25); }
+
+.maint-btn {
+  font-size: 11px;
+  padding: 2px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  border: 1px solid rgba(251,191,36,0.35);
+  background: rgba(251,191,36,0.08);
+  color: #fbbf24;
+  transition: all 0.2s;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.maint-btn:hover:not(:disabled) { background: rgba(251,191,36,0.2); border-color: rgba(251,191,36,0.6); }
+.maint-btn.active {
+  border-color: rgba(52,211,153,0.5);
+  background: rgba(52,211,153,0.1);
+  color: #34d399;
+}
+.maint-btn.active:hover:not(:disabled) { background: rgba(52,211,153,0.25); }
+.maint-btn:disabled { opacity: 0.5; cursor: default; }
 </style>

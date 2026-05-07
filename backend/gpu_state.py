@@ -37,6 +37,9 @@ _online: bool = False
 _event: asyncio.Event = asyncio.Event()  # set = online, cleared = offline
 _offline_since: float = 0.0             # monotonic timestamp when outage started
 
+# Maintenance mode: when True, all GPU pipeline calls are skipped / fallback to local
+_maintenance: bool = False
+
 # Watchdog agent state (updated by the watcher loop)
 _watchdog_available: bool = False
 _watchdog_services: dict = {}           # {name: {running, healthy, pid, uptime_s}}
@@ -52,7 +55,25 @@ def register_online_callback(fn) -> None:
 
 
 def is_online() -> bool:
-    return _online
+    return _online and not _maintenance
+
+
+def is_maintenance() -> bool:
+    return _maintenance
+
+
+def set_maintenance(value: bool) -> None:
+    global _maintenance, _online
+    _maintenance = value
+    if value:
+        # Treat as offline so callers skip GPU immediately
+        _event.clear()
+        logger.info("GPU maintenance mode ENABLED — all GPU pipelines will skip/fallback")
+    else:
+        # Restore event state based on actual connectivity
+        if _online:
+            _event.set()
+        logger.info("GPU maintenance mode DISABLED")
 
 
 def watchdog_status() -> dict:
@@ -141,6 +162,11 @@ async def watch_gpu_service(broadcast_fn=None) -> None:
         while True:
             try:
                 now = time.monotonic()
+
+                # ── skip probe entirely while in maintenance mode ───────
+                if _maintenance:
+                    await asyncio.sleep(ONLINE_INTERVAL)
+                    continue
 
                 # ── probe GPU service ────────────────────────────────────
                 online = await _probe_gpu(client)
