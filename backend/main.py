@@ -3127,8 +3127,8 @@ async def retry_publish_task(task_id: int):
             task = await cur.fetchone()
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    if task["status"] != "failed":
-        raise HTTPException(status_code=409, detail="Can only retry failed tasks")
+    if task["status"] not in ("failed", "scheduled"):
+        raise HTTPException(status_code=409, detail="Can only retry failed or scheduled tasks")
     async with aio_connect() as db:
         await db.execute(
             "UPDATE publish_tasks SET status = 'pending', error_msg = NULL WHERE id = ?",

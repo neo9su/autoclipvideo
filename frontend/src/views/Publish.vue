@@ -26,7 +26,7 @@
             <span class="task-platform">{{ t.platform }}</span>
             <span :class="['badge', statusClass(t.status)]">{{ statusLabel(t.status) }}</span>
             <span v-if="t.no_cart" class="badge badge-no-cart">无车</span>
-            <button v-if="['failed','publishing'].includes(t.status)"
+            <button v-if="['failed','publishing'].includes(t.status) || (t.status === 'scheduled' && isExpired(t.scheduled_at))"
               class="btn-xs btn-retry" @click.stop="retryTask(t.id)" title="重试">↺</button>
             <button v-if="t.status === 'scheduled' && isExpired(t.scheduled_at)"
               class="btn-xs btn-retry" @click.stop="openReschedule(t)" title="重新排期">↻</button>
@@ -54,7 +54,7 @@
             </div>
           </div>
           <div class="detail-actions">
-            <button v-if="['failed','publishing'].includes(selectedTask.status)" class="btn-primary" @click="retryTask(selectedTask.id)">重试</button>
+            <button v-if="['failed','publishing'].includes(selectedTask.status) || (selectedTask.status === 'scheduled' && isExpired(selectedTask.scheduled_at))" class="btn-primary" @click="retryTask(selectedTask.id)">重试</button>
             <button v-if="selectedTask.status === 'scheduled' && isExpired(selectedTask.scheduled_at)" class="btn-warning" @click="openReschedule(selectedTask)">重新排期</button>
             <button class="btn-secondary" @click="regenMeta(selectedTask.id)" :disabled="regenning" title="重新生成标题和文案">{{ regenning ? '生成中…' : '重生成文案' }}</button>
             <button v-if="selectedTask.status === 'failed'" class="btn-danger" @click="deleteFailedTask(selectedTask.id)">删除</button>
