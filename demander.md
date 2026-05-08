@@ -1,7 +1,7 @@
 # 需求清单 — douyin-recorder
 
 > 本文件由 Claude Code 自动维护。每次对话结束前回写，新对话开始时优先读取。
-> 最后更新：2026-04-27（阶段十七）
+> 最后更新：2026-05-08（阶段十八）
 
 ---
 
@@ -17,6 +17,7 @@
 | v1.8.1 | `v1.8.1` | 2026-04-27 | 抖音平台建议第一批：减少套路词/多角度加权/痛点驱动/真实语气/学习系统更新 |
 | v1.8.2 | `v1.8.2` | 2026-04-27 | 抖音平台建议第二批：叙事个性化/KUKU人设/信息深度/视觉质量评分/价值导向 |
 | **v1.9.0** | **`v1.9.0`** | **2026-04-27** | **新潮趋势评分维度 + 「新潮种草」文案方案 + 趋势词加权30+条** |
+| **v1.9.1** | `v1.9.1` | 2026-05-08 | Watchdog GPU 3D/Enc/Dec 占用率监测 |
 
 ### 回退方法
 ```bash
@@ -64,6 +65,31 @@ git checkout main
 4. VideoToolbox 在 Apple Silicon 上分配 Metal buffer，无法 Swap，直接吃统一内存
 5. 输出分辨率 4K(2160×3840)，每路 VideoToolbox 需 1~2GB → 6 路 = 6~12GB，严重超出 8GB
 6. 内存监控阈值 `MEM_WARN_GB=20` 在 8GB 机器上永远触发不了（形同虚设）
+
+---
+
+## 阶段十八：Watchdog GPU 占用率监测（已完成 2026-05-08）
+
+### 背景
+健康化烡检脏查中只能看到 GPU 服务是否在线，无法知道 GPU 当前负载。
+
+### 改动清单
+
+| 文件 | 改动 |
+|------|------|
+| `gpu_service.py`（GPU服务器） | `/health` 端点新增 `gpu_3d_pct`、`gpu_mem_pct`、`gpu_enc_pct`、`gpu_dec_pct` 四个字段（`nvidia-smi dmon -s u -c 1`，timeout=5s，失败静默） |
+| `watchdog_agent.py`（GPU服务器） | `_probe_health` 拆分为 `_probe_health_with_data`；`/status` 端点在 gpu 服务 healthy 时透传四个占用率字段 |
+| `frontend/src/components/GpuBanner.vue` | ComfyUI 在线时展示 `3D%` 和 `Enc%` 进度条 |
+| `scripts/fix_stuck_jobs.py` | 已巡棄日志同步显示 GPU 占用率 |
+
+### GPU 占用率字段说明（nvidia-smi dmon sm/mem/enc/dec）
+
+| 字段 | 含义 |
+|------|------|
+| `gpu_3d_pct` | SM/3D 平均占用率（Whisper 推理时高） |
+| `gpu_mem_pct` | 显存控制器占用率 |
+| `gpu_enc_pct` | NVENC（Video Encode）占用率（ffmpeg 编码时高） |
+| `gpu_dec_pct` | NVDEC（Video Decode）占用率 |
 
 ---
 
