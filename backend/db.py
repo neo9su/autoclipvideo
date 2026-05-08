@@ -176,6 +176,9 @@ async def init_db():
             "ALTER TABLE products ADD COLUMN product_thumb TEXT",
             # 发布重试计数
             "ALTER TABLE publish_tasks ADD COLUMN retry_count INTEGER DEFAULT 0",
+            # 封面候选图 (JSON array of relative paths) 和已选封面
+            "ALTER TABLE clip_groups ADD COLUMN cover_candidates TEXT",
+            "ALTER TABLE clip_groups ADD COLUMN selected_cover TEXT",
         ]:
             try:
                 await db.execute(migration)

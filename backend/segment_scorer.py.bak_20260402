@@ -1,0 +1,598 @@
+"""
+Audio + visual quality scoring for segment selection — Phase B, C & D.
+
+Phase B (audio):    ffmpeg volumedetect — loudness/dynamic range per segment.
+                    No new dependencies.
+Phase C (visual):   OpenCV Laplacian sharpness + face detection per segment.
+                    Requires: opencv-python  (pip install opencv-python-headless)
+                    Gracefully degrades to no-op when OpenCV is not installed.
+Phase D (semantic): Claude Haiku vision — wig visibility, demo quality, etc.
+                    Requires: imagehash Pillow  (pip install imagehash Pillow)
+                    Requires: AWS_BEARER_TOKEN_BEDROCK env var
+                    Gracefully degrades to no-op when dependencies/token missing.
+                    Cost: ~$0.008/recording (15 segs × 2 frames × Haiku image price)
+
+Integration:
+    from segment_scorer import enrich_audio_scores, enrich_visual_scores, enrich_semantic_scores
+    await enrich_audio_scores(mp4_path, segs)      # after score_and_tag + silence filter
+    await enrich_visual_scores(mp4_path, segs)     # after audio scoring
+    await enrich_semantic_scores(mp4_path, segs)   # after visual scoring
+"""
+import asyncio
+import base64
+import json
+import logging
+import os
+import re
+import tempfile
+
+logger = logging.getLogger(__name__)
+
+# Max concurrent volumedetect processes (audio-only decode, CPU-light).
+_SEM_AUDIO = asyncio.Semaphore(3)
+
+# Max concurrent ffmpeg frame-extract processes shared across Phase C & D.
+# Each needs a brief video decode; 3 concurrent is safe on M2 8GB.
+_SEM_FRAME = asyncio.Semaphore(3)
+
+
+async def _volumedetect(mp4: str, start: float, end: float) -> dict:
+    """
+    Run ffmpeg volumedetect on [start, end] of mp4.
+    Returns {"mean_db": float, "max_db": float} or {} on failure.
+
+    ffmpeg volumedetect output example (stderr):
+      [Parsed_volumedetect_0 @ ...] mean_volume: -20.3 dB
+      [Parsed_volumedetect_0 @ ...] max_volume: -6.2 dB
+    """
+    # -nostdin avoids ffmpeg waiting for stdin on some platforms
+    cmd = [
+        "ffmpeg", "-nostdin", "-y",
+        "-ss", f"{start:.3f}", "-to", f"{end:.3f}",
+        "-i", mp4,
+        "-af", "volumedetect",
+        "-f", "null", "-",
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+    except Exception as e:
+        logger.debug(f"volumedetect spawn failed: {e}")
+        return {}
+
+    text = stderr.decode("utf-8", errors="replace")
+    mean_m = re.search(r"mean_volume:\s*([-\d.]+)\s*dB", text)
+    max_m  = re.search(r"max_volume:\s*([-\d.]+)\s*dB", text)
+
+    if not mean_m:
+        return {}
+
+    return {
+        "mean_db": float(mean_m.group(1)),
+        "max_db":  float(max_m.group(1)) if max_m else float(mean_m.group(1)),
+    }
+
+
+def _audio_bonus(mean_db: float, max_db: float) -> float:
+    """
+    Translate raw audio stats into a score addend.
+
+    mean_db : RMS average level (dBFS). Higher = louder / more energetic.
+              Live-stream anchor speech typically ranges -28 to -18 dBFS.
+    max_db  : Peak level. (max_db - mean_db) = dynamic range.
+
+    Rationale:
+      - Loud/excited delivery (+energy): better hook material, keeps viewers.
+      - High dynamic range (punchy emphasis, "秒变！"): emotional peak moments.
+      - Very quiet / near-silent: likely transition noise or dead air; penalise.
+
+    Return range: approximately [-6, +7.5].
+    """
+    bonus = 0.0
+
+    # ── Loudness (mean RMS) ───────────────────────────────────────────────────
+    if mean_db > -18:       bonus += 5.0   # excited/shouting — high energy hook
+    elif mean_db > -22:     bonus += 3.5   # energetic delivery
+    elif mean_db > -28:     bonus += 1.5   # normal speech
+    elif mean_db > -35:     bonus += 0.0   # quiet (still valid)
+    else:                   bonus -= 4.0   # near-silent; may have slipped past silence filter
+
+    # ── Dynamic range (peak − mean) ──────────────────────────────────────────
+    dynamic = max_db - mean_db
+    if dynamic > 20:        bonus += 2.5   # very dynamic — shouts, emphasis
+    elif dynamic > 14:      bonus += 1.5   # moderate dynamic
+    elif dynamic > 8:       bonus += 0.5   # mildly dynamic
+
+    return bonus
+
+
+async def enrich_audio_scores(mp4: str, segs: list) -> None:
+    """
+    Enrich seg.score with an audio energy bonus for every valid segment.
+
+    Runs all volumedetect jobs concurrently (bounded semaphore).
+    Modifies segs in-place — call after score_and_tag() and the silence filter,
+    but before select_clips().
+
+    Hard filter: if mean_db < -45 dBFS the segment is effectively silent even
+    if it passed the 60%-silence-ratio check; marks seg.valid = False.
+    """
+    valid = [s for s in segs if s.valid]
+    if not valid:
+        return
+
+    async def _one(seg) -> None:
+        async with _SEM_AUDIO:
+            stats = await _volumedetect(mp4, seg.start, seg.end)
+
+        if not stats:
+            return  # failed — leave score unchanged
+
+        mean_db = stats["mean_db"]
+        max_db  = stats["max_db"]
+
+        # Hard filter: near-silent segments that passed the 60%-ratio gate
+        if mean_db < -45:
+            seg.valid = False
+            logger.debug(
+                f"Audio hard-filter (near-silent) [{seg.start:.1f}-{seg.end:.1f}]"
+                f" mean={mean_db:.1f}dB"
+            )
+            return
+
+        bonus = _audio_bonus(mean_db, max_db)
+        seg.score = round(seg.score + bonus, 2)
+        logger.debug(
+            f"Audio [{seg.start:.1f}-{seg.end:.1f}] "
+            f"mean={mean_db:.1f}dB max={max_db:.1f}dB "
+            f"bonus={bonus:+.1f} → score={seg.score:.1f}"
+        )
+
+    await asyncio.gather(*[_one(s) for s in valid])
+    enriched = sum(1 for s in valid if s.valid)
+    filtered  = len(valid) - enriched
+    logger.info(
+        f"Audio scoring complete: {enriched} enriched, {filtered} hard-filtered"
+        f" ({len(valid)} total valid)"
+    )
+
+
+# ── Phase C: Visual quality scoring ──────────────────────────────────────────
+
+# Max concurrent frame-extract + OpenCV jobs.
+# Each needs a brief ffmpeg decode; 3 concurrent is fine on M2 8GB.
+_SEM_VISUAL = asyncio.Semaphore(3)
+
+# Sharpness thresholds (Laplacian variance on grayscale frame, 1080×1920 crop)
+_SHARP_HARD_MIN  = 30.0    # below this → severe blur → seg.valid = False
+_SHARP_SOFT_LOW  = 80.0    # below this → visible blur → mild penalty
+_SHARP_GOOD      = 200.0   # above this → crisp         → bonus
+_SHARP_EXCELLENT = 500.0   # above this → very sharp     → extra bonus
+
+# Haar cascade path (bundled with opencv-python)
+_HAAR_FRONTAL = None   # loaded lazily once per process
+
+
+def _get_face_cascade():
+    global _HAAR_FRONTAL
+    if _HAAR_FRONTAL is None:
+        import cv2
+        path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        _HAAR_FRONTAL = cv2.CascadeClassifier(path)
+    return _HAAR_FRONTAL
+
+
+async def _extract_frame(mp4: str, ts: float) -> str | None:
+    """
+    Extract a single frame at timestamp ts from mp4.
+    Returns path to a temp JPEG, or None on failure.
+    Caller is responsible for deleting the file.
+    """
+    fd, path = tempfile.mkstemp(suffix=".jpg")
+    os.close(fd)
+    # Two-pass seek: coarse -ss before -i (fast), fine -ss after for accuracy
+    pre  = max(0.0, ts - 2.0)
+    fine = ts - pre
+    cmd = [
+        "ffmpeg", "-nostdin", "-y",
+        "-ss", f"{pre:.3f}", "-i", mp4,
+        "-ss", f"{fine:.3f}", "-frames:v", "1",
+        "-vf", "scale=540:960:force_original_aspect_ratio=decrease",  # half-res: fast + enough for OpenCV
+        "-q:v", "4", path,
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.communicate()
+        if proc.returncode == 0 and os.path.exists(path) and os.path.getsize(path) > 0:
+            return path
+    except Exception as e:
+        logger.debug(f"Frame extract failed at {ts:.1f}s: {e}")
+    try:
+        os.remove(path)
+    except Exception:
+        pass
+    return None
+
+
+def _analyse_frame(frame_path: str) -> dict:
+    """
+    Run synchronous OpenCV analysis on a JPEG frame.
+    Returns:
+      sharpness  : Laplacian variance (float, 0→∞)
+      face_ratio : largest face area / total frame area (0.0–1.0)
+      brightness : mean pixel intensity (0–255)
+    """
+    import cv2
+    import numpy as np
+
+    img = cv2.imread(frame_path)
+    if img is None:
+        return {}
+
+    h, w = img.shape[:2]
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # Sharpness: Laplacian variance — blurry frames give low values
+    sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+    # Face detection — quick run at reduced scale factor
+    cascade = _get_face_cascade()
+    faces = cascade.detectMultiScale(
+        gray,
+        scaleFactor=1.15,
+        minNeighbors=4,
+        minSize=(30, 30),
+    )
+    face_ratio = 0.0
+    if len(faces) > 0:
+        # Largest face
+        areas = [fw * fh for (_, _, fw, fh) in faces]
+        face_ratio = max(areas) / (w * h)
+
+    brightness = float(np.mean(gray))
+
+    return {
+        "sharpness":  sharpness,
+        "face_ratio": face_ratio,
+        "brightness": brightness,
+    }
+
+
+def _visual_bonus(sharpness: float, face_ratio: float, brightness: float) -> float:
+    """
+    Compute score addend from visual quality metrics.
+
+    sharpness  : Laplacian variance (higher = sharper).
+    face_ratio : largest detected face as fraction of frame area.
+    brightness : mean pixel value 0–255.
+
+    Return range: approximately [-5, +9].
+    """
+    bonus = 0.0
+
+    # ── Sharpness ─────────────────────────────────────────────────────────────
+    # Hard filter handled by caller; here only soft adjustments.
+    if sharpness >= _SHARP_EXCELLENT:   bonus += 4.0
+    elif sharpness >= _SHARP_GOOD:      bonus += 2.5
+    elif sharpness >= _SHARP_SOFT_LOW:  bonus += 0.5
+    else:                               bonus -= 2.0   # visible blur (but above hard limit)
+
+    # ── Face coverage ─────────────────────────────────────────────────────────
+    # Large face → good close-up / frontal shot → high engagement potential
+    if face_ratio >= 0.12:    bonus += 4.0   # prominent face close-up
+    elif face_ratio >= 0.05:  bonus += 2.5   # clear face, mid-range
+    elif face_ratio >= 0.01:  bonus += 1.0   # face visible but small
+    # face_ratio == 0: could be product close-up — neutral, no penalty
+
+    # ── Exposure ──────────────────────────────────────────────────────────────
+    if brightness < 35 or brightness > 225:
+        bonus -= 3.0   # severe under/over-exposure
+
+    return bonus
+
+
+async def enrich_visual_scores(mp4: str, segs: list) -> None:
+    """
+    Enrich seg.score with a visual quality bonus for every valid segment.
+
+    Extracts one frame at the segment midpoint and runs OpenCV analysis.
+    Modifies segs in-place — call after enrich_audio_scores().
+
+    Hard filter: sharpness < _SHARP_HARD_MIN → seg.valid = False (severe blur).
+
+    Gracefully skips all scoring if opencv-python is not installed.
+    """
+    try:
+        import cv2  # noqa: F401 — early check; actual use is in _analyse_frame
+    except ImportError:
+        logger.info("opencv-python not installed — visual scoring skipped (pip install opencv-python-headless)")
+        return
+
+    valid = [s for s in segs if s.valid]
+    if not valid:
+        return
+
+    async def _one(seg) -> None:
+        mid = (seg.start + seg.end) / 2
+        async with _SEM_VISUAL:
+            frame_path = await _extract_frame(mp4, mid)
+
+        if not frame_path:
+            return  # extraction failed — leave score unchanged
+
+        try:
+            stats = await asyncio.to_thread(_analyse_frame, frame_path)
+        finally:
+            try:
+                os.remove(frame_path)
+            except Exception:
+                pass
+
+        if not stats:
+            return
+
+        sharpness  = stats["sharpness"]
+        face_ratio = stats["face_ratio"]
+        brightness = stats["brightness"]
+
+        # Hard filter: severely blurry frames not worth including
+        if sharpness < _SHARP_HARD_MIN:
+            seg.valid = False
+            logger.debug(
+                f"Visual hard-filter (severe blur) [{seg.start:.1f}-{seg.end:.1f}]"
+                f" sharpness={sharpness:.0f}"
+            )
+            return
+
+        bonus = _visual_bonus(sharpness, face_ratio, brightness)
+        seg.score = round(seg.score + bonus, 2)
+        logger.debug(
+            f"Visual [{seg.start:.1f}-{seg.end:.1f}] "
+            f"sharp={sharpness:.0f} face={face_ratio:.3f} bright={brightness:.0f} "
+            f"bonus={bonus:+.1f} → score={seg.score:.1f}"
+        )
+
+    await asyncio.gather(*[_one(s) for s in valid])
+    enriched = sum(1 for s in valid if s.valid)
+    filtered  = len(valid) - enriched
+    logger.info(
+        f"Visual scoring complete: {enriched} enriched, {filtered} hard-filtered"
+        f" ({len(valid)} total valid)"
+    )
+
+
+# ── Phase D: Claude visual semantic scoring ───────────────────────────────────
+
+_BEDROCK_URL   = "https://bedrock-runtime.us-east-1.amazonaws.com"
+_VISION_MODEL  = os.environ.get("BEDROCK_VISION_MODEL", "us.anthropic.claude-sonnet-4-6")
+_BEDROCK_TOKEN = os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "")
+
+# Max concurrent Bedrock API calls — keeps cost predictable and avoids rate limits.
+_SEM_SEMANTIC = asyncio.Semaphore(2)
+
+# Circuit breaker: set True after first unrecoverable Bedrock error (invalid model, auth fail).
+# Prevents wasting frame-extraction time on every segment when the service is misconfigured.
+_semantic_disabled = False
+
+# In-process pHash cache: phash_int → analysis result dict.
+# Prevents duplicate API calls for visually identical/similar frames across segments.
+_PHASH_CACHE: dict[int, dict] = {}
+_PHASH_MAX_DISTANCE = 10   # Hamming distance threshold for "same frame"
+
+_VISION_PROMPT = """你正在分析假发直播间的视频帧。请评估以下内容并以JSON格式返回。
+
+评估项目：
+1. wig_visible: 假发在画面中的清晰可见程度 (0-10，0=看不见，10=非常清晰占据主体)
+2. is_closeup: 是否为近景特写（主播头部/产品占画面50%以上）true/false
+3. is_demo: 是否正在演示佩戴过程（戴上/摘下/展示假发效果）true/false
+4. facing_camera: 主播是否正对镜头（而非侧对或背对）true/false
+5. product_quality: 画面呈现质量（光线、构图、产品展示完整性）(0-10)
+
+只返回JSON，不含其他内容：
+{"wig_visible": 数字, "is_closeup": 布尔, "is_demo": 布尔, "facing_camera": 布尔, "product_quality": 数字}"""
+
+
+def _semantic_bonus(result: dict) -> float:
+    """
+    Translate Claude vision analysis into a score addend.
+
+    Scoring philosophy (centered at 0 for average content):
+    - wig_visible 0–10 → (val-5)*1.2  [-6, +6]   core product presence
+    - product_quality 0–10 → (val-5)*0.8  [-4, +4]  presentation multiplier
+    - is_demo → +3.5 (demonstrating beats describing)
+    - is_closeup → +4.0 / -0.5 (close-up detail = highest purchase intent driver)
+    - facing_camera → +1.5 / -0.5 (direct engagement)
+
+    Typical range: -5 to +15.
+    """
+    bonus = 0.0
+    bonus += (result.get("wig_visible",     5) - 5) * 1.2
+    bonus += (result.get("product_quality", 5) - 5) * 0.8
+    if result.get("is_demo"):
+        bonus += 3.5
+    if result.get("is_closeup"):
+        bonus += 4.0   # raised from 2.5: detail closeup is the highest purchase driver
+    else:
+        bonus -= 0.5
+    if result.get("facing_camera"):
+        bonus += 1.5
+    else:
+        bonus -= 0.5
+    return round(bonus, 2)
+
+
+def _phash_of_file(frame_path: str) -> int | None:
+    """Compute perceptual hash of a JPEG. Returns int or None on failure."""
+    try:
+        import imagehash
+        from PIL import Image
+        return int(str(imagehash.phash(Image.open(frame_path))), 16)
+    except Exception:
+        return None
+
+
+def _find_cached(phash_int: int) -> dict | None:
+    """Return a cached analysis if a visually similar frame (Hamming ≤ threshold) exists."""
+    try:
+        import imagehash
+    except ImportError:
+        return None
+    query = imagehash.hex_to_hash(format(phash_int, "016x"))
+    for stored_int, stored_result in _PHASH_CACHE.items():
+        stored = imagehash.hex_to_hash(format(stored_int, "016x"))
+        if query - stored <= _PHASH_MAX_DISTANCE:
+            return stored_result
+    return None
+
+
+async def _call_bedrock_vision(frame_paths: list[str]) -> dict | None:
+    """
+    Call Bedrock Claude Haiku with 1–2 JPEG frames.
+    Returns parsed analysis dict or None on failure.
+    """
+    content = []
+    for fp in frame_paths:
+        try:
+            with open(fp, "rb") as f:
+                img_b64 = base64.b64encode(f.read()).decode()
+            content.append({
+                "image": {"format": "jpeg", "source": {"bytes": img_b64}}
+            })
+        except Exception as e:
+            logger.debug(f"Frame read failed {fp}: {e}")
+    if not content:
+        return None
+    content.append({"text": _VISION_PROMPT})
+
+    payload = {
+        "messages": [{"role": "user", "content": content}],
+        "inferenceConfig": {"maxTokens": 200, "temperature": 0},
+    }
+    url = f"{_BEDROCK_URL}/model/{_VISION_MODEL}/converse"
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                url, json=payload,
+                headers={
+                    "Authorization": f"Bearer {_BEDROCK_TOKEN}",
+                    "Content-Type": "application/json",
+                },
+            )
+        if resp.status_code != 200:
+            logger.warning(f"Bedrock vision {resp.status_code}: {resp.text[:200]}")
+            # 400/403/404 = misconfiguration (bad model ID, auth failure, region).
+            # Trip the circuit breaker so we stop wasting frame-extraction time.
+            if resp.status_code in (400, 403, 404):
+                global _semantic_disabled
+                _semantic_disabled = True
+                logger.error(
+                    f"Bedrock vision permanently disabled (status {resp.status_code}). "
+                    "Check BEDROCK_VISION_MODEL and AWS_BEARER_TOKEN_BEDROCK."
+                )
+            return None
+        raw = resp.json()["output"]["message"]["content"][0]["text"]
+        # raw_decode stops at end of first complete JSON object, ignoring trailing text
+        try:
+            start = raw.index("{")
+            obj, _ = json.JSONDecoder().raw_decode(raw, start)
+            return obj
+        except (ValueError, json.JSONDecodeError):
+            logger.warning(f"No JSON in vision response: {raw[:200]}")
+    except Exception as e:
+        logger.warning(f"Bedrock vision call failed: {e}")
+    return None
+
+
+async def enrich_semantic_scores(mp4: str, segs: list) -> None:
+    """
+    Enrich seg.score with Claude Haiku visual semantic analysis (Phase D).
+
+    Extracts 2 frames per segment (at 33% and 66% of duration).
+    pHash deduplication skips API calls for visually identical frames
+    (e.g. same product shown across multiple segments of the same recording).
+
+    Modifies segs in-place — call after enrich_visual_scores().
+
+    Gracefully skips if:
+      - AWS_BEARER_TOKEN_BEDROCK not set
+      - imagehash / Pillow not installed  (pip install imagehash Pillow)
+      - Any Bedrock API error (non-fatal, score left unchanged)
+    """
+    if not _BEDROCK_TOKEN:
+        logger.info("Semantic scoring skipped: AWS_BEARER_TOKEN_BEDROCK not set")
+        return
+
+    if _semantic_disabled:
+        logger.info("Semantic scoring skipped: circuit breaker tripped (Bedrock misconfigured)")
+        return
+
+    try:
+        import imagehash   # noqa: F401
+        from PIL import Image  # noqa: F401
+    except ImportError:
+        logger.info("Semantic scoring skipped: pip install imagehash Pillow")
+        return
+
+    valid = [s for s in segs if s.valid]
+    if not valid:
+        return
+
+    async def _one(seg) -> None:
+        dur  = seg.end - seg.start
+        ts1  = seg.start + dur * 0.33
+        ts2  = seg.start + dur * 0.66
+
+        # Extract up to 2 frames — bounded by shared frame-extract semaphore
+        async with _SEM_FRAME:
+            frame1 = await _extract_frame(mp4, ts1)
+            frame2 = await _extract_frame(mp4, ts2) if dur > 3.0 else None
+        frames = [f for f in [frame1, frame2] if f]
+        if not frames:
+            return
+
+        try:
+            phashes = [await asyncio.to_thread(_phash_of_file, fp) for fp in frames]
+
+            # Cache lookup (primary key = first frame's hash)
+            result = None
+            if phashes[0] is not None:
+                result = await asyncio.to_thread(_find_cached, phashes[0])
+
+            if result is not None:
+                logger.debug(f"Semantic cache hit [{seg.start:.1f}-{seg.end:.1f}]")
+            else:
+                async with _SEM_SEMANTIC:
+                    result = await _call_bedrock_vision(frames)
+                # Store all frame hashes → same result
+                if result:
+                    for ph in phashes:
+                        if ph is not None:
+                            _PHASH_CACHE[ph] = result
+
+            if result:
+                bonus = _semantic_bonus(result)
+                seg.score = round(seg.score + bonus, 2)
+                logger.debug(
+                    f"Semantic [{seg.start:.1f}-{seg.end:.1f}] "
+                    f"wig={result.get('wig_visible',0)} demo={result.get('is_demo')} "
+                    f"closeup={result.get('is_closeup')} facing={result.get('facing_camera')} "
+                    f"pq={result.get('product_quality',0)} bonus={bonus:+.1f} → score={seg.score:.1f}"
+                )
+        finally:
+            for fp in frames:
+                try:
+                    os.remove(fp)
+                except Exception:
+                    pass
+
+    await asyncio.gather(*[_one(s) for s in valid])
+    logger.info(f"Semantic scoring complete: {len(valid)} segments processed")

@@ -19,6 +19,23 @@
 
     <!-- Center: metrics -->
     <div class="banner-metrics" v-if="status.comfyui?.reachable">
+      <!-- GPU utilization bars (nvidia-smi dmon) -->
+      <div class="metric" v-if="gpu3dPct !== null">
+        <span class="metric-label">3D</span>
+        <div class="bar-wrap">
+          <div class="bar" :class="gpu3dPct > 85 ? 'danger' : gpu3dPct > 60 ? 'warn' : 'ok'"
+               :style="{ width: gpu3dPct + '%' }"></div>
+        </div>
+        <span class="metric-val">{{ gpu3dPct }}%</span>
+      </div>
+      <div class="metric" v-if="gpuEncPct !== null">
+        <span class="metric-label">Enc</span>
+        <div class="bar-wrap">
+          <div class="bar" :class="gpuEncPct > 85 ? 'danger' : gpuEncPct > 40 ? 'warn' : 'ok'"
+               :style="{ width: Math.max(gpuEncPct, gpuEncPct > 0 ? 4 : 0) + '%' }"></div>
+        </div>
+        <span class="metric-val">{{ gpuEncPct }}%</span>
+      </div>
       <div class="metric" v-if="vramTotal > 0">
         <span class="metric-label">专用显存</span>
         <div class="bar-wrap">
@@ -139,6 +156,11 @@ const vramFree  = computed(() => status.value.comfyui?.vram_free  || 0)
 const vramPct   = computed(() => vramTotal.value ? Math.round((1 - vramFree.value / vramTotal.value) * 100) : 0)
 const vramUsedGB  = computed(() => ((vramTotal.value - vramFree.value) / 1e9).toFixed(1))
 const vramTotalGB = computed(() => (vramTotal.value / 1e9).toFixed(0))
+
+// GPU utilization from nvidia-smi dmon (via gpu_service /health)
+const gpu3dPct  = computed(() => status.value.health?.gpu_3d_pct  ?? null)
+const gpuEncPct = computed(() => status.value.health?.gpu_enc_pct ?? null)
+const gpuMemPct = computed(() => status.value.health?.gpu_mem_pct ?? null)
 
 const ramTotal = computed(() => status.value.comfyui?.ram_total || 0)
 const ramFree  = computed(() => status.value.comfyui?.ram_free  || 0)

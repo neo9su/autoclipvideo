@@ -1,0 +1,4059 @@
+"""
+Intelligent clip editor for Douyin live recordings.
+
+Pipeline:
+  1. Parse SRT → scored segments
+  2. Detect silence via ffmpeg → mark invalid
+  3. Select best segments (15-30s total) with A-B-A structure
+  4. Cut + concat via ffmpeg → output _clip.mp4
+"""
+import asyncio
+import glob as _glob
+import logging
+import os
+import random
+import re
+import tempfile
+from dataclasses import dataclass, field
+from typing import List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
+
+RECORDINGS_DIR = os.path.join(os.path.dirname(__file__), "..", "recordings")
+MUSIC_DIR = os.path.join(os.path.dirname(__file__), "assets", "music")
+
+
+def _pick_music() -> Optional[str]:
+    tracks = [
+        t for t in
+        _glob.glob(os.path.join(MUSIC_DIR, "*.mp3")) +
+        _glob.glob(os.path.join(MUSIC_DIR, "*.wav"))
+        if not os.path.basename(t).startswith("_")  # skip auto-generated
+    ]
+    if tracks:
+        return random.choice(tracks)
+    # No user tracks: use auto-generated BGM library
+    auto_tracks = [
+        t for t in
+        _glob.glob(os.path.join(MUSIC_DIR, "_bgm_*.mp3")) +
+        _glob.glob(os.path.join(MUSIC_DIR, "_generated_bgm.mp3"))
+        if os.path.exists(t)
+    ]
+    if auto_tracks:
+        return random.choice(auto_tracks)
+    try:
+        from music_gen import generate_bgm
+        return generate_bgm()
+    except Exception as e:
+        logger.warning(f"BGM generation failed: {e}")
+        return None
+CLIP_MIN = 30.0   # seconds (巨量千川优质标准：15-60s为佳，30s确保完整三段式)
+CLIP_MAX = 60.0   # seconds (原240s完播率极低，降至60s对齐平台优质上限)
+MAX_CLIP_SEGMENTS = 50  # cap to avoid ffmpeg resource exhaustion
+
+# v2 引擎参数（发型边界识别模式）
+CLIP_MIN_V2 = 46.0   # 抖音竖屏短视频最优完播区间下限
+CLIP_MAX_V2 = 60.0   # 上限保持60s
+SEG_PAD = 0.5     # seconds of audio/video to retain before/after each SRT segment
+
+# ── Patterns that trigger segment removal ────────────────────────────────────
+_REMOVE_PATTERNS = [
+    r'\d+号链接',
+    r'点.{0,3}链接',
+    r'没货[了]?',
+    r'有货的宝宝',
+    r'下播',
+    r'稍等[一下片刻]?',
+    r'网络(卡顿?|问题|不好|断了?)',
+    r'刷新[一下页面]?',
+    r'黑屏',
+    r'花屏',
+    r'哪里人',
+    r'吃饭(了|没)',
+    r'今天怎么样',
+    r'去拿[一下]?货',
+    r'低头算',
+    r'后台(操作|看[一下]?)',
+    r'(尖锐|嘈杂)噪.?音',
+    r'回声',
+    # 催单
+    r'最后\d+[百千]?单',
+    r'抢最后',
+    r'就剩\d+[百千]?单',
+    r'仅剩\d+[百千]?单',
+    r'秒没',
+    # 催单 - 链接/下单
+    r'[一二三四五六七八九十百]+号链接',
+    r'拍[一二三四五六七八九十百\d]+号',
+    r'(上|开)[了]?链接',
+    r'赶(紧|快)(拍|下单)',
+    r'截图.{0,5}下单',
+    # 时间词
+    r'这周|上周|下周',
+    r'年前|年后',
+    r'今天|明天|昨天',
+    r'这个月|下个月|上个月',
+    # 卖惨/演戏营销（巨量千川低质管控）
+    r'快撑不下去',
+    r'房租.{0,5}到期',
+    r'老板.{0,5}(亏本|亏损)',
+    r'清仓.{0,5}处理',
+    r'(快|马上)倒闭',
+    r'撑不住了',
+    # 过度效果承诺（禁止承诺改变外貌）
+    r'保证.{0,8}(变美|变好|显年轻)',
+    r'显年轻\d+岁',
+    r'遮住所有',
+    r'彻底解决',
+    # 诱骗互动（平台明确管控）
+    r'点赞送礼',
+    r'评论抽奖',
+    r'转发有惊喜',
+    # 绝对化用语（平台明确禁止）
+    r'全网最[低便宜]',
+    r'史上最[低便宜好]',
+    r'第一[名款]',
+    r'销量第一',
+    r'唯一[正品授权]',
+    r'独家[正品]',
+    # 炫富/拜金（信息价值-价值观扣分）
+    r'[豪][车宅]',
+    r'年入[百千万亿]',
+    r'月入[百千万亿]',
+    r'躺[着赚]钱',
+    r'[轻松]暴富',
+    # 价格误导
+    r'原价[^\d]{0,3}\d+',
+    r'骨折价',
+    r'亏本[甩卖出]',
+    # 直播间号位词（无产品信息的槽位播报）
+    r'上[一二三四五六七八九十\d]+号',     # "上一号"/"上2号"
+    r'开[一二三四五六七八九十\d]+号',     # "开一号"
+    r'这[是个][一二三四五六七八九十\d]+号',# "这是一号"
+    r'[一二三四五六七八九十\d]+号上车',   # "一号上车"
+    r'^[一二三四五六七八九十\d]+号$',     # 纯粹的"一号"/"2号"单独成段
+    # 闲聊/互动填充词（无产品价值）
+    r'怎么办[呢啊哦]',
+    r'漂漂亮亮',
+    r'(?:对不对|是不是|好不好)[啊吧呢哦]?$',
+    r'有没有宝宝',
+    r'宝宝们?(来了|好|在吗)',
+    r'欢迎[来到进入]?直播间',
+    r'感谢[大家宝宝]+(来)?观看',
+    r'大家[好晚上早上下午]+好',
+    r'辛苦了[哦啊]?$',
+    r'[加油努力]+(哦啊吧)$',
+]
+
+# ── Keyword scoring (higher = more valuable to keep) ─────────────────────────
+_SCORES: dict[str, float] = {
+    # ── 痛点（pain points）—— 片段必须选入 ────────────────────────────────────
+    '发量少': 10, '发缝宽': 10, '发缝大': 10, '头顶塌': 10, '秃顶': 10, '秃头': 10,
+    '贴头皮': 9, '显脸大': 9, '显老': 9, '稀疏': 9, '扁塌': 9, '扁头': 9,
+    '油头塌': 9, '细软发': 9, '发际线高': 9, '头顶空': 10, '头型不好看': 9,
+    '不敢低头': 9, '不敢扎头发': 9, '没自信': 8, '形象差': 8, '气质差': 8,
+    '白发': 10, '遮白发': 11, '白头发': 10,
+    '头发稀': 10, '发丝少': 10, '发量太少': 10, '头皮': 9, '油头': 8,
+    '显白': 9,
+    '出门快': 10, '五分钟': 10, '1分钟': 10, '一分钟': 10,
+    '十五分钟': 9, '15分钟': 9, '省时': 9, '不用打理': 9, '每天都可以': 8,
+    # ── 对比效果（before/after comparison）────────────────────────────────────
+    # 注：巨量千川对「佩戴前后改变外貌」有管控，以下词由用户明确要求加入；
+    #     正面表达真实使用效果（变化明显/瞬间变多）属产品描述，非违规效果承诺。
+    '戴前': 10, '戴后': 10, '前后对比': 10,
+    '变化明显': 10, '瞬间变多': 10, '立刻蓬松': 10,
+    # ── 情绪刺激 / 社交证明（social proof）──────────────────────────────────
+    '以为烫头': 10, '以为整容': 10, '同事以为': 10, '朋友以为': 9,
+    '老公以为': 9, '男朋友以为': 9, '认不出来': 9, '以为变了': 8,
+    '路人以为': 8, '都以为': 9, '以为去': 8,
+    '大笑': 7, '惊讶': 7, '天啊': 7,
+    # ── 产品核心卖点（product features）─────────────────────────────────────
+    '自然': 7, '仿真头皮': 10, '无痕': 9, '看不出': 9, '真实感': 9,
+    '蓬松': 9, '增加发量': 10, '遮盖发缝': 10, '高颅顶': 9,
+    '显脸小': 9, '修饰脸型': 8,
+    '真人发丝': 9, '递针': 8, '不掉色': 8, '免打理': 8,
+    '仿真': 8, '一梳到底': 9, '秒变': 10, '小V脸': 10,
+    '变身': 9, '背影杀': 9, '头包脸': 9, '氛围感': 8,
+    # 产品参数（需求1）
+    '头围': 9, '大头围': 9, '小头围': 9,
+    '人发': 8, '真人发': 9, '化纤': 7,
+    '发根': 8, '发尾': 7,
+    '色号': 8, '颜色': 7, '挑染': 8, '渐变色': 8,
+    '学生头': 7, '梨花头': 7, 'bob头': 7, 'BOB头': 7,
+    '短发': 7, '长发': 7, '卷发': 7, '直发': 7,
+    # ── 佩戴过程（wearing process）───────────────────────────────────────────
+    '一秒佩戴': 10, '快速戴上': 9, '新手可用': 9, '简单方便': 8,
+    '不费时间': 9, '不挑人': 9, '轻松上手': 9,
+    '戴上去': 8, '这样戴': 8, '夹一下': 7, '梳开': 7, '调整一下': 7,
+    # 佩戴动作（需求8A）
+    '戴好': 10, '套上去': 9, '摘下来': 8, '取下来': 8, '试试': 8, '试一下': 8,
+    # ── 细节特写（detail closeup）—— 最高优先级 ──────────────────────────────
+    '发缝真实': 11, '发根清晰': 11, '分缝自然': 11, '发丝细腻': 11,
+    '贴合头皮': 10, '边缘自然': 10, '顺滑': 9, '不打结': 9,
+    '不反光': 9, '颜色自然': 9,
+    '特写': 11, '近景': 9, '细节': 11, '发丝质感': 12,
+    '侧面': 7, '从侧面': 8, '侧边': 6, '正面': 5, '背面': 6,
+    '整体': 7, '整体造型': 8, '全貌': 7,
+    '头顶': 6, '顶部': 5, '俯视': 6,
+    '360': 9, '转一圈': 8, '转一下': 7,
+    # ── 舒适度（comfort）─────────────────────────────────────────────────────
+    '透气': 8, '不闷': 9, '不勒头': 9, '轻薄': 8,
+    '无负担': 8, '夏天可戴': 9, '久戴不累': 8,
+    '怕热': 9, '夏天': 8, '夏日': 8, '网底': 9, '透气网': 9,
+    '晒黑': 8, '戴着凉快': 9, '通风': 8, '散热': 7,
+    # ── 稳固性（stability）───────────────────────────────────────────────────
+    '不掉': 9, '不滑': 9, '不移位': 9, '卡扣固定': 9,
+    '稳固贴合': 9, '牢固': 8, '跑步不掉': 10, '风吹不掉': 10,
+    # ── 场景代入（usage scene）───────────────────────────────────────────────
+    '上班': 8, '通勤': 8, '出门': 7, '约会': 9,
+    '聚会': 8, '逛街': 8, '拍照': 7,
+    '见客户': 8, '面试': 8, '相亲': 9, '婚礼': 8,
+    '日常': 7, '懒人': 8, '早起赶时间': 9, '外出旅行': 8,
+    # 场景词补充（需求2）
+    '前任': 9, '见前任': 9, '见家长': 8, '毕业': 7,
+    '男朋友': 8, '旅游': 8, '旅行': 8, '出游': 7, '早上': 6,
+    # ── 转化引导（conversion CTA）────────────────────────────────────────────
+    '炸福利': 10, '上车': 9, '运费险': 8,
+    '不满意包退': 9, '包退': 8, '点购物车': 9, '加购': 7,
+    '看到最后': 10, '一定要看': 10, '别划走': 10, '后面更夸张': 9,
+    '真的有用': 8, '我放评论区了': 8, '链接在评论区': 8,
+    '直接入': 9, '闭眼买': 9, '强烈推荐': 8,
+    # ── 材质工艺（materials & craft）────────────────────────────────────────
+    '全真发': 9, '哑光真发': 10, '顺削发': 9,
+    '高仿真发丝': 11, '记忆丝': 9, '蛋白丝': 9,
+    '蕾丝内网': 10, '全蕾丝': 10, '仿生头皮': 11,
+    '递针工艺': 11, '单根勾织': 11, '仿生毛孔': 10,
+    '防滑条': 8, '可调节扣': 8, '轻薄透气': 9,
+    # ── 佩戴体验（wear comfort）──────────────────────────────────────────────
+    '不闷汗': 9, '不扎头': 9, '无胶佩戴': 10,
+    # ── 视觉效果（visual result）─────────────────────────────────────────────
+    '一秒变发量': 12, '视觉增发': 11,
+    '发际线逼真': 11, '无痕隐形': 11,
+    '蓬松自然': 10, '不显头大': 9,
+    '可随意分缝': 10, '发色均匀': 9, '无化学反光': 10,
+    # ── 痛点补充（pain points extended）─────────────────────────────────────
+    '细软塌': 9, '秃头星人': 10,
+    '产后脱发': 10, '压力脱发': 9, '遗传性脱发': 10,
+    'M型额头': 10, '秃鬓角': 10,
+    '白发遮盖': 11, '不想染发': 9,
+    '发型单调': 9, '不敢换造型': 9,
+    '戴假发怕假': 10, '怕掉': 8, '怕闷': 8,
+    '化疗': 10, '医疗性脱发': 10,
+    # ── 场景补充（scene extended）────────────────────────────────────────────
+    '日常通勤': 8, '上班上学': 8,
+    '约会聚餐': 9, '同学聚会': 8,
+    '婚礼敬酒': 9, '伴娘发型': 9,
+    '舞台演出': 8, '年会活动': 8,
+    '拍照上镜': 9, '短视频出镜': 8,
+    # ── 转化补充（conversion extended）──────────────────────────────────────
+    '真人发同效果': 10, '几分之一的价格': 10,
+    '送全套工具': 9, '护理液': 8, '支架': 7,
+    '7天试戴': 10, '首单优惠': 9, '直播间专属价': 10,
+    '顺丰发货': 8, '隐私包装': 9,
+    # ── 产品维护（maintenance）───────────────────────────────────────────────
+    '不毛躁': 9, '少掉发': 9,
+    '可烫可染': 10, '可修剪': 8, '可改短': 8,
+    '送保养视频': 9, '终身护理建议': 10,
+    '送防尘袋': 8, '发网': 8, '钢梳': 7,
+}
+
+# ── Segment category tags (10-category narrative system) ─────────────────────
+# Narrative order: problem → comparison → social_proof → product → wearing →
+#                  detail  → comfort    → result       → scene   → convert
+_PROBLEM_KW = {
+    '发量少', '发缝宽', '发缝大', '头顶塌', '秃顶', '秃头',
+    '贴头皮', '显脸大', '显老', '稀疏', '扁塌', '扁头',
+    '油头塌', '细软发', '发际线高', '头顶空', '头型不好看',
+    '不敢低头', '不敢扎头发', '没自信', '形象差', '气质差',
+    '白发', '遮白发', '白头发', '头发稀', '发丝少', '发量太少', '头皮', '油头',
+    '出门快', '五分钟', '1分钟', '一分钟', '十五分钟', '15分钟', '省时', '不用打理',
+    # extended
+    '细软塌', '秃头星人', '产后脱发', '压力脱发', '遗传性脱发',
+    'M型额头', '秃鬓角', '白发遮盖', '不想染发',
+    '发型单调', '不敢换造型', '戴假发怕假', '怕掉', '怕闷',
+    '化疗', '医疗性脱发',
+}
+_COMPARISON_KW = {
+    '戴前', '戴后', '前后对比', '变化明显', '瞬间变多', '立刻蓬松',
+}
+_SOCIAL_PROOF_KW = {
+    '以为烫头', '以为整容', '同事以为', '朋友以为', '老公以为',
+    '男朋友以为', '认不出来', '以为变了', '路人以为', '都以为', '以为去',
+}
+_PRODUCT_KW = {
+    '仿真头皮', '无痕', '看不出', '真实感', '增加发量', '遮盖发缝',
+    '高颅顶', '显脸小', '修饰脸型', '蓬松',
+    '真人发丝', '递针', '不掉色', '免打理', '仿真', '一梳到底',
+    '秒变', '小V脸', '变身', '背影杀', '头包脸', '氛围感',
+    # 产品参数（需求1）
+    '头围', '大头围', '小头围', '人发', '真人发', '化纤',
+    '发根', '发尾', '色号', '颜色', '挑染', '渐变色',
+    '学生头', '梨花头', 'bob头', 'BOB头', '短发', '长发', '卷发', '直发',
+    # 材质工艺
+    '全真发', '哑光真发', '顺削发', '高仿真发丝', '记忆丝', '蛋白丝',
+    '蕾丝内网', '全蕾丝', '仿生头皮', '递针工艺', '单根勾织', '仿生毛孔',
+    '防滑条', '可调节扣', '轻薄透气', '发色均匀', '无化学反光',
+    '可烫可染', '可修剪', '可改短',
+}
+_WEARING_KW = {
+    '一秒佩戴', '快速戴上', '新手可用', '简单方便', '不费时间', '不挑人', '轻松上手',
+    '戴上去', '这样戴', '夹一下', '梳开', '调整一下',
+    # 佩戴动作（需求8A）
+    '戴好', '套上去', '摘下来', '取下来', '试试', '试一下',
+}
+_DETAIL_KW = {
+    '发缝真实', '发根清晰', '分缝自然', '发丝细腻',
+    '贴合头皮', '边缘自然', '顺滑', '不打结', '不反光', '颜色自然',
+    '特写', '近景', '细节', '发丝质感',
+}
+_COMFORT_KW = {
+    '透气', '不闷', '不勒头', '轻薄', '无负担', '夏天可戴', '久戴不累',
+    '怕热', '夏天', '夏日', '网底', '透气网', '晒黑', '戴着凉快', '通风', '散热',
+    # stability
+    '不掉', '不滑', '不移位', '卡扣固定', '稳固贴合', '牢固', '跑步不掉', '风吹不掉',
+    # extended wear comfort
+    '不闷汗', '不扎头', '无胶佩戴', '不显头大', '不毛躁',
+}
+_RESULT_KW = {'秒变', '小V脸', '变身', '高颅顶', '头包脸', '背影杀', '氛围感', '蓬松',
+              '变化明显', '立刻蓬松', '瞬间变多',
+              '一秒变发量', '视觉增发', '发际线逼真', '无痕隐形',
+              '蓬松自然', '可随意分缝'}  # after-wearing result
+_SCENE_KW = {
+    '上班', '通勤', '出门', '约会', '聚会', '逛街', '拍照',
+    '见客户', '面试', '相亲', '婚礼', '日常', '懒人', '早起赶时间', '外出旅行',
+    # 场景词补充（需求2）
+    '前任', '见前任', '见家长', '毕业', '男朋友', '旅游', '旅行', '出游', '早上',
+    # extended scenes
+    '日常通勤', '上班上学', '约会聚餐', '同学聚会',
+    '婚礼敬酒', '伴娘发型', '舞台演出', '年会活动',
+    '拍照上镜', '短视频出镜',
+}
+_CONVERT_KW = {
+    '炸福利', '上车', '运费险', '包退', '点购物车', '加购',
+    '看到最后', '一定要看', '别划走', '后面更夸张',
+    '真的有用', '我放评论区了', '链接在评论区', '直接入', '闭眼买', '强烈推荐',
+    # extended conversion
+    '真人发同效果', '几分之一的价格', '送全套工具', '护理液', '支架',
+    '7天试戴', '首单优惠', '直播间专属价', '顺丰发货', '隐私包装',
+    '送保养视频', '终身护理建议', '送防尘袋', '发网', '钢梳', '少掉发',
+}
+# Legacy alias — kept for backward-compat with any code that references _SOLUTION_KW
+_SOLUTION_KW = _PRODUCT_KW | _WEARING_KW
+# _CONCERN_KW folded into _COMFORT_KW above
+_CONCERN_KW  = _COMFORT_KW
+
+
+@dataclass
+class Seg:
+    idx: int
+    start: float
+    end: float
+    text: str
+    score: float = 0.0
+    valid: bool = True
+    category: str = "neutral"   # problem/comparison/social_proof/product/wearing/detail/comfort/result/scene/convert/neutral
+    motion: str = "static"      # camera motion style: push_in / push_in_strong / pull_out / pan_right / pan_left / tilt_up / tilt_down / static
+    transition: str = "dissolve:0.35"  # xfade transition INTO this segment: "type:duration"
+
+    @property
+    def duration(self) -> float:
+        return self.end - self.start
+
+
+# ── ASS subtitle generation ────────────────────────────────────────────────────
+
+# Map each keyword to its semantic category (used for ASS subtitle coloring)
+_KW_TO_CAT: dict[str, str] = {}
+for _kw in _PROBLEM_KW:       _KW_TO_CAT[_kw] = "problem"
+for _kw in _COMPARISON_KW:    _KW_TO_CAT[_kw] = "comparison"
+for _kw in _SOCIAL_PROOF_KW:  _KW_TO_CAT[_kw] = "social_proof"
+for _kw in _PRODUCT_KW:       _KW_TO_CAT[_kw] = "product"
+for _kw in _WEARING_KW:       _KW_TO_CAT[_kw] = "wearing"
+for _kw in _DETAIL_KW:        _KW_TO_CAT[_kw] = "detail"
+for _kw in _COMFORT_KW:       _KW_TO_CAT[_kw] = "comfort"
+for _kw in _RESULT_KW:        _KW_TO_CAT[_kw] = "result"
+for _kw in _SCENE_KW:         _KW_TO_CAT[_kw] = "scene"
+for _kw in _CONVERT_KW:       _KW_TO_CAT[_kw] = "convert"
+for _kw in _SCORES:
+    if _kw not in _KW_TO_CAT:
+        _KW_TO_CAT[_kw] = "neutral"
+
+# ASS colors: &HAABBGGRR& (AA=00 opaque; bytes in Blue-Green-Red order)
+_KW_COLORS: dict[str, str] = {
+    # 统一黄色高亮 #FFE600（参考视频风格：白底文字+单色黄色关键词）
+    # ASS BGR: B=00, G=E6, R=FF → &H0000E6FF&
+    "problem":      "&H0000E6FF&",   # yellow #FFE600
+    "comparison":   "&H0000E6FF&",   # yellow #FFE600
+    "social_proof": "&H0000E6FF&",   # yellow #FFE600
+    "product":      "&H0000E6FF&",   # yellow #FFE600
+    "wearing":      "&H0000E6FF&",   # yellow #FFE600
+    "detail":       "&H0000E6FF&",   # yellow #FFE600
+    "comfort":      "&H0000E6FF&",   # yellow #FFE600
+    "result":       "&H0000E6FF&",   # yellow #FFE600
+    "scene":        "&H0000E6FF&",   # yellow #FFE600
+    "convert":      "&H0000E6FF&",   # yellow #FFE600
+    "solution":     "&H0000E6FF&",   # yellow #FFE600 (legacy alias)
+    "neutral":      "&H0000E6FF&",   # yellow #FFE600
+}
+
+
+# ── ASS subtitle style pool ───────────────────────────────────────────────────
+# 主字幕三层叠加效果（模拟 Photoshop 图层样式）：
+#
+#   Layer 0  GradWhite  ← 最底层：白色/浅色外描边15px + 微弱阴影（距离3px，25%不透明度）
+#   Layer 1  GradOuter  ← 中层：紫色渐变描边12px
+#   Layer 2  GradInner  ← 顶层：蓝色描边7px + 白色填充
+#
+# 视觉分层：
+#   文字填充   白色（GradInner primary）
+#   0-7px     蓝色描边 #5599FF（GradInner outline）
+#   7-12px    紫色描边 #CC77FF（GradOuter outline，GradInner 之外部分可见）
+#   12-15px   浅白外描边 #EEEEFF（GradWhite outline，增加立体感）
+#   阴影       距离3px，25%不透明度黑色投影
+#
+# 字体：jf open 粉圓 2.0（圆润胖体）+ ZCOOL QingKe HuangYou（备用）
+# 注：新青年体未找到公开下载源，如用户提供 TTF 文件可直接替换 _SUBTITLE_FONT
+# 颜色（ASS格式 &HAABBGGRR&）亮色渐变方案：
+#   白色填充    &H00FFFFFF&
+#   亮蓝描边    #44AAFF → BGR: FF AA 44 → &H00FFAA44&
+#   亮粉描边    #FF44CC → BGR: CC 44 FF → &H00CC44FF&
+#   浅色外描边  #F8F0FF → BGR: FF F0 F8 → &H00FFF0F8&
+#   阴影颜色    黑色25%不透明 → alpha=0xBF → &HBF000000&
+_SUBTITLE_FONT = "WenYue XinQingNianTi (Authorization Required) W8-J"   # 文悦新青年体 W8-J（assets/fonts/WenYue-XinQingNianTi-W8-J-2.otf）
+_SUBTITLE_FONT_FALLBACK = "Microsoft YaHei"
+
+# Legacy styles kept for HighlightKW / StatBig / List overlays (not used for main subs)
+_SUBTITLE_STYLES = [
+    ("Clean",   "PingFang SC",     96,  0, 0,  1, 6, 2),
+    ("Bold",    "STHeiti",         104, 1, 0,  0, 8, 3),
+    ("Round",   "Yuanti SC",       100, 0, 0,  2, 5, 2),
+    ("Modern",  "Microsoft YaHei", 100, 0, 0,  1, 6, 2),
+]
+
+def _build_ass_styles() -> str:
+    """Build the [V4+ Styles] section: 3-layer gradient + overlay styles."""
+    fmt = "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+    lines = [fmt]
+    # ── Layer 0: 浅色外描边16px + 微弱阴影（最底层）──────────────────────────────
+    # 外描边+1px → 16px；亮粉浅色，阴影3px偏移25%不透明度
+    lines.append(
+        f"Style: GradWhite,{_SUBTITLE_FONT},115,"
+        f"&H00FFFFFF&,&H000000FF&,&H00FFF0F8&,&HBF000000&,"
+        f"1,0,0,0,100,100,1,0,1,16,3,2,80,80,580,1\n"
+    )
+    # ── Layer 1: 亮粉/品红渐变描边13px（中层）────────────────────────────────────
+    lines.append(
+        f"Style: GradOuter,{_SUBTITLE_FONT},115,"
+        f"&H00FFFFFF&,&H000000FF&,&H00CC44FF&,&H00000000&,"
+        f"1,0,0,0,100,100,1,0,1,13,0,2,80,80,580,1\n"
+    )
+    # ── Layer 2: 亮蓝描边8px + 白色填充（顶层）──────────────────────────────────
+    lines.append(
+        f"Style: GradInner,{_SUBTITLE_FONT},115,"
+        f"&H00FFFFFF&,&H000000FF&,&H00FFAA44&,&H00000000&,"
+        f"1,0,0,0,100,100,1,0,1,8,0,2,80,80,580,1\n"
+    )
+    # ── 兼容/备用样式（HighlightKW、StatBig、List 叠加层）────────────────────────
+    for name, font, size, bold, italic, spacing, outline, shadow in _SUBTITLE_STYLES:
+        lines.append(
+            f"Style: {name},{font},{size},"
+            f"&H00FFFFFF&,&H000000FF&,&H00FF9955&,&H00000000&,"
+            f"{bold},{italic},0,0,100,100,{spacing},0,1,{outline},{shadow},2,80,80,580,1\n"
+        )
+    return "".join(lines)
+
+_STYLE_NAMES = [s[0] for s in _SUBTITLE_STYLES]
+
+_ASS_HEADER_BASE = """\
+[Script Info]
+ScriptType: v4.00+
+WrapStyle: 0
+ScaledBorderAndShadow: yes
+PlayResX: 1440
+PlayResY: 2560
+
+[V4+ Styles]
+"""
+
+# HLKwOuter/HLKwInner: upper-right corner overlay, 2-layer light purple+blue gradient stroke
+# Alignment 9 = top-right; OuterLayer wider light-purple, InnerLayer narrower light-blue
+# Stroke sizes: subtitle GradInner=8px → HighlightKW +2px → HLKwInner=10px, HLKwOuter=12px
+# Light purple #CC99FF → ASS BGR &H00FF99CC&;  Light blue #99CCFF → ASS BGR &H00FFCC99&
+_HIGHLIGHT_KW_STYLE_LINE = (
+    "Style: HLKwOuter,WenYue XinQingNianTi (Authorization Required) W8-J,110,"
+    "&H00FFFFFF&,&H000000FF&,&H00FF99CC&,&H80000000&,"
+    "1,0,0,0,100,100,0,0,1,12,0,9,40,60,100,1\n"
+    "Style: HLKwInner,WenYue XinQingNianTi (Authorization Required) W8-J,110,"
+    "&H00FFFFFF&,&H000000FF&,&H00FFCC99&,&H00000000&,"
+    "1,0,0,0,100,100,0,0,1,10,0,9,40,60,100,1\n"
+)
+
+# StatBig: large centered overlay for numeric measurements (75厘米, 160身高 etc.)
+# Alignment 5 = screen center; large white-cream fill with thick dark outline
+_STAT_BIG_STYLE_LINE = (
+    "Style: StatBig,STHeiti,240,"
+    "&H00F0F0F0,&H000000FF,&H00101010,&H80000000,"
+    "1,0,0,0,100,100,0,0,1,14,6,5,0,0,0,1\n"
+)
+
+# List: product keyword checklist overlay above subtitle area; left-aligned with checkmarks
+# Font: 新青年体; white fill, dark outline; position set via \an7\pos() per dialogue line
+_LIST_STYLE_LINE = (
+    "Style: List,WenYue XinQingNianTi (Authorization Required) W8-J,100,"
+    "&H00FFFFFF&,&H000000FF&,&H00101010&,&H80000000&,"
+    "1,0,0,0,100,100,0,0,1,7,3,5,0,0,0,1\n"
+)
+
+def _make_ass_header() -> str:
+    return (
+        _ASS_HEADER_BASE
+        + _build_ass_styles()
+        + _HIGHLIGHT_KW_STYLE_LINE
+        + _STAT_BIG_STYLE_LINE
+        + _LIST_STYLE_LINE
+        + "\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+    )
+
+
+def _sec_to_ass(s: float) -> str:
+    s = max(0.0, s)
+    h = int(s // 3600)
+    m = int((s % 3600) // 60)
+    sec = s % 60
+    return f"{h}:{m:02d}:{sec:05.2f}"
+
+
+# Fonts used exclusively for keyword highlights — visually distinct from base styles.
+# \fn switches font inline; \r resets back to the segment's base Style.
+_KW_FONTS: dict[str, str] = {
+    # 统一使用 STHeiti 加粗（参考视频：关键词统一粗体，与基础字体风格一致）
+    "problem":      "STHeiti",
+    "comparison":   "STHeiti",
+    "social_proof": "STHeiti",
+    "product":      "STHeiti",
+    "wearing":      "STHeiti",
+    "detail":       "STHeiti",
+    "comfort":      "STHeiti",
+    "result":       "STHeiti",
+    "scene":        "STHeiti",
+    "convert":      "STHeiti",
+    "solution":     "STHeiti",
+    "neutral":      "STHeiti",
+}
+
+
+def _annotate_text(text: str) -> tuple[str, bool]:
+    """Wrap keywords in ASS color + font + bold tags. Returns (tagged_text, had_keyword).
+    Each keyword gets: its category color, its category font (\\fn), and bold (\\b1).
+    \\r after the keyword resets back to the segment's base Style (font + color).
+    """
+    kws = sorted(_KW_TO_CAT.keys(), key=len, reverse=True)
+    has_kw = False
+    for kw in kws:
+        if kw in text:
+            cat   = _KW_TO_CAT[kw]
+            color = _KW_COLORS[cat]
+            font  = _KW_FONTS.get(cat, "STHeiti")
+            open_tag  = "{" + f"\\c{color}\\fn{font}\\b1" + "}"
+            close_tag = "{\\r}"
+            text = text.replace(kw, open_tag + kw + close_tag, 1)
+            has_kw = True
+    return text, has_kw
+
+
+# ── Overlay detection helpers ─────────────────────────────────────────────────
+
+# Measurement overlay: detects "75厘米", "160cm", "身高160" etc.
+_MEAS_PAT = re.compile(
+    r'(\d+(?:\.\d+)?)\s*(厘米|公分|cm|CM)'
+    r'|(?:身高|高)\s*(\d{2,3}(?:\.\d+)?)'
+    r'|(?:长度|长)\s*(\d{2,3}(?:\.\d+)?)\s*(厘米|公分|cm)?'
+)
+
+def _find_measurement_overlay(text: str) -> Optional[str]:
+    """Return first measurement string for large overlay, e.g. '75厘米' or '160'."""
+    m = _MEAS_PAT.search(text)
+    if not m:
+        return None
+    if m.group(1):   # number+unit
+        return m.group(1) + (m.group(2) or "")
+    if m.group(3):   # 身高/高 + number
+        return m.group(3)
+    if m.group(4):   # 长度 + number + optional unit
+        return m.group(4) + (m.group(5) or "厘米")
+    return None
+
+# Parallel keyword list: "低调、低薄度" or "低调的低薄度的"
+_PARALLEL_ENUM_PAT = re.compile(r'[\u4e00-\u9fff]{1,8}(?:、[\u4e00-\u9fff]{1,8})+')
+_PARALLEL_DE_PAT   = re.compile(r'([\u4e00-\u9fff]{2,5})的([\u4e00-\u9fff]{2,5})的')
+
+def _find_parallel_items(text: str) -> list:
+    """Return list of parallel keyword items if detected (2-4 items)."""
+    m = _PARALLEL_ENUM_PAT.search(text)
+    if m:
+        items = [p.strip() for p in m.group(0).split("、") if p.strip()]
+        if len(items) >= 2:
+            return items[:4]
+    m2 = _PARALLEL_DE_PAT.search(text)
+    if m2:
+        return [m2.group(1), m2.group(2)]
+    return []
+
+
+_LIST_PRODUCT_CATS = {"problem", "product", "detail", "wearing", "comfort", "scene"}
+
+def _extract_list_keywords(text: str, max_items: int = 4) -> list[str]:
+    """Extract top product-related keywords from segment text for list overlay.
+    Returns keywords sorted by score desc, filtered to product-relevant categories.
+    """
+    found = []
+    for kw, sc in sorted(_SCORES.items(), key=lambda x: -x[1]):
+        cat = _KW_TO_CAT.get(kw, "neutral")
+        if cat in _LIST_PRODUCT_CATS and kw in text:
+            found.append(kw)
+            if len(found) >= max_items:
+                break
+    return found
+
+# Non-keyword lines: simple fade-in/out only (platform quality: avoid excessive effects)
+_ANIM_PLAIN = r"{\fad(120,80)}"
+# Keyword lines: single scale bounce to draw attention
+_ANIM_KW = r"{\fad(150,100)\t(0,200,\fscx108\fscy108)\t(200,400,\fscx100\fscy100)}"
+
+# ── Highlight keyword overlay (upper-right corner) ────────────────────────────
+# Pop-in animation: fade + scale bounce 118% → 100%
+_ANIM_HL = r"{\fad(200,150)\t(0,300,\fscx118\fscy118)\t(300,600,\fscx100\fscy100)}"
+_HIGHLIGHT_MIN_SCORE    = 8.0   # keyword score must reach this to trigger overlay
+_HIGHLIGHT_COOLDOWN_SEC = 5.0   # minimum seconds between consecutive overlays
+_HIGHLIGHT_SHOW_DUR     = 2.0   # how long each overlay stays on screen (seconds)
+
+
+def _extract_highlight_keyword(text: str) -> Optional[str]:
+    """Return the highest-scoring keyword found in *text* if its score >= _HIGHLIGHT_MIN_SCORE."""
+    best_kw, best_sc = None, 0.0
+    for kw, sc in _SCORES.items():
+        if kw in text and sc > best_sc:
+            best_kw, best_sc = kw, sc
+    return best_kw if best_sc >= _HIGHLIGHT_MIN_SCORE else None
+
+
+MAX_SUB_CHARS = 12   # max Chinese characters per single subtitle line
+_PUNCT_SPLIT  = set("，。！？、；：,!?;:")
+
+
+def _split_subtitle(text: str, max_chars: int = MAX_SUB_CHARS) -> list[str]:
+    """
+    Split text into single-line chunks of at most max_chars characters.
+    Prefers splitting on punctuation; falls back to hard split at max_chars.
+    Strips all embedded newlines so every returned chunk is one visual line.
+    """
+    # Flatten any existing line-breaks from the SRT source
+    text = text.replace("\\N", "").replace("\n", "").strip()
+    if not text:
+        return []
+    if len(text) <= max_chars:
+        return [text]
+
+    chunks: list[str] = []
+    while len(text) > max_chars:
+        window = text[:max_chars]
+        # Find last punctuation within the window
+        split_at = -1
+        for i in range(len(window) - 1, -1, -1):
+            if window[i] in _PUNCT_SPLIT:
+                split_at = i + 1
+                break
+        if split_at > 0:
+            chunks.append(text[:split_at])
+            text = text[split_at:]
+        else:
+            chunks.append(text[:max_chars])
+            text = text[max_chars:]
+    if text:
+        chunks.append(text)
+    return chunks
+
+
+def build_ass(
+    selected: List[Seg],
+    all_segs: List[Seg],
+    seg_offsets: Optional[List[float]] = None,
+) -> str:
+    """
+    Generate ASS subtitle string with keyword highlights.
+
+    seg_offsets: actual start position (seconds) of each segment in the merged
+    video. When provided these override the internal cursor that was previously
+    used — this is necessary to account for xfade / anime-transition overlaps
+    which shift every subtitle after the first segment.
+
+    Rules enforced:
+      • Every Dialogue line is single-line (no \\N).
+      • Each line is at most MAX_SUB_CHARS characters; longer SRT lines are
+        split and timing is distributed proportionally by character count.
+      • Font style rotates sequentially per output line (visible variety).
+      • Keyword lines get a scale-bounce animation.
+    """
+    header = _make_ass_header()
+    dialogue: list[str] = []
+    cursor = 0.0
+    line_idx = 0   # global counter drives both style rotation and animation cycle
+    last_hl_time = -_HIGHLIGHT_COOLDOWN_SEC  # last highlight overlay time
+
+    rng = random.Random()
+    for i, sel_seg in enumerate(selected):
+        pad_b = min(SEG_PAD, sel_seg.start)
+        if seg_offsets is not None and i < len(seg_offsets):
+            offset = seg_offsets[i]
+        else:
+            offset = cursor
+            cursor += pad_b + sel_seg.duration + SEG_PAD
+        # One consistent base style per segment — keywords deviate from this via \fn\c
+        seg_style = rng.choice(_STYLE_NAMES)
+
+        for srt in all_segs:
+            ov_start = max(srt.start, sel_seg.start)
+            ov_end   = min(srt.end,   sel_seg.end)
+            if ov_end - ov_start < 0.1:
+                continue
+
+            base_t0 = offset + pad_b + (ov_start - sel_seg.start)
+            base_t1 = offset + pad_b + (ov_end   - sel_seg.start)
+            base_dur = base_t1 - base_t0
+
+            chunks = _split_subtitle(srt.text)
+            if not chunks:
+                continue
+
+            # Distribute timing proportionally by character count
+            total_chars = sum(len(c) for c in chunks)
+            t_cursor = base_t0
+            for chunk in chunks:
+                frac = len(chunk) / total_chars if total_chars > 0 else 1 / len(chunks)
+                t0 = t_cursor
+                t1 = t_cursor + base_dur * frac
+                t_cursor = t1
+
+                annotated, has_kw = _annotate_text(chunk)
+                prefix = _ANIM_KW if has_kw else _ANIM_PLAIN
+                line_idx += 1
+
+                # 三层叠加字幕效果（模拟 Photoshop 图层样式）：
+                #   Layer 0 GradWhite  → 浅色外描边15px + 微弱阴影3px（25%不透明度）
+                #   Layer 1 GradOuter  → 紫色描边12px（渐变外圈）
+                #   Layer 2 GradInner  → 蓝色描边7px + 白色填充（顶层）
+                dialogue.append(
+                    f"Dialogue: 0,{_sec_to_ass(t0)},{_sec_to_ass(t1)},"
+                    f"GradWhite,,0,0,0,,{prefix}{annotated}"
+                )
+                dialogue.append(
+                    f"Dialogue: 1,{_sec_to_ass(t0)},{_sec_to_ass(t1)},"
+                    f"GradOuter,,0,0,0,,{prefix}{annotated}"
+                )
+                dialogue.append(
+                    f"Dialogue: 2,{_sec_to_ass(t0)},{_sec_to_ass(t1)},"
+                    f"GradInner,,0,0,0,,{prefix}{annotated}"
+                )
+
+                # ── StatBig: large centered measurement overlay (Layer 2) ──────
+                meas = _find_measurement_overlay(chunk)
+                if meas:
+                    # punch-in scale bounce + fade, positioned at ~42% from top
+                    stat_anim = (
+                        r"{\an5\pos(720,1075)"
+                        r"\fad(80,100)"
+                        r"\t(0,250,\fscx112\fscy112)\t(250,420,\fscx100\fscy100)}"
+                    )
+                    dialogue.append(
+                        f"Dialogue: 2,{_sec_to_ass(t0)},{_sec_to_ass(t1)},"
+                        f"StatBig,,0,0,0,,{stat_anim}{meas}"
+                    )
+
+                # List overlay moved to per-segment level (below srt loop)
+
+        # ── Highlight keyword overlay (upper-right corner, 2-layer gradient, Layer 1/2) ─
+        hl_kw = _extract_highlight_keyword(sel_seg.text)
+        if hl_kw:
+            t_hl = offset + pad_b   # segment content start in merged timeline
+            if t_hl - last_hl_time >= _HIGHLIGHT_COOLDOWN_SEC:
+                last_hl_time = t_hl
+                dialogue.append(
+                    f"Dialogue: 1,{_sec_to_ass(t_hl)},{_sec_to_ass(t_hl + _HIGHLIGHT_SHOW_DUR)},"
+                    f"HLKwOuter,,0,0,0,,{_ANIM_HL}{hl_kw}"
+                )
+                dialogue.append(
+                    f"Dialogue: 2,{_sec_to_ass(t_hl)},{_sec_to_ass(t_hl + _HIGHLIGHT_SHOW_DUR)},"
+                    f"HLKwInner,,0,0,0,,{_ANIM_HL}{hl_kw}"
+                )
+
+        # ── List: product keyword checklist overlay, above subtitle, left-aligned ─
+        seg_list_kws = _extract_list_keywords(sel_seg.text)
+        if seg_list_kws:
+            list_t0 = offset + pad_b
+            list_dur = min(4.0, sel_seg.end - sel_seg.start)
+            list_t1 = list_t0 + list_dur
+            x_left = 80        # left margin (px from left edge of 1440px canvas)
+            y_base_list = 1680  # just above subtitle zone (~1980px)
+            y_step_list = 87    # ~1/3 of original 260, tight line spacing
+            for idx, kw in enumerate(seg_list_kws[:4]):
+                ypos = y_base_list + idx * y_step_list
+                stagger = idx * 0.10
+                list_anim = "{" + f"\\an7\\pos({x_left},{ypos})\\fad(70,60)" + "}"
+                dialogue.append(
+                    f"Dialogue: 2,{_sec_to_ass(list_t0 + stagger)},{_sec_to_ass(list_t1)},"
+                    f"List,,0,0,0,,{list_anim}✓ {kw}"
+                )
+
+    return header + "\n".join(dialogue) + "\n"
+
+
+FADE_DUR = 1.5       # video-to-video direct crossfade (seconds)
+ANIME_FADE = 0.5     # crossfade into/out of anime transition frame
+ANIME_TOTAL = 2.0    # total duration of anime still input (includes both fades)
+
+
+def _compute_seg_offsets(
+    seg_durations: List[float],
+    boundary_frames: dict,
+    n: int,
+) -> List[float]:
+    """
+    Compute the actual start-time (seconds) of each segment in the final merged
+    video, accounting for xfade / anime-transition overlaps.
+
+    xfade boundary i→i+1:  next_offset = cur_offset + dur[i] - FADE_DUR
+    anime boundary i→i+1:  next_offset = cur_offset + dur[i] + (ANIME_TOTAL - 2*ANIME_FADE)
+                                        = cur_offset + dur[i] + 1.0
+    """
+    offsets: List[float] = []
+    cursor = 0.0
+    for i, dur in enumerate(seg_durations):
+        offsets.append(cursor)
+        if i < n - 1:
+            if i in boundary_frames:
+                cursor += dur + (ANIME_TOTAL - 2 * ANIME_FADE)   # +1.0 s
+            else:
+                cursor += dur - FADE_DUR                          # -1.5 s
+    return offsets
+
+
+def _ass_to_sec(ts: str) -> float:
+    """Convert ASS timestamp 'H:MM:SS.CC' to seconds."""
+    try:
+        h, m, s = ts.strip().split(":")
+        return int(h) * 3600 + int(m) * 60 + float(s)
+    except Exception:
+        return 0.0
+
+
+async def _validate_subtitle_alignment(clip_path: str, ass_path: str) -> dict:
+    """
+    Post-encode subtitle/speech alignment check.
+
+    Uses ffmpeg silencedetect to map speech activity in the output clip and
+    compares it against ASS subtitle timestamps.
+
+    Returns:
+        {"score": 0-100, "total": N, "aligned": M, "mean_offset_ms": int}
+        score = percentage of subtitle midpoints that fall inside a speech region.
+    """
+    import re as _re
+
+    # ── 1. Probe video duration ────────────────────────────────────────────────
+    try:
+        dur_cmd = [
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", clip_path,
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *dur_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
+        )
+        stdout, _ = await proc.communicate()
+        video_dur = float(stdout.strip()) if stdout.strip() else 0.0
+    except Exception:
+        video_dur = 0.0
+
+    # ── 2. Detect silence regions → derive speech intervals ───────────────────
+    sil_cmd = [
+        "ffmpeg", "-i", clip_path,
+        "-af", "silencedetect=noise=-30dB:d=0.15",
+        "-f", "null", "-",
+    ]
+    proc2 = await asyncio.create_subprocess_exec(
+        *sil_cmd,
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc2.communicate()
+    text = stderr.decode("utf-8", errors="ignore")
+
+    sil_starts = [float(m) for m in _re.findall(r"silence_start: ([\d.]+)", text)]
+    sil_ends   = [float(m) for m in _re.findall(r"silence_end: ([\d.]+)", text)]
+
+    speech: List[tuple] = []
+    if not sil_starts:
+        speech = [(0.0, video_dur)] if video_dur > 0 else []
+    else:
+        prev = 0.0
+        for i, ss in enumerate(sil_starts):
+            if ss > prev + 0.1:
+                speech.append((prev, ss))
+            prev = sil_ends[i] if i < len(sil_ends) else video_dur
+        if prev < video_dur - 0.5:
+            speech.append((prev, video_dur))
+
+    # ── 3. Parse ASS subtitle timestamps ──────────────────────────────────────
+    sub_intervals: List[tuple] = []
+    try:
+        with open(ass_path, encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("Dialogue:"):
+                    parts = line.split(",", 9)
+                    if len(parts) >= 3:
+                        t0 = _ass_to_sec(parts[1])
+                        t1 = _ass_to_sec(parts[2])
+                        if t0 >= 0 and t1 > t0:
+                            sub_intervals.append((t0, t1))
+    except Exception:
+        pass
+
+    # ── 4. Score: subtitle midpoint inside a speech interval? ─────────────────
+    total   = len(sub_intervals)
+    aligned = 0
+    offsets_ms: List[float] = []
+
+    for t0, t1 in sub_intervals:
+        mid = (t0 + t1) / 2.0
+        in_speech = any(s0 <= mid <= s1 for s0, s1 in speech)
+        if in_speech:
+            aligned += 1
+            offsets_ms.append(0.0)
+        else:
+            # Distance to nearest speech region midpoint
+            nearest = min(
+                (abs(mid - (s0 + s1) / 2.0) for s0, s1 in speech),
+                default=999.0,
+            )
+            offsets_ms.append(nearest * 1000)
+
+    score = int(100 * aligned / total) if total > 0 else 100
+    mean_offset = int(sum(offsets_ms) / len(offsets_ms)) if offsets_ms else 0
+
+    logger.info(
+        f"Subtitle alignment: score={score}% ({aligned}/{total} aligned), "
+        f"mean_offset={mean_offset}ms  [{clip_path}]"
+    )
+    if score < 60:
+        logger.warning(
+            f"Poor subtitle alignment detected (score={score}%). "
+            f"Check SEG_OFFSETS / xfade timing. clip={clip_path}"
+        )
+    return {"score": score, "total": total, "aligned": aligned, "mean_offset_ms": mean_offset}
+
+
+# Output resolution: 2K portrait (9:16) — GPU path uses NVENC; local uses hevc_videotoolbox
+OUT_W = 1440
+OUT_H = 2560
+
+# ComfyUI input resolution: SD1.5-safe portrait (9:16), avoids VRAM OOM at 4K
+COMFY_W = 576   # 9:16 portrait, divisible by 64 (SD 1.5 requirement)
+COMFY_H = 1024
+
+# Zoom punch: 1.5× crop toward face/wig area (upper-centre of frame)
+ZOOM_FACTOR = 1.5
+ZOOM_W = int(OUT_W / ZOOM_FACTOR)   # zoomed-in width
+ZOOM_H = int(OUT_H / ZOOM_FACTOR)   # zoomed-in height
+ZOOM_X = (OUT_W - ZOOM_W) // 2      # 360 – centred horizontally
+ZOOM_Y = 0                           # start from top → captures face/wig
+
+# Transition pool – cycled across segment boundaries, 5 visual styles:
+#   前后叠加: dissolve / fade
+#   聚焦:     zoomin / radial / hblur
+#   画中画:   squeezeh / squeezev
+#   人物重叠: fadeblack  (rembg gives true BG separation)
+#   运镜:     zoom_punch (snap zoom-in to face, snap back)
+_TR_POOL = [
+    "dissolve",    # 前后叠加
+    "zoomin",      # 聚焦
+    "squeezeh",    # 画中画
+    "fadeblack",   # 人物重叠
+    "zoom_punch",  # 运镜
+    "fade",        # 前后叠加
+    "radial",      # 聚焦
+    "hblur",       # 聚焦
+    "squeezev",    # 画中画
+    "polaroid",       # 拍立得转场
+    "phone_zoom",     # 手机屏幕放大转场
+    "camera_zoomout", # 相机缩小效果
+]
+
+
+# ── Overlay-transition still generators (PIL) ─────────────────────────────────
+
+def _build_polaroid_still(
+    frame_b_path: str, frame_a_path: str, out_path: str,
+    W: int, H: int, angle: float = -7.0
+) -> bool:
+    """
+    Compose a polaroid-style frame: B image inside white-bordered tilted polaroid,
+    placed on a darkened blurred background of A.
+    """
+    try:
+        from PIL import Image, ImageFilter, ImageDraw
+        # Background: blurred, darkened A
+        bg = Image.open(frame_a_path).convert("RGB").resize((W, H), Image.LANCZOS)
+        bg = bg.filter(ImageFilter.GaussianBlur(radius=20))
+        dark = Image.new("RGBA", (W, H), (0, 0, 0, 120))
+        bg_rgba = bg.convert("RGBA")
+        bg_rgba.paste(dark, mask=dark)
+        canvas = bg_rgba
+
+        # Polaroid proportions: 80% of screen width
+        POLAR_W  = int(W * 0.82)
+        BSIDE    = int(POLAR_W * 0.045)
+        BTOP     = int(POLAR_W * 0.045)
+        BBOT     = int(POLAR_W * 0.145)   # larger bottom border (polaroid style)
+        CONT_H   = int(POLAR_W * 1.22)    # content area height (4:5 ish)
+        POLAR_H  = CONT_H + BTOP + BBOT
+
+        # White polaroid card
+        polar = Image.new("RGB", (POLAR_W, POLAR_H), (252, 252, 250))
+
+        # B content pasted inside
+        b_img = Image.open(frame_b_path).convert("RGB")
+        cw = POLAR_W - 2 * BSIDE
+        b_resized = b_img.resize((cw, CONT_H), Image.LANCZOS)
+        polar.paste(b_resized, (BSIDE, BTOP))
+
+        # Subtle inner shadow on B content edges
+        draw = ImageDraw.Draw(polar)
+        draw.rectangle([BSIDE, BTOP, BSIDE + cw - 1, BTOP + CONT_H - 1],
+                       outline=(180, 180, 175), width=1)
+
+        # Rotate
+        polar_rot = polar.rotate(angle, expand=True,
+                                 fillcolor=(252, 252, 250), resample=Image.BICUBIC)
+
+        # Composite onto canvas (slightly above center — visual balance)
+        px = (W - polar_rot.width)  // 2
+        py = (H - polar_rot.height) // 2 - int(H * 0.025)
+        canvas.paste(polar_rot.convert("RGBA"), (px, py))
+
+        canvas.convert("RGB").save(out_path, "JPEG", quality=94)
+        return True
+    except Exception as exc:
+        logger.error(f"_build_polaroid_still: {exc}")
+        return False
+
+
+def _build_phone_still(
+    frame_b_path: str, out_path: str, W: int, H: int
+) -> bool:
+    """
+    Compose B image inside an iPhone-style phone frame on a blurred B background.
+    Phone bezel occupies ~78% of screen width, centered.
+    """
+    try:
+        from PIL import Image, ImageFilter, ImageDraw
+        b_img = Image.open(frame_b_path).convert("RGB").resize((W, H), Image.LANCZOS)
+
+        # Background: blurred bokeh of same B content
+        bg = b_img.filter(ImageFilter.GaussianBlur(radius=22))
+        dark = Image.new("RGBA", (W, H), (0, 0, 0, 90))
+        canvas = bg.convert("RGBA")
+        canvas.paste(dark, mask=dark)
+
+        # Phone dimensions
+        PH_W    = int(W * 0.76)
+        PH_H    = int(PH_W * H / W * 1.04)
+        PH_H    = min(PH_H, int(H * 0.87))
+        BEZEL   = max(12, int(PH_W * 0.042))
+        CORNER  = int(PH_W * 0.105)
+
+        # Screen content area (inside bezel)
+        SCR_W = PH_W - 2 * BEZEL
+        SCR_H = PH_H - 2 * BEZEL
+
+        phone = Image.new("RGBA", (PH_W, PH_H), (0, 0, 0, 0))
+        draw  = ImageDraw.Draw(phone)
+
+        # Phone body (near-black, rounded)
+        draw.rounded_rectangle([0, 0, PH_W - 1, PH_H - 1],
+                               radius=CORNER, fill=(18, 18, 20, 255))
+
+        # Screen area (black base for mask)
+        SCR_CORNER = int(CORNER * 0.65)
+        draw.rounded_rectangle([BEZEL, BEZEL, BEZEL + SCR_W - 1, BEZEL + SCR_H - 1],
+                               radius=SCR_CORNER, fill=(0, 0, 0, 255))
+
+        # Paste B into screen with rounded mask
+        b_scr  = b_img.resize((SCR_W, SCR_H), Image.LANCZOS)
+        mask   = Image.new("L", (SCR_W, SCR_H), 0)
+        ImageDraw.Draw(mask).rounded_rectangle(
+            [0, 0, SCR_W - 1, SCR_H - 1], radius=SCR_CORNER, fill=255)
+        phone.paste(b_scr.convert("RGBA"), (BEZEL, BEZEL), mask)
+
+        # Dynamic island / notch cutout
+        NIL_W = int(PH_W * 0.28)
+        NIL_H = int(BEZEL * 1.1)
+        NIL_X = (PH_W - NIL_W) // 2
+        NIL_Y = BEZEL - NIL_H + 3
+        draw.rounded_rectangle([NIL_X, NIL_Y, NIL_X + NIL_W, NIL_Y + NIL_H],
+                               radius=NIL_H // 2, fill=(10, 10, 12, 240))
+
+        # Thin metallic rim highlight (top edge)
+        draw.line([(CORNER, 1), (PH_W - CORNER, 1)],
+                  fill=(80, 80, 85, 160), width=1)
+
+        # Place on canvas (centered)
+        px = (W - PH_W) // 2
+        py = (H - PH_H) // 2
+        canvas.paste(phone, (px, py), phone)
+
+        canvas.convert("RGB").save(out_path, "JPEG", quality=94)
+        return True
+    except Exception as exc:
+        logger.error(f"_build_phone_still: {exc}")
+        return False
+
+
+def _build_camera_still(
+    frame_a_path: str, out_path: str, W: int, H: int
+) -> bool:
+    """
+    Compose camera-recording viewfinder UI over A's last frame.
+    Shows zoom selector (3× active) + record button at bottom.
+    """
+    try:
+        from PIL import Image, ImageFilter, ImageDraw, ImageFont
+        canvas = Image.open(frame_a_path).convert("RGBA").resize((W, H), Image.LANCZOS)
+
+        draw = ImageDraw.Draw(canvas)
+
+        # ── Bottom control bar ─────────────────────────────────────────────
+        BAR_H  = int(H * 0.13)
+        BAR_Y  = H - BAR_H
+        # Semi-transparent pill bar
+        bar_overlay = Image.new("RGBA", (W, BAR_H), (0, 0, 0, 0))
+        bdraw = ImageDraw.Draw(bar_overlay)
+        PILL_W = int(W * 0.72)
+        PILL_H = int(BAR_H * 0.52)
+        PILL_X = (W - PILL_W) // 2
+        PILL_Y = (BAR_H - PILL_H) // 2
+        bdraw.rounded_rectangle(
+            [PILL_X, PILL_Y, PILL_X + PILL_W, PILL_Y + PILL_H],
+            radius=PILL_H // 2,
+            fill=(35, 35, 35, 185)
+        )
+        canvas.paste(bar_overlay, (0, BAR_Y), bar_overlay)
+
+        # Zoom labels
+        try:
+            font_zoom = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", int(H * 0.022))
+        except Exception:
+            font_zoom = ImageFont.load_default()
+
+        labels = [("·1·", False), ("·2·", False), ("3×", True)]
+        seg_w  = PILL_W // 4
+        for idx, (label, active) in enumerate(labels):
+            cx = PILL_X + seg_w * (idx + 1) - seg_w // 2
+            cy = BAR_Y + PILL_Y + PILL_H // 2
+            if active:
+                # Highlighted pill behind active label
+                L_PW = int(seg_w * 0.72)
+                L_PH = int(PILL_H * 0.72)
+                draw.rounded_rectangle(
+                    [cx - L_PW // 2, cy - L_PH // 2, cx + L_PW // 2, cy + L_PH // 2],
+                    radius=L_PH // 2,
+                    fill=(245, 190, 50, 220)
+                )
+                draw.text((cx, cy), label, font=font_zoom,
+                          fill=(10, 10, 10, 255), anchor="mm")
+            else:
+                draw.text((cx, cy), label, font=font_zoom,
+                          fill=(210, 210, 210, 200), anchor="mm")
+
+        # Record button (white circle + red square)
+        REC_CX = W // 2
+        REC_CY = BAR_Y + BAR_H // 2
+        REC_R  = int(BAR_H * 0.36)
+        draw.ellipse([REC_CX - REC_R, REC_CY - REC_R, REC_CX + REC_R, REC_CY + REC_R],
+                     fill=(255, 255, 255, 245), outline=(200, 200, 200, 200), width=2)
+        SQ = int(REC_R * 0.44)
+        draw.rounded_rectangle(
+            [REC_CX - SQ, REC_CY - SQ, REC_CX + SQ, REC_CY + SQ],
+            radius=int(SQ * 0.28),
+            fill=(220, 35, 35, 245)
+        )
+
+        # ── Thin focus bracket in center ───────────────────────────────────
+        BRK = int(min(W, H) * 0.22)
+        BCX, BCY = W // 2, int(H * 0.42)
+        ARM = int(BRK * 0.22)
+        BT  = 2
+        bc  = (255, 255, 255, 160)
+        # Corner brackets (4 corners)
+        for dx, dy in [(-1, -1), (1, -1), (-1, 1), (1, 1)]:
+            x0 = BCX + dx * BRK // 2
+            y0 = BCY + dy * BRK // 2
+            draw.line([(x0, y0), (x0 + dx * (-ARM), y0)], fill=bc, width=BT)
+            draw.line([(x0, y0), (x0, y0 + dy * (-ARM))], fill=bc, width=BT)
+
+        canvas.convert("RGB").save(out_path, "JPEG", quality=94)
+        return True
+    except Exception as exc:
+        logger.error(f"_build_camera_still: {exc}")
+        return False
+
+
+async def _preprocess_segments(mp4: str, selected: List[Seg], tmp_dir: str, on_progress=None) -> List[Optional[str]]:
+    """Pre-encode each segment to 4K temp file in parallel to reduce filter-graph memory.
+    Audio: apply noisereduce (voice isolation) when available, else ffmpeg-only denoising.
+    Video: lanczos upscale + mild sharpening.
+    """
+    _SF = (
+        f"scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease:flags=lanczos,"
+        f"pad={OUT_W}:{OUT_H}:(ow-iw)/2:(oh-ih)/2,"
+        f"curves=master='0/0 0.15/0.10 0.50/0.55 0.85/0.92 1/1',"  # HDR S-curve contrast
+        f"eq=saturation=1.28:brightness=0.018:gamma=1.02,"           # HDR saturation lift
+        f"unsharp=5:5:0.6:5:5:0.0"                                   # mild luma sharpening
+    )
+
+    from denoise import extract_and_denoise
+
+    async def _one(i: int, seg: Seg) -> Optional[str]:
+        out = os.path.join(tmp_dir, f"seg{i}.mp4")
+        pad_b = min(SEG_PAD, seg.start)   # pre-buffer (clamped so we don't seek before t=0)
+        pad_a = SEG_PAD                    # post-buffer
+        audio_start = seg.start - pad_b
+        padded_dur  = seg.duration + pad_b + pad_a
+
+        pre = max(0.0, audio_start - 3.0)
+        fs  = audio_start - pre
+        fe  = fs + padded_dur
+        duration = padded_dur + 0.1
+
+        # Noisereduce audio covers the full padded window so it stays aligned with video.
+        denoised_wav = os.path.join(tmp_dir, f"seg{i}_dn.wav")
+        has_denoised = await extract_and_denoise(mp4, audio_start, padded_dur + 0.15, denoised_wav)
+
+        if has_denoised:
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", f"{pre:.3f}", "-i", mp4,
+                "-i", denoised_wav,
+                "-vf", f"trim={fs:.3f}:{fe:.3f},setpts=PTS-STARTPTS,{_SF},fps=30",
+                "-map", "0:v", "-map", "1:a",
+                "-t", f"{duration:.3f}",
+                "-c:v", "hevc_videotoolbox", "-b:v", "30M", "-allow_sw", "1",
+                "-c:a", "aac", "-b:a", "128k",
+                out,
+            ]
+        else:
+            # Fallback: ffmpeg-only chain — highpass + aggressive afftdn + anlmdn
+            af = (
+                f"atrim={fs:.3f}:{fe:.3f},asetpts=PTS-STARTPTS,"
+                "highpass=f=100,"
+                "afftdn=nf=-40:nt=w,"
+                "anlmdn=s=7:p=0.002:r=0.002:m=15"
+            )
+            cmd = [
+                "ffmpeg", "-y", "-ss", f"{pre:.3f}", "-i", mp4,
+                "-vf", f"trim={fs:.3f}:{fe:.3f},setpts=PTS-STARTPTS,{_SF},fps=30",
+                "-af", af,
+                "-t", f"{duration:.3f}",
+                "-c:v", "hevc_videotoolbox", "-b:v", "30M", "-allow_sw", "1",
+                "-c:a", "aac", "-b:a", "128k",
+                out,
+            ]
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+        )
+        await proc.communicate()
+        try:
+            os.remove(denoised_wav)
+        except Exception:
+            pass
+        if proc.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 0:
+            return out
+        logger.warning(f"Pre-encode failed for segment {i}")
+        return None
+
+    # 1 concurrent pre-encode per clip job; with MAX_CONCURRENT_CLIPS=2 this means
+    # at most 2 parallel 4K ffmpeg pre-encodes system-wide, avoiding OOM
+    sem = asyncio.Semaphore(1)
+
+    n_segs = len(selected)
+
+    async def _one_sem(i: int, seg: Seg) -> Optional[str]:
+        async with sem:
+            logger.debug(f"Pre-encoding segment {i+1}/{n_segs} ...")
+            result = await _one(i, seg)
+            if on_progress:
+                await on_progress("preprocess", i + 1, n_segs)
+            return result
+
+    results = await asyncio.gather(*[_one_sem(i, seg) for i, seg in enumerate(selected)])
+    return list(results)
+
+
+async def _run_cmd(cmd: list) -> tuple:
+    """Run a subprocess, return (returncode, stderr_text)."""
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+    )
+    _, err = await proc.communicate()
+    return proc.returncode, err.decode(errors="replace")
+
+
+async def _xfade_merge(
+    seg_files: List[str],
+    selected: List[Seg],
+    boundary_frames: dict,
+    tmp_dir: str,
+    seg_durations: Optional[List[float]] = None,
+    on_progress=None,
+) -> Tuple[Optional[str], float]:
+    """Tree-based parallel xfade merge with asyncio.Semaphore(2).
+
+    Merges in O(log N) rounds; up to 2 concurrent ffmpeg processes per round.
+    Memory stays bounded (each process reads exactly 2 inputs) while wall-clock
+    time is roughly halved vs. the previous linear approach for large N.
+
+    boundary_frames: {bi: jpeg/png_path} for anime/zoom_punch transitions.
+    Returns (merged_path, total_duration) or (None, 0.0) on failure.
+    """
+    n = len(seg_files)
+    if n == 0:
+        return None, 0.0
+    if n == 1:
+        return seg_files[0], selected[0].duration
+
+    _SF = (
+        f"scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease,"
+        f"pad={OUT_W}:{OUT_H}:(ow-iw)/2:(oh-ih)/2"
+    )
+    sem = asyncio.Semaphore(1)   # one merge at a time: each xfade buffers two 4K streams in RAM
+    _counter = [0]
+
+    async def _run(cmd: list) -> Tuple[int, str]:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+        )
+        _, err = await proc.communicate()
+        return proc.returncode, err.decode(errors="replace")
+
+    async def _merge2(f1: str, f2: str, tr: str, offset: float, dst: str) -> bool:
+        rc, err = await _run([
+            "ffmpeg", "-y", "-i", f1, "-i", f2,
+            "-filter_complex",
+            f"[0:v]settb=1/25[va];[1:v]settb=1/25[vb];"
+            f"[va][vb]xfade=transition={tr}:duration={FADE_DUR}:offset={offset:.3f}[vout];"
+            f"[0:a][1:a]acrossfade=d={FADE_DUR}[aout]",
+            "-map", "[vout]", "-map", "[aout]",
+            "-pix_fmt", "yuv420p",
+            "-c:v", "hevc_videotoolbox", "-b:v", "30M", "-allow_sw", "1",
+            "-c:a", "aac", "-b:a", "128k",
+            dst,
+        ])
+        if rc != 0:
+            logger.error(f"_merge2 rc={rc}: {err[-400:]}")
+        return rc == 0
+
+    async def _merge_anime(f1: str, anime: str, f2: str, tr: str, fade_off: float, dst: str) -> bool:
+        """3-step: f1 → fadewhite → anime_still (with Ken Burns zoom) → tr-xfade → f2"""
+        tmp1 = dst + "_s1.mp4"
+        _n_frames = int(ANIME_TOTAL * 25)   # total frames for zoompan duration
+        # Ken Burns: slow zoom from 1.0× to ~1.11× centered on upper-center (face area)
+        _anime_vf = (
+            f"scale={COMFY_W}:{COMFY_H}:force_original_aspect_ratio=decrease,"
+            f"pad={COMFY_W}:{COMFY_H}:(ow-iw)/2:(oh-ih)/2,"
+            f"fps=30,"
+            f"zoompan=z='min(zoom+0.0022,1.11)':d={_n_frames}"
+            f":x='(iw/2)-(iw/zoom/2)':y='(ih/3)-(ih/zoom/3)'"
+            f":s={COMFY_W}x{COMFY_H},"
+            f"scale={OUT_W}:{OUT_H}:flags=lanczos,"
+            f"unsharp=5:5:0.4:5:5:0.0,"
+            f"settb=1/25"
+        )
+        rc1, err1 = await _run([
+            "ffmpeg", "-y", "-i", f1,
+            "-loop", "1", "-t", f"{ANIME_TOTAL:.1f}", "-i", anime,
+            "-filter_complex",
+            f"[0:v]settb=1/25[va];"
+            f"[1:v]{_anime_vf}[vb];"
+            f"[va][vb]xfade=transition=fadewhite:duration={ANIME_FADE}:offset={fade_off:.3f}[vout];"
+            f"aevalsrc=0:c=stereo:s=44100,atrim=duration={ANIME_TOTAL:.1f},asetpts=PTS-STARTPTS[asilent];"
+            f"[0:a][asilent]acrossfade=d={ANIME_FADE}[aout]",
+            "-map", "[vout]", "-map", "[aout]",
+            "-pix_fmt", "yuv420p",
+            "-c:v", "hevc_videotoolbox", "-b:v", "30M", "-allow_sw", "1",
+            "-c:a", "aac", "-b:a", "128k",
+            tmp1,
+        ])
+        if rc1 != 0:
+            logger.error(f"_merge_anime step1 rc={rc1}: {err1[-300:]}")
+            return False
+        step2_off = fade_off + ANIME_TOTAL - ANIME_FADE
+        rc2, err2 = await _run([
+            "ffmpeg", "-y", "-i", tmp1, "-i", f2,
+            "-filter_complex",
+            f"[0:v]settb=1/25[va];[1:v]settb=1/25[vb];"
+            f"[va][vb]xfade=transition={tr}:duration={ANIME_FADE}:offset={step2_off:.3f}[vout];"
+            f"[0:a][1:a]acrossfade=d={ANIME_FADE}[aout]",
+            "-map", "[vout]", "-map", "[aout]",
+            "-pix_fmt", "yuv420p",
+            "-c:v", "hevc_videotoolbox", "-b:v", "30M", "-allow_sw", "1",
+            "-c:a", "aac", "-b:a", "128k",
+            dst,
+        ])
+        try:
+            os.remove(tmp1)
+        except Exception:
+            pass
+        if rc2 != 0:
+            logger.error(f"_merge_anime step2 rc={rc2}: {err2[-300:]}")
+        return rc2 == 0
+
+    async def _do_merge(left: tuple, right: tuple) -> Optional[tuple]:
+        """Merge two chunks under the semaphore; returns new chunk or None."""
+        async with sem:
+            lf, ldur, llorig, lrorig, ltemp = left
+            rf, rdur, rlorig, rrorig, rtemp = right
+            bi = lrorig  # boundary index = rightmost original seg of left chunk
+            tr = _TR_POOL[bi % len(_TR_POOL)]
+            xfade_tr = "dissolve" if tr == "zoom_punch" else tr
+            _counter[0] += 1
+            dst = os.path.join(tmp_dir, f"tree_{_counter[0]}.mp4")
+
+            _OVERLAY_TR = {"polaroid", "phone_zoom", "camera_zoomout"}
+            if tr in _OVERLAY_TR:
+                fade_off = max(0.0, ldur - ANIME_FADE)
+                ok = await _merge_overlay(lf, rf, tr, fade_off, dst, seed=bi * 17)
+                new_dur = fade_off + ANIME_TOTAL - ANIME_FADE + rdur
+            elif bi in boundary_frames:
+                fade_off = ldur - ANIME_FADE
+                ok = await _merge_anime(lf, boundary_frames[bi], rf, xfade_tr, fade_off, dst)
+                new_dur = fade_off + ANIME_TOTAL - ANIME_FADE + rdur
+            else:
+                xfade_off = max(0.0, ldur - FADE_DUR)
+                ok = await _merge2(lf, rf, xfade_tr, xfade_off, dst)
+                new_dur = ldur - FADE_DUR + rdur
+
+            if ltemp:
+                try:
+                    os.remove(lf)
+                except Exception:
+                    pass
+            if rtemp:
+                try:
+                    os.remove(rf)
+                except Exception:
+                    pass
+            if not ok:
+                return None
+            return (dst, new_dur, llorig, rrorig, True)
+
+    # Each chunk: (file, duration, left_orig_idx, right_orig_idx, is_temp)
+    # Use provided padded durations if available, else fall back to Seg.duration
+    _durations = seg_durations if (seg_durations and len(seg_durations) == n) else [s.duration for s in selected]
+    chunks: List[tuple] = [
+        (seg_files[i], _durations[i], i, i, False) for i in range(n)
+    ]
+
+    import math as _math
+    total_rounds = _math.ceil(_math.log2(n)) if n > 1 else 1
+    round_num = 0
+    while len(chunks) > 1:
+        round_num += 1
+        next_chunks: List[Optional[tuple]] = []
+        merge_tasks: List[Tuple[int, tuple, tuple]] = []  # (slot, left, right)
+
+        for j in range(0, len(chunks), 2):
+            if j + 1 >= len(chunks):
+                next_chunks.append(chunks[j])  # odd chunk carries forward
+            else:
+                next_chunks.append(None)        # placeholder for merge result
+                merge_tasks.append((len(next_chunks) - 1, chunks[j], chunks[j + 1]))
+
+        results = await asyncio.gather(*[_do_merge(l, r) for _, l, r in merge_tasks])
+
+        for (slot, _, _), res in zip(merge_tasks, results):
+            if res is None:
+                return None, 0.0
+            next_chunks[slot] = res
+
+        chunks = next_chunks  # type: ignore
+        logger.debug(f"Tree merge round {round_num}: {len(chunks)} chunk(s) remaining")
+        if on_progress:
+            await on_progress("merge", round_num, total_rounds)
+
+    return chunks[0][0], chunks[0][1]
+
+
+async def _build_clip(
+    mp4: str,
+    selected: List[Seg],
+    segs: List[Seg],
+    out: str,
+    anime_frames: Optional[List[Optional[str]]] = None,
+    person_frames: Optional[dict] = None,
+    zoom_punch_clips: Optional[dict] = None,
+    on_progress=None,
+) -> bool:
+    """Three-phase pipeline to avoid OOM on 8 GB RAM with many 4K segments:
+      Phase 1: sequential pre-encode each segment to 4K temp file
+      Phase 2: iterative pairwise xfade merge (constant 2-input memory per step)
+      Phase 3: final pass – subtitles + background music
+    """
+    n = len(selected)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # ── Phase 1: sequential pre-encode to 4K ──────────────────────────────
+        if on_progress:
+            await on_progress("preprocess", 0, n)
+        seg_files = await _preprocess_segments(mp4, selected, tmp, on_progress=on_progress)
+        if any(f is None for f in seg_files):
+            logger.error("Pre-encode failed for one or more segments")
+            return False
+
+        # Actual padded duration of each pre-encoded segment (includes SEG_PAD on both sides)
+        seg_durations = [
+            seg.duration + min(SEG_PAD, seg.start) + SEG_PAD
+            for seg in selected
+        ]
+
+        # Build boundary frame mapping (anime takes priority over zoom_punch)
+        boundary_frames: dict = {}
+        for bi in range(n - 1):
+            af = anime_frames[bi] if anime_frames and bi < len(anime_frames) else None
+            zf = zoom_punch_clips.get(bi) if zoom_punch_clips else None
+            frame = af or zf
+            if frame:
+                boundary_frames[bi] = frame
+
+        # Build ASS subtitles AFTER boundary_frames is known so we can compute
+        # the accurate per-segment start offsets (accounts for xfade overlaps).
+        seg_offsets = _compute_seg_offsets(seg_durations, boundary_frames, n)
+        logger.debug(f"_build_clip seg_offsets={[f'{o:.2f}' for o in seg_offsets]}")
+        ass_content = build_ass(selected, segs, seg_offsets=seg_offsets)
+        has_subs = "Dialogue:" in ass_content
+
+        ass_path = os.path.join(tmp, "subs.ass")
+        with open(ass_path, "w", encoding="utf-8") as f:
+            f.write(ass_content)
+
+        # ── Phase 2: iterative pairwise xfade merge ────────────────────────────
+        if on_progress:
+            await on_progress("merge", 0, 1)
+        merged_file, _merged_dur = await _xfade_merge(
+            seg_files, selected, boundary_frames, tmp,
+            seg_durations=seg_durations, on_progress=on_progress
+        )
+        if merged_file is None:
+            logger.error("Iterative xfade merge failed")
+            return False
+
+        # ── Phase 3: final encode – subtitles + music ─────────────────────────
+        if on_progress:
+            await on_progress("final", 0, 1)
+        music_path = _pick_music()
+        cmd = ["ffmpeg", "-y", "-i", merged_file]
+        parts: List[str] = []
+        music_idx: Optional[int] = None
+
+        if music_path:
+            cmd += ["-stream_loop", "-1", "-i", music_path]
+            music_idx = 1
+            parts.append(
+                # Compress voice, normalize loudness, force stereo before mixing
+                f"[0:a]acompressor=threshold=-25dB:ratio=3:attack=5:release=100:makeup=4dB,"
+                f"loudnorm=I=-16:TP=-1.5:LRA=11,"
+                f"aformat=channel_layouts=stereo[voice];"
+                f"[{music_idx}:a]volume=0.40,aformat=channel_layouts=stereo[bgm];"
+                f"[voice][bgm]amix=inputs=2:duration=first:normalize=0[aout]"
+            )
+            audio_map = "[aout]"
+        else:
+            # No music: still normalise voice loudness
+            parts.append(
+                "[0:a]acompressor=threshold=-25dB:ratio=3:attack=5:release=100:makeup=4dB,"
+                "loudnorm=I=-16:TP=-1.5:LRA=11,"
+                "aformat=channel_layouts=stereo[aout]"
+            )
+            audio_map = "[aout]"
+
+        if has_subs:
+            escaped = ass_path.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+            parts.append(f"[0:v]ass={escaped}[vout]")
+            vmap = "[vout]"
+        else:
+            vmap = "0:v"
+
+        if parts:
+            cmd += ["-filter_complex", ";".join(parts)]
+
+        cmd += [
+            "-map", vmap, "-map", audio_map,
+            "-pix_fmt", "yuv420p",
+            "-c:v", "hevc_videotoolbox", "-b:v", "30M", "-allow_sw", "1",
+            "-ar", "44100", "-ac", "2",
+            "-c:a", "aac", "-b:a", "192k",
+            out,
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+        )
+        _, stderr = await proc.communicate()
+        ok = proc.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 0
+        if not ok:
+            decoded = stderr.decode(errors="replace")
+            logger.error(f"_build_clip final encode rc={proc.returncode}")
+            logger.error(f"_build_clip stderr:\n{decoded[-2000:]}")
+            return False
+
+        # ── Subtitle alignment validation ──────────────────────────────────────
+        if has_subs and os.path.exists(ass_path):
+            try:
+                await _validate_subtitle_alignment(out, ass_path)
+            except Exception as _ve:
+                logger.debug(f"Subtitle validation skipped: {_ve}")
+
+        return True
+
+
+async def _prepend_thumbnail(clip_path: str, thumb_path: str) -> bool:
+    """
+    Prepend `thumb_path` as a 0.5-second still frame at the beginning of `clip_path`.
+    Two-step: encode JPEG → 0.5s mp4, then concat with clip via demuxer (-c copy).
+    Overwrites the original file in-place.
+    """
+    tmp_thumb = clip_path + "_thumb0.mp4"
+    tmp_out   = clip_path + ".prepend_tmp.mp4"
+
+    try:
+        # Detect main clip codec and fps to ensure thumbnail matches (codec mismatch
+        # in concat demuxer with -c copy causes unplayable output)
+        main_codec = await asyncio.to_thread(_probe_video_codec, clip_path)
+        if main_codec == "h264":
+            thumb_vcodec = ["h264_videotoolbox", "-b:v", "8M"]
+        else:
+            thumb_vcodec = ["hevc_videotoolbox", "-b:v", "20M", "-allow_sw", "1"]
+
+        # Probe fps from main clip; fall back to 25fps (GPU service output)
+        try:
+            fps_info = await asyncio.to_thread(_probe_fps, clip_path)
+        except Exception:
+            fps_info = 25
+        fps = fps_info if fps_info else 25
+
+        # Step 1: encode thumbnail JPEG → 0.5s mp4 (same codec/fps as main clip)
+        _SF = (
+            f"scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease,"
+            f"pad={OUT_W}:{OUT_H}:(ow-iw)/2:(oh-ih)/2,fps={fps}"
+        )
+        cmd1 = [
+            "ffmpeg", "-y",
+            "-loop", "1", "-t", "0.5", "-i", thumb_path,
+            "-f", "lavfi", "-t", "0.5", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+            "-vf", _SF,
+            "-c:v", *thumb_vcodec,
+            "-c:a", "aac", "-b:a", "128k",
+            tmp_thumb,
+        ]
+        p1 = await asyncio.create_subprocess_exec(
+            *cmd1, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+        )
+        _, err1 = await p1.communicate()
+        if p1.returncode != 0 or not os.path.exists(tmp_thumb):
+            logger.warning(f"_prepend_thumbnail step1 failed: {err1.decode()[-300:]}")
+            return False
+
+        # Step 2: re-encode concat using separate -i per input so each file gets its own
+        # decoder instance. Concat demuxer + hwaccel silently truncates at SPS/PPS
+        # boundary (nvenc vs videotoolbox mismatch) — this approach avoids that.
+        cmd2 = [
+            "ffmpeg", "-y",
+            "-hwaccel", "videotoolbox", "-i", tmp_thumb,
+            "-hwaccel", "videotoolbox", "-i", clip_path,
+            "-filter_complex", "[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[vout][aout]",
+            "-map", "[vout]", "-map", "[aout]",
+            "-c:v", "hevc_videotoolbox", "-tag:v", "hvc1", "-b:v", "30M", "-allow_sw", "1",
+            "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "+faststart",
+            tmp_out,
+        ]
+        p2 = await asyncio.create_subprocess_exec(
+            *cmd2, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+        )
+        _, err2 = await p2.communicate()
+        ok = p2.returncode == 0 and os.path.exists(tmp_out) and os.path.getsize(tmp_out) > 0
+        if ok:
+            os.replace(tmp_out, clip_path)
+            logger.info(f"Thumbnail prepended (0.5s) to {os.path.basename(clip_path)}")
+        else:
+            logger.warning(f"_prepend_thumbnail step2 failed: {err2.decode()[-400:]}")
+            if os.path.exists(tmp_out):
+                os.remove(tmp_out)
+        return ok
+
+    finally:
+        try:
+            os.remove(tmp_thumb)
+        except Exception:
+            pass
+
+
+# ── Before/After comparison clip ──────────────────────────────────────────────
+
+# Keywords to identify "before wig" moments in the transcript
+_BEFORE_KW = frozenset([
+    "没戴", "不戴", "之前", "原来", "本来", "以前", "自己的头发",
+    "真发", "素颜", "自然发", "裸头", "光头",
+    # 需求8B补充
+    "没戴好", "还没戴", "戴之前",
+])
+# Keywords to identify "after wig / transformation complete" moments
+_AFTER_KW = frozenset([
+    "戴上", "变美", "好看", "漂亮", "换上", "戴了", "变身",
+    "效果", "看看", "之后", "现在", "出来了", "完成",
+    # 需求8B补充
+    "戴好了", "戴上之后", "整体效果", "看看效果",
+])
+
+
+def _find_comparison_timestamps(
+    segs: "List[Seg]",
+    duration: float,
+) -> tuple[float, float]:
+    """
+    Scan SRT segments for "before" and "after" keywords.
+    Returns (before_ts, after_ts) timestamps in the source video.
+    Falls back to 8% / 55% of video duration when keywords are absent.
+    """
+    before_ts: Optional[float] = None
+    after_ts: Optional[float] = None
+
+    for seg in segs:
+        text = seg.text or ""
+        mid  = (seg.start + seg.end) / 2.0
+        if before_ts is None:
+            if any(kw in text for kw in _BEFORE_KW):
+                before_ts = mid
+        elif after_ts is None:
+            if any(kw in text for kw in _AFTER_KW):
+                after_ts = mid
+
+    if before_ts is None:
+        before_ts = max(1.0, duration * 0.08)
+    if after_ts is None or after_ts <= before_ts:
+        after_ts = duration * 0.55
+
+    return before_ts, after_ts
+
+
+async def create_before_after_clip(
+    mp4_path: str,
+    segs: "List[Seg]",
+    out_mp4: str,
+    hold_seconds: float = 2.5,
+) -> bool:
+    """
+    Create a short (hold_seconds) before/after comparison video clip.
+
+    Steps:
+      1. Probe video duration
+      2. Find "before" and "after" timestamps via SRT keyword search
+      3. Generate 1080×1920 comparison JPEG (thumbnail.generate_comparison_frame)
+      4. Encode JPEG → hold_seconds mp4 with silent audio (same codec as main clips)
+
+    The resulting mp4 can be prepended to the main clip via _prepend_video_segment.
+    """
+    from thumbnail import generate_comparison_frame
+
+    # Probe duration
+    try:
+        dur_cmd = [
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", mp4_path,
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *dur_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await proc.communicate()
+        duration = float(stdout.strip())
+    except Exception:
+        duration = 60.0
+
+    before_ts, after_ts = _find_comparison_timestamps(segs, duration)
+    logger.info(f"Before/After timestamps: before={before_ts:.1f}s after={after_ts:.1f}s (video={duration:.1f}s)")
+
+    comp_jpg = out_mp4.replace(".mp4", "_comp.jpg")
+    ok = await generate_comparison_frame(mp4_path, before_ts, after_ts, comp_jpg)
+    if not ok or not os.path.exists(comp_jpg):
+        return False
+
+    try:
+        _SF = (
+            f"scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease,"
+            f"pad={OUT_W}:{OUT_H}:(ow-iw)/2:(oh-ih)/2,fps=30"
+        )
+        cmd = [
+            "ffmpeg", "-y",
+            "-loop", "1", "-t", f"{hold_seconds:.2f}", "-i", comp_jpg,
+            "-f", "lavfi", "-t", f"{hold_seconds:.2f}",
+            "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+            "-vf", _SF,
+            "-c:v", "hevc_videotoolbox", "-b:v", "30M", "-allow_sw", "1",
+            "-c:a", "aac", "-b:a", "128k",
+            "-pix_fmt", "yuv420p",
+            out_mp4,
+        ]
+        proc2 = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+        )
+        _, err = await proc2.communicate()
+        ok = proc2.returncode == 0 and os.path.exists(out_mp4) and os.path.getsize(out_mp4) > 0
+        if not ok:
+            logger.warning(f"create_before_after_clip encode failed: {err.decode()[-400:]}")
+        return ok
+    finally:
+        try:
+            os.remove(comp_jpg)
+        except Exception:
+            pass
+
+
+def _probe_video_codec(path: str) -> str:
+    """Return video codec name of the first video stream, e.g. 'h264' or 'hevc'."""
+    import subprocess, json as _json
+    try:
+        out = subprocess.check_output(
+            ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", path],
+            stderr=subprocess.DEVNULL, timeout=10,
+        )
+        streams = _json.loads(out).get("streams", [])
+        for s in streams:
+            if s.get("codec_type") == "video":
+                return s.get("codec_name", "")
+    except Exception:
+        pass
+    return ""
+
+
+def _probe_fps(path: str) -> float:
+    """Return frame rate of the first video stream as a float, e.g. 25.0."""
+    import subprocess, json as _json
+    try:
+        out = subprocess.check_output(
+            ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", path],
+            stderr=subprocess.DEVNULL, timeout=10,
+        )
+        streams = _json.loads(out).get("streams", [])
+        for s in streams:
+            if s.get("codec_type") == "video":
+                r_fps = s.get("r_frame_rate", "")
+                if "/" in r_fps:
+                    num, den = r_fps.split("/")
+                    if int(den) > 0:
+                        return float(num) / float(den)
+    except Exception:
+        pass
+    return 25.0
+
+
+async def _prepend_video_segment(prefix_mp4: str, clip_path: str) -> bool:
+    """
+    Prepend `prefix_mp4` to `clip_path` in-place.
+    If the two files have different video codecs (e.g. h264 vs hevc from local fallback),
+    the prefix is re-encoded to match the main clip's codec before concat.
+    """
+    list_file = clip_path + "_cmp_concat.txt"
+    tmp_out   = clip_path + "_cmp_prepend.mp4"
+    reenc_prefix = prefix_mp4 + "_reenc.mp4"
+    try:
+        prefix_to_use = prefix_mp4
+
+        # Detect codec mismatch and re-encode prefix if needed
+        main_codec   = await asyncio.to_thread(_probe_video_codec, clip_path)
+        prefix_codec = await asyncio.to_thread(_probe_video_codec, prefix_mp4)
+        if main_codec and prefix_codec and main_codec != prefix_codec:
+            logger.info(
+                f"Comparison prefix codec mismatch ({prefix_codec} vs main {main_codec}) "
+                f"— re-encoding prefix to {main_codec}"
+            )
+            enc = "hevc_videotoolbox" if main_codec == "hevc" else "h264_videotoolbox"
+            proc_re = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y", "-i", prefix_mp4,
+                "-c:v", enc, "-b:v", "8M",
+                "-c:a", "aac", "-b:a", "128k",
+                reenc_prefix,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+            )
+            _, re_err = await proc_re.communicate()
+            if proc_re.returncode == 0 and os.path.exists(reenc_prefix):
+                prefix_to_use = reenc_prefix
+            else:
+                logger.warning(f"Prefix re-encode failed: {re_err.decode()[-300:]}")
+
+        # Use separate -i per input so each file gets its own decoder instance.
+        # Concat demuxer + hwaccel silently truncates at SPS/PPS boundary when mixing
+        # hevc_nvenc (GPU) and hevc_videotoolbox (local) — this approach avoids that.
+        cmd = [
+            "ffmpeg", "-y",
+            "-hwaccel", "videotoolbox", "-i", os.path.abspath(prefix_to_use),
+            "-hwaccel", "videotoolbox", "-i", os.path.abspath(clip_path),
+            "-filter_complex", "[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[vout][aout]",
+            "-map", "[vout]", "-map", "[aout]",
+            "-c:v", "hevc_videotoolbox", "-tag:v", "hvc1", "-b:v", "30M", "-allow_sw", "1",
+            "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "+faststart",
+            tmp_out,
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+        )
+        _, err = await proc.communicate()
+        ok = proc.returncode == 0 and os.path.exists(tmp_out) and os.path.getsize(tmp_out) > 0
+        if ok:
+            os.replace(tmp_out, clip_path)
+            logger.info(f"Comparison ({os.path.basename(prefix_mp4)}) prepended to {os.path.basename(clip_path)}")
+        else:
+            logger.warning(f"_prepend_video_segment failed: {err.decode()[-400:]}")
+            if os.path.exists(tmp_out):
+                os.remove(tmp_out)
+        return ok
+    finally:
+        for f in (list_file, reenc_prefix):
+            try:
+                os.remove(f)
+            except Exception:
+                pass
+
+
+def _cartoonize_pil(src_jpg: str, dst_jpg: str) -> Optional[str]:
+    """
+    PIL-based cartoon/anime effect as fallback when ComfyUI is unavailable.
+    Steps: posterize colors → boost saturation → smooth → edge overlay.
+    """
+    try:
+        from PIL import Image, ImageFilter, ImageEnhance, ImageOps, ImageChops
+        img = Image.open(src_jpg).convert("RGB")
+        # Smooth to remove noise before posterization
+        smooth = img.filter(ImageFilter.GaussianBlur(radius=1.5))
+        # Posterize: reduce colors to cartoon-like palette
+        poster = ImageOps.posterize(smooth, 4)
+        # Boost saturation and contrast for vivid anime look
+        poster = ImageEnhance.Color(poster).enhance(2.0)
+        poster = ImageEnhance.Contrast(poster).enhance(1.3)
+        # Extract and threshold edges
+        edges = smooth.filter(ImageFilter.FIND_EDGES).convert("L")
+        edges = edges.point(lambda x: 0 if x < 20 else min(255, x * 3))
+        edges_inv = ImageOps.invert(edges).convert("RGB")
+        # Multiply posterized image with inverted edges → dark outlines
+        result = ImageChops.multiply(poster, edges_inv)
+        result.save(dst_jpg, "JPEG", quality=90)
+        return dst_jpg
+    except Exception as e:
+        logger.warning(f"PIL cartoonize failed: {e}")
+        return None
+
+
+async def _gen_transition_anime_frames(
+    mp4: str, selected: List[Seg]
+) -> List[Optional[str]]:
+    """
+    For each boundary between selected segments, extract the first frame of the
+    NEXT segment and convert to anime style via ComfyUI.
+    Returns list of length len(selected)-1 (None where generation failed).
+    Caller must delete the returned temp files.
+    """
+    n = len(selected)
+    if n < 2:
+        return []
+    comfy_ok = False
+    try:
+        from comfyui_client import anime_img2img, health_check
+        comfy_ok = await health_check()
+    except Exception:
+        pass
+
+    async def _one(seg: Seg, idx: int) -> Optional[str]:
+        frame_tmp  = tempfile.mktemp(suffix=".jpg")   # 1080p source frame
+        comfy_tmp  = tempfile.mktemp(suffix=".jpg")   # COMFY_W×COMFY_H for ComfyUI
+        anime_tmp  = tempfile.mktemp(suffix=".jpg")   # final output
+        try:
+            pre = max(0.0, seg.start - 3.0)
+            fine = seg.start - pre
+            # Extract at 1080×1920 (half-4K): 2× better upscale to 4K vs 576×1024
+            _FW, _FH = OUT_W // 2, OUT_H // 2   # 1080×1920
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", f"{pre:.3f}", "-i", mp4,
+                "-ss", f"{fine:.3f}", "-frames:v", "1",
+                "-vf", (
+                    f"scale={_FW}:{_FH}:force_original_aspect_ratio=decrease,"
+                    f"pad={_FW}:{_FH}:(ow-iw)/2:(oh-ih)/2"
+                ),
+                "-q:v", "2", frame_tmp,
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+            )
+            await proc.communicate()
+            if proc.returncode != 0 or not os.path.exists(frame_tmp):
+                return None
+
+            if comfy_ok:
+                # Downscale to ComfyUI-safe SD1.5 resolution before img2img
+                try:
+                    from PIL import Image as _PIL
+                    _img = _PIL.open(frame_tmp).convert("RGB")
+                    _img = _img.resize((COMFY_W, COMFY_H), _PIL.LANCZOS)
+                    _img.save(comfy_tmp, "JPEG", quality=88)
+                except Exception:
+                    comfy_tmp = frame_tmp   # fallback: send 1080p directly
+
+                seed = (hash(mp4) ^ idx * 0xCAFE) & 0xFFFFFF
+                ok = await anime_img2img(comfy_tmp, anime_tmp, seed=seed, timeout=90)
+                if ok and os.path.exists(anime_tmp) and os.path.getsize(anime_tmp) > 0:
+                    return anime_tmp   # ComfyUI output (576×1024), upscaled by _merge_anime
+
+            # PIL fallback: cartoonize at 1080×1920 (much sharper than 576×1024 when upscaled to 4K)
+            return _cartoonize_pil(frame_tmp, anime_tmp)
+        except Exception as e:
+            logger.warning(f"Anime transition frame {idx} error: {e}")
+            return None
+        finally:
+            for _p in {frame_tmp, comfy_tmp}:  # set deduplicates when comfy_tmp==frame_tmp
+                try:
+                    os.remove(_p)
+                except Exception:
+                    pass
+
+    sem_frames = asyncio.Semaphore(1)  # M2 8GB: 串行帧提取，避免多路4K解码叠加内存
+
+    async def _one_limited(seg: Seg, idx: int) -> Optional[str]:
+        async with sem_frames:
+            return await _one(seg, idx)
+
+    tasks = [_one_limited(selected[i + 1], i) for i in range(n - 1)]
+    results = list(await asyncio.gather(*tasks))
+    ok_count = sum(1 for r in results if r)
+    logger.info(f"Anime transition frames: {ok_count}/{n - 1} generated")
+    return results
+
+
+async def _gen_zoom_punch_clips(
+    mp4: str, selected: List[Seg], boundaries: List[int]
+) -> dict:
+    """
+    For each boundary, extract the first frame of the NEXT segment and apply a
+    1.5× zoom-in crop targeting the face/wig area (upper-centre of frame).
+    Returns {boundary_i: JPEG_path}. Caller must delete temp files.
+    """
+    async def _one(bi: int) -> tuple:
+        seg = selected[bi + 1]
+        out_tmp = tempfile.mktemp(suffix=".jpg")
+        try:
+            pre = max(0.0, seg.start - 3.0)
+            fine = seg.start - pre
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", f"{pre:.3f}", "-i", mp4,
+                "-ss", f"{fine:.3f}", "-frames:v", "1",
+                "-vf", (
+                    # Step 1: scale source to 4K
+                    f"scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease,"
+                    f"pad={OUT_W}:{OUT_H}:(ow-iw)/2:(oh-ih)/2,"
+                    # Step 2: crop upper-centre at 1/ZOOM_FACTOR size → 1.5× zoom toward face
+                    f"crop={ZOOM_W}:{ZOOM_H}:{ZOOM_X}:{ZOOM_Y},"
+                    # Step 3: scale cropped area back to 4K (high-quality)
+                    f"scale={OUT_W}:{OUT_H}:flags=lanczos"
+                ),
+                "-q:v", "2", out_tmp,
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.communicate()
+            if proc.returncode == 0 and os.path.exists(out_tmp) and os.path.getsize(out_tmp) > 0:
+                return bi, out_tmp
+            return bi, None
+        except Exception as e:
+            logger.warning(f"Zoom punch frame error at boundary {bi}: {e}")
+            try:
+                os.remove(out_tmp)
+            except Exception:
+                pass
+            return bi, None
+
+    sem_zoom = asyncio.Semaphore(1)  # M2 8GB: 串行帧提取，避免多路2K解码叠加内存
+
+    async def _one_sem(bi: int) -> tuple:
+        async with sem_zoom:
+            return await _one(bi)
+
+    pairs = await asyncio.gather(*[_one_sem(bi) for bi in boundaries])
+    result = {bi: path for bi, path in pairs if path}
+    logger.info(f"Zoom punch clips: {len(result)}/{len(boundaries)} generated")
+    return result
+
+
+async def _gen_person_frames(
+    mp4: str, selected: List[Seg], boundaries: List[int]
+) -> dict:
+    """
+    For each boundary in `boundaries`, extract the last frame of segment[i] and
+    apply rembg background removal to isolate the person.
+    Returns dict {boundary_i: PNG_path}. Caller must delete temp files.
+    """
+    if not boundaries:
+        return {}
+    try:
+        import rembg
+    except ImportError:
+        logger.debug("rembg not installed – person overlay transitions disabled")
+        return {}
+
+    async def _one(bi: int) -> tuple:
+        seg = selected[bi]
+        frame_tmp = tempfile.mktemp(suffix=".jpg")
+        person_tmp = tempfile.mktemp(suffix=".png")
+        try:
+            seek = max(0.0, seg.end - 0.5)
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", f"{seek:.3f}", "-i", mp4,
+                "-frames:v", "1",
+                "-vf", (
+                    f"scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease,"
+                    f"pad={OUT_W}:{OUT_H}:(ow-iw)/2:(oh-ih)/2"
+                ),
+                "-q:v", "2", frame_tmp,
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+            )
+            await proc.communicate()
+            if proc.returncode != 0 or not os.path.exists(frame_tmp):
+                return bi, None
+
+            # Try GPU rembg first (CUDA, <0.5s/frame); fallback to local CPU (~5-30s/frame)
+            _used_gpu_rembg = False
+            try:
+                from gpu_state import is_online as _gpu_online
+                if _gpu_online():
+                    import httpx as _httpx
+                    with open(frame_tmp, "rb") as _f:
+                        _img_data = _f.read()
+                    async with _httpx.AsyncClient(timeout=30.0) as _c:
+                        _r = await _c.post(
+                            f"{_GPU_SERVICE_URL}/rembg",
+                            files={"file": ("frame.jpg", _img_data, "image/jpeg")},
+                        )
+                    if _r.status_code == 200:
+                        with open(person_tmp, "wb") as _f:
+                            _f.write(_r.content)
+                        _used_gpu_rembg = True
+            except Exception:
+                pass
+
+            if not _used_gpu_rembg:
+                def _remove_bg():
+                    with open(frame_tmp, "rb") as f:
+                        data = f.read()
+                    result = rembg.remove(data)
+                    with open(person_tmp, "wb") as f:
+                        f.write(result)
+                await asyncio.get_event_loop().run_in_executor(None, _remove_bg)
+            if os.path.exists(person_tmp) and os.path.getsize(person_tmp) > 0:
+                return bi, person_tmp
+            return bi, None
+        except Exception as e:
+            logger.warning(f"Person frame error at boundary {bi}: {e}")
+            try:
+                os.remove(person_tmp)
+            except Exception:
+                pass
+            return bi, None
+        finally:
+            try:
+                os.remove(frame_tmp)
+            except Exception:
+                pass
+
+    sem_rembg = asyncio.Semaphore(1)  # rembg loads U2Net model ~1-2 GB per inference; keep serial
+
+    async def _one_rembg(bi: int) -> tuple:
+        async with sem_rembg:
+            return await _one(bi)
+
+    results = await asyncio.gather(*[_one_rembg(bi) for bi in boundaries])
+    out = {bi: path for bi, path in results if path}
+    logger.info(f"Person overlay frames: {len(out)}/{len(boundaries)} generated")
+    return out
+
+
+# ── SRT parsing ───────────────────────────────────────────────────────────────
+
+def _ts_to_sec(ts: str) -> float:
+    ts = ts.strip().replace(",", ".")
+    parts = ts.split(":")
+    h, m, s = int(parts[0]), int(parts[1]), float(parts[2])
+    return h * 3600 + m * 60 + s
+
+
+def parse_srt(path: str) -> List[Seg]:
+    with open(path, encoding="utf-8") as f:
+        content = f.read()
+    segs = []
+    for block in re.split(r"\n{2,}", content.strip()):
+        lines = [l.strip() for l in block.splitlines() if l.strip()]
+        if len(lines) < 3:
+            continue
+        try:
+            idx = int(lines[0])
+            arrow = lines[1].split("-->")
+            start = _ts_to_sec(arrow[0])
+            end   = _ts_to_sec(arrow[1])
+            text  = " ".join(lines[2:])
+            segs.append(Seg(idx=idx, start=start, end=end, text=text))
+        except (ValueError, IndexError):
+            continue
+    return segs
+
+
+# ── Scoring ───────────────────────────────────────────────────────────────────
+
+def _merge_short_segs(segs: List[Seg], min_dur: float = 3.0, max_gap: float = 1.5, max_merged: float = 6.0) -> List[Seg]:
+    """Merge consecutive SRT segments that are too short into scene-level segments.
+
+    Segments whose individual duration < min_dur are merged with their neighbours
+    as long as the inter-segment gap is <= max_gap and the combined duration stays
+    <= max_merged.  This handles fine-grained transcripts where each sentence is
+    only 1-2 seconds long.
+    """
+    if not segs:
+        return segs
+    out: List[Seg] = []
+    buf = Seg(idx=segs[0].idx, start=segs[0].start, end=segs[0].end, text=segs[0].text)
+    for nxt in segs[1:]:
+        gap = nxt.start - buf.end
+        combined = nxt.end - buf.start
+        if buf.duration < min_dur and gap <= max_gap and combined <= max_merged:
+            buf.end  = nxt.end
+            buf.text = buf.text + " " + nxt.text
+        else:
+            out.append(buf)
+            buf = Seg(idx=nxt.idx, start=nxt.start, end=nxt.end, text=nxt.text)
+    out.append(buf)
+    return out
+
+
+def score_and_tag(seg: Seg) -> None:
+    text = seg.text
+
+    # Remove check
+    for pat in _REMOVE_PATTERNS:
+        if re.search(pat, text):
+            seg.valid = False
+            return
+
+    # Too short to be useful (min 3s per scene)
+    if seg.duration < 3.0:
+        seg.valid = False
+        return
+
+    # Trim over-long segments — keyword segments get extra budget to preserve full sentences
+    # 产品干货关键词出现时，允许最长 9s，确保主播能说完整句话
+    has_product_kw = any(kw in text for kw in (_PRODUCT_KW | _DETAIL_KW | _WEARING_KW | _COMFORT_KW))
+    max_dur = 9.0 if has_product_kw else 6.0
+    if seg.duration > max_dur:
+        seg.end = seg.start + max_dur
+
+    # Keyword score
+    score = 0.0
+    for kw, pts in _SCORES.items():
+        if kw in text:
+            score += pts
+
+    # Boost punchy short segments (3–4s sweet spot)
+    if 3.0 <= seg.duration <= 4.0:
+        score *= 1.2
+
+    seg.score = round(score, 2)
+
+    # Segments with zero product/feature score are pure filler (chat, transitions,
+    # off-topic remarks). Exclude them so the fill budget stays product-focused.
+    if seg.score == 0.0:
+        seg.valid = False
+        return
+
+    # Category tag — social_proof checked first (highest CTR priority)
+    # Priority order mirrors the 10-step narrative (higher CTR categories checked first)
+    if any(kw in text for kw in _PROBLEM_KW):
+        seg.category = "problem"
+    elif any(kw in text for kw in _COMPARISON_KW):
+        seg.category = "comparison"
+    elif any(kw in text for kw in _SOCIAL_PROOF_KW):
+        seg.category = "social_proof"
+    elif any(kw in text for kw in _DETAIL_KW):
+        seg.category = "detail"
+    elif any(kw in text for kw in _WEARING_KW):
+        seg.category = "wearing"
+    elif any(kw in text for kw in _PRODUCT_KW):
+        seg.category = "product"
+    elif any(kw in text for kw in _COMFORT_KW):
+        seg.category = "comfort"
+    elif any(kw in text for kw in _RESULT_KW):
+        seg.category = "result"
+    elif any(kw in text for kw in _SCENE_KW):
+        seg.category = "scene"
+    elif any(kw in text for kw in _CONVERT_KW):
+        seg.category = "convert"
+
+
+# ── Silence detection ─────────────────────────────────────────────────────────
+
+async def detect_silence(mp4: str, noise_db: int = -35, min_dur: float = 1.5) -> List[Tuple[float, float]]:
+    cmd = [
+        "ffmpeg", "-i", mp4,
+        "-af", f"silencedetect=noise={noise_db}dB:d={min_dur}",
+        "-f", "null", "-",
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+    )
+    _, stderr = await proc.communicate()
+    out = stderr.decode()
+    starts = [float(x) for x in re.findall(r"silence_start: ([\d.]+)", out)]
+    ends   = [float(x) for x in re.findall(r"silence_end: ([\d.]+)", out)]
+    return list(zip(starts, ends))
+
+
+def _silence_ratio(seg: Seg, silences: List[Tuple[float, float]]) -> float:
+    if seg.duration <= 0:
+        return 1.0
+    overlap = sum(
+        max(0.0, min(seg.end, se) - max(seg.start, ss))
+        for ss, se in silences
+    )
+    return overlap / seg.duration
+
+
+# ── Clip selection ─────────────────────────────────────────────────────────────
+
+def _pick_by_category(segs: List[Seg], cat: str, budget: float) -> List[Seg]:
+    pool = sorted(
+        [s for s in segs if s.category == cat and s.score > 0],
+        key=lambda s: s.score, reverse=True
+    )
+    chosen, used = [], 0.0
+    for s in pool:
+        if used + s.duration <= budget:
+            chosen.append(s)
+            used += s.duration
+    return chosen
+
+
+def _select_from_valid(valid: List[Seg], clip_min: float = CLIP_MIN, clip_max: float = CLIP_MAX) -> List[Seg]:
+    """10-step narrative arc for 假发 short-form video (巨量千川优质短视频结构).
+
+    Assembly order (skips slots with no matching content):
+      1. 痛点开头   problem      — viewer self-identifies with the problem
+      2. 对比强化   comparison   — before state / contrast to amplify urgency
+      3. 情绪刺激   social_proof — "同事以为我去烫头了" — social validation hook
+      4. 产品展示   product      — core features / visual transformation
+      5. 佩戴过程   wearing      — step-by-step demo; builds confidence
+      6. 细节特写   detail       — close-up of hair quality; purchase trigger
+      7. 舒适稳固   comfort      — addresses heat/stability doubts
+      8. 戴后效果   result       — after-wearing visual impression
+      9. 场景代入   scene        — specific use case (约会/通勤/婚礼 etc.)
+     10. 转化收口   convert      — CTA forced last; shortest available
+    """
+    if not valid:
+        return []
+
+    used_ids: set = set()
+
+    def _pick_block(cat: str, budget: float, max_segs: int = 2) -> List[Seg]:
+        pool = sorted(
+            [s for s in valid if id(s) not in used_ids and s.category == cat and s.score > 0],
+            key=lambda s: s.score, reverse=True,
+        )
+        chosen, used = [], 0.0
+        for s in pool:
+            if len(chosen) >= max_segs or used + s.duration > budget:
+                continue  # try next (a shorter seg may still fit)
+            chosen.append(s)
+            used += s.duration
+        return chosen
+
+    # ── Narrative slots (category, budget_s, max_segs) ───────────────────────
+    _NARRATIVE_SLOTS = [
+        ("problem",      7.0, 2),
+        # comparison (戴之前/戴之后对比图片) excluded per user preference
+        ("social_proof", 6.0, 2),
+        ("product",      6.0, 2),
+        ("wearing",      6.0, 2),
+        ("detail",       5.0, 2),
+        ("comfort",      6.0, 2),
+        ("result",       5.0, 1),
+        ("scene",        5.0, 1),
+        # "convert" handled separately as forced-last
+    ]
+
+    structured: List[Seg] = []
+    for cat, budget, max_segs in _NARRATIVE_SLOTS:
+        block = _pick_block(cat, budget, max_segs)
+        structured.extend(block)
+        used_ids.update(id(s) for s in block)
+
+    # ── Convert: forced last, shortest available ──────────────────────────────
+    convert_pool = sorted(
+        [s for s in valid if id(s) not in used_ids and s.category == "convert"],
+        key=lambda s: s.duration,
+    )
+    if convert_pool:
+        closer = [convert_pool[0]]
+    else:
+        fallback = sorted(
+            [s for s in valid if id(s) not in used_ids],
+            key=lambda s: s.score, reverse=True,
+        )
+        closer = [fallback[0]] if fallback else []
+    used_ids.update(id(s) for s in closer)
+
+    # ── Fill remaining budget with best unused segments (chronological) ───────
+    used_dur = sum(s.duration for s in structured) + sum(s.duration for s in closer)
+    fill_budget = clip_max - used_dur
+    fill: List[Seg] = []
+    if fill_budget > 0:
+        fill_pool = sorted(
+            [s for s in valid if id(s) not in used_ids],
+            key=lambda s: s.score, reverse=True,
+        )
+        used = 0.0
+        for s in fill_pool:
+            if used + s.duration > fill_budget:
+                continue
+            fill.append(s)
+            used += s.duration
+    fill = sorted(fill, key=lambda s: s.start)  # chronological within fill
+
+    assembled = structured + fill + closer
+
+    # ── Pad to clip_min ───────────────────────────────────────────────────────
+    total = sum(s.duration for s in assembled)
+    if total < clip_min:
+        all_used = {id(s) for s in assembled}
+        extras = sorted(
+            [s for s in valid if id(s) not in all_used],
+            key=lambda s: s.score, reverse=True,
+        )
+        insert_pos = len(assembled) - len(closer)
+        for s in extras:
+            if total >= clip_max:
+                break
+            assembled.insert(insert_pos, s)
+            total += s.duration
+            insert_pos += 1
+
+    # ── Cap segment count ─────────────────────────────────────────────────────
+    if len(assembled) > MAX_CLIP_SEGMENTS:
+        n_fixed = len(structured) + len(closer)
+        keep = MAX_CLIP_SEGMENTS - n_fixed
+        trimmed_fill = sorted(fill, key=lambda s: s.score, reverse=True)[:keep]
+        trimmed_fill = sorted(trimmed_fill, key=lambda s: s.start)
+        assembled = structured + trimmed_fill + closer
+
+    # ── Assign camera motion + transitions ────────────────────────────────────
+    _seed = hash(assembled[0].text[:16]) & 0xFFFF if assembled else 0
+    _assign_styles(assembled, seed=_seed)
+
+    return assembled
+
+
+_CLUSTER_WINDOW = 300.0   # 5-minute window to find dense content cluster
+_CLUSTER_MIN_SPAN = 600.0  # only cluster when recording spans > 10 minutes
+
+
+# ── Composite style presets ────────────────────────────────────────────────────
+# Each preset = (motion, transition_type, transition_dur)
+# Three named "feel" modes the user requested + supporting styles:
+#   attention  — 快速 zoom+flash 抓注意力 (hook/social proof)
+#   detail     — 慢推近+平移 展示细节 (process/solution)
+#   seed       — 拉远+字幕 种草 (result/CTA)
+_STYLES: dict[str, tuple] = {
+    # ── 抓注意 (attention-grabbing) ──
+    "attention_r":  ("push_in_strong",  "fadewhite",      0.20),
+    "attention_l":  ("zoom_pan_left",   "fadewhite",      0.20),
+    "hook_shake":   ("shake",           "zoomin",         0.28),  # impact snap entry
+    "diag_in":      ("push_in_strong",  "diagtl",         0.25),  # diagonal corner punch
+    # ── 展示细节 (detail showcase) ──
+    "detail_r":     ("zoom_pan_right",  "smoothleft",     0.40),
+    "detail_l":     ("zoom_pan_left",   "smoothright",    0.40),
+    "center_r":     ("zoom_pan_right",  "center_fade",    0.40),  # radial center reveal
+    "radial_in":    ("push_in",         "radial",         0.35),  # radial clock wipe
+    # ── 种草 (seeding/pull-back) ──
+    "seed":         ("pull_out",        "fadegrays",      0.40),
+    "seed_tilt":    ("tilt_down",       "fadegrays",      0.40),
+    "pixel_mix":    ("pull_out",        "pixel_dissolve", 0.40),  # ordered-dither dissolve
+    # ── 叙事转折 (narrative pivot) ──
+    "pivot":        ("rotate_ccw",      "fadeblack",      0.50),
+    "pivot_push":   ("pull_out",        "fadeblack",      0.45),
+    "shadow_push":  ("push_in",         "shadow_sweep",   0.35),  # diagonal shadow sweep
+    # ── 社交证明 (social proof) ──
+    "social_up":    ("tilt_up",         "wipeleft",       0.35),
+    "social_down":  ("tilt_down",       "wipeleft",       0.35),
+    "slide_in_r":   ("pan_right",       "slideleft",      0.30),  # slide-in from right
+    "slide_in_l":   ("pan_left",        "slideright",     0.30),  # slide-in from left
+    "squeeze_r":    ("tilt_up",         "squeezeh",       0.35),  # horizontal squeeze
+    # ── 快切填充 (fast fill cuts) ──
+    "quick_r":      ("pan_right",       "dissolve",       0.22),
+    "quick_l":      ("pan_left",        "dissolve",       0.22),
+    "quick_in":     ("push_in",         "hblur",          0.28),
+    "quick_rot":    ("rotate_cw",       "dissolve",       0.25),
+    "diag_wipe":    ("pan_right",       "diagonal_wipe",  0.28),  # diagonal corner wipe
+    # ── CTA 结尾 ──
+    "cta":          ("pull_out",        "fadegrays",      0.40),  # pull-back to reveal full look
+    # ── 特效转场 (overlay composites) ──
+    "polaroid_tr":     ("push_in",  "polaroid",       0.40),  # 拍立得转场
+    "phone_zoom_tr":   ("push_in",  "phone_zoom",     0.40),  # 手机屏幕放大
+    "camera_out_tr":   ("pull_out", "camera_zoomout", 0.40),  # 相机缩小
+}
+
+# Style pools by narrative position — random selection within the pool
+_STYLE_POOLS: dict[str, list] = {
+    # idx=0 always gets hook treatment regardless of category
+    "hook":         ["hook_shake",  "attention_r", "attention_l", "diag_in"],
+    # 10-step narrative categories
+    "problem":      ["hook_shake",  "pivot",       "pivot_push",  "shadow_push",  "attention_r"],
+    "comparison":   ["attention_r", "attention_l", "diag_in",     "hook_shake",   "polaroid_tr"],
+    "social_proof": ["social_up",   "social_down", "slide_in_r",  "squeeze_r",    "attention_r"],
+    "product":      ["detail_r",    "detail_l",    "center_r",    "radial_in",    "seed"],
+    "wearing":      ["detail_r",    "detail_l",    "radial_in",   "quick_in",     "center_r",    "phone_zoom_tr"],
+    "detail":       ["radial_in",   "center_r",    "detail_r",    "quick_in"],
+    "comfort":      ["seed",        "seed_tilt",   "pixel_mix",   "quick_l"],
+    "result":       ["seed",        "seed_tilt",   "pixel_mix",   "center_r",     "camera_out_tr"],
+    "scene":        ["slide_in_r",  "slide_in_l",  "social_up",   "social_down"],
+    "convert":      ["cta"],
+    # legacy / fallback
+    "solution":     ["detail_r",    "detail_l",    "center_r",    "radial_in"],
+    "neutral":      ["quick_r",     "quick_l",     "quick_in",    "quick_rot",
+                     "slide_in_r",  "slide_in_l",  "radial_in",   "diag_in",
+                     "diag_wipe",   "detail_r",    "detail_l"],
+}
+
+
+def _assign_styles(assembled: List[Seg], seed: int = 0) -> None:
+    """
+    Assign motion + transition to every segment using composite style presets.
+
+    Each category maps to a pool of named styles (see _STYLE_POOLS).
+    Selection within the pool is pseudo-random seeded from the segment's
+    position + text hash, ensuring the same recording always produces the
+    same cut while different recordings vary.
+
+    CTA (convert) is always "cta" (static + fadegrays) — no randomization.
+    """
+    import random
+    rng = random.Random(seed)
+
+    # Narrative position labels for the structured head of assembled
+    # (hook is always index 0, the rest follow in order)
+    def _pos(seg: Seg, idx: int) -> str:
+        if idx == 0:
+            return "hook"
+        return seg.category
+
+    # Keywords that indicate close-up hair/scalp detail → punch-in zoom to upper frame
+    _HAIR_DETAIL_KW = frozenset([
+        "发丝", "发根", "发纹", "仿真皮", "仿递针", "仿头皮", "头皮",
+        "发质", "头顶", "分缝", "发缝", "毛流", "毛鳞片",
+    ])
+
+    for i, seg in enumerate(assembled):
+        pool_key = _pos(seg, i)
+        pool = _STYLE_POOLS.get(pool_key, _STYLE_POOLS["neutral"])
+
+        # Seed per-segment for determinism: base seed + seg index + text hash
+        seg_seed = seed + i * 31 + (hash(seg.text[:16]) & 0xFFFF)
+        rng.seed(seg_seed)
+        style_name = rng.choice(pool)
+
+        motion, t_type, t_dur = _STYLES[style_name]
+
+        # Hair detail segments → override to push_in_strong (zoom upper-center crop)
+        if any(kw in seg.text for kw in _HAIR_DETAIL_KW):
+            motion = "push_in_strong"
+
+        seg.motion = motion
+        if i > 0:
+            seg.transition = f"{t_type}:{t_dur:.2f}"
+
+    # Safety: ensure at least 4 segments have active motion (non-static).
+    # If any remain static after assignment, override them with push_in/pull_out
+    # alternately until the threshold is met.
+    MIN_MOTION_SEGS = 4
+    motion_count = sum(1 for s in assembled if s.motion != "static")
+    if motion_count < MIN_MOTION_SEGS:
+        static_segs = [s for s in assembled if s.motion == "static"]
+        # Sort by score ascending so we override the lowest-value static segs first
+        static_segs.sort(key=lambda s: getattr(s, "score", 0))
+        replacements = ["push_in", "pull_out"]
+        idx = 0
+        for seg in static_segs:
+            if motion_count >= MIN_MOTION_SEGS:
+                break
+            seg.motion = replacements[idx % 2]
+            idx += 1
+            motion_count += 1
+
+
+async def _merge_overlay(
+    f1: str, f2: str, tr_type: str, fade_off: float, dst: str, seed: int = 0
+) -> bool:
+    """
+    Overlay-composite transition: polaroid / phone_zoom / camera_zoomout.
+
+    1. Extract last frame of f1 and/or first frame of f2 (tiny probe frames).
+    2. Build a composite still via PIL (_build_*_still).
+    3. Animate the still with zoompan (grow-in or zoom-out depending on type).
+    4. xfade: f1 → fadewhite → still_animated → fadewhite → f2
+
+    Reuses ANIME_TOTAL / ANIME_FADE constants.
+    Falls back to simple dissolve on any error.
+    """
+    import random
+    rng = random.Random(seed)
+
+    frame_a = dst + "_ov_a.jpg"
+    frame_b = dst + "_ov_b.jpg"
+    still   = dst + "_ov_still.jpg"
+    tmp1    = dst + "_ov_s1.mp4"
+
+    async def _extract_frame(src: str, out: str, seek: str) -> bool:
+        """Extract one frame from src; seek='first'|'last'."""
+        cmd = (
+            ["ffmpeg", "-y", "-sseof", "-2", "-i", src]
+            if seek == "last" else
+            ["ffmpeg", "-y", "-ss", "0.1", "-i", src]
+        ) + [
+            "-frames:v", "1",
+            "-vf", f"scale={OUT_W // 4}:{OUT_H // 4}:flags=fast_bilinear",
+            "-q:v", "5", out,
+        ]
+        p = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+        )
+        await p.communicate()
+        return p.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 0
+
+    async def _fallback() -> bool:
+        rc, err = await _run_cmd([
+            "ffmpeg", "-y", "-i", f1, "-i", f2,
+            "-filter_complex",
+            f"[0:v]settb=1/30[va];[1:v]settb=1/30[vb];"
+            f"[va][vb]xfade=transition=fadewhite:duration={FADE_DUR}:offset={fade_off:.3f}[vout];"
+            f"[0:a][1:a]acrossfade=d={FADE_DUR}[aout]",
+            "-map", "[vout]", "-map", "[aout]",
+            "-pix_fmt", "yuv420p",
+            "-c:v", "hevc_videotoolbox", "-b:v", "30M", "-allow_sw", "1",
+            "-c:a", "aac", "-b:a", "128k",
+            dst,
+        ])
+        if rc != 0:
+            logger.error(f"_merge_overlay fallback rc={rc}: {err[-300:]}")
+        return rc == 0
+
+    try:
+        # ── Step 1: Extract frames ─────────────────────────────────────────
+        ok_a = await _extract_frame(f1, frame_a, "last")
+        ok_b = await _extract_frame(f2, frame_b, "first")
+        if not ok_b:
+            return await _fallback()
+
+        # ── Step 2: Build composite still ─────────────────────────────────
+        built = False
+        if tr_type == "polaroid":
+            angle = rng.uniform(-10, 10)
+            built = ok_a and await asyncio.to_thread(
+                _build_polaroid_still, frame_b, frame_a, still, OUT_W, OUT_H, angle)
+        elif tr_type == "phone_zoom":
+            built = await asyncio.to_thread(
+                _build_phone_still, frame_b, still, OUT_W, OUT_H)
+        elif tr_type == "camera_zoomout":
+            built = ok_a and await asyncio.to_thread(
+                _build_camera_still, frame_a, still, OUT_W, OUT_H)
+        if not built or not os.path.exists(still):
+            return await _fallback()
+
+        # ── Step 3: Animate still with zoompan ────────────────────────────
+        n_frames = int(ANIME_TOTAL * 30)
+
+        if tr_type in ("polaroid", "phone_zoom"):
+            # Grow-in: 0.55x → 1.0x centered
+            zoom_vf = (
+                f"zoompan=z='if(eq(on,1),0.55,min(zoom+{0.45/n_frames:.5f},1.0))'"
+                f":d={n_frames}:x='(iw/2)-(iw/zoom/2)':y='(ih/2)-(ih/zoom/2)'"
+                f":s={OUT_W}x{OUT_H},fps=30"
+            )
+        else:
+            # Camera zoom-out: 1.40x → 1.0x centered
+            zoom_vf = (
+                f"zoompan=z='if(eq(on,1),1.40,max(zoom-{0.40/n_frames:.5f},1.0))'"
+                f":d={n_frames}:x='(iw/2)-(iw/zoom/2)':y='(ih/2)-(ih/zoom/2)'"
+                f":s={OUT_W}x{OUT_H},fps=30"
+            )
+
+        anim_vf = (
+            f"scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease:flags=lanczos,"
+            f"pad={OUT_W}:{OUT_H}:(ow-iw)/2:(oh-ih)/2,"
+            f"{zoom_vf},"
+            f"settb=1/30"
+        )
+
+        # ── Step 4: f1 → fadewhite → still_animated ───────────────────────
+        rc1, err1 = await _run_cmd([
+            "ffmpeg", "-y", "-i", f1,
+            "-loop", "1", "-t", f"{ANIME_TOTAL:.1f}", "-i", still,
+            "-filter_complex",
+            f"[0:v]settb=1/30[va];"
+            f"[1:v]{anim_vf}[vb];"
+            f"[va][vb]xfade=transition=fadewhite:duration={ANIME_FADE}:offset={fade_off:.3f}[vout];"
+            f"aevalsrc=0:c=stereo:s=44100,atrim=duration={ANIME_TOTAL:.1f},asetpts=PTS-STARTPTS[asilent];"
+            f"[0:a][asilent]acrossfade=d={ANIME_FADE}[aout]",
+            "-map", "[vout]", "-map", "[aout]",
+            "-pix_fmt", "yuv420p",
+            "-c:v", "hevc_videotoolbox", "-b:v", "30M", "-allow_sw", "1",
+            "-c:a", "aac", "-b:a", "128k",
+            tmp1,
+        ])
+        if rc1 != 0:
+            logger.error(f"_merge_overlay step1 ({tr_type}) rc={rc1}: {err1[-300:]}")
+            return await _fallback()
+
+        # ── Step 5: still_animated → fadewhite → f2 ───────────────────────
+        step2_off = fade_off + ANIME_TOTAL - ANIME_FADE
+        rc2, err2 = await _run_cmd([
+            "ffmpeg", "-y", "-i", tmp1, "-i", f2,
+            "-filter_complex",
+            f"[0:v]settb=1/30[va];[1:v]settb=1/30[vb];"
+            f"[va][vb]xfade=transition=fadewhite:duration={ANIME_FADE}:offset={step2_off:.3f}[vout];"
+            f"[0:a][1:a]acrossfade=d={ANIME_FADE}[aout]",
+            "-map", "[vout]", "-map", "[aout]",
+            "-pix_fmt", "yuv420p",
+            "-c:v", "hevc_videotoolbox", "-b:v", "30M", "-allow_sw", "1",
+            "-c:a", "aac", "-b:a", "128k",
+            dst,
+        ])
+        if rc2 != 0:
+            logger.error(f"_merge_overlay step2 ({tr_type}) rc={rc2}: {err2[-300:]}")
+        return rc2 == 0
+
+    except Exception as exc:
+        logger.error(f"_merge_overlay ({tr_type}) exception: {exc}")
+        return await _fallback()
+    finally:
+        for p in [frame_a, frame_b, still, tmp1]:
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+
+
+def _best_time_window(valid: List[Seg]) -> List[Seg]:
+    """
+    Restrict selection to the highest-scoring 5-minute window in the recording.
+    Prevents the clip from jumping across large time gaps in a long live stream,
+    which reads as "内容不完整" under the platform quality rubric.
+    Only applied when valid segments span more than _CLUSTER_MIN_SPAN seconds.
+    """
+    if not valid:
+        return valid
+    sorted_segs = sorted(valid, key=lambda s: s.start)
+    span = sorted_segs[-1].end - sorted_segs[0].start
+    if span <= _CLUSTER_MIN_SPAN:
+        return valid  # short recording — skip windowing
+
+    best_score, best_window = -1.0, valid
+    for anchor in sorted_segs:
+        w_end = anchor.start + _CLUSTER_WINDOW
+        w_segs = [s for s in sorted_segs if s.start >= anchor.start and s.end <= w_end]
+        w_dur = sum(s.duration for s in w_segs)
+        if w_dur < CLIP_MIN * 0.5:
+            continue  # not enough content in this window
+        w_score = sum(s.score for s in w_segs)
+        # Bonus: all four categories present = narrative is complete
+        cats = {s.category for s in w_segs}
+        if {"problem", "solution", "result", "convert"}.issubset(cats):
+            w_score *= 1.3
+        if w_score > best_score:
+            best_score = w_score
+            best_window = w_segs
+    return best_window if best_window else valid
+
+
+def select_clips(segs: List[Seg], clip_min: float = CLIP_MIN, clip_max: float = CLIP_MAX) -> List[Seg]:
+    valid = _best_time_window([s for s in segs if s.valid])
+    return _select_from_valid(valid, clip_min, clip_max)
+
+
+def select_clips_variant(
+    segs: List[Seg],
+    exclude_ids: set,
+    clip_min: float = CLIP_MIN,
+    clip_max: float = CLIP_MAX,
+    seed: int = 0,
+) -> List[Seg]:
+    """Like select_clips but excludes segments already used in a prior variant."""
+    valid = [s for s in segs if s.valid and id(s) not in exclude_ids]
+    # If remaining content is insufficient, allow reuse but shuffle to differ from variant 0
+    if sum(s.duration for s in valid) < clip_min:
+        rng = random.Random(seed)
+        valid = [s for s in segs if s.valid]
+        rng.shuffle(valid)
+    valid = _best_time_window(valid)
+    return _select_from_valid(valid, clip_min, clip_max)
+
+
+# ── Feedback-guided scoring ───────────────────────────────────────────────────
+
+async def _feedback_to_hints(srt_path: str, feedback: str) -> dict:
+    """
+    Call Claude via Bedrock to convert user feedback into scoring hints.
+    Returns a dict with keys: preferred_ranges, avoid_ranges, boost_keywords,
+    avoid_keywords, prefer_longer, clip_min_override, clip_max_override.
+    Falls back to empty hints on any error.
+    """
+    from analyzer import BEDROCK_URL, BEDROCK_MODEL, BEDROCK_TOKEN
+    import httpx, json as _json, re as _re
+
+    if not BEDROCK_TOKEN:
+        logger.warning("Bedrock not configured, skipping feedback hints")
+        return {}
+
+    # Read SRT text (up to 6000 chars)
+    try:
+        with open(srt_path, encoding="utf-8") as f:
+            raw_srt = f.read()
+        lines = [l for l in raw_srt.splitlines()
+                 if l.strip() and not l.strip().isdigit() and "-->" not in l]
+        srt_text = "\n".join(lines)[:6000]
+    except Exception:
+        srt_text = ""
+
+    prompt = f"""你是短视频剪辑专家。用户对当前剪辑效果不满意，请根据反馈和字幕内容给出改善建议。
+
+用户反馈：
+{feedback}
+
+字幕片段（含时间轴，格式 秒数|内容）：
+{srt_text}
+
+请以JSON格式返回（只返回JSON，不含任何其他文字）：
+{{
+  "preferred_ranges": [[开始秒, 结束秒], ...],
+  "avoid_ranges": [[开始秒, 结束秒], ...],
+  "boost_keywords": ["词1", "词2"],
+  "avoid_keywords": ["词1"],
+  "prefer_longer": true或false,
+  "clip_min_override": null或秒数,
+  "clip_max_override": null或秒数,
+  "reasoning": "一句话解释"
+}}"""
+
+    payload = {
+        "messages": [{"role": "user", "content": [{"text": prompt}]}],
+        "inferenceConfig": {"maxTokens": 600, "temperature": 0},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{BEDROCK_URL}/model/{BEDROCK_MODEL}/converse",
+                json=payload,
+                headers={"Authorization": f"Bearer {BEDROCK_TOKEN}",
+                         "Content-Type": "application/json"},
+            )
+        if resp.status_code != 200:
+            logger.warning(f"Bedrock feedback hints error {resp.status_code}")
+            return {}
+        raw = resp.json()["output"]["message"]["content"][0]["text"]
+        m = _re.search(r"\{.*\}", raw, _re.DOTALL)
+        if m:
+            hints = _json.loads(m.group())
+            logger.info(f"Feedback hints: {hints.get('reasoning', '')}")
+            return hints
+    except Exception as e:
+        logger.warning(f"Feedback hints failed: {e}")
+    return {}
+
+
+def _apply_hints(segs: List[Seg], hints: dict) -> None:
+    """Apply Claude-generated hints to segment scores in-place."""
+    if not hints:
+        return
+
+    boost_kw = hints.get("boost_keywords") or []
+    avoid_kw = hints.get("avoid_keywords") or []
+    preferred = hints.get("preferred_ranges") or []
+    avoided   = hints.get("avoid_ranges") or []
+
+    for seg in segs:
+        if not seg.valid:
+            continue
+        # Keyword boosts / penalties
+        for kw in boost_kw:
+            if kw in seg.text:
+                seg.score += 3.0
+        for kw in avoid_kw:
+            if kw in seg.text:
+                seg.score -= 5.0
+                if seg.score < 0:
+                    seg.valid = False
+        # Time-range preferences
+        mid = (seg.start + seg.end) / 2
+        for s, e in preferred:
+            if s <= mid <= e:
+                seg.score += 4.0
+        for s, e in avoided:
+            if s <= mid <= e:
+                seg.valid = False
+
+
+# ── GPU offload path ──────────────────────────────────────────────────────────
+
+_GPU_SERVICE_URL  = os.environ.get("GPU_SERVICE_URL",  "http://10.190.0.203:8877")
+_GPU_WAIT_TIMEOUT = float(os.environ.get("GPU_WAIT_TIMEOUT", "600"))  # seconds to wait for GPU before local fallback
+
+# Maximum clip jobs pending on GPU server before we wait to submit more
+_GPU_MAX_PENDING = int(os.environ.get("GPU_MAX_PENDING", "500"))
+
+
+async def _gpu_delete_clip_job(job_id: str) -> None:
+    """Fire-and-forget: delete a completed clip job's files on the GPU server."""
+    try:
+        import httpx as _hx
+        async with _hx.AsyncClient(timeout=10.0) as c:
+            await c.delete(f"{_GPU_SERVICE_URL}/clip-jobs/{job_id}")
+        logger.debug(f"GPU clip job {job_id} cleaned up")
+    except Exception as e:
+        logger.debug(f"GPU clip job cleanup ignored: {e}")
+
+
+async def _gpu_pending_count() -> int:
+    """Return number of clip jobs queued+processing on GPU server."""
+    try:
+        import httpx as _hx
+        async with _hx.AsyncClient(timeout=5.0) as c:
+            r = await c.get(f"{_GPU_SERVICE_URL}/health")
+        if r.status_code == 200:
+            data = r.json()
+            return data.get("clip_jobs_pending", 0)
+    except Exception:
+        pass
+    return 0
+
+
+async def _edit_via_gpu(
+    mp4_filename: str,
+    room_id: int,
+    selected: List["Seg"],
+    segs: List["Seg"],
+    out_path: str,
+    on_progress=None,
+    mp4_path: Optional[str] = None,   # local path; enables auto-upload on 404
+) -> Optional[str]:
+    """
+    Offload clip encoding to GPU server via NVENC.
+    If the GPU returns 404 (file not found) and mp4_path is provided, the file is
+    uploaded automatically and the job is retried.
+    Returns out_path on success, None on failure.
+    """
+    import httpx
+
+    # Compute seg_offsets mirroring _nvenc_linear_merge's xfade overlap accumulation.
+    # Phase 2 uses simple concat (no xfade), so subtitle offsets are plain cumulative sums.
+    # Transitions are added in Phase 4 (after subtitle burn) and audio is re-trimmed to match.
+    _GPU_SEG_PAD = 0.5  # must match gpu_service/main.py SEG_PAD
+    _padded_durs = [min(_GPU_SEG_PAD, s.start) + s.duration + _GPU_SEG_PAD for s in selected]
+    _gpu_offsets: list[float] = [0.0]
+    _acc = 0.0
+    for _i in range(len(selected) - 1):
+        _acc += _padded_durs[_i]
+        _gpu_offsets.append(_acc)
+
+    ass_content = build_ass(selected, segs, seg_offsets=_gpu_offsets)
+    best_seg = max(selected, key=lambda s: s.score) if any(s.score > 0 for s in selected) \
+               else selected[max(0, len(selected) // 4)]
+
+    payload = {
+        "mp4_filename": mp4_filename,
+        "room_id": room_id,
+        "segments": [{"start": s.start, "end": s.end} for s in selected],
+        "ass_content": ass_content,
+        "thumb_seek": best_seg.start + 1.0,
+        "motion_styles": [s.motion for s in selected],
+        "transitions":   [s.transition for s in selected],  # index 0 unused; [1..] = type:dur per boundary
+    }
+
+    async def _submit(client) -> Optional[str]:
+        """POST /clip-jobs; returns job_id or None."""
+        nonlocal mp4_path
+        try:
+            resp = await client.post(f"{_GPU_SERVICE_URL}/clip-jobs", json=payload)
+        except Exception as e:
+            logger.warning(f"GPU clip job submission failed: {e}")
+            return None
+        if resp.status_code == 404 and mp4_path and os.path.exists(mp4_path):
+            # File not on GPU server — upload it, then retry once
+            logger.info(f"GPU 404: auto-uploading {mp4_filename} to GPU server then retrying...")
+            try:
+                from sync import sync_file
+                await sync_file(mp4_path, room_id)
+            except Exception as ue:
+                logger.warning(f"Auto-upload for {mp4_filename} failed: {ue}")
+                return None
+            try:
+                resp = await client.post(f"{_GPU_SERVICE_URL}/clip-jobs", json=payload)
+            except Exception as e:
+                logger.warning(f"GPU clip job retry after upload failed: {e}")
+                return None
+        if resp.status_code != 201:
+            logger.warning(f"GPU clip job rejected: {resp.status_code} {resp.text[:200]}")
+            return None
+        jid = resp.json()["job_id"]
+        logger.info(f"GPU clip job created: {jid} for {mp4_filename}")
+        return jid
+
+    from gpu_lock import gpu_slot as _gpu_slot
+    async with _gpu_slot(f"clip:{os.path.basename(mp4_filename)}"):
+        # Wait if GPU server already has too many jobs pending (avoid C: disk pressure)
+        _wait_logged = False
+        while True:
+            pending = await _gpu_pending_count()
+            if pending < _GPU_MAX_PENDING:
+                break
+            if not _wait_logged:
+                logger.info(f"GPU has {pending} pending clip jobs (max {_GPU_MAX_PENDING}), waiting...")
+                _wait_logged = True
+            await asyncio.sleep(15.0)
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            job_id = await _submit(client)
+        if not job_id:
+            return None
+
+        # Poll until done or 25-minute timeout; recover if GPU goes offline mid-job
+        deadline = asyncio.get_event_loop().time() + 1500
+        consecutive_errors = 0
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            while asyncio.get_event_loop().time() < deadline:
+                await asyncio.sleep(5.0)
+                try:
+                    data = (await client.get(f"{_GPU_SERVICE_URL}/clip-jobs/{job_id}")).json()
+                    consecutive_errors = 0
+                except Exception:
+                    consecutive_errors += 1
+                    if consecutive_errors >= 6:   # ~30s of consecutive failures
+                        from gpu_state import is_online as _gpu_is_online, wait_until_online as _gpu_wait
+                        if not _gpu_is_online():
+                            logger.info(f"GPU offline during clip job {job_id} — waiting for recovery...")
+                            try:
+                                await asyncio.wait_for(_gpu_wait(), timeout=600)
+                            except asyncio.TimeoutError:
+                                logger.warning(f"GPU stayed offline; abandoning clip job {job_id}")
+                                return None
+                            # GPU is back — check if job still exists
+                            consecutive_errors = 0
+                            try:
+                                r = await client.get(f"{_GPU_SERVICE_URL}/clip-jobs/{job_id}")
+                                if r.status_code == 404:
+                                    # Job was lost in restart — resubmit
+                                    logger.info(f"Clip job {job_id} lost after GPU restart, resubmitting...")
+                                    async with httpx.AsyncClient(timeout=30.0) as sc:
+                                        new_jid = await _submit(sc)
+                                    if new_jid:
+                                        job_id = new_jid
+                                    else:
+                                        return None
+                            except Exception:
+                                pass
+                    continue
+
+                status = data.get("status")
+                pct    = data.get("pct", 0)
+                phase  = data.get("phase", "")
+
+                if on_progress and pct > 0:
+                    if phase == "preprocess":
+                        await on_progress("preprocess", pct, 40)
+                    elif phase == "merge":
+                        await on_progress("merge", pct - 40, 35)
+                    elif phase in ("final", "thumbnail", "done"):
+                        await on_progress("final", 1, 1)
+
+                if status == "done":
+                    break
+                if status == "error":
+                    logger.warning(f"GPU clip job {job_id} error: {data.get('error')}")
+                    return None
+            else:
+                logger.warning(f"GPU clip job {job_id} timed out")
+                return None
+
+        # Download result (still inside gpu_slot — holds lock until transfer complete)
+        try:
+            async with httpx.AsyncClient(timeout=300.0) as client:
+                r = await client.get(f"{_GPU_SERVICE_URL}/clip-jobs/{job_id}/mp4")
+                if r.status_code != 200:
+                    logger.warning(f"GPU clip download failed: {r.status_code}")
+                    return None
+                os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                with open(out_path, "wb") as f:
+                    f.write(r.content)
+        except Exception as e:
+            logger.warning(f"GPU clip download error: {e}")
+            return None
+
+        if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
+            logger.warning("GPU clip download produced empty file")
+            return None
+
+        size_mb = os.path.getsize(out_path) / 1024 / 1024
+        logger.info(f"GPU clip downloaded: {out_path} ({size_mb:.1f} MB)")
+
+        # Clean up GPU server job files (fire-and-forget)
+        asyncio.create_task(_gpu_delete_clip_job(job_id))
+
+        return out_path
+
+
+# ── Fast local fallback (stream-copy + single encode) ─────────────────────────
+
+async def _fast_local_clip(
+    mp4: str,
+    selected: List[Seg],
+    segs: List[Seg],
+    out: str,
+    on_progress=None,
+) -> bool:
+    """
+    Fast local fallback when GPU is unavailable.
+    Stream-copy segment extraction + concat + single re-encode pass.
+    Skips all transitions and pre-processing.  ~10-30s vs 30+ minutes.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        # Step 1: extract each segment via stream copy (no re-encode)
+        # Probe the actual duration of each segment after extraction — stream copy
+        # snaps to the nearest keyframe so actual duration may differ from the
+        # theoretical value. We use the probed durations for ASS timing.
+        seg_files: List[str] = []
+        actual_durations: List[float] = []
+        for i, seg in enumerate(selected):
+            seg_out = os.path.join(tmp, f"seg_{i:03d}.mp4")
+            pad_start = min(SEG_PAD, seg.start)
+            t_start = seg.start - pad_start
+            t_dur = seg.duration + pad_start + SEG_PAD
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", f"{t_start:.3f}",
+                "-t", f"{t_dur:.3f}",
+                "-i", mp4,
+                "-c", "copy",
+                "-reset_timestamps", "1",
+                "-avoid_negative_ts", "make_zero",
+                seg_out,
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+            )
+            await proc.communicate()
+            if proc.returncode == 0 and os.path.exists(seg_out) and os.path.getsize(seg_out) > 0:
+                seg_files.append(seg_out)
+                # Probe actual duration (keyframe rounding may differ from t_dur)
+                try:
+                    dp = await asyncio.create_subprocess_exec(
+                        "ffprobe", "-v", "error",
+                        "-show_entries", "format=duration",
+                        "-of", "default=noprint_wrappers=1:nokey=1", seg_out,
+                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+                    )
+                    dout, _ = await dp.communicate()
+                    actual_durations.append(float(dout.strip()))
+                except Exception:
+                    actual_durations.append(t_dur)
+            else:
+                logger.warning(f"_fast_local_clip: segment {i} extract failed")
+                return False
+
+        # Compute cumulative offsets from actual durations (no xfade in fast path)
+        seg_offsets: List[float] = []
+        _cursor = 0.0
+        for _d in actual_durations:
+            seg_offsets.append(_cursor)
+            _cursor += _d
+        logger.debug(f"_fast_local_clip seg_offsets={[f'{o:.2f}' for o in seg_offsets]}")
+
+        ass_content = build_ass(selected, segs, seg_offsets=seg_offsets)
+        has_subs = "Dialogue:" in ass_content
+        ass_path = os.path.join(tmp, "subs.ass")
+        with open(ass_path, "w", encoding="utf-8") as f:
+            f.write(ass_content)
+
+        # Step 2: concat all segments (stream copy)
+        list_path = os.path.join(tmp, "concat.txt")
+        with open(list_path, "w") as lf:
+            for sf in seg_files:
+                lf.write(f"file '{sf}'\n")
+        merged = os.path.join(tmp, "merged.mp4")
+        cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy", merged]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+        )
+        await proc.communicate()
+        if proc.returncode != 0 or not os.path.exists(merged) or os.path.getsize(merged) == 0:
+            logger.error("_fast_local_clip: concat failed")
+            return False
+
+        # Step 3: single re-encode pass — scale to 1080×1920 + subtitles + music
+        music_path = _pick_music()
+        cmd = ["ffmpeg", "-y", "-i", merged]
+        filter_parts: List[str] = []
+        audio_map = "0:a"
+
+        if music_path:
+            cmd += ["-stream_loop", "-1", "-i", music_path]
+            filter_parts.append(
+                "[0:a]acompressor=threshold=-25dB:ratio=3:attack=5:release=100:makeup=4dB,"
+                "loudnorm=I=-16:TP=-1.5:LRA=11,"
+                "aformat=channel_layouts=stereo[voice];"
+                "[1:a]volume=0.40,aformat=channel_layouts=stereo[bgm];"
+                "[voice][bgm]amix=inputs=2:duration=first:normalize=0[aout]"
+            )
+            audio_map = "[aout]"
+        else:
+            filter_parts.append(
+                "[0:a]acompressor=threshold=-25dB:ratio=3:attack=5:release=100:makeup=4dB,"
+                "loudnorm=I=-16:TP=-1.5:LRA=11,"
+                "aformat=channel_layouts=stereo[aout]"
+            )
+            audio_map = "[aout]"
+
+        vf = f"scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease,pad={OUT_W}:{OUT_H}:(ow-iw)/2:(oh-ih)/2"
+        if has_subs:
+            escaped = ass_path.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+            vf += f",ass={escaped}"
+        filter_parts.append(f"[0:v]{vf}[vout]")
+
+        cmd += ["-filter_complex", ";".join(filter_parts)]
+        cmd += [
+            "-map", "[vout]", "-map", audio_map,
+            "-pix_fmt", "yuv420p",
+            "-c:v", "hevc_videotoolbox", "-b:v", "30M", "-allow_sw", "1",
+            "-ar", "44100", "-ac", "2",
+            "-c:a", "aac", "-b:a", "192k",
+            out,
+        ]
+        if on_progress:
+            await on_progress("final", 0, 1)
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+        )
+        _, stderr = await proc.communicate()
+        ok = proc.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 0
+        if not ok:
+            logger.error(
+                f"_fast_local_clip final encode failed rc={proc.returncode}: "
+                f"{stderr.decode(errors='replace')[-1000:]}"
+            )
+            return False
+
+        # Subtitle alignment validation
+        if has_subs and os.path.exists(ass_path):
+            try:
+                await _validate_subtitle_alignment(out, ass_path)
+            except Exception as _ve:
+                logger.debug(f"Subtitle validation skipped: {_ve}")
+
+        return True
+
+
+# ── Main entry ────────────────────────────────────────────────────────────────
+
+# ── Highlight reel intro (replaces before/after comparison) ───────────────────
+
+_SUBTITLE_POOL = [
+    "高光时刻", "变美瞬间", "精彩片段",
+    "Beauté", "Moments", "Style", "今日造型", "变美日记",
+]
+
+# Bold display fonts for overlay text (macOS system paths)
+_BOLD_FONT_PATHS = [
+    "/System/Library/Fonts/Supplemental/Impact.ttf",
+    "/Library/Fonts/Impact.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    "/Library/Fonts/Arial Bold.ttf",
+    "/System/Library/Fonts/HelveticaNeue.ttc",
+    "/System/Library/Fonts/Helvetica.ttc",
+]
+
+
+def _make_title_overlay_png(
+    title: str,
+    subtitle: str,
+    width: int,
+    height: int,
+    out_png: str,
+) -> bool:
+    """
+    Create a transparent title overlay PNG with horizontal stripe effect.
+    Style: large bold uppercase text + alternating horizontal stripe mask + subtitle + colorful arc.
+    """
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+        import math
+
+        img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+
+        # ── Colorful arc (left side, partial ring) ──────────────────────────
+        arc_colors = [
+            (200, 80, 255), (100, 140, 255), (50, 220, 200),
+            (80, 255, 150), (255, 220, 50), (255, 90, 40),
+        ]
+        cx = int(width * 0.07)
+        cy = height // 2
+        outer_r = int(width * 0.17)
+        inner_r = int(width * 0.11)
+        band_deg = 260.0 / len(arc_colors)
+        start_deg = -220.0
+
+        arc_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        arc_draw = ImageDraw.Draw(arc_layer)
+        for i, color in enumerate(arc_colors):
+            a0 = start_deg + i * band_deg
+            a1 = start_deg + (i + 1) * band_deg
+            box = [cx - outer_r, cy - outer_r, cx + outer_r, cy + outer_r]
+            arc_draw.pieslice(box, a0, a1, fill=(*color, 210))
+        # Punch transparent center
+        inner_box = [cx - inner_r, cy - inner_r, cx + inner_r, cy + inner_r]
+        arc_draw.ellipse(inner_box, fill=(0, 0, 0, 0))
+        img = Image.alpha_composite(img, arc_layer)
+
+        # ── Title font ────────────────────────────────────────────────────
+        font_size = max(110, width // 6)   # large — fills most of the frame width
+        title_font = None
+        for fp in _BOLD_FONT_PATHS:
+            if os.path.exists(fp):
+                try:
+                    title_font = ImageFont.truetype(fp, font_size)
+                    break
+                except Exception:
+                    pass
+        if title_font is None:
+            from thumbnail import _load_font as _tf
+            _FONT_TITLE_PATH = os.path.join(os.path.dirname(__file__), "assets", "fonts", "ZCOOLKuaiLe-Regular.ttf")
+            title_font = _tf(_FONT_TITLE_PATH, font_size)
+
+        text = title.upper()[:10]
+
+        # ── Render text on a separate layer, then apply stripe mask ───────
+        text_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        td = ImageDraw.Draw(text_layer)
+        bbox = title_font.getbbox(text)
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+        tx = (width - tw) // 2 - bbox[0]
+        ty = height // 2 - th // 2 - bbox[1] - int(height * 0.03)
+
+        # Thin shadow for depth (no heavy outline — keeps semi-transparent look)
+        for dx, dy in [(-2, 2), (2, 2)]:
+            td.text((tx + dx, ty + dy), text, font=title_font, fill=(0, 0, 0, 80))
+        # Semi-transparent white text (alpha=170 ≈ 67% opaque)
+        td.text((tx, ty), text, font=title_font, fill=(255, 255, 255, 170))
+
+        # Horizontal stripe mask: blank every other 5-pixel band → scan-line glitch effect
+        pixels = text_layer.load()
+        stripe = 5
+        for y in range(height):
+            if (y // stripe) % 2 == 1:
+                for x in range(width):
+                    r, g, b, a = pixels[x, y]
+                    pixels[x, y] = (r, g, b, 0)
+
+        img = Image.alpha_composite(img, text_layer)
+
+        # ── Subtitle ─────────────────────────────────────────────────────
+        sub_size = max(28, width // 32)
+        sub_font = None
+        _FONT_SUB_PATH = os.path.join(os.path.dirname(__file__), "assets", "fonts", "ZCOOLXiaoWei-Regular.ttf")
+        if os.path.exists(_FONT_SUB_PATH):
+            try:
+                sub_font = ImageFont.truetype(_FONT_SUB_PATH, sub_size)
+            except Exception:
+                pass
+        if sub_font is None:
+            sub_font = ImageFont.load_default()
+
+        draw2 = ImageDraw.Draw(img)
+        sub_bbox = sub_font.getbbox(subtitle)
+        sw = sub_bbox[2] - sub_bbox[0]
+        sx = (width - sw) // 2 - sub_bbox[0]
+        sy = ty + th + int(height * 0.025)
+        draw2.text((sx, sy), subtitle, font=sub_font, fill=(210, 210, 210, 200))
+
+        img.save(out_png, "PNG")
+        return True
+    except Exception as e:
+        logger.warning(f"Title overlay PNG failed: {e}")
+        return False
+
+
+async def _hl_merge_phone_zoom(f1: str, f2: str, dst: str, seed: int = 0) -> bool:
+    """
+    Phone-zoom transition between two video-only highlight clips.
+    Inserts an animated phone-screen still between f1 and f2.
+    No audio (highlight clips are silent; BGM added later).
+    """
+    HL_ANIME_DUR  = 0.6   # total still animation duration (s)
+    HL_ANIME_FADE = 0.2   # fadewhite duration into/out of still (s)
+
+    frame_b = dst + "_hpz_b.jpg"
+    still   = dst + "_hpz_still.jpg"
+    anim    = dst + "_hpz_anim.mp4"
+    tmp1    = dst + "_hpz_s1.mp4"
+
+    async def _cleanup():
+        for p in (frame_b, still, anim, tmp1):
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+
+    try:
+        # Step 1: Extract first frame of f2 (small probe)
+        cmd = [
+            "ffmpeg", "-y", "-ss", "0.05", "-i", f2,
+            "-frames:v", "1",
+            "-vf", f"scale={OUT_W // 4}:{OUT_H // 4}:flags=fast_bilinear",
+            "-q:v", "5", frame_b,
+        ]
+        p = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+        )
+        await p.communicate()
+        if p.returncode != 0 or not os.path.exists(frame_b):
+            return False
+
+        # Step 2: Build phone-screen composite still (PIL)
+        built = await asyncio.to_thread(_build_phone_still, frame_b, still, OUT_W, OUT_H)
+        if not built or not os.path.exists(still):
+            return False
+
+        # Step 3: Animate still with zoompan grow-in (0.55× → 1.0×)
+        n_frames = int(HL_ANIME_DUR * 30)
+        zoom_vf = (
+            f"zoompan=z='if(eq(on,1),0.55,min(zoom+{0.45/n_frames:.5f},1.0))'"
+            f":d={n_frames}:x='(iw/2)-(iw/zoom/2)':y='(ih/2)-(ih/zoom/2)'"
+            f":s={OUT_W}x{OUT_H},fps=30"
+        )
+        anim_vf = (
+            f"scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease:flags=lanczos,"
+            f"pad={OUT_W}:{OUT_H}:(ow-iw)/2:(oh-ih)/2,"
+            f"{zoom_vf},settb=1/30"
+        )
+        cmd = [
+            "ffmpeg", "-y",
+            "-loop", "1", "-t", f"{HL_ANIME_DUR + 0.1:.2f}", "-i", still,
+            "-vf", anim_vf, "-t", f"{HL_ANIME_DUR:.2f}",
+            "-c:v", "hevc_videotoolbox", "-b:v", "30M", "-allow_sw", "1",
+            "-an", "-pix_fmt", "yuv420p", anim,
+        ]
+        p = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+        )
+        _, err = await p.communicate()
+        if p.returncode != 0 or not os.path.exists(anim):
+            logger.warning(f"_hl_merge_phone_zoom anim failed: {err.decode()[-200:]}")
+            return False
+
+        # Probe f1 duration
+        try:
+            rc, dur_out = await _run_cmd([
+                "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1", f1,
+            ])
+            f1_dur = float(dur_out.strip())
+        except Exception:
+            f1_dur = 1.0
+
+        # Step 4: xfade f1 → animated still (fadewhite)
+        fade_off1 = max(0.0, f1_dur - HL_ANIME_FADE)
+        cmd = [
+            "ffmpeg", "-y", "-i", f1, "-i", anim,
+            "-filter_complex",
+            f"[0:v]settb=1/30[va];[1:v]settb=1/30[vb];"
+            f"[va][vb]xfade=transition=fadewhite:duration={HL_ANIME_FADE}:offset={fade_off1:.3f}[vout]",
+            "-map", "[vout]",
+            "-c:v", "hevc_videotoolbox", "-b:v", "30M", "-allow_sw", "1",
+            "-an", "-pix_fmt", "yuv420p", tmp1,
+        ]
+        p = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+        )
+        _, err = await p.communicate()
+        if p.returncode != 0 or not os.path.exists(tmp1):
+            logger.warning(f"_hl_merge_phone_zoom s1 failed: {err.decode()[-200:]}")
+            return False
+
+        # Step 5: xfade animated still → f2 (fadewhite)
+        tmp1_dur = f1_dur + HL_ANIME_DUR - HL_ANIME_FADE
+        step2_off = max(0.0, tmp1_dur - HL_ANIME_FADE)
+        cmd = [
+            "ffmpeg", "-y", "-i", tmp1, "-i", f2,
+            "-filter_complex",
+            f"[0:v]settb=1/30[va];[1:v]settb=1/30[vb];"
+            f"[va][vb]xfade=transition=fadewhite:duration={HL_ANIME_FADE}:offset={step2_off:.3f}[vout]",
+            "-map", "[vout]",
+            "-c:v", "hevc_videotoolbox", "-b:v", "30M", "-allow_sw", "1",
+            "-an", "-pix_fmt", "yuv420p", dst,
+        ]
+        p = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+        )
+        _, err = await p.communicate()
+        if p.returncode != 0:
+            logger.warning(f"_hl_merge_phone_zoom s2 failed: {err.decode()[-200:]}")
+            return False
+
+        return os.path.exists(dst) and os.path.getsize(dst) > 0
+
+    except Exception as e:
+        logger.error(f"_hl_merge_phone_zoom: {e}")
+        return False
+    finally:
+        await _cleanup()
+
+
+async def create_highlight_reel(
+    mp4_path: str,
+    segs: "List[Seg]",
+    out_mp4: str,
+    title: str = "STYLE",
+    subtitle: str = "",
+) -> bool:
+    """
+    Create a 3-5s highlight reel from the top-scoring segments.
+
+    Steps:
+      1. Pick top 6-10 segments by score; extract 0.75s raw each → 0.5s at 1.5× speed
+      2. Concat with right-to-left slide (slideleft) xfade transitions
+      3. Overlay semi-transparent striped title PNG with fade-in/out
+    """
+    if not subtitle:
+        subtitle = random.choice(_SUBTITLE_POOL)
+
+    # Pick 6-10 top segments (by score), min 0.5s, then restore chronological order
+    # Exclude comparison segments (戴之前/戴之后 images) per user preference
+    valid = [s for s in segs if s.valid and s.duration >= 0.5 and s.category != "comparison"]
+    if not valid:
+        valid = [s for s in segs if s.duration >= 0.5 and s.category != "comparison"]
+    if not valid:
+        valid = [s for s in segs if s.duration >= 0.5]
+    if not valid:
+        return False
+    top = sorted(valid, key=lambda s: s.score, reverse=True)[:3]
+    top = sorted(top, key=lambda s: s.start)  # restore time order
+
+    CLIP_RAW   = 1.5   # raw seconds to extract (→ 1.0s at 1.5×)
+    SPEED      = 1.5   # playback speed multiplier
+    CLIP_OUT   = CLIP_RAW / SPEED   # 1.0s per clip after speedup
+    CROSSFADE  = 0.5   # xfade transition duration (must be < CLIP_OUT)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # ── Step 1: extract each clip at 1.5× speed, video only (BGM replaces audio) ──
+        clip_files: list[str] = []
+        _SF = (
+            f"scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease,"
+            f"pad={OUT_W}:{OUT_H}:(ow-iw)/2:(oh-ih)/2"
+        )
+        for i, seg in enumerate(top):
+            mid = (seg.start + seg.end) / 2.0
+            t_start = max(0.0, mid - CLIP_RAW / 2)
+            seg_out = os.path.join(tmp, f"hl_{i}.mp4")
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", f"{t_start:.3f}", "-t", f"{CLIP_RAW + 0.2:.3f}",
+                "-i", mp4_path,
+                "-vf", f"setpts=PTS/{SPEED},{_SF},fps=25",
+                "-t", f"{CLIP_OUT:.3f}",
+                "-c:v", "hevc_videotoolbox", "-b:v", "30M", "-allow_sw", "1",
+                "-an",                        # no audio — BGM added later
+                "-pix_fmt", "yuv420p",
+                seg_out,
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+            )
+            _, err = await proc.communicate()
+            if proc.returncode == 0 and os.path.exists(seg_out) and os.path.getsize(seg_out) > 0:
+                clip_files.append(seg_out)
+            else:
+                logger.debug(f"Highlight clip {i} failed: {err.decode()[-200:]}")
+
+        if not clip_files:
+            return False
+
+        # ── Step 2: concat clips with phone_zoom transitions (video only) ──
+        _HL_ANIME_DUR  = 0.6   # still animation duration
+        _HL_ANIME_FADE = 0.2   # fadewhite duration into/out of still
+        merged = os.path.join(tmp, "merged.mp4")
+        N = len(clip_files)
+        if N == 1:
+            import shutil
+            shutil.copy2(clip_files[0], merged)
+        else:
+            current = clip_files[0]
+            ok_merge = True
+            for k in range(1, N):
+                dst_k = merged if k == N - 1 else os.path.join(tmp, f"merged_{k}.mp4")
+                ok = await _hl_merge_phone_zoom(current, clip_files[k], dst_k, seed=k * 13)
+                if not ok:
+                    ok_merge = False
+                    break
+                current = dst_k
+            if not ok_merge:
+                logger.warning("Highlight phone_zoom merge failed — falling back to simple concat")
+                list_file = os.path.join(tmp, "concat.txt")
+                with open(list_file, "w") as lf:
+                    for cf in clip_files:
+                        lf.write(f"file '{os.path.abspath(cf)}'\n")
+                cmd2 = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_file,
+                        "-c:v", "hevc_videotoolbox", "-b:v", "30M", "-allow_sw", "1",
+                        "-an", "-pix_fmt", "yuv420p", merged]
+                proc2 = await asyncio.create_subprocess_exec(
+                    *cmd2, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                )
+                await proc2.communicate()
+
+        if not os.path.exists(merged) or os.path.getsize(merged) == 0:
+            return False
+
+        # ── Step 3: overlay title PNG ─────────────────────────────────────
+        title_png = os.path.join(tmp, "title_overlay.png")
+        has_overlay = _make_title_overlay_png(title, subtitle, OUT_W, OUT_H, title_png)
+
+        if not has_overlay:
+            import shutil
+            shutil.copy2(merged, out_mp4)
+            return os.path.exists(out_mp4) and os.path.getsize(out_mp4) > 0
+
+        # Total output duration: N clips + (N-1) phone_zoom transitions
+        total_out = N * CLIP_OUT + (N - 1) * (_HL_ANIME_DUR - 2 * _HL_ANIME_FADE)
+        fade_dur  = min(0.3, total_out * 0.15)
+        fade_out_start = max(0.0, total_out - fade_dur - 0.1)
+
+        bgm_path = _pick_music()
+        if bgm_path:
+            # BGM: loop, trim to output duration, lower volume
+            title_fc = (
+                f"[1:v]fade=t=in:st=0:d={fade_dur:.2f}:alpha=1,"
+                f"fade=t=out:st={fade_out_start:.2f}:d={fade_dur:.2f}:alpha=1[ovr];"
+                "[0:v][ovr]overlay=0:0[vout];"
+                f"[2:a]atrim=0:{total_out:.3f},asetpts=PTS-STARTPTS,volume=0.5,"
+                "aformat=channel_layouts=stereo[aout]"
+            )
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", merged,
+                "-i", title_png,
+                "-stream_loop", "-1", "-i", bgm_path,
+                "-filter_complex", title_fc,
+                "-map", "[vout]", "-map", "[aout]",
+                "-c:v", "hevc_videotoolbox", "-b:v", "30M", "-allow_sw", "1",
+                "-c:a", "aac", "-b:a", "192k",
+                "-pix_fmt", "yuv420p",
+                out_mp4,
+            ]
+        else:
+            # No BGM available: video-only output
+            title_fc = (
+                f"[1:v]fade=t=in:st=0:d={fade_dur:.2f}:alpha=1,"
+                f"fade=t=out:st={fade_out_start:.2f}:d={fade_dur:.2f}:alpha=1[ovr];"
+                "[0:v][ovr]overlay=0:0[vout]"
+            )
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", merged,
+                "-i", title_png,
+                "-filter_complex", title_fc,
+                "-map", "[vout]",
+                "-c:v", "hevc_videotoolbox", "-b:v", "30M", "-allow_sw", "1",
+                "-an",
+                "-pix_fmt", "yuv420p",
+                out_mp4,
+            ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+        )
+        _, err = await proc.communicate()
+        ok = proc.returncode == 0 and os.path.exists(out_mp4) and os.path.getsize(out_mp4) > 0
+        if not ok:
+            logger.warning(f"Highlight overlay failed: {err.decode()[-200:]}")
+            import shutil
+            shutil.copy2(merged, out_mp4)
+            ok = os.path.exists(out_mp4) and os.path.getsize(out_mp4) > 0
+        return ok
+
+
+async def _add_highlight_prefix(
+    mp4_path: str,
+    segs: list,
+    out_path: str,
+    room_name: str = "",
+) -> None:
+    """Prepend a highlight reel intro clip to out_path. Swallows all errors."""
+    hl_out = out_path.replace(".mp4", "_highlight.mp4")
+    try:
+        # Derive display title: prefer English letters, fall back to first few chars
+        eng = re.sub(r"[^a-zA-Z]", "", room_name).upper()
+        title = eng[:8] if len(eng) >= 3 else (room_name[:6].upper() if room_name else "STYLE")
+        subtitle = random.choice(_SUBTITLE_POOL)
+        if await create_highlight_reel(mp4_path, segs, hl_out, title=title, subtitle=subtitle):
+            await _prepend_video_segment(hl_out, out_path)
+    except Exception as e:
+        logger.warning(f"Highlight reel prefix skipped: {e}")
+    finally:
+        try:
+            os.remove(hl_out)
+        except Exception:
+            pass
+
+
+async def _add_highlight_prefix_from_srt(
+    mp4_path: str,
+    srt_path: str,
+    out_path: str,
+    room_name: str = "",
+) -> None:
+    """Parse SRT and call _add_highlight_prefix. Used when segs are not in scope."""
+    try:
+        segs = parse_srt(srt_path)
+        segs = _merge_short_segs(segs)
+        for seg in segs:
+            score_and_tag(seg)
+        await _add_highlight_prefix(mp4_path, segs, out_path, room_name=room_name)
+    except Exception as e:
+        logger.warning(f"_add_highlight_prefix_from_srt failed: {e}")
+
+
+async def _add_comparison_prefix(mp4_path: str, segs: list, out_path: str) -> None:
+    """[DISABLED] Before/after comparison clip — success rate too low. Kept for future use.
+    Call _add_highlight_prefix instead.
+    """
+    pass  # disabled — see create_before_after_clip for the preserved implementation
+
+
+async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown", record_date: str = "", clip_duration: Optional[float] = None, on_progress=None, feedback: Optional[str] = None, room_id: Optional[int] = None, clip_engine: str = "legacy") -> Optional[str]:
+    """
+    Produce a highlight clip from a recording + its SRT.
+    clip_engine='legacy' uses keyword-based 10-step narrative selection.
+    clip_engine='v2'     uses hairstyle-boundary detection — picks the best single wig intro window.
+    Returns local path to the output _clip.mp4, or None on failure.
+    Output is organised as recordings/{room_name}/{date}/{room}_{date}_{seq}_clip.mp4.
+    """
+    if not os.path.exists(mp4_path):
+        logger.error(f"MP4 not found: {mp4_path}")
+        return None
+    if not os.path.exists(srt_path):
+        logger.error(f"SRT not found: {srt_path}")
+        return None
+
+    # Parse + merge short segments + score
+    segs = parse_srt(srt_path)
+    if not segs:
+        logger.warning(f"Empty SRT: {srt_path}")
+        return None
+    segs = _merge_short_segs(segs)
+    for seg in segs:
+        score_and_tag(seg)
+
+    # Detect silence and penalize silent segments
+    try:
+        silences = await detect_silence(mp4_path)
+        for seg in segs:
+            if seg.valid and _silence_ratio(seg, silences) > 0.6:
+                seg.valid = False
+                logger.debug(f"Silence removed: [{seg.start:.1f}-{seg.end:.1f}] {seg.text[:30]}")
+    except Exception as e:
+        logger.warning(f"Silence detection skipped: {e}")
+
+    # Phase B: Audio energy scoring — enrich scores with per-segment loudness/dynamics
+    try:
+        from segment_scorer import enrich_audio_scores
+        await enrich_audio_scores(mp4_path, segs)
+    except Exception as e:
+        logger.warning(f"Audio scoring skipped: {e}")
+
+    # Phase C: Visual quality scoring — sharpness + face detection per segment
+    try:
+        from segment_scorer import enrich_visual_scores
+        await enrich_visual_scores(mp4_path, segs)
+    except Exception as e:
+        logger.warning(f"Visual scoring skipped: {e}")
+
+    # Phase D: Claude Haiku visual semantic scoring — wig visibility + demo quality
+    try:
+        from segment_scorer import enrich_semantic_scores
+        await enrich_semantic_scores(mp4_path, segs)
+    except Exception as e:
+        logger.warning(f"Semantic scoring skipped: {e}")
+
+    # ── v2: 发型边界识别，仅在识别到的发型窗口内选段 ──────────────────────────
+    if clip_engine == "v2":
+        try:
+            from wig_boundary import detect_boundaries, pick_best_window
+            boundaries = await detect_boundaries(srt_path)
+            window = pick_best_window(boundaries)
+            if window:
+                logger.info(
+                    f"[v2] Wig window: {window['wig']} "
+                    f"({window['start_sec']:.0f}s–{window['end_sec']:.0f}s, "
+                    f"complete={window['complete']})"
+                )
+                segs = [s for s in segs if s.start >= window["start_sec"] and s.end <= window["end_sec"]]
+                if not segs:
+                    logger.warning(f"[v2] No segments in wig window, falling back to all segs")
+            else:
+                logger.warning("[v2] No wig boundaries detected, using full recording")
+        except Exception as e:
+            logger.warning(f"[v2] Boundary detection error: {e}, continuing with all segs")
+
+    # Apply feedback hints if provided
+    if feedback:
+        hints = await _feedback_to_hints(srt_path, feedback)
+        _apply_hints(segs, hints)
+        c_min = hints.get("clip_min_override") or ((clip_duration * 0.85) if clip_duration else (CLIP_MIN_V2 if clip_engine == "v2" else CLIP_MIN))
+        c_max = hints.get("clip_max_override") or (clip_duration if clip_duration else (CLIP_MAX_V2 if clip_engine == "v2" else CLIP_MAX))
+        if hints.get("prefer_longer"):
+            c_min = max(c_min, CLIP_MIN * 1.3)
+    else:
+        if clip_engine == "v2":
+            c_min = clip_duration * 0.85 if clip_duration else CLIP_MIN_V2
+            c_max = clip_duration if clip_duration else CLIP_MAX_V2
+        else:
+            c_min = (clip_duration * 0.85) if clip_duration else CLIP_MIN
+            c_max = clip_duration if clip_duration else CLIP_MAX
+
+    # Select clips
+    selected = select_clips(segs, clip_min=c_min, clip_max=c_max)
+    if not selected:
+        logger.warning(f"No valid clips selected for {mp4_path}")
+        return None
+
+    total_dur = sum(s.duration for s in selected)
+    logger.info(
+        f"[{clip_engine}] Selected {len(selected)} segments, {total_dur:.1f}s "
+        f"[{', '.join(s.category for s in selected)}]"
+    )
+
+    from datetime import datetime
+    date_str  = record_date or datetime.utcnow().strftime("%Y%m%d")
+    safe_name = re.sub(r'[\\/:*?"<>|]', '_', room_name)
+    out_dir   = os.path.join(RECORDINGS_DIR, safe_name, date_str)
+    os.makedirs(out_dir, exist_ok=True)
+    seq       = len([f for f in os.listdir(out_dir) if f.endswith("_clip.mp4")]) + 1
+    out_path  = os.path.join(out_dir, f"{safe_name}_{date_str}_{seq:03d}_clip.mp4")
+
+    # ── Try GPU path first ────────────────────────────────────────────────────
+    if room_id is not None:
+        # Wait for GPU to come back online before attempting (up to _GPU_WAIT_TIMEOUT)
+        from gpu_state import is_online as _gpu_is_online, wait_until_online as _gpu_wait
+        if not _gpu_is_online():
+            logger.info(f"GPU offline — waiting up to {_GPU_WAIT_TIMEOUT:.0f}s before clip job...")
+            try:
+                await asyncio.wait_for(_gpu_wait(), timeout=_GPU_WAIT_TIMEOUT)
+                logger.info("GPU back online, proceeding with GPU clip")
+            except asyncio.TimeoutError:
+                logger.warning(f"GPU still offline after {_GPU_WAIT_TIMEOUT:.0f}s — clip job skipped (no local fallback)")
+                return None
+        if room_id is not None:
+            try:
+                mp4_filename = os.path.basename(mp4_path)
+                gpu_result = await _edit_via_gpu(
+                    mp4_filename, room_id, selected, segs, out_path, on_progress,
+                    mp4_path=mp4_path,
+                )
+                if gpu_result:
+                    size_mb = os.path.getsize(out_path) / 1024 / 1024
+                    logger.info(f"Clip ready (GPU): {out_path} ({size_mb:.1f} MB, {total_dur:.1f}s)")
+                    return out_path
+                logger.error("GPU clip failed — no local fallback, job skipped")
+                return None
+            except Exception as e:
+                logger.error(f"GPU path error — no local fallback: {e}")
+                return None
+
+    logger.error(f"No GPU available for {os.path.basename(mp4_path)} — clip skipped")
+    return None
+
+
+async def edit_recording_multi(
+    mp4_path: str,
+    srt_path: str,
+    count: int,
+    room_name: str = "unknown",
+    record_date: str = "",
+    clip_duration: Optional[float] = None,
+    on_progress=None,
+    feedback: Optional[str] = None,
+    room_id: Optional[int] = None,
+    clip_engine: str = "legacy",
+) -> List[str]:
+    """
+    Produce `count` distinct highlight clips from the same recording.
+    Returns list of successfully generated output paths.
+    """
+    if not os.path.exists(mp4_path):
+        logger.error(f"MP4 not found: {mp4_path}")
+        return []
+    if not os.path.exists(srt_path):
+        logger.error(f"SRT not found: {srt_path}")
+        return []
+
+    # Parse + merge short segments + score once
+    segs = parse_srt(srt_path)
+    if not segs:
+        logger.warning(f"Empty SRT: {srt_path}")
+        return []
+    segs = _merge_short_segs(segs)
+    for seg in segs:
+        score_and_tag(seg)
+
+    # Detect silence once
+    try:
+        silences = await detect_silence(mp4_path)
+        for seg in segs:
+            if seg.valid and _silence_ratio(seg, silences) > 0.6:
+                seg.valid = False
+    except Exception as e:
+        logger.warning(f"Silence detection skipped: {e}")
+
+    # Phase B: Audio energy scoring
+    try:
+        from segment_scorer import enrich_audio_scores
+        await enrich_audio_scores(mp4_path, segs)
+    except Exception as e:
+        logger.warning(f"Audio scoring skipped: {e}")
+
+    # Phase C: Visual quality scoring
+    try:
+        from segment_scorer import enrich_visual_scores
+        await enrich_visual_scores(mp4_path, segs)
+    except Exception as e:
+        logger.warning(f"Visual scoring skipped: {e}")
+
+    # Phase D: Claude Haiku visual semantic scoring — wig visibility + demo quality
+    try:
+        from segment_scorer import enrich_semantic_scores
+        await enrich_semantic_scores(mp4_path, segs)
+    except Exception as e:
+        logger.warning(f"Semantic scoring skipped: {e}")
+
+    # ── v2: 发型边界识别（多版本共用同一个发型窗口）──────────────────────────
+    if clip_engine == "v2":
+        try:
+            from wig_boundary import detect_boundaries, pick_best_window
+            boundaries = await detect_boundaries(srt_path)
+            window = pick_best_window(boundaries)
+            if window:
+                logger.info(
+                    f"[v2-multi] Wig window: {window['wig']} "
+                    f"({window['start_sec']:.0f}s–{window['end_sec']:.0f}s)"
+                )
+                segs = [s for s in segs if s.start >= window["start_sec"] and s.end <= window["end_sec"]]
+                if not segs:
+                    logger.warning("[v2-multi] No segments in wig window, using all segs")
+            else:
+                logger.warning("[v2-multi] No wig boundaries detected, using full recording")
+        except Exception as e:
+            logger.warning(f"[v2-multi] Boundary detection error: {e}, continuing with all segs")
+
+    # Apply feedback hints if provided
+    if feedback:
+        hints = await _feedback_to_hints(srt_path, feedback)
+        _apply_hints(segs, hints)
+
+    if clip_engine == "v2":
+        c_min = clip_duration * 0.85 if clip_duration else CLIP_MIN_V2
+        c_max = clip_duration if clip_duration else CLIP_MAX_V2
+    else:
+        c_min = (clip_duration * 0.85) if clip_duration else CLIP_MIN
+        c_max = clip_duration if clip_duration else CLIP_MAX
+
+    from datetime import datetime
+    date_str  = record_date or datetime.utcnow().strftime("%Y%m%d")
+    safe_name = re.sub(r'[\\/:*?"<>|]', '_', room_name)
+    out_dir   = os.path.join(RECORDINGS_DIR, safe_name, date_str)
+    os.makedirs(out_dir, exist_ok=True)
+    base_seq  = len([f for f in os.listdir(out_dir) if f.endswith("_clip.mp4") or "_clip_v" in f]) + 1
+
+    results: List[str] = []
+    exclude_ids: set = set()
+
+    for k in range(count):
+        if k == 0:
+            selected = _select_from_valid([s for s in segs if s.valid], c_min, c_max)
+        else:
+            selected = select_clips_variant(segs, exclude_ids, c_min, c_max, seed=k)
+
+        if not selected:
+            logger.warning(f"No clips selected for variant {k+1}")
+            continue
+
+        # Accumulate used segment ids to encourage variety in next variant
+        exclude_ids.update(id(s) for s in selected)
+
+        out_path = os.path.join(out_dir, f"{safe_name}_{date_str}_{base_seq:03d}_clip_v{k+1}.mp4")
+        total_dur = sum(s.duration for s in selected)
+        logger.info(f"Variant {k+1}: {len(selected)} segs, {total_dur:.1f}s")
+
+        # ── Try GPU NVENC path first ──────────────────────────────────────────
+        gpu_used = False
+        _room_id_v = room_id  # local copy so we can disable GPU for this variant only
+        if _room_id_v is not None:
+            from gpu_state import is_online as _gpu_is_online, wait_until_online as _gpu_wait
+            if not _gpu_is_online():
+                logger.info(f"GPU offline — waiting up to {_GPU_WAIT_TIMEOUT:.0f}s (variant {k+1})...")
+                try:
+                    await asyncio.wait_for(_gpu_wait(), timeout=_GPU_WAIT_TIMEOUT)
+                except asyncio.TimeoutError:
+                    logger.warning(f"GPU still offline — variant {k+1} skipped (no local fallback)")
+                    continue
+        if _room_id_v is not None:
+            try:
+                mp4_filename = os.path.basename(mp4_path)
+                gpu_result = await _edit_via_gpu(
+                    mp4_filename, _room_id_v, selected, segs, out_path, on_progress,
+                    mp4_path=mp4_path,
+                )
+                if gpu_result:
+                    size_mb = os.path.getsize(out_path) / 1024 / 1024
+                    logger.info(f"Variant {k+1} ready (NVENC): {out_path} ({size_mb:.1f} MB)")
+                    results.append(out_path)
+                    gpu_used = True
+                else:
+                    logger.error(f"GPU clip failed for variant {k+1} — no local fallback")
+            except Exception as e:
+                logger.error(f"GPU path error for variant {k+1} — no local fallback: {e}")
+        else:
+            logger.error(f"No GPU available for variant {k+1} — skipped")
+
+    return results

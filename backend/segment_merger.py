@@ -353,9 +353,12 @@ async def maybe_merge_before_upload(
         if oldest_start:
             try:
                 dt = datetime.fromisoformat(oldest_start.replace(" ", "T"))
+                # DB stores local time without tzinfo — compare with local now
                 if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                wait_secs = int(time.time() - dt.timestamp())
+                    from datetime import datetime as _dt
+                    wait_secs = int((_dt.now() - dt).total_seconds())
+                else:
+                    wait_secs = int(time.time() - dt.timestamp())
             except Exception:
                 pass
         if wait_secs < STALE_WAIT_SECS:

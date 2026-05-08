@@ -1,0 +1,96 @@
+{
+  "generation_time": "2026-04-08T22:18:22.084717",
+  "test_count": 10,
+  "test_samples": [
+    {
+      "test_id": 1,
+      "group_id": 1538,
+      "product_name": "中长发半扎发蕾丝假发 深棕色",
+      "scene_type": "opening",
+      "video_prompt": "woman looking concerned in mirror, trying different looks, soft disappointed expression, product focused scene, realistic lifestyle scene, natural lighting, relatable everyday moment, 4K quality, professional cinematography",
+      "duration": 12,
+      "expected_style": "Product showcase, lifestyle commercial"
+    },
+    {
+      "test_id": 2,
+      "group_id": 1539,
+      "product_name": "中分直发高层次精修款 黑巧克力",
+      "scene_type": "opening",
+      "video_prompt": "woman looking concerned in mirror, trying different looks, soft disappointed expression, product focused scene, realistic lifestyle scene, natural lighting, relatable everyday moment, 4K quality, professional cinematography",
+      "duration": 12,
+      "expected_style": "Product showcase, lifestyle commercial"
+    },
+    {
+      "test_id": 3,
+      "group_id": 1540,
+      "product_name": "水光绸缎微卷长直发 自然黑",
+      "scene_type": "opening",
+      "video_prompt": "woman looking concerned in mirror, trying different looks, soft disappointed expression, product focused scene, realistic lifestyle scene, natural lighting, relatable everyday moment, 4K quality, professional cinematography",
+      "duration": 12,
+      "expected_style": "Product showcase, lifestyle commercial"
+    },
+    {
+      "test_id": 4,
+      "group_id": 1541,
+      "product_name": "无辜卷卷短卷发 冷茶色、咖啡豆色",
+      "scene_type": "opening",
+      "video_prompt": "woman looking concerned in mirror, trying different looks, soft disappointed expression, product focused scene, realistic lifestyle scene, natural lighting, relatable everyday moment, 4K quality, professional cinematography",
+      "duration": 12,
+      "expected_style": "Product showcase, lifestyle commercial"
+    },
+    {
+      "test_id": 5,
+      "group_id": 1543,
+      "product_name": "梨花烫内扣长发 自然黑",
+      "scene_type": "opening",
+      "video_prompt": "woman looking concerned in mirror, trying different looks, soft disappointed expression, product focused scene, realistic lifestyle scene, natural lighting, relatable everyday moment, 4K quality, professional cinematography",
+      "duration": 12,
+      "expected_style": "Product showcase, lifestyle commercial"
+    },
+    {
+      "test_id": 6,
+      "group_id": 1544,
+      "product_name": "空气感刘海短发 冷茶色",
+      "scene_type": "opening",
+      "video_prompt": "woman looking concerned in mirror, trying different looks, soft disappointed expression, product focused scene, realistic lifestyle scene, natural lighting, relatable everyday moment, 4K quality, professional cinematography",
+      "duration": 12,
+      "expected_style": "Product showcase, lifestyle commercial"
+    },
+    {
+      "test_id": 7,
+      "group_id": 1545,
+      "product_name": "齐刘海卷发中长款 灰粉渐变色",
+      "scene_type": "opening",
+      "video_prompt": "woman looking concerned in mirror, trying different looks, soft disappointed expression, product focused scene, realistic lifestyle scene, natural lighting, relatable everyday moment, 4K quality, professional cinematography",
+      "duration": 12,
+      "expected_style": "Product showcase, lifestyle commercial"
+    },
+    {
+      "test_id": 8,
+      "group_id": 1547,
+      "product_name": "日系高层次齐刘海卷发 蜜桃乌龙灰粉渐变色",
+      "scene_type": "opening",
+      "video_prompt": "woman looking concerned in mirror, trying different looks, soft disappointed expression, product focused scene, realistic lifestyle scene, natural lighting, relatable everyday moment, 4K quality, professional cinematography",
+      "duration": 12,
+      "expected_style": "Product showcase, lifestyle commercial"
+    },
+    {
+      "test_id": 9,
+      "group_id": 1548,
+      "product_name": "齐刘海卷发/中分直发",
+      "scene_type": "opening",
+      "video_prompt": "woman looking concerned in mirror, trying different looks, soft disappointed expression, product focused scene, realistic lifestyle scene, natural lighting, relatable everyday moment, 4K quality, professional cinematography",
+      "duration": 12,
+      "expected_style": "Product showcase, lifestyle commercial"
+    },
+    {
+      "test_id": 10,
+      "group_id": 1549,
+      "product_name": "微卷长发/蛋卷短发 粉棕色",
+      "scene_type": "opening",
+      "video_prompt": "woman looking concerned in mirror, trying different looks, soft disappointed expression, product focused scene, realistic lifestyle scene, natural lighting, relatable everyday moment, 4K quality, professional cinematography",
+      "duration": 12,
+      "expected_style": "Product showcase, lifestyle commercial"
+    }
+  ]
+}

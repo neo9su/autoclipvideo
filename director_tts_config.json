@@ -1,0 +1,28 @@
+{
+  "voices": {
+    "female_young": {
+      "macos_voice": "Ting-Ting",
+      "speed": 180,
+      "quality": 127,
+      "description": "年轻女声 - 清晰自然"
+    },
+    "female_mature": {
+      "macos_voice": "Mei-Jia",
+      "speed": 175,
+      "quality": 127,
+      "description": "成熟女声 - 温暖可信"
+    },
+    "female_sweet": {
+      "macos_voice": "Sin-ji",
+      "speed": 185,
+      "quality": 127,
+      "description": "甜美女声 - 亲和力强"
+    }
+  },
+  "audio_processing": {
+    "sample_rate": 48000,
+    "channels": 2,
+    "volume": 0.8,
+    "filters": "volume=0.8,highpass=f=80,compand=attacks=0.1:decays=0.3:points=-90/-90|-35/-35|-25/-25|0/-15"
+  }
+}

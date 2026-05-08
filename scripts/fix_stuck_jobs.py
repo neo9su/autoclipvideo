@@ -187,7 +187,14 @@ def check_gpu(report: HealthReport, _dry_run: bool):
     else:
         q = health.get("queue_depth", 0)
         pending = health.get("clip_jobs_pending", 0)
-        log(f"  GPU :8877 正常 — queue_depth={q} clip_pending={pending}")
+        g3d = health.get("gpu_3d_pct")
+        genc = health.get("gpu_enc_pct")
+        gmem = health.get("gpu_mem_pct")
+        util_str = (
+            f" | GPU 3D={g3d}% Enc={genc}% Mem={gmem}%"
+            if g3d is not None else ""
+        )
+        log(f"  GPU :8877 正常 — queue_depth={q} clip_pending={pending}{util_str}")
 
     watchdog = http_get(GPU_WATCHDOG, timeout=6)
     if watchdog is None:
@@ -202,7 +209,14 @@ def check_gpu(report: HealthReport, _dry_run: bool):
         if not comfy_ok:
             report.issue(f"ComfyUI 异常: running={comfy.get('running')} healthy={comfy.get('healthy')}")
         if gpu_ok and comfy_ok:
-            log(f"  Watchdog :8878 — gpu=✅ comfyui=✅ uptime={svc.get('uptime_s',0)//3600}h")
+            g3d = svc.get("gpu_3d_pct")
+            genc = svc.get("gpu_enc_pct")
+            gmem = svc.get("gpu_mem_pct")
+            util_str = (
+                f" | 3D={g3d}% Enc={genc}% Mem={gmem}%"
+                if g3d is not None else ""
+            )
+            log(f"  Watchdog :8878 — gpu=✅ comfyui=✅ uptime={svc.get('uptime_s',0)//3600}h{util_str}")
 
     return health is not None
 

@@ -1,0 +1,178 @@
+ERROR:    Error loading ASGI app. Could not import module "main".
+2026-05-08 01:36:25,905 WARNING director_matcher: sentence-transformers not available, will use fallback matching
+2026-05-08 01:36:25,913 INFO backend.main: 导演模式API路由已加载
+INFO:     Started server process [99757]
+INFO:     Waiting for application startup.
+2026-05-08 01:36:26,006 INFO backend.main: Reset 2 stuck clip task(s) to pending (no clip_filename)
+2026-05-08 01:36:26,158 INFO editor: load_rule_overrides: applied 4 overrides (显白→1.5, 日常→1.5, 运费险→0.0, 一定要看→0.0)
+2026-05-08 01:36:26,158 INFO monitor: Starting monitor for room: 小圆圆不圆 (1)
+2026-05-08 01:36:26,158 INFO monitor: Starting monitor for room: KUKU公主 (2)
+2026-05-08 01:36:26,162 INFO monitor: [小圆圆不圆] Monitor started
+2026-05-08 01:36:26,231 INFO monitor: [KUKU公主] Monitor started
+2026-05-08 01:36:26,255 INFO publish_scheduler: Publish scheduler started with throttling
+INFO:     Application startup complete.
+ERROR:    [Errno 48] error while attempting to bind on address ('0.0.0.0', 8899): address already in use
+INFO:     Waiting for application shutdown.
+2026-05-08 01:36:26,268 INFO monitor: [小圆圆不圆] Monitor stopped
+2026-05-08 01:36:26,269 INFO monitor: [KUKU公主] Monitor stopped
+INFO:     Application shutdown complete.
+2026-05-08 02:36:57,843 WARNING director_matcher: sentence-transformers not available, will use fallback matching
+2026-05-08 02:36:57,848 INFO backend.main: 导演模式API路由已加载
+INFO:     Started server process [4288]
+INFO:     Waiting for application startup.
+2026-05-08 02:36:57,964 INFO editor: load_rule_overrides: applied 4 overrides (显白→1.5, 日常→1.5, 运费险→0.0, 一定要看→0.0)
+2026-05-08 02:36:57,966 INFO monitor: Starting monitor for room: 小圆圆不圆 (1)
+2026-05-08 02:36:57,966 INFO monitor: Starting monitor for room: KUKU公主 (2)
+2026-05-08 02:36:57,966 INFO monitor: [小圆圆不圆] Monitor started
+2026-05-08 02:36:58,039 INFO monitor: [KUKU公主] Monitor started
+2026-05-08 02:36:58,071 INFO publish_scheduler: Publish scheduler started with throttling
+INFO:     Application startup complete.
+ERROR:    [Errno 48] error while attempting to bind on address ('0.0.0.0', 8899): address already in use
+INFO:     Waiting for application shutdown.
+2026-05-08 02:36:58,083 INFO monitor: [小圆圆不圆] Monitor stopped
+2026-05-08 02:36:58,084 INFO monitor: [KUKU公主] Monitor stopped
+INFO:     Application shutdown complete.
+2026-05-08 03:37:27,712 WARNING director_matcher: sentence-transformers not available, will use fallback matching
+2026-05-08 03:37:27,720 INFO backend.main: 导演模式API路由已加载
+INFO:     Started server process [8774]
+INFO:     Waiting for application startup.
+2026-05-08 03:37:28,016 INFO editor: load_rule_overrides: applied 4 overrides (显白→1.5, 日常→1.5, 运费险→0.0, 一定要看→0.0)
+2026-05-08 03:37:28,017 INFO monitor: Starting monitor for room: 小圆圆不圆 (1)
+2026-05-08 03:37:28,017 INFO monitor: Starting monitor for room: KUKU公主 (2)
+2026-05-08 03:37:28,018 INFO monitor: [小圆圆不圆] Monitor started
+2026-05-08 03:37:28,084 INFO monitor: [KUKU公主] Monitor started
+2026-05-08 03:37:28,109 INFO publish_scheduler: Publish scheduler started with throttling
+INFO:     Application startup complete.
+ERROR:    [Errno 48] error while attempting to bind on address ('0.0.0.0', 8899): address already in use
+INFO:     Waiting for application shutdown.
+2026-05-08 03:37:28,121 INFO monitor: [小圆圆不圆] Monitor stopped
+2026-05-08 03:37:28,122 INFO monitor: [KUKU公主] Monitor stopped
+INFO:     Application shutdown complete.
+2026-05-08 04:37:53,143 WARNING director_matcher: sentence-transformers not available, will use fallback matching
+2026-05-08 04:37:53,149 INFO backend.main: 导演模式API路由已加载
+INFO:     Started server process [11696]
+INFO:     Waiting for application startup.
+2026-05-08 04:37:53,533 INFO editor: load_rule_overrides: applied 4 overrides (显白→1.5, 日常→1.5, 运费险→0.0, 一定要看→0.0)
+2026-05-08 04:37:53,534 INFO monitor: Starting monitor for room: 小圆圆不圆 (1)
+2026-05-08 04:37:53,534 INFO monitor: Starting monitor for room: KUKU公主 (2)
+2026-05-08 04:37:53,534 INFO monitor: [小圆圆不圆] Monitor started
+2026-05-08 04:37:53,609 INFO monitor: [KUKU公主] Monitor started
+2026-05-08 04:37:53,634 INFO publish_scheduler: Publish scheduler started with throttling
+INFO:     Application startup complete.
+ERROR:    [Errno 48] error while attempting to bind on address ('0.0.0.0', 8899): address already in use
+INFO:     Waiting for application shutdown.
+2026-05-08 04:37:53,647 INFO monitor: [小圆圆不圆] Monitor stopped
+2026-05-08 04:37:53,648 INFO monitor: [KUKU公主] Monitor stopped
+INFO:     Application shutdown complete.
+2026-05-08 05:38:21,555 WARNING director_matcher: sentence-transformers not available, will use fallback matching
+2026-05-08 05:38:21,560 INFO backend.main: 导演模式API路由已加载
+INFO:     Started server process [17271]
+INFO:     Waiting for application startup.
+2026-05-08 05:38:21,797 INFO editor: load_rule_overrides: applied 4 overrides (显白→1.5, 日常→1.5, 运费险→0.0, 一定要看→0.0)
+2026-05-08 05:38:21,798 INFO monitor: Starting monitor for room: 小圆圆不圆 (1)
+2026-05-08 05:38:21,798 INFO monitor: Starting monitor for room: KUKU公主 (2)
+2026-05-08 05:38:21,799 INFO monitor: [小圆圆不圆] Monitor started
+2026-05-08 05:38:21,867 INFO monitor: [KUKU公主] Monitor started
+2026-05-08 05:38:21,893 INFO publish_scheduler: Publish scheduler started with throttling
+INFO:     Application startup complete.
+ERROR:    [Errno 48] error while attempting to bind on address ('0.0.0.0', 8899): address already in use
+INFO:     Waiting for application shutdown.
+2026-05-08 05:38:21,911 INFO monitor: [小圆圆不圆] Monitor stopped
+2026-05-08 05:38:21,913 INFO monitor: [KUKU公主] Monitor stopped
+INFO:     Application shutdown complete.
+2026-05-08 06:38:45,658 WARNING director_matcher: sentence-transformers not available, will use fallback matching
+2026-05-08 06:38:45,663 INFO backend.main: 导演模式API路由已加载
+INFO:     Started server process [20291]
+INFO:     Waiting for application startup.
+2026-05-08 06:38:45,884 INFO editor: load_rule_overrides: applied 4 overrides (显白→1.5, 日常→1.5, 运费险→0.0, 一定要看→0.0)
+2026-05-08 06:38:45,885 INFO monitor: Starting monitor for room: 小圆圆不圆 (1)
+2026-05-08 06:38:45,885 INFO monitor: Starting monitor for room: KUKU公主 (2)
+2026-05-08 06:38:45,886 INFO monitor: [小圆圆不圆] Monitor started
+2026-05-08 06:38:45,957 INFO monitor: [KUKU公主] Monitor started
+2026-05-08 06:38:45,984 INFO publish_scheduler: Publish scheduler started with throttling
+INFO:     Application startup complete.
+ERROR:    [Errno 48] error while attempting to bind on address ('0.0.0.0', 8899): address already in use
+INFO:     Waiting for application shutdown.
+2026-05-08 06:38:45,996 INFO monitor: [小圆圆不圆] Monitor stopped
+2026-05-08 06:38:45,997 INFO monitor: [KUKU公主] Monitor stopped
+INFO:     Application shutdown complete.
+2026-05-08 07:39:09,428 WARNING director_matcher: sentence-transformers not available, will use fallback matching
+2026-05-08 07:39:09,433 INFO backend.main: 导演模式API路由已加载
+INFO:     Started server process [23159]
+INFO:     Waiting for application startup.
+2026-05-08 07:39:09,653 INFO editor: load_rule_overrides: applied 4 overrides (显白→1.5, 日常→1.5, 运费险→0.0, 一定要看→0.0)
+2026-05-08 07:39:09,654 INFO monitor: Starting monitor for room: 小圆圆不圆 (1)
+2026-05-08 07:39:09,654 INFO monitor: Starting monitor for room: KUKU公主 (2)
+2026-05-08 07:39:09,654 INFO monitor: [小圆圆不圆] Monitor started
+2026-05-08 07:39:09,723 INFO monitor: [KUKU公主] Monitor started
+2026-05-08 07:39:09,750 INFO publish_scheduler: Publish scheduler started with throttling
+INFO:     Application startup complete.
+ERROR:    [Errno 48] error while attempting to bind on address ('0.0.0.0', 8899): address already in use
+INFO:     Waiting for application shutdown.
+2026-05-08 07:39:09,761 INFO monitor: [小圆圆不圆] Monitor stopped
+2026-05-08 07:39:09,763 INFO monitor: [KUKU公主] Monitor stopped
+INFO:     Application shutdown complete.
+2026-05-08 08:39:37,505 WARNING director_matcher: sentence-transformers not available, will use fallback matching
+2026-05-08 08:39:37,510 INFO backend.main: 导演模式API路由已加载
+INFO:     Started server process [25846]
+INFO:     Waiting for application startup.
+2026-05-08 08:39:37,738 INFO editor: load_rule_overrides: applied 4 overrides (显白→1.5, 日常→1.5, 运费险→0.0, 一定要看→0.0)
+2026-05-08 08:39:37,739 INFO monitor: Starting monitor for room: 小圆圆不圆 (1)
+2026-05-08 08:39:37,739 INFO monitor: Starting monitor for room: KUKU公主 (2)
+2026-05-08 08:39:37,739 INFO monitor: [小圆圆不圆] Monitor started
+2026-05-08 08:39:37,808 INFO monitor: [KUKU公主] Monitor started
+2026-05-08 08:39:37,832 INFO publish_scheduler: Publish scheduler started with throttling
+INFO:     Application startup complete.
+ERROR:    [Errno 48] error while attempting to bind on address ('0.0.0.0', 8899): address already in use
+INFO:     Waiting for application shutdown.
+2026-05-08 08:39:37,844 INFO monitor: [小圆圆不圆] Monitor stopped
+2026-05-08 08:39:37,845 INFO monitor: [KUKU公主] Monitor stopped
+INFO:     Application shutdown complete.
+2026-05-08 09:40:01,919 WARNING director_matcher: sentence-transformers not available, will use fallback matching
+2026-05-08 09:40:01,925 INFO backend.main: 导演模式API路由已加载
+INFO:     Started server process [28775]
+INFO:     Waiting for application startup.
+2026-05-08 09:40:02,184 INFO editor: load_rule_overrides: applied 4 overrides (显白→1.5, 日常→1.5, 运费险→0.0, 一定要看→0.0)
+2026-05-08 09:40:02,185 INFO monitor: Starting monitor for room: 小圆圆不圆 (1)
+2026-05-08 09:40:02,185 INFO monitor: Starting monitor for room: KUKU公主 (2)
+2026-05-08 09:40:02,186 INFO monitor: [小圆圆不圆] Monitor started
+2026-05-08 09:40:02,260 INFO monitor: [KUKU公主] Monitor started
+2026-05-08 09:40:02,284 INFO publish_scheduler: Publish scheduler started with throttling
+INFO:     Application startup complete.
+ERROR:    [Errno 48] error while attempting to bind on address ('0.0.0.0', 8899): address already in use
+INFO:     Waiting for application shutdown.
+2026-05-08 09:40:02,298 INFO monitor: [小圆圆不圆] Monitor stopped
+2026-05-08 09:40:02,299 INFO monitor: [KUKU公主] Monitor stopped
+INFO:     Application shutdown complete.
+2026-05-08 10:40:25,562 WARNING director_matcher: sentence-transformers not available, will use fallback matching
+2026-05-08 10:40:25,568 INFO backend.main: 导演模式API路由已加载
+INFO:     Started server process [31543]
+INFO:     Waiting for application startup.
+2026-05-08 10:40:25,788 INFO editor: load_rule_overrides: applied 4 overrides (显白→1.5, 日常→1.5, 运费险→0.0, 一定要看→0.0)
+2026-05-08 10:40:25,789 INFO monitor: Starting monitor for room: 小圆圆不圆 (1)
+2026-05-08 10:40:25,789 INFO monitor: Starting monitor for room: KUKU公主 (2)
+2026-05-08 10:40:25,789 INFO monitor: [小圆圆不圆] Monitor started
+2026-05-08 10:40:25,861 INFO monitor: [KUKU公主] Monitor started
+2026-05-08 10:40:25,888 INFO publish_scheduler: Publish scheduler started with throttling
+INFO:     Application startup complete.
+ERROR:    [Errno 48] error while attempting to bind on address ('0.0.0.0', 8899): address already in use
+INFO:     Waiting for application shutdown.
+2026-05-08 10:40:25,899 INFO monitor: [小圆圆不圆] Monitor stopped
+2026-05-08 10:40:25,900 INFO monitor: [KUKU公主] Monitor stopped
+INFO:     Application shutdown complete.
+2026-05-08 11:40:54,327 WARNING director_matcher: sentence-transformers not available, will use fallback matching
+2026-05-08 11:40:54,333 INFO backend.main: 导演模式API路由已加载
+INFO:     Started server process [34178]
+INFO:     Waiting for application startup.
+2026-05-08 11:40:54,552 INFO editor: load_rule_overrides: applied 4 overrides (显白→1.5, 日常→1.5, 运费险→0.0, 一定要看→0.0)
+2026-05-08 11:40:54,553 INFO monitor: Starting monitor for room: 小圆圆不圆 (1)
+2026-05-08 11:40:54,553 INFO monitor: Starting monitor for room: KUKU公主 (2)
+2026-05-08 11:40:54,553 INFO monitor: [小圆圆不圆] Monitor started
+2026-05-08 11:40:54,624 INFO monitor: [KUKU公主] Monitor started
+2026-05-08 11:40:54,649 INFO publish_scheduler: Publish scheduler started with throttling
+INFO:     Application startup complete.
+ERROR:    [Errno 48] error while attempting to bind on address ('0.0.0.0', 8899): address already in use
+INFO:     Waiting for application shutdown.
+2026-05-08 11:40:54,662 INFO monitor: [小圆圆不圆] Monitor stopped
+2026-05-08 11:40:54,663 INFO monitor: [KUKU公主] Monitor stopped
+INFO:     Application shutdown complete.
