@@ -24,8 +24,7 @@ async def check_video_quality(video_path: str) -> tuple[bool, str]:
     """
     Check video quality requirements for publishing:
       - Resolution >= 1080x1920 (portrait 1080P)
-      - Frame rate >= 25 fps
-      - Duration >= 30 seconds
+      - Duration >= 15 seconds (max 90 seconds)
     Returns (passed, reason). reason is empty string if passed.
     """
     try:
@@ -54,23 +53,15 @@ async def check_video_quality(video_path: str) -> tuple[bool, str]:
     if short_side < 1080 or long_side < 1920:
         issues.append(f"分辨率不足（{w}x{h}，需要 1080x1920 以上）")
 
-    # Frame rate: parse "num/den" fraction
-    fps_raw = video_stream.get("r_frame_rate", "0/1")
-    try:
-        num, den = fps_raw.split("/")
-        fps = float(num) / float(den)
-    except Exception:
-        fps = 0.0
-    if fps < 25:
-        issues.append(f"帧率不足（{fps:.1f} fps，需要 ≥ 25 fps）")
-
     # Duration: from format section (more reliable than stream duration)
     try:
         duration = float(info.get("format", {}).get("duration", 0))
     except Exception:
         duration = 0.0
-    if duration < 30:
-        issues.append(f"时长不足（{duration:.1f}s，需要 ≥ 30 秒）")
+    if duration < 15:
+        issues.append(f"时长不足（{duration:.1f}s，需要 ≥ 15 秒）")
+    if duration > 90:
+        issues.append(f"时长超限（{duration:.1f}s，需要 ≤ 90 秒）")
 
     if issues:
         return False, "；".join(issues)
