@@ -48,6 +48,7 @@
           </div>
           <div class="task-title">{{ t.title || '(无标题)' }}</div>
           <div class="task-meta">
+            <span class="task-id-tag">{{ formatTaskId(t) }}</span>
             <span class="muted"><span v-if="t.room_name" class="task-room-tag">{{ t.room_name }}</span>{{ t.group_label }}</span>
             <span v-if="t.scheduled_at" class="countdown">{{ formatScheduled(t.scheduled_at) }}</span>
           </div>
@@ -64,6 +65,7 @@
             <div class="detail-sub">
               <span :class="['badge', statusClass(selectedTask.status)]">{{ statusLabel(selectedTask.status) }}</span>
               <span class="muted">· {{ selectedTask.platform }} · 分组: {{ selectedTask.group_label }}</span>
+              <span class="detail-id-tag">{{ formatTaskId(selectedTask) }}</span>
             </div>
           </div>
           <div class="detail-actions">
@@ -651,6 +653,19 @@ const statusFilters = [
 const newTask = ref({ group_id: '', platform: 'douyin', account_id: '', title: '', description: '', tags: '', product_ids: [], no_cart: false })
 const newAccount = ref({ platform: 'douyin', account_name: '' })
 
+// ID formatting
+function formatGroupId(id) {
+  return 'GP' + String(id).padStart(7, '0')
+}
+function formatTaskId(task) {
+  const vp = task.video_path || ''
+  let modePrefix
+  if (vp.includes('director')) modePrefix = '1X'
+  else if (vp.includes('creative')) modePrefix = '3X'
+  else modePrefix = '2X'
+  return 'DT' + modePrefix + String(task.group_id).padStart(7, '0')
+}
+
 function statusLabel(s) {
   return { pending: '待发布', scheduled: '定时', publishing: '发布中', done: '已完成', failed: '失败' }[s] || s
 }
@@ -1102,6 +1117,8 @@ onUnmounted(() => ws?.close())
 .task-search-input::placeholder { color: #555; }
 .task-search-clear { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); background: none; border: none; color: #666; cursor: pointer; font-size: 16px; line-height: 1; padding: 0 2px; }
 .task-search-clear:hover { color: #ccc; }
+.task-id-tag { font-size: 10px; font-family: 'SF Mono', 'Fira Code', monospace; color: #4a5568; letter-spacing: 0.5px; user-select: all; margin-right: 4px; }
+.detail-id-tag { font-size: 11px; font-family: 'SF Mono', 'Fira Code', monospace; color: #555; letter-spacing: 0.5px; user-select: all; margin-left: 8px; }
 .panel-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .panel-header h3 { font-size: 15px; font-weight: 600; }
 .filter-bar { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 12px; }

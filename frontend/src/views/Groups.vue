@@ -21,6 +21,7 @@
         <div class="group-header">
           <div class="group-meta">
             <div class="group-label">{{ g.label }}</div>
+            <div class="group-id-tag">{{ formatGroupId(g.id) }}</div>
             <div class="group-sub">
               <span v-if="!g.is_custom" class="tag">{{ g.room_name }}</span>
               <span v-else class="tag" style="background:rgba(251,146,60,0.15);color:#c2540a;">自定义</span>
@@ -621,7 +622,11 @@ let progressTimer = null
 const mergeErrorGroup = ref(null)
 function showMergeError(g) { mergeErrorGroup.value = g }
 
-// Video preview
+// ID formatting
+function formatGroupId(id) {
+  return 'GP' + String(id).padStart(7, '0')
+}
+
 const previewRec = ref(null)
 const previewError = ref(false)
 function openPreview(r) { previewRec.value = r; previewError.value = false }
@@ -1258,7 +1263,8 @@ onUnmounted(() => { ws?.close(); stopProgressPolling() })
 .uploading-hint { font-size: 12px; color: #fb923c; }
 .group-header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
 .group-meta { flex: 1; }
-.group-label { font-size: 16px; font-weight: 600; margin-bottom: 6px; }
+.group-label { font-size: 16px; font-weight: 600; margin-bottom: 4px; }
+.group-id-tag { font-size: 10px; font-family: 'SF Mono', 'Fira Code', monospace; color: #555; letter-spacing: 0.5px; margin-bottom: 6px; user-select: all; }
 .group-sub { display: flex; gap: 6px; flex-wrap: wrap; }
 .tag { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: #2a2a2a; color: #999; }
 .tag.color { background: rgba(251,191,36,0.12); color: #fbbf24; }
