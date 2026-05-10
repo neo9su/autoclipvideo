@@ -40,8 +40,11 @@
               class="btn-xs btn-retry" @click.stop="retryTask(t.id)" title="重试">↺</button>
             <button v-if="t.status === 'scheduled' && isExpired(t.scheduled_at)"
               class="btn-xs btn-retry" @click.stop="openReschedule(t)" title="重新排期">↻</button>
-            <button v-if="t.status === 'failed'"
-              class="btn-xs btn-danger btn-del-failed" @click.stop="deleteFailedTask(t.id)" title="删除">×</button>
+            <!-- 快捷取消/删除按鈕 -->
+            <button v-if="['pending','scheduled'].includes(t.status)"
+              class="btn-xs btn-quick-cancel" @click.stop="quickCancelTask(t)" title="取消任务">×</button>
+            <button v-if="['failed','done'].includes(t.status)"
+              class="btn-xs btn-quick-delete" @click.stop="quickDeleteTask(t)" title="删除">×</button>
           </div>
           <div class="task-title">{{ t.title || '(无标题)' }}</div>
           <div class="task-meta">
@@ -731,6 +734,26 @@ async function retryTask(id) {
   }
 }
 
+async function quickCancelTask(t) {
+  try {
+    await cancelPublishTask(t.id)
+    if (selectedTask.value?.id === t.id) selectedTask.value = null
+    tasks.value = tasks.value.filter(x => x.id !== t.id)
+  } catch (e) {
+    showToast('取消失败: ' + e.message, 'error')
+  }
+}
+
+async function quickDeleteTask(t) {
+  try {
+    await cancelPublishTask(t.id)
+    if (selectedTask.value?.id === t.id) selectedTask.value = null
+    tasks.value = tasks.value.filter(x => x.id !== t.id)
+  } catch (e) {
+    showToast('删除失败: ' + e.message, 'error')
+  }
+}
+
 async function cancelTask(id) {
   if (!confirm('确认取消此任务？')) return
   try {
@@ -1213,6 +1236,10 @@ label { display: block; font-size: 12px; color: #888; margin: 12px 0 4px; }
 .btn-xs.btn-retry { color: #60a5fa; border-color: #60a5fa; padding: 2px 6px; margin-left: auto; }
 .btn-warning { background: transparent; color: #f59e0b; border: 1px solid #f59e0b; border-radius: 6px; padding: 7px 16px; cursor: pointer; font-size: 13px; }
 .btn-xs.btn-del-failed { color: #fe2c55; border-color: #fe2c55; padding: 2px 7px; margin-left: 4px; font-size: 13px; line-height: 1; }
+.btn-xs.btn-quick-cancel { color: #f59e0b; border-color: #f59e0b; padding: 2px 7px; margin-left: auto; font-size: 13px; line-height: 1; opacity: 0.6; transition: opacity 0.15s; }
+.btn-xs.btn-quick-cancel:hover { opacity: 1; }
+.btn-xs.btn-quick-delete { color: #9ca3af; border-color: #4b5563; padding: 2px 7px; margin-left: auto; font-size: 13px; line-height: 1; opacity: 0.45; transition: opacity 0.15s; }
+.btn-xs.btn-quick-delete:hover { color: #fe2c55; border-color: #fe2c55; opacity: 1; }
 
 .badge { border-radius: 4px; padding: 2px 8px; font-size: 11px; }
 .badge-green { background: rgba(52,211,153,0.15); color: #34d399; }
