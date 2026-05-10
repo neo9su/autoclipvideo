@@ -10,6 +10,16 @@
           <button class="btn-primary" @click="showCreateModal = true">+ 创建任务</button>
         </div>
       </div>
+      <div class="task-search-bar">
+        <input
+          v-model="taskSearch"
+          type="text"
+          class="task-search-input"
+          placeholder="🔍 搜索标题 / 分组 / 直播间…"
+          @input="onTaskSearch"
+        />
+        <button v-if="taskSearch" class="task-search-clear" @click="taskSearch = ''; onTaskSearch()">×</button>
+      </div>
       <div class="filter-bar">
         <button v-for="s in statusFilters" :key="s.value"
           :class="['filter-btn', statusFilter === s.value && 'active']"
@@ -18,8 +28,8 @@
         </button>
       </div>
       <div class="task-items">
-        <div v-if="!tasks.length" class="empty">暂无任务</div>
-        <div v-for="t in tasks" :key="t.id"
+        <div v-if="!filteredTasks.length" class="empty">{{ taskSearch ? '无匹配任务' : '暂无任务' }}</div>
+        <div v-for="t in filteredTasks" :key="t.id"
           :class="['task-item', selectedTask?.id === t.id && 'selected']"
           @click="selectTask(t)">
           <div class="task-item-top">
@@ -59,6 +69,7 @@
             <button class="btn-secondary" @click="regenMeta(selectedTask.id)" :disabled="regenning" title="重新生成标题和文案">{{ regenning ? '生成中…' : '重生成文案' }}</button>
             <button v-if="selectedTask.status === 'failed'" class="btn-danger" @click="deleteFailedTask(selectedTask.id)">删除</button>
             <button v-if="['pending','scheduled'].includes(selectedTask.status)" class="btn-danger" @click="cancelTask(selectedTask.id)">取消</button>
+            <button v-if="selectedTask.status === 'done'" class="btn-secondary" @click="repeatTask(selectedTask)" title="以相同配置再次发布">🔁 重复发布</button>
           </div>
         </div>
         <div v-if="selectedTask.error_msg" class="error-box">{{ selectedTask.error_msg }}</div>
@@ -461,6 +472,7 @@ const rescheduleTask = ref(null)
 const rescheduleTime = ref('')
 const showCreateModal = ref(false)
 watch(showCreateModal, (v) => { if (v) refreshGroups() })
+const taskSearch = ref('')
 const statusFilter = ref('')
 const mergedGroups = ref([])
 const groupsRefreshing = ref(false)
@@ -660,6 +672,38 @@ function formatScheduled(iso) {
 
 async function loadTasks() {
   tasks.value = await getPublishTasks(statusFilter.value || null)
+}
+
+const filteredTasks = computed(() => {
+  const q = taskSearch.value.trim().toLowerCase()
+  if (!q) return tasks.value
+  return tasks.value.filter(t =>
+    (t.title || '').toLowerCase().includes(q) ||
+    (t.group_label || '').toLowerCase().includes(q) ||
+    (t.room_name || '').toLowerCase().includes(q)
+  )
+})
+
+function onTaskSearch() {
+  // reactive — filteredTasks computed handles filtering
+}
+
+async function repeatTask(task) {
+  // Pre-fill create modal with the done task's settings
+  await refreshGroups()
+  const defaultAcc = accounts.value.find(a => a.account_name === '颜遇生活')
+  newTask.value = {
+    group_id: String(task.group_id),
+    platform: task.platform || 'douyin',
+    account_id: task.account_id || defaultAcc?.id || '',
+    title: task.title || '',
+    description: task.description || '',
+    tags: task.tags || '',
+    product_ids: task.product_ids || [],
+    no_cart: task.no_cart || false,
+  }
+  scheduleMode.value = 'now'
+  showCreateModal.value = true
 }
 
 async function refreshGroups() {
@@ -1029,6 +1073,12 @@ onUnmounted(() => ws?.close())
 @media (min-width: 900px) { .publish-layout { flex-direction: row; } }
 
 .task-list-panel { width: 100%; max-width: 320px; flex-shrink: 0; }
+.task-search-bar { position: relative; margin-bottom: 8px; }
+.task-search-input { width: 100%; box-sizing: border-box; background: #1a1a1a; border: 1px solid #333; border-radius: 8px; color: #e0e0e0; font-size: 13px; padding: 7px 32px 7px 10px; outline: none; transition: border-color 0.15s; }
+.task-search-input:focus { border-color: #555; }
+.task-search-input::placeholder { color: #555; }
+.task-search-clear { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); background: none; border: none; color: #666; cursor: pointer; font-size: 16px; line-height: 1; padding: 0 2px; }
+.task-search-clear:hover { color: #ccc; }
 .panel-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .panel-header h3 { font-size: 15px; font-weight: 600; }
 .filter-bar { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 12px; }
