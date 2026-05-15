@@ -573,15 +573,17 @@ async function submitBatch() {
   }
 }
 
-const filteredGroups = computed(() =>
-  roomFilter.value === 0
-    ? mergedGroups.value
-    : mergedGroups.value.filter(g => g.room_id === roomFilter.value)
-)
-
 const publishedGroupIds = computed(() =>
   new Set(tasks.value.filter(t => t.status === 'done').map(t => t.group_id))
 )
+
+const filteredGroups = computed(() => {
+  const base = roomFilter.value === 0
+    ? mergedGroups.value
+    : mergedGroups.value.filter(g => g.room_id === roomFilter.value)
+  // 隐藏已发布（有 done 任务）的分组，避免重复发布
+  return base.filter(g => !publishedGroupIds.value.has(g.id))
+})
 
 // Products filtered to match the selected group's room
 const selectedGroupRoomId = computed(() => {
