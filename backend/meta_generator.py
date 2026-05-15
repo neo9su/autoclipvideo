@@ -14,12 +14,13 @@ import aiosqlite
 import httpx
 
 from db import DB_PATH, aio_connect
+from llm_client import llm_post
 
 logger = logging.getLogger(__name__)
 
-BEDROCK_URL = "https://bedrock-runtime.us-east-1.amazonaws.com"
-BEDROCK_MODEL = os.environ.get("BEDROCK_MODEL", "us.anthropic.claude-sonnet-4-6")
-BEDROCK_TOKEN = os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "")
+# 兼容旧引用
+BEDROCK_URL = os.environ.get("LLM_BASE_URL", "http://10.190.0.214:8080/v1")
+BEDROCK_TOKEN = os.environ.get("LLM_API_KEY", "")
 RECORDINGS_DIR = os.path.join(os.path.dirname(__file__), "..", "recordings")
 
 # 8个文案维度池，每次随机抽4个，避免每次都生成相同的4种方案
@@ -206,50 +207,21 @@ def _build_meta_prompt(
 
 
 async def _call_bedrock(prompt: str, max_tokens: int = 600) -> Optional[dict]:
-    if not BEDROCK_TOKEN:
-        logger.error("AWS_BEARER_TOKEN_BEDROCK not set")
+    raw = await llm_post(
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=max_tokens,
+        temperature=0.95,
+        timeout=120.0,
+    )
+    if raw is None:
         return None
-    payload = {
-        "messages": [{"role": "user", "content": [{"text": prompt}]}],
-        "inferenceConfig": {"maxTokens": max_tokens, "temperature": 0.95},
-    }
-    url = f"{BEDROCK_URL}/model/{BEDROCK_MODEL}/converse"
-
-    for attempt in range(1, 4):
+    m = re.search(r"\{.*\}", raw, re.DOTALL)
+    if m:
         try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                resp = await client.post(
-                    url,
-                    json=payload,
-                    headers={
-                        "Authorization": f"Bearer {BEDROCK_TOKEN}",
-                        "Content-Type": "application/json",
-                    },
-                )
-            if resp.status_code == 200:
-                raw = resp.json()["output"]["message"]["content"][0]["text"]
-                m = re.search(r"\{.*\}", raw, re.DOTALL)
-                if m:
-                    return json.loads(m.group())
-                logger.error(f"No JSON in Bedrock response: {raw[:200]}")
-                return None
-            elif resp.status_code in (429, 500, 502, 503) and attempt < 3:
-                logger.warning(f"Bedrock {resp.status_code}, retrying (attempt {attempt}/3)...")
-            else:
-                logger.error(f"Bedrock error {resp.status_code}: {resp.text[:300]}")
-                return None
-        except (httpx.ConnectError, httpx.TimeoutException) as e:
-            if attempt < 3:
-                logger.warning(f"Bedrock transient error ({e}), retrying (attempt {attempt}/3)...")
-            else:
-                logger.error(f"Bedrock call failed after 3 attempts: {e}")
-                return None
-        except Exception as e:
-            logger.error(f"Bedrock call failed: {e}")
-            return None
-
-        await asyncio.sleep(2 ** attempt)  # 2s, 4s backoff
-
+            return json.loads(m.group())
+        except json.JSONDecodeError:
+            pass
+    logger.error(f"No JSON in LLM response: {raw[:200]}")
     return None
 
 
@@ -375,7 +347,7 @@ async def generate_meta(group_id: int) -> Optional[dict]:
     )
     logger.info(f"[group {group_id}] Generating meta with schemes: {scheme_types}")
 
-    result = await _call_bedrock(prompt, max_tokens=3000)
+    result = await _call_bedrock(prompt, max_tokens=1500)
     if not result:
         # Bedrock失败时回退到本地备用文案
         logger.warning(f"Bedrock generation failed for group {group_id}, using local fallback")

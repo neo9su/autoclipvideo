@@ -14,13 +14,13 @@ import os
 import re
 from typing import Optional
 
-import httpx
+from llm_client import llm_post
 
 logger = logging.getLogger(__name__)
 
-BEDROCK_URL   = "https://bedrock-runtime.us-east-1.amazonaws.com"
-BEDROCK_MODEL = os.environ.get("BEDROCK_MODEL", "us.anthropic.claude-sonnet-4-6")
-BEDROCK_TOKEN = os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "")
+# 兼容旧引用
+BEDROCK_URL   = os.environ.get("LLM_BASE_URL", "http://10.190.0.214:8080/v1")
+BEDROCK_TOKEN = os.environ.get("LLM_API_KEY", "")
 
 _PROMPT = """你是假发直播间内容分析专家。请分析以下直播字幕（包含时间戳），识别每款发型介绍的起止时间。
 
@@ -94,7 +94,7 @@ async def detect_boundaries(srt_path: str) -> list[dict]:
     失败时返回空列表（调用方应 fallback 到 legacy）。
     """
     if not BEDROCK_TOKEN:
-        logger.warning("BEDROCK_TOKEN not set — skipping boundary detection")
+        logger.warning("LLM_API_KEY not set — skipping boundary detection")
         return []
 
     srt_timed = _srt_to_timed_text(srt_path)
@@ -102,29 +102,15 @@ async def detect_boundaries(srt_path: str) -> list[dict]:
         logger.warning(f"Empty SRT timed text: {srt_path}")
         return []
 
-    payload = {
-        "messages": [{
-            "role": "user",
-            "content": [{"text": _PROMPT.format(srt_timed=srt_timed)}],
-        }],
-        "inferenceConfig": {"maxTokens": 800, "temperature": 0},
-    }
-    url = f"{BEDROCK_URL}/model/{BEDROCK_MODEL}/converse"
+    raw = await llm_post(
+        messages=[{"role": "user", "content": _PROMPT.format(srt_timed=srt_timed)}],
+        max_tokens=800,
+        temperature=0,
+        timeout=120.0,
+    )
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                url,
-                json=payload,
-                headers={
-                    "Authorization": f"Bearer {BEDROCK_TOKEN}",
-                    "Content-Type": "application/json",
-                },
-            )
-        if resp.status_code != 200:
-            logger.error(f"Bedrock boundary {resp.status_code}: {resp.text[:300]}")
+        if raw is None:
             return []
-
-        raw = resp.json()["output"]["message"]["content"][0]["text"]
         m = re.search(r"\[.*\]", raw, re.DOTALL)
         if not m:
             logger.warning(f"No JSON array in boundary response: {raw[:200]}")

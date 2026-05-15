@@ -10,15 +10,17 @@ import time
 from typing import Dict, List, Optional
 import httpx
 
+from llm_client import llm_post, LLM_MODEL as BEDROCK_MODEL
+
 logger = logging.getLogger(__name__)
 
-# 复用现有配置
-BEDROCK_URL = "https://bedrock-runtime.us-east-1.amazonaws.com"
-BEDROCK_MODEL = os.environ.get("BEDROCK_MODEL", "us.anthropic.claude-sonnet-4-6")
+# 兼容旧变量名（部分地方引用）
+_LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://10.190.0.214:8080/v1")
+BEDROCK_URL = _LLM_BASE_URL
 
 
 def _get_bedrock_token() -> str:
-    return os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "")
+    return os.environ.get("LLM_API_KEY", "")
 
 # ── Vibe 定义 ──────────────────────────────────────────────────────────────────
 # 每种 vibe 决定脚本的叙事风格、情绪曲线、配音基调、背景音乐方向
@@ -155,51 +157,16 @@ class DirectorScriptGenerator:
             srt_content, wig_model, wig_color, room_name, script_type, vibe
         )
 
-        headers = {
-            "Authorization": f"Bearer {_get_bedrock_token()}",
-            "Content-Type": "application/json",
-        }
-
-        payload = {
-            "messages": [{"role": "user", "content": [{"text": prompt}]}],
-            "inferenceConfig": {
-                "maxTokens": 5000,
-                "temperature": 0.9,   # 更高创意度
-            },
-        }
-
-        for attempt in range(1, 4):
-            try:
-                async with httpx.AsyncClient(timeout=90) as client:
-                    response = await client.post(
-                        f"{BEDROCK_URL}/model/{BEDROCK_MODEL}/converse",
-                        json=payload,
-                        headers=headers,
-                    )
-
-                if response.status_code == 200:
-                    result = response.json()
-                    script_text = result["output"]["message"]["content"][0]["text"]
-                    return self._parse_script_response(script_text, vibe)
-                elif response.status_code in (429, 500, 502, 503) and attempt < 3:
-                    logger.warning(f"Bedrock {response.status_code}, retrying ({attempt}/3)...")
-                else:
-                    logger.error(f"Bedrock API error: {response.status_code} - {response.text[:300]}")
-                    return self._fallback_script(vibe)
-
-            except (httpx.ConnectError, httpx.TimeoutException) as e:
-                if attempt < 3:
-                    logger.warning(f"Bedrock transient error ({e}), retrying ({attempt}/3)...")
-                else:
-                    logger.error(f"Script generation failed after 3 attempts: {e}")
-                    return self._fallback_script(vibe)
-            except Exception as e:
-                logger.error(f"Script generation failed: {e}")
-                return self._fallback_script(vibe)
-
-            await asyncio.sleep(2 ** attempt)
-
-        return self._fallback_script(vibe)
+        script_text = await llm_post(
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=3000,
+            temperature=0.9,
+            timeout=60.0,
+        )
+        if script_text is None:
+            logger.error("Script generation: LLM returned None")
+            return self._fallback_script(vibe)
+        return self._parse_script_response(script_text, vibe)
 
     def _build_script_prompt(
         self,

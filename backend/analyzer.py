@@ -1,5 +1,5 @@
 """
-Semantic analysis of recording SRT via Bedrock LLM.
+Semantic analysis of recording SRT via LLM.
 Extracts wig model/color and assigns recording to a clip group.
 """
 import asyncio
@@ -16,12 +16,11 @@ import aiosqlite
 import httpx
 
 from db import DB_PATH, aio_connect
+from llm_client import llm_post, LLM_MODEL as BEDROCK_MODEL, _LLM_BASE_URL, _LLM_API_KEY
 
 logger = logging.getLogger(__name__)
-
-BEDROCK_URL = "https://bedrock-runtime.us-east-1.amazonaws.com"
-BEDROCK_MODEL = os.environ.get("BEDROCK_MODEL", "us.anthropic.claude-sonnet-4-6")
-BEDROCK_TOKEN = os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "")
+BEDROCK_URL   = _LLM_BASE_URL
+BEDROCK_TOKEN = _LLM_API_KEY
 RECORDINGS_DIR = os.path.join(os.path.dirname(__file__), "..", "recordings")
 
 _PROMPT = """你是假发直播间内容分析专家。分析以下直播字幕，提取产品信息。
@@ -40,52 +39,22 @@ _PROMPT = """你是假发直播间内容分析专家。分析以下直播字幕�
 
 
 async def _call_bedrock(text: str) -> Optional[dict]:
-    if not BEDROCK_TOKEN:
-        logger.error("AWS_BEARER_TOKEN_BEDROCK not set, skipping analysis")
-        return None
-
     prompt = _PROMPT.format(text=text)
-    payload = {
-        "messages": [{"role": "user", "content": [{"text": prompt}]}],
-        "inferenceConfig": {"maxTokens": 400, "temperature": 0},
-    }
-    url = f"{BEDROCK_URL}/model/{BEDROCK_MODEL}/converse"
-
-    for attempt in range(1, 4):
+    raw = await llm_post(
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=400,
+        temperature=0,
+        timeout=120.0,
+    )
+    if raw is None:
+        return None
+    m = re.search(r"\{.*\}", raw, re.DOTALL)
+    if m:
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(
-                    url,
-                    json=payload,
-                    headers={
-                        "Authorization": f"Bearer {BEDROCK_TOKEN}",
-                        "Content-Type": "application/json",
-                    },
-                )
-            if resp.status_code == 200:
-                raw = resp.json()["output"]["message"]["content"][0]["text"]
-                m = re.search(r"\{.*\}", raw, re.DOTALL)
-                if m:
-                    return json.loads(m.group())
-                logger.error(f"No JSON in Bedrock response: {raw[:200]}")
-                return None
-            elif resp.status_code in (429, 500, 502, 503) and attempt < 3:
-                logger.warning(f"Bedrock {resp.status_code}, retrying (attempt {attempt}/3)...")
-            else:
-                logger.error(f"Bedrock error {resp.status_code}: {resp.text[:300]}")
-                return None
-        except (httpx.ConnectError, httpx.TimeoutException) as e:
-            if attempt < 3:
-                logger.warning(f"Bedrock transient error ({e}), retrying (attempt {attempt}/3)...")
-            else:
-                logger.error(f"Bedrock call failed after 3 attempts: {e}")
-                return None
-        except Exception as e:
-            logger.error(f"Bedrock call failed: {e}")
-            return None
-
-        await asyncio.sleep(2 ** attempt)  # 2s, 4s backoff
-
+            return json.loads(m.group())
+        except json.JSONDecodeError:
+            pass
+    logger.error(f"No JSON in LLM response: {raw[:200]}")
     return None
 
 
