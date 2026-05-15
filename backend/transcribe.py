@@ -73,7 +73,7 @@ POLL_INTERVAL = 60  # seconds
 
 # At most 1 director pipeline at a time: the LLM proxy (10.190.0.214:8080) is single-threaded
 # and drops concurrent requests with 502. Serial execution avoids proxy overload.
-_DIRECTOR_SEM = asyncio.Semaphore(1)
+_DIRECTOR_SEM = asyncio.Semaphore(2)
 
 # ── Transcription timing tracker ─────────────────────────────────────────────
 _job_submit_times: dict[str, float] = {}   # gpu_job_id → time.time() when submitted

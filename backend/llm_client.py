@@ -29,7 +29,7 @@ def get_llm_sem() -> asyncio.Semaphore:
     """Return (lazily creating) the global LLM semaphore."""
     global _LLM_SEM
     if _LLM_SEM is None:
-        _LLM_SEM = asyncio.Semaphore(1)
+        _LLM_SEM = asyncio.Semaphore(3)
     return _LLM_SEM
 
 
