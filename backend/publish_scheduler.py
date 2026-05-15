@@ -107,6 +107,23 @@ async def _execute_task(task: dict, broadcast_fn: Optional[Callable] = None):
     await _set_status("publishing")
 
     try:
+        # 重复发布检查：如果同一分组已有其他 done 任务，跳过本次发布
+        group_id = task.get("group_id")
+        if group_id:
+            async with aio_connect() as db:
+                async with db.execute(
+                    """SELECT COUNT(*) FROM publish_tasks
+                       WHERE group_id = ? AND platform = ? AND status = 'done' AND id != ?""",
+                    (group_id, platform, task_id),
+                ) as cur:
+                    done_count = (await cur.fetchone())[0]
+            if done_count > 0:
+                logger.info(f"Task {task_id}: group {group_id} already published ({done_count} done tasks), skipping")
+                await _set_status("done", error_msg="分组已在其他任务中发布，跳过")
+                if broadcast_fn:
+                    await broadcast_fn({"type": "publish_task_update", "task_id": task_id, "status": "done", "skipped": True})
+                return
+
         publisher = _get_publisher(platform)
 
         # Resolve video path
