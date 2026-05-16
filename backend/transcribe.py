@@ -71,9 +71,10 @@ _flush_event: asyncio.Event = asyncio.Event()
 RECORDINGS_DIR = os.path.join(os.path.dirname(__file__), "..", "recordings")
 POLL_INTERVAL = 60  # seconds
 
-# At most 1 director pipeline at a time: the LLM proxy (10.190.0.214:8080) is single-threaded
-# and drops concurrent requests with 502. Serial execution avoids proxy overload.
-_DIRECTOR_SEM = asyncio.Semaphore(2)
+# Pipeline concurrency: GPU has headroom (RTX 4080S 16GB), LLM semaphore is separate (=3).
+# Director and creative use independent semaphores to maximize throughput.
+_DIRECTOR_SEM = asyncio.Semaphore(4)
+_CREATIVE_SEM = asyncio.Semaphore(4)
 
 # ── Transcription timing tracker ─────────────────────────────────────────────
 _job_submit_times: dict[str, float] = {}   # gpu_job_id → time.time() when submitted
@@ -1054,12 +1055,10 @@ async def _run_director_pipeline_inner(group_id: int):
 
 
 # ── Creative pipeline (自编文案，vibe=creative) ────────────────────────────────
-# Share the same LLM semaphore as director: proxy is single-threaded, must not run both at once.
-_creative_sem = _DIRECTOR_SEM
 
 
 async def _run_creative_pipeline(group_id: int):
-    async with _creative_sem:
+    async with _CREATIVE_SEM:
         try:
             await _run_creative_pipeline_inner(group_id)
         except Exception as e:
