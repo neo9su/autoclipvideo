@@ -1254,8 +1254,8 @@ async def backfill_auto_merge():
             async with db.execute(
                 """SELECT id FROM clip_groups
                    WHERE classic_status = 2
-                     AND (director_status = 0 OR director_status = -1)
-                     AND (creative_status = 0 OR creative_status IS NULL OR creative_status = -1)
+                     AND director_status = 0
+                     AND (creative_status = 0 OR creative_status IS NULL)
                    ORDER BY id DESC"""
             ) as cur:
                 pending = [r["id"] for r in await cur.fetchall()]
