@@ -1250,6 +1250,7 @@ async def backfill_auto_merge():
         await asyncio.sleep(2)  # let Phase 1 tasks settle
         async with aio_connect() as db:
             db.row_factory = aiosqlite.Row
+            # Groups where director not started
             async with db.execute(
                 """SELECT id FROM clip_groups
                    WHERE classic_status = 2
@@ -1257,15 +1258,31 @@ async def backfill_auto_merge():
                      AND (creative_status = 0 OR creative_status IS NULL)
                    ORDER BY id DESC"""
             ) as cur:
-                pending = [r["id"] for r in await cur.fetchall()]
+                pending_director = [r["id"] for r in await cur.fetchall()]
+            # Groups where director done but creative not started
+            async with db.execute(
+                """SELECT id FROM clip_groups
+                   WHERE classic_status = 2
+                     AND director_status = 2
+                     AND (creative_status = 0 OR creative_status IS NULL)
+                   ORDER BY id DESC"""
+            ) as cur:
+                pending_creative_only = [r["id"] for r in await cur.fetchall()]
+
+        pending = list(set(pending_director) | set(pending_creative_only))
+
+        if pending_director:
+            logger.info(f"Backfill: {len(pending_director)} groups with classic done but director/creative not run — scheduling...")
+        if pending_creative_only:
+            logger.info(f"Backfill: {len(pending_creative_only)} groups with director done but creative not run — scheduling...")
 
         if pending:
-            logger.info(f"Backfill: {len(pending)} groups with classic done but director/creative not run — scheduling...")
             for gid in pending:
-                asyncio.create_task(_run_director_pipeline(gid))
+                if gid in pending_director:
+                    asyncio.create_task(_run_director_pipeline(gid))
                 asyncio.create_task(_run_creative_pipeline(gid))
                 await asyncio.sleep(0.3)  # stagger to avoid flooding
-            logger.info(f"Backfill: director+creative tasks queued for {len(pending)} groups")
+            logger.info(f"Backfill: queued tasks for {len(pending)} groups")
         else:
             logger.info("Backfill: all groups already have director/creative results or in progress")
 

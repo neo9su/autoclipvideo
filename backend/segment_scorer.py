@@ -413,9 +413,9 @@ async def enrich_visual_scores(mp4: str, segs: list) -> None:
 
 # ── Phase D: Claude visual semantic scoring ───────────────────────────────────
 
-_BEDROCK_URL   = "https://bedrock-runtime.us-east-1.amazonaws.com"
-_VISION_MODEL  = os.environ.get("BEDROCK_VISION_MODEL", "us.anthropic.claude-sonnet-4-6")
-_BEDROCK_TOKEN = os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "")
+_BEDROCK_URL   = os.environ.get("LLM_BASE_URL", "http://10.190.0.214:8080/v1")
+_VISION_MODEL  = os.environ.get("LLM_MODEL", "us.anthropic.claude-sonnet-4-6")
+_BEDROCK_TOKEN = os.environ.get("LLM_API_KEY", "sk-orx-ukMXZXaPzL_Du1Xkcx3UuiSEjcf7TiXJ")
 
 # Max concurrent Bedrock API calls — keeps cost predictable and avoids rate limits.
 _SEM_SEMANTIC = asyncio.Semaphore(2)
@@ -423,6 +423,10 @@ _SEM_SEMANTIC = asyncio.Semaphore(2)
 # Circuit breaker: set True after first unrecoverable Bedrock error (invalid model, auth fail).
 # Prevents wasting frame-extraction time on every segment when the service is misconfigured.
 _semantic_disabled = False
+
+# Failure counter: trip circuit breaker after 3 consecutive timeouts/exceptions.
+_semantic_fail_count = 0
+_SEMANTIC_FAIL_THRESHOLD = 3
 
 # In-process pHash cache: phash_int → analysis result dict.
 # Prevents duplicate API calls for visually identical/similar frames across segments.
@@ -526,19 +530,22 @@ async def _call_bedrock_vision(frame_paths: list[str]) -> dict | None:
             with open(fp, "rb") as f:
                 img_b64 = base64.b64encode(f.read()).decode()
             content.append({
-                "image": {"format": "jpeg", "source": {"bytes": img_b64}}
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}
             })
         except Exception as e:
             logger.debug(f"Frame read failed {fp}: {e}")
     if not content:
         return None
-    content.append({"text": _VISION_PROMPT})
+    content.append({"type": "text", "text": _VISION_PROMPT})
 
     payload = {
+        "model": _VISION_MODEL,
         "messages": [{"role": "user", "content": content}],
-        "inferenceConfig": {"maxTokens": 250, "temperature": 0},
+        "max_tokens": 250,
+        "temperature": 0,
     }
-    url = f"{_BEDROCK_URL}/model/{_VISION_MODEL}/converse"
+    url = f"{_BEDROCK_URL}/chat/completions"
     try:
         import httpx
         async with httpx.AsyncClient(timeout=8.0) as client:
@@ -550,18 +557,16 @@ async def _call_bedrock_vision(frame_paths: list[str]) -> dict | None:
                 },
             )
         if resp.status_code != 200:
-            logger.warning(f"Bedrock vision {resp.status_code}: {resp.text[:200]}")
-            # 400/403/404 = misconfiguration (bad model ID, auth failure, region).
-            # Trip the circuit breaker so we stop wasting frame-extraction time.
+            logger.warning(f"LLM vision {resp.status_code}: {resp.text[:200]}")
             if resp.status_code in (400, 403, 404):
                 global _semantic_disabled
                 _semantic_disabled = True
                 logger.error(
-                    f"Bedrock vision permanently disabled (status {resp.status_code}). "
-                    "Check BEDROCK_VISION_MODEL and AWS_BEARER_TOKEN_BEDROCK."
+                    f"LLM vision permanently disabled (status {resp.status_code}). "
+                    "Check LLM_MODEL and LLM_API_KEY."
                 )
             return None
-        raw = resp.json()["output"]["message"]["content"][0]["text"]
+        raw = resp.json()["choices"][0]["message"]["content"]
         # raw_decode stops at end of first complete JSON object, ignoring trailing text
         try:
             start = raw.index("{")
@@ -571,6 +576,14 @@ async def _call_bedrock_vision(frame_paths: list[str]) -> dict | None:
             logger.warning(f"No JSON in vision response: {raw[:200]}")
     except Exception as e:
         logger.warning(f"Bedrock vision call failed: {e}")
+        global _semantic_fail_count, _semantic_disabled
+        _semantic_fail_count += 1
+        if _semantic_fail_count >= _SEMANTIC_FAIL_THRESHOLD:
+            _semantic_disabled = True
+            logger.error(
+                f"LLM vision circuit breaker tripped after {_semantic_fail_count} failures "
+                "(timeouts/connection errors). Semantic scoring disabled for this session."
+            )
     return None
 
 
@@ -702,19 +715,20 @@ _NARRATIVE_TO_CATEGORY = {
 
 
 async def _call_bedrock_text(text: str) -> dict | None:
-    """Call Bedrock Claude to score a text segment. Returns parsed JSON or None."""
+    """Call LLM to score a text segment. Returns parsed JSON or None."""
     import httpx
-    bearer = os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "")
-    bedrock_url = os.environ.get("BEDROCK_URL", "")
-    bedrock_model = os.environ.get("BEDROCK_MODEL", "us.anthropic.claude-haiku-4-5-20251001")
-
-    if not bearer or not bedrock_url:
-        return None
+    llm_url   = os.environ.get("LLM_BASE_URL", "http://10.190.0.214:8080/v1")
+    llm_key   = os.environ.get("LLM_API_KEY", "sk-orx-ukMXZXaPzL_Du1Xkcx3UuiSEjcf7TiXJ")
+    llm_model = os.environ.get("LLM_MODEL", "us.anthropic.claude-sonnet-4-6")
 
     payload = {
-        "system": [{"text": "你是视频内容分析助手，专注于假发直播内容价值评估。"}],
-        "messages": [{"role": "user", "content": [{"text": _LLM_TEXT_PROMPT.format(text=text[:300])}]}],
-        "inferenceConfig": {"maxTokens": 150, "temperature": 0.1},
+        "model": llm_model,
+        "messages": [
+            {"role": "system", "content": "你是视频内容分析助手，专注于假发直播内容价值评估。"},
+            {"role": "user", "content": _LLM_TEXT_PROMPT.format(text=text[:300])}
+        ],
+        "max_tokens": 150,
+        "temperature": 0.1,
     }
     try:
         async with _LLM_TEXT_SEMAPHORE:
@@ -723,14 +737,13 @@ async def _call_bedrock_text(text: str) -> dict | None:
                 http2=False, timeout=15.0
             ) as client:
                 resp = await client.post(
-                    f"{bedrock_url}/model/{bedrock_model}/converse",
+                    f"{llm_url}/chat/completions",
                     json=payload,
-                    headers={"Authorization": f"Bearer {bearer}"},
+                    headers={"Authorization": f"Bearer {llm_key}"},
                 )
         if resp.status_code != 200:
             return None
-        body = resp.json()
-        raw = body["output"]["message"]["content"][0]["text"].strip()
+        raw = resp.json()["choices"][0]["message"]["content"].strip()
         # Strip markdown fences if present
         if raw.startswith("```"):
             raw = raw.split("```")[1]
