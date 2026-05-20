@@ -902,7 +902,9 @@ async def create_job(
     room_id: int = Form(...),
 ):
     """Receive MP4 file and start transcription."""
-    job_id = os.path.splitext(file.filename)[0]
+    from urllib.parse import unquote
+    _raw_filename = unquote(file.filename)  # decode %E5%B0%8F... → 中文
+    job_id = os.path.splitext(_raw_filename)[0]
     room_dir = os.path.join(STORAGE_DIR, str(room_id))
     # exist_ok=True doesn't suppress WinError 183 on Windows when the path is a junction/symlink;
     # catch the OSError explicitly so the endpoint doesn't return 500.
@@ -911,7 +913,7 @@ async def create_job(
     except OSError:
         pass  # directory already exists — safe to continue
 
-    mp4_path = os.path.join(room_dir, file.filename)
+    mp4_path = os.path.join(room_dir, _raw_filename)
     srt_path = os.path.join(room_dir, job_id + ".srt")
 
     async with aiofiles.open(mp4_path, "wb") as f:
@@ -1016,9 +1018,15 @@ class ClipJobRequest(BaseModel):
 
 @app.post("/clip-jobs", status_code=201)
 async def create_clip_job(req: ClipJobRequest):
+    from urllib.parse import quote
     mp4_path = os.path.join(STORAGE_DIR, str(req.room_id), req.mp4_filename)
     if not os.path.exists(mp4_path):
-        raise HTTPException(status_code=404, detail=f"MP4 not found on server: {mp4_path}")
+        encoded_name = quote(req.mp4_filename, safe='.-_')
+        mp4_path_enc = os.path.join(STORAGE_DIR, str(req.room_id), encoded_name)
+        if os.path.exists(mp4_path_enc):
+            mp4_path = mp4_path_enc
+        else:
+            raise HTTPException(status_code=404, detail=f"MP4 not found on server: {mp4_path}")
     if not req.segments:
         raise HTTPException(status_code=422, detail="segments list is empty")
 
@@ -1392,9 +1400,15 @@ async def _do_voice_ref(ref_id: str, mp4_path: str, start: float, duration: floa
 @app.post("/voice-refs", status_code=201)
 async def create_voice_ref(req: VoiceRefRequest):
     """Extract a WAV voice reference from a recording (lightweight, no NVENC)."""
+    from urllib.parse import quote
     mp4_path = os.path.join(STORAGE_DIR, str(req.room_id), req.mp4_filename)
     if not os.path.isfile(mp4_path):
-        raise HTTPException(status_code=404, detail=f"File not found: {req.mp4_filename}")
+        encoded_name = quote(req.mp4_filename, safe='.-_')
+        mp4_path_enc = os.path.join(STORAGE_DIR, str(req.room_id), encoded_name)
+        if os.path.isfile(mp4_path_enc):
+            mp4_path = mp4_path_enc
+        else:
+            raise HTTPException(status_code=404, detail=f"File not found: {req.mp4_filename}")
 
     duration = max(1.0, req.end - req.start)
     ref_id = uuid.uuid4().hex[:16]
@@ -1662,6 +1676,7 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
     import base64 as _b64
     out_dir = os.path.join(STORAGE_DIR, "director", job_id)
     os.makedirs(out_dir, exist_ok=True)
+    has_tts_for_lipsync = bool(tts_audio_b64)  # flag for optional lip sync step
 
     try:
         _update_director_job(job_id, status="processing", phase="preprocess", pct=0)
@@ -1678,7 +1693,14 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
         for i, clip in enumerate(clips):
             mp4_path = os.path.join(STORAGE_DIR, str(clip["room_id"]), clip["filename"])
             if not os.path.exists(mp4_path):
-                raise FileNotFoundError(f"Source not found: {mp4_path}")
+                # Fallback: try URL-encoded filename (legacy sync used percent-encoding)
+                from urllib.parse import quote, unquote
+                encoded_name = quote(clip["filename"], safe='.-_')
+                mp4_path_enc = os.path.join(STORAGE_DIR, str(clip["room_id"]), encoded_name)
+                if os.path.exists(mp4_path_enc):
+                    mp4_path = mp4_path_enc
+                else:
+                    raise FileNotFoundError(f"Source not found: {mp4_path}")
 
             seg_out = os.path.join(out_dir, f"seg{i:03d}.mp4")
             start    = float(clip["start"])
@@ -1706,7 +1728,36 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
         )
         if not merged or not os.path.exists(merged):
             raise RuntimeError("xfade merge failed")
-        _update_director_job(job_id, pct=75)
+        _update_director_job(job_id, pct=60)
+
+        # ── Phase 2.5: Lip Sync (optional) ────────────────────────────────────
+        # If lip sync models are deployed, re-render mouth movements to match TTS audio.
+        # Enable by placing wav2lip_gan.onnx in C:\Users\neo\lipsync\models\
+        LIPSYNC_DIR = os.path.join(os.path.dirname(STORAGE_DIR), "lipsync")
+        LIPSYNC_MODEL = os.path.join(LIPSYNC_DIR, "models", "wav2lip_gan.onnx")
+        if has_tts_for_lipsync and os.path.exists(LIPSYNC_MODEL):
+            _update_director_job(job_id, phase="lipsync", pct=62)
+            lipsync_out = os.path.join(out_dir, "merged_lipsync.mp4")
+            tts_wav_for_ls = os.path.join(out_dir, "tts_ls.wav")
+            # Decode TTS audio for lip sync
+            import base64 as _b64_ls
+            with open(tts_wav_for_ls, "wb") as _f:
+                _f.write(_b64_ls.b64decode(tts_audio_b64))
+            ls_script = os.path.join(LIPSYNC_DIR, "lipsync_infer.py")
+            if os.path.exists(ls_script):
+                ls_rc = await _run_ffmpeg(
+                    "python", ls_script,
+                    "--video", merged, "--audio", tts_wav_for_ls, "--output", lipsync_out,
+                )
+                if ls_rc == 0 and os.path.exists(lipsync_out) and os.path.getsize(lipsync_out) > 0:
+                    logger.info(f"[Director] Lip sync applied: {lipsync_out}")
+                    merged = lipsync_out
+                else:
+                    logger.warning(f"[Director] Lip sync failed (rc={ls_rc}), using original merge")
+            _update_director_job(job_id, pct=75)
+        else:
+            _update_director_job(job_id, pct=75)
+        has_tts_for_lipsync = False  # consumed
 
         # ── Phase 3: final encode – subtitle burn + TTS audio ─────────────────
         _update_director_job(job_id, phase="final", pct=75)
