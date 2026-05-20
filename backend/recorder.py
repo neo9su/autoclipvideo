@@ -41,6 +41,8 @@ class RoomRecorder:
 
     async def stop(self):
         self.recording = False
+        last_file = self.current_file  # capture before cleanup
+        last_seg_index = self.segment_index
         if self._proc:
             try:
                 self._proc.terminate()
@@ -58,6 +60,15 @@ class RoomRecorder:
         self.current_file = None
         self.session_start = None
         self.segment_start = None
+
+        # Finalize the last segment that was interrupted by stop()
+        if last_file and self.on_segment_done:
+            filepath = os.path.join(RECORDINGS_DIR, last_file)
+            if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
+                logger.info(f"[{self.room_name}] Finalizing last segment on stop: {last_file}")
+                asyncio.create_task(
+                    self.on_segment_done(self.room_id, filepath, last_seg_index)
+                )
 
     async def _record_loop(self, stream_url: str):
         while self.recording:
