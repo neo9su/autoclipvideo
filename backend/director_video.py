@@ -446,8 +446,8 @@ class DirectorVideoComposer:
     
     async def _prepare_video_clips(self, matched_segments: List[Dict], 
                                  config: Dict) -> List[Dict]:
-        """准备视频片段信息"""
-        video_clips = []
+        """准备视频片段信息。连续匹配到同一录像且时间衔接的场景合并为一个长片段，避免讲解中途切断。"""
+        raw_clips = []
         
         for i, segment_data in enumerate(matched_segments):
             recording_id = segment_data.get('matched_recording_id')
@@ -476,9 +476,32 @@ class DirectorVideoComposer:
                 'confidence': segment_data.get('confidence_score', 0.0),
             }
             
-            video_clips.append(clip_info)
+            raw_clips.append(clip_info)
         
-        logger.info(f"Prepared {len(video_clips)} video clips")
+        # Merge consecutive clips from the same recording file where times are adjacent
+        video_clips = []
+        for clip in raw_clips:
+            if (video_clips
+                and clip['filename'] == video_clips[-1]['filename']
+                and abs(clip['start_time'] - (video_clips[-1]['start_time'] + video_clips[-1]['duration'])) < 1.0):
+                # Merge: extend previous clip duration, concatenate script text
+                prev = video_clips[-1]
+                prev['duration'] = (clip['start_time'] + clip['duration']) - prev['start_time']
+                prev['script_text'] = (prev['script_text'] + ' ' + clip['script_text']).strip()
+                # Keep first scene_id for subtitle timing (will use merged TTS durations)
+                if clip.get('scene_id') is not None:
+                    if 'merged_scene_ids' not in prev:
+                        prev['merged_scene_ids'] = [prev.get('scene_id')]
+                    prev['merged_scene_ids'].append(clip['scene_id'])
+                logger.info(f"Merged clip {clip['index']} into previous (same recording, continuous)")
+            else:
+                video_clips.append(clip)
+        
+        # Re-index after merge
+        for i, c in enumerate(video_clips):
+            c['index'] = i
+        
+        logger.info(f"Prepared {len(video_clips)} video clips (merged from {len(raw_clips)} segments)")
         return video_clips
     
     async def _find_recording_file(self, recording_id: int) -> Optional[Dict]:

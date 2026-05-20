@@ -115,6 +115,7 @@
                 {{ directorBusy[g.id] === 'script' ? '生成中…' : (g.director_script ? '↺ 重新生成脚本' : '生成脚本') }}
               </button>
               <span v-if="g.director_script" class="step-done">✓ 脚本已生成</span>
+              <button v-if="g.director_script" class="btn-action purple" style="margin-left:8px" @click="openScriptReview(g)">✏ 审核文案</button>
             </div>
             <div class="director-step">
               <span class="step-num">2</span>
@@ -353,6 +354,37 @@
       <div v-if="classicPreviewError" class="preview-err">视频加载失败</div>
       <div class="preview-footer">
         <a :href="`${apiBase}/api/groups/${classicPreviewGroup.id}/download`" class="btn-action teal" download>↓ 下载</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- Script Review Modal -->
+  <div v-if="scriptReviewGroup" class="modal-backdrop" @click.self="closeScriptReview">
+    <div class="script-review-modal">
+      <div class="preview-header">
+        <span class="preview-title">文案审核 · {{ scriptReviewGroup.label }}</span>
+        <button class="modal-close" @click="closeScriptReview">✕</button>
+      </div>
+      <div class="script-review-body">
+        <div v-for="(scene, idx) in reviewScenes" :key="idx" class="script-scene">
+          <div class="scene-header">
+            <span class="scene-badge">{{ scene.scene_type || `场景${idx+1}` }}</span>
+            <span class="scene-time">{{ scene.timestamp_start }}s - {{ scene.timestamp_end }}s</span>
+          </div>
+          <textarea
+            v-model="scene.voiceover_text"
+            class="scene-textarea"
+            rows="2"
+            :placeholder="`场景${idx+1}文案`"
+          ></textarea>
+        </div>
+      </div>
+      <div class="script-review-footer">
+        <button class="btn-action" @click="closeScriptReview">取消</button>
+        <button class="btn-action purple" :disabled="scriptSaving" @click="saveReviewedScript">
+          {{ scriptSaving ? '保存中…' : '✓ 确认保存' }}
+        </button>
+        <button class="btn-director" @click="regenerateScript">↺ 重新生成</button>
       </div>
     </div>
   </div>
@@ -643,6 +675,48 @@ const directorPreviewGroup = ref(null)
 const directorPreviewError = ref(false)
 function openDirectorPreview(g) { directorPreviewGroup.value = g; directorPreviewError.value = false }
 function closeDirectorPreview() { directorPreviewGroup.value = null }
+
+// Script review modal
+const scriptReviewGroup = ref(null)
+const reviewScenes = ref([])
+const scriptSaving = ref(false)
+function openScriptReview(g) {
+  try {
+    const script = typeof g.director_script === 'string' ? JSON.parse(g.director_script) : g.director_script
+    reviewScenes.value = (script.scenes || []).map(s => ({ ...s }))
+    scriptReviewGroup.value = g
+  } catch (e) {
+    alert('脚本解析失败')
+  }
+}
+function closeScriptReview() { scriptReviewGroup.value = null; reviewScenes.value = [] }
+async function saveReviewedScript() {
+  scriptSaving.value = true
+  try {
+    const g = scriptReviewGroup.value
+    const script = typeof g.director_script === 'string' ? JSON.parse(g.director_script) : { ...g.director_script }
+    script.scenes = reviewScenes.value
+    await fetch(`${apiBase}/api/v2/director/update-script`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ group_id: g.id, script }),
+    })
+    g.director_script = JSON.stringify(script)
+    g.director_audio_path = null
+    g.director_final_video = null
+    closeScriptReview()
+    alert('文案已保存，请重新生成配音')
+  } catch (e) {
+    alert('保存失败: ' + e.message)
+  } finally {
+    scriptSaving.value = false
+  }
+}
+function regenerateScript() {
+  const g = scriptReviewGroup.value
+  closeScriptReview()
+  generateDirectorScript(g)
+}
 
 // Creative video preview
 const creativePreviewGroup = ref(null)
@@ -1457,4 +1531,15 @@ onUnmounted(() => { ws?.close(); stopProgressPolling() })
 .cover-preview-dots { display: flex; justify-content: center; gap: 8px; padding: 12px; }
 .cover-dot { width: 8px; height: 8px; border-radius: 50%; background: #444; cursor: pointer; transition: background 0.15s; }
 .cover-dot-active { background: #fbbf24; }
+
+/* Script review modal */
+.script-review-modal { background: #111; border: 1px solid #333; border-radius: 12px; width: min(700px, 94vw); max-height: 85vh; display: flex; flex-direction: column; overflow: hidden; }
+.script-review-body { padding: 16px; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 12px; }
+.script-scene { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 8px; padding: 12px; }
+.scene-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.scene-badge { background: #7c3aed; color: white; padding: 2px 8px; border-radius: 4px; font-size: 12px; }
+.scene-time { color: #888; font-size: 12px; }
+.scene-textarea { width: 100%; background: #0a0a0a; border: 1px solid #333; border-radius: 6px; color: #eee; padding: 8px; font-size: 14px; resize: vertical; font-family: inherit; }
+.scene-textarea:focus { border-color: #7c3aed; outline: none; }
+.script-review-footer { padding: 12px 16px; border-top: 1px solid #2a2a2a; display: flex; gap: 8px; justify-content: flex-end; }
 </style>

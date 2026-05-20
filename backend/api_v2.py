@@ -212,6 +212,47 @@ async def get_group_script(group_id: int):
         logger.error(f"Failed to get script for group {group_id}: {e}")
         raise HTTPException(status_code=500, detail=f"获取脚本失败: {str(e)}")
 
+
+class ScriptUpdateRequest(BaseModel):
+    group_id: int
+    script: Dict
+
+
+@director_router.post("/update-script")
+async def update_script(request: ScriptUpdateRequest):
+    """手动编辑/审核后保存修改过的脚本。覆盖已有脚本，清除已生成的配音和视频（需重新生成）。"""
+    import aiosqlite
+    from db import DB_PATH
+
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            # Verify group exists
+            async with db.execute(
+                "SELECT id FROM clip_groups WHERE id = ?", (request.group_id,)
+            ) as cur:
+                if not await cur.fetchone():
+                    raise HTTPException(status_code=404, detail="分组不存在")
+            # Save edited script, clear downstream outputs so user must re-generate
+            await db.execute(
+                """UPDATE clip_groups
+                   SET director_script = ?,
+                       director_audio_path = NULL,
+                       director_segments = NULL,
+                       director_final_video = NULL,
+                       director_status = 0,
+                       director_error = NULL
+                   WHERE id = ?""",
+                (json.dumps(request.script, ensure_ascii=False), request.group_id),
+            )
+            await db.commit()
+        return {"success": True, "message": "脚本已保存，请重新生成配音"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update script for group {request.group_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"保存失败: {e}")
+
+
 @director_router.post("/generate-voiceover")
 async def generate_voiceover(group_id: int, use_voice_cloning: bool = True):
     """为分组生成声音克隆配音"""
