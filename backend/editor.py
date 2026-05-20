@@ -2208,12 +2208,10 @@ async def _feedback_to_hints(srt_path: str, feedback: str) -> dict:
     avoid_keywords, prefer_longer, clip_min_override, clip_max_override.
     Falls back to empty hints on any error.
     """
-    from analyzer import BEDROCK_URL, BEDROCK_MODEL, BEDROCK_TOKEN
+    _llm_url   = os.environ.get("LLM_BASE_URL", "http://10.190.0.214:8080/v1")
+    _llm_key   = os.environ.get("LLM_API_KEY", "sk-orx-ukMXZXaPzL_Du1Xkcx3UuiSEjcf7TiXJ")
+    _llm_model = os.environ.get("LLM_MODEL", "us.anthropic.claude-sonnet-4-6")
     import httpx, json as _json, re as _re
-
-    if not BEDROCK_TOKEN:
-        logger.warning("Bedrock not configured, skipping feedback hints")
-        return {}
 
     # Read SRT text (up to 6000 chars)
     try:
@@ -2246,21 +2244,23 @@ async def _feedback_to_hints(srt_path: str, feedback: str) -> dict:
 }}"""
 
     payload = {
-        "messages": [{"role": "user", "content": [{"text": prompt}]}],
-        "inferenceConfig": {"maxTokens": 600, "temperature": 0},
+        "model": _llm_model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 600,
+        "temperature": 0,
     }
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
-                f"{BEDROCK_URL}/model/{BEDROCK_MODEL}/converse",
+                f"{_llm_url}/chat/completions",
                 json=payload,
-                headers={"Authorization": f"Bearer {BEDROCK_TOKEN}",
+                headers={"Authorization": f"Bearer {_llm_key}",
                          "Content-Type": "application/json"},
             )
         if resp.status_code != 200:
-            logger.warning(f"Bedrock feedback hints error {resp.status_code}")
+            logger.warning(f"LLM feedback hints error {resp.status_code}")
             return {}
-        raw = resp.json()["output"]["message"]["content"][0]["text"]
+        raw = resp.json()["choices"][0]["message"]["content"]
         m = _re.search(r"\{.*\}", raw, _re.DOTALL)
         if m:
             hints = _json.loads(m.group())
@@ -2588,7 +2588,12 @@ async def _fast_local_clip(
             )
             audio_map = "[aout]"
 
-        vf = "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2"
+        vf = (
+            "scale=1080:1920:force_original_aspect_ratio=decrease:flags=lanczos,"
+            "pad=1080:1920:(ow-iw)/2:(oh-ih)/2,"
+            "unsharp=5:5:0.8:5:5:0.4,"
+            "eq=contrast=1.1:brightness=0.05:saturation=1.2"
+        )
         if has_subs:
             escaped = ass_path.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
             vf += f",ass={escaped}"
