@@ -1732,9 +1732,9 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
 
         # ── Phase 2.5: Lip Sync (optional) ────────────────────────────────────
         # If lip sync models are deployed, re-render mouth movements to match TTS audio.
-        # Enable by placing wav2lip_gan.onnx in C:\Users\neo\lipsync\models\
-        LIPSYNC_DIR = os.path.join(os.path.dirname(STORAGE_DIR), "lipsync")
-        LIPSYNC_MODEL = os.path.join(LIPSYNC_DIR, "models", "wav2lip_gan.onnx")
+        # Enable by placing wav2lip_gan.pth in C:\Users\neo\lipsync\models\
+        LIPSYNC_DIR = "C:/Users/neo/lipsync"
+        LIPSYNC_MODEL = os.path.join(LIPSYNC_DIR, "models", "wav2lip_gan.pth")
         if has_tts_for_lipsync and os.path.exists(LIPSYNC_MODEL):
             _update_director_job(job_id, phase="lipsync", pct=62)
             lipsync_out = os.path.join(out_dir, "merged_lipsync.mp4")

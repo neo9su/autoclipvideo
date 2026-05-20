@@ -6,5 +6,10 @@ node_modules/
 frontend/dist/
 douyin.db
 recordings/
+voice_output/
+data/
 *.egg-info/
 .env
+*.log
+*.bak
+

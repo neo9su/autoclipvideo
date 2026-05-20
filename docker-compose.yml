@@ -1,0 +1,29 @@
+services:
+  app:
+    build: .
+    container_name: autoclipvideo
+    ports:
+      - "8899:8899"
+      - "5173:5173"
+    volumes:
+      - ./data:/app/data
+      - ./recordings:/app/recordings
+      - ./voice_output:/app/voice_output
+    environment:
+      - GPU_SERVICE_URL=${GPU_SERVICE_URL:-http://host.docker.internal:8877}
+      - COMFYUI_URL=${COMFYUI_URL:-http://host.docker.internal:8188}
+      - WATCHDOG_URL=${WATCHDOG_URL:-http://host.docker.internal:8878}
+      - AWS_BEARER_TOKEN_BEDROCK=${AWS_BEARER_TOKEN_BEDROCK:-}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - MAX_CONCURRENT_CLIPS=${MAX_CONCURRENT_CLIPS:-1}
+      - MEM_WARN_GB=${MEM_WARN_GB:-5}
+      - COSYVOICE_URL=${COSYVOICE_URL:-}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8899/api/status"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # GPU service runs natively on Windows (not in Docker)
+  # Configure GPU_SERVICE_URL to point to your GPU server

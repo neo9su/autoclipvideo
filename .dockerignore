@@ -1,0 +1,13 @@
+**/node_modules
+**/dist
+**/__pycache__
+*.pyc
+*.pyo
+.DS_Store
+.env
+douyin.db
+recordings/
+voice_output/
+data/
+*.egg-info
+.git
