@@ -90,6 +90,11 @@ def _sec_to_ass(s: float) -> str:
     return f"{h}:{m:02d}:{sec:05.2f}"
 
 
+# Subtitle-to-audio sync offset (seconds). Positive = subtitle appears later.
+# Compensates for AAC encoder delay in the GPU concat pipeline.
+_SUB_OFFSET = 0.30
+
+
 def _build_director_ass(video_clips: list, transition_dur: float,
                         tts_dur_by_scene: dict = None) -> str:
     """
@@ -99,7 +104,7 @@ def _build_director_ass(video_clips: list, transition_dur: float,
     MAX_CHARS = 14
     MAX_LINES = 2
     n = len(video_clips)
-    cursor = 0.0
+    cursor = _SUB_OFFSET  # apply global sync offset
     events: list = []
 
     for i, clip in enumerate(video_clips):
