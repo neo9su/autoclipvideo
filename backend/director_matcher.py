@@ -108,7 +108,9 @@ class SemanticMatcher:
         核心逻辑：用 SRT 时间戳精确定位视频切点，而不是盲目顺序推进。
         每个 script segment 的 voiceover_text 在录像 SRT 中做语义搜索，
         找到最匹配的连续 SRT 段落，取其完整时间范围作为切点。
-        这样保证主播讲完一个完整语义点再切，不会话说到一半被截断。
+        
+        时间排斥机制：每段匹配后设置冷却区（±15s），后续段落优先选择
+        远离已用区间的时间点，确保画面多样性。
         """
         try:
             recordings = await self._get_group_recordings(group_id)
@@ -118,6 +120,8 @@ class SemanticMatcher:
 
             # 已使用的 SRT entry 索引集合（避免重复使用同一段内容）
             used_srt_indices: Dict[int, set] = {}  # rec_id -> set of srt entry indices
+            # 已使用的时间区间（用于时间排斥，确保画面多样性）
+            used_time_ranges: Dict[int, List[tuple]] = {}  # rec_id -> [(start, end), ...]
 
             matched_segments = []
 
@@ -127,9 +131,9 @@ class SemanticMatcher:
                 
                 logger.info(f"Matching segment {i+1}/{len(script_segments)}: {seg_text[:50]!r}")
 
-                # 尝试 SRT 语义匹配
+                # 尝试 SRT 语义匹配（带时间排斥）
                 best_match = await self._find_best_srt_match(
-                    seg_text, seg_duration, recordings, used_srt_indices
+                    seg_text, seg_duration, recordings, used_srt_indices, used_time_ranges
                 )
 
                 if best_match:
@@ -138,6 +142,12 @@ class SemanticMatcher:
                     if rec_id not in used_srt_indices:
                         used_srt_indices[rec_id] = set()
                     used_srt_indices[rec_id].update(best_match.get('used_indices', []))
+                    # 标记已用时间区间
+                    if rec_id not in used_time_ranges:
+                        used_time_ranges[rec_id] = []
+                    used_time_ranges[rec_id].append(
+                        (best_match['start_time'], best_match['start_time'] + best_match['duration'])
+                    )
 
                     matched_segments.append({
                         'script_segment': segment,
@@ -155,7 +165,7 @@ class SemanticMatcher:
                 else:
                     # 回退：顺序分配
                     fallback = await self._fallback_match_single(
-                        segment, recordings, used_srt_indices
+                        segment, recordings, used_srt_indices, used_time_ranges
                     )
                     matched_segments.append(fallback)
                     logger.info(f"  → fallback: rec {fallback['matched_recording_id']}")
@@ -173,15 +183,19 @@ class SemanticMatcher:
         segment_duration: float,
         recordings: List[Dict],
         used_srt_indices: Dict[int, set],
+        used_time_ranges: Dict[int, List[tuple]] = None,
     ) -> Optional[Dict]:
         """
         在所有录像的 SRT 段落中找到与 segment_text 最语义匹配的连续段落。
+        带时间排斥：距离已用时间区间太近的片段会被惩罚，确保画面多样性。
         
         返回: {recording_id, start_time, duration, score, reason, used_indices}
         或 None（找不到好的匹配时）
         """
         if not segment_text:
             return None
+        if used_time_ranges is None:
+            used_time_ranges = {}
 
         best_result = None
         best_score = 0.3  # 最低阈值：score < 0.3 认为匹配不可靠
@@ -195,6 +209,7 @@ class SemanticMatcher:
                 continue
 
             used_set = used_srt_indices.get(rec_id, set())
+            rec_time_ranges = used_time_ranges.get(rec_id, [])
             
             # 在该录像的 SRT entries 中寻找最佳连续段落（窗口 1-5 条 SRT）
             result = await loop.run_in_executor(
@@ -202,16 +217,39 @@ class SemanticMatcher:
                 segment_text, srt_entries, used_set, segment_duration
             )
 
-            if result and result['score'] > best_score:
-                best_score = result['score']
-                best_result = {
-                    'recording_id': rec_id,
-                    'start_time': result['start_time'],
-                    'duration': result['duration'],
-                    'score': result['score'],
-                    'reason': f"srt_semantic={result['score']:.2f}",
-                    'used_indices': result['used_indices'],
-                }
+            if result and result['score'] > 0.2:
+                # ── 时间排斥惩罚：距离已用时间区间越近，惩罚越重 ──────────
+                # 确保画面多样性：不会反复取同一个区间的视频
+                time_penalty = 0.0
+                if rec_time_ranges:
+                    candidate_mid = result['start_time'] + result['duration'] / 2
+                    for (used_start, used_end) in rec_time_ranges:
+                        used_mid = (used_start + used_end) / 2
+                        distance = abs(candidate_mid - used_mid)
+                        # 15秒内的片段受惩罚，越近惩罚越重
+                        COOLDOWN = 15.0
+                        if distance < COOLDOWN:
+                            # 线性惩罚：距离0时惩罚0.4，距离15s时惩罚0
+                            penalty = 0.4 * (1.0 - distance / COOLDOWN)
+                            time_penalty = max(time_penalty, penalty)
+                        # 完全重叠（时间范围相交）—— 重惩罚
+                        overlap_start = max(result['start_time'], used_start)
+                        overlap_end = min(result['start_time'] + result['duration'], used_end)
+                        if overlap_end > overlap_start:
+                            time_penalty = max(time_penalty, 0.5)
+                
+                adjusted_score = result['score'] - time_penalty
+                
+                if adjusted_score > best_score:
+                    best_score = adjusted_score
+                    best_result = {
+                        'recording_id': rec_id,
+                        'start_time': result['start_time'],
+                        'duration': result['duration'],
+                        'score': adjusted_score,
+                        'reason': f"srt_match={result['score']:.2f} time_pen={time_penalty:.2f}",
+                        'used_indices': result['used_indices'],
+                    }
 
         return best_result
 
@@ -547,8 +585,11 @@ class SemanticMatcher:
         segment: Dict,
         recordings: List[Dict],
         used_srt_indices: Dict[int, set],
+        used_time_ranges: Dict[int, List[tuple]] = None,
     ) -> Dict:
-        """单个 segment 的回退匹配：录像级语义匹配 + 顺序偏移"""
+        """单个 segment 的回退匹配：录像级语义匹配 + 避开已用时间区间"""
+        if used_time_ranges is None:
+            used_time_ranges = {}
         seg_text = segment.get('voiceover_text', '') or segment.get('text', '')
         seg_duration = segment.get('duration', 15.0)
 
@@ -573,38 +614,50 @@ class SemanticMatcher:
 
         rec_id = best_rec['recording_id']
         rec_dur = best_rec.get('duration', 30.0)
-
-        # 找该录像中最后使用的位置之后开始
-        used = used_srt_indices.get(rec_id, set())
         srt_entries = best_rec.get('srt_entries', [])
+        used = used_srt_indices.get(rec_id, set())
+        rec_ranges = used_time_ranges.get(rec_id, [])
+
+        # 找一个远离已用区间的时间点
+        # 策略：遍历所有 SRT entries，找距离所有已用区间最远的起点
+        best_start = 0.0
+        best_distance = -1.0
         
-        if srt_entries and used:
-            # 从已用的最后一个 entry 之后开始
-            last_used = max(used) if used else -1
-            start_entry = last_used + 1
-            if start_entry < len(srt_entries):
-                start_time = srt_entries[start_entry]['start']
-                # 向后取够 seg_duration 的 entries
-                end_time = start_time + seg_duration
-                for j in range(start_entry, len(srt_entries)):
-                    if srt_entries[j]['end'] >= end_time:
-                        end_time = srt_entries[j]['end']
-                        break
-                duration = min(end_time - start_time, rec_dur - start_time)
-            else:
-                start_time = 0.0
-                duration = min(seg_duration, rec_dur)
+        if srt_entries:
+            for entry in srt_entries:
+                if entry['idx'] - 1 in used:  # idx 是 1-based, set 是 0-based index
+                    continue
+                t = entry['start']
+                # 计算到所有已用区间的最小距离
+                if rec_ranges:
+                    min_dist = min(abs(t - (s+e)/2) for s, e in rec_ranges)
+                else:
+                    min_dist = rec_dur  # 无已用，距离最大
+                if min_dist > best_distance:
+                    best_distance = min_dist
+                    best_start = t
         else:
-            start_time = 0.0
-            duration = min(seg_duration, rec_dur)
+            # 无 SRT，尝试均匀分布
+            if rec_ranges:
+                # 找已用区间之间的最大空隙
+                used_mids = sorted((s+e)/2 for s, e in rec_ranges)
+                gaps = [(0.0, used_mids[0])] + \
+                       [(used_mids[i], used_mids[i+1]) for i in range(len(used_mids)-1)] + \
+                       [(used_mids[-1], rec_dur)]
+                biggest_gap = max(gaps, key=lambda g: g[1] - g[0])
+                best_start = (biggest_gap[0] + biggest_gap[1]) / 2
+            else:
+                best_start = 0.0
+
+        duration = min(seg_duration, rec_dur - best_start)
 
         return {
             'script_segment': segment,
             'matched_recording_id': rec_id,
-            'matched_start_time': start_time,
+            'matched_start_time': best_start,
             'matched_duration': max(duration, 3.0),  # 至少 3 秒
             'confidence_score': best_score,
-            'match_reason': 'fallback_sequential',
+            'match_reason': 'fallback_dispersed',
         }
 
     def _calculate_semantic_similarity(self, text1: str, text2: str) -> float:
