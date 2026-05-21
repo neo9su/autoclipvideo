@@ -141,7 +141,7 @@ class SemanticMatcher:
                     # 查找录像时长
                     rec_dur_val = 600.0
                     for r in recordings:
-                        if r.get('id') == rec_id:
+                        if r.get('recording_id') == rec_id:
                             rec_dur_val = r.get('duration', 600.0)
                             break
                     # 标记已用的 SRT entries
