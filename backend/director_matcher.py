@@ -138,6 +138,12 @@ class SemanticMatcher:
 
                 if best_match:
                     rec_id = best_match['recording_id']
+                    # 查找录像时长
+                    rec_dur_val = 600.0
+                    for r in recordings:
+                        if r.get('id') == rec_id:
+                            rec_dur_val = r.get('duration', 600.0)
+                            break
                     # 标记已用的 SRT entries
                     if rec_id not in used_srt_indices:
                         used_srt_indices[rec_id] = set()
@@ -154,7 +160,7 @@ class SemanticMatcher:
                         'matched_recording_id': rec_id,
                         'matched_start_time': best_match['start_time'],
                         'matched_duration': best_match['duration'],
-                        'matched_rec_duration': rec_dur,
+                        'matched_rec_duration': rec_dur_val,
                         'confidence_score': best_match['score'],
                         'match_reason': best_match['reason'],
                     })
@@ -679,6 +685,7 @@ class SemanticMatcher:
             'matched_recording_id': rec_id,
             'matched_start_time': best_start,
             'matched_duration': max(duration, 3.0),  # 至少 3 秒
+            'matched_rec_duration': rec_dur,
             'confidence_score': best_score,
             'match_reason': 'fallback_dispersed',
         }
@@ -752,6 +759,7 @@ class SemanticMatcher:
                 'matched_recording_id': rid,
                 'matched_start_time': start,
                 'matched_duration': min(seg_dur, rec_dur - start),
+                'matched_rec_duration': rec_dur,
                 'confidence_score': 0.1,
                 'match_reason': 'fallback_sequential',
             })
