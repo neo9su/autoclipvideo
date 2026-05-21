@@ -569,9 +569,23 @@ class SemanticMatcher:
                     rows = await cursor.fetchall()
 
             for row in rows:
-                # 计算时长
+                # 计算实际文件时长（用 ffprobe，而非数据库的 start/end time）
+                filepath = os.path.join(recordings_dir, row["filename"])
                 duration = 30.0
-                if row["end_time"]:
+                if os.path.exists(filepath):
+                    try:
+                        import subprocess
+                        result = subprocess.run(
+                            ["ffprobe", "-v", "quiet", "-show_entries",
+                             "format=duration", "-of", "csv=p=0", filepath],
+                            capture_output=True, text=True, timeout=5
+                        )
+                        if result.returncode == 0 and result.stdout.strip():
+                            duration = float(result.stdout.strip())
+                    except Exception:
+                        pass
+                if duration <= 1.0 and row["end_time"]:
+                    # fallback 到数据库时间
                     try:
                         start = datetime.fromisoformat(row["start_time"])
                         end = datetime.fromisoformat(row["end_time"])
