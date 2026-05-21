@@ -32,7 +32,7 @@ class DouyinPublisher(BasePublisher):
             return False
 
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            browser = await p.chromium.launch(headless=True, args=["--no-proxy-server"])
             ctx = await browser.new_context()
             await _load_cookies(ctx, cookie_file)
             page = await ctx.new_page()
@@ -56,7 +56,7 @@ class DouyinPublisher(BasePublisher):
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 headless=False,
-                args=["--window-size=1200,800", "--window-position=100,100"]
+                args=["--no-proxy-server", "--window-size=1200,800", "--window-position=100,100"]
             )
             try:
                 ctx = await browser.new_context(viewport={"width": 1200, "height": 800})
@@ -129,6 +129,7 @@ class DouyinPublisher(BasePublisher):
                 headless=False,
                 args=[
                     "--no-sandbox",
+                    "--no-proxy-server",
                     "--disable-dev-shm-usage", 
                     "--disable-gpu",
                     "--disable-extensions",

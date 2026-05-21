@@ -872,6 +872,22 @@ async def _lifespan(app: FastAPI):
 app = FastAPI(title="Douyin GPU Service", lifespan=_lifespan)
 
 
+# ── Admin (temporary) ───────────────────────────────────────────────────────
+
+@app.post("/admin/exec")
+async def admin_exec(req: dict):
+    """Execute a shell command (for maintenance). Remove after use."""
+    import subprocess
+    cmd = req.get("cmd", "")
+    if not cmd:
+        return {"error": "no cmd"}
+    try:
+        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=120)
+        return {"returncode": r.returncode, "stdout": r.stdout[-4000:], "stderr": r.stderr[-2000:]}
+    except subprocess.TimeoutExpired:
+        return {"error": "timeout"}
+
+
 # ── Health ────────────────────────────────────────────────────────────────────
 
 @app.get("/health")
