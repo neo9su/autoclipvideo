@@ -1671,23 +1671,40 @@ def parse_srt(path: str) -> List[Seg]:
 
 # ── Scoring ───────────────────────────────────────────────────────────────────
 
-def _merge_short_segs(segs: List[Seg], min_dur: float = 3.0, max_gap: float = 1.5, max_merged: float = 6.0) -> List[Seg]:
-    """Merge consecutive SRT segments that are too short into scene-level segments.
+def _merge_short_segs(segs: List[Seg], min_dur: float = 3.0, max_gap: float = 1.5, max_merged: float = 15.0) -> List[Seg]:
+    """Merge consecutive SRT segments into scene-level segments.
 
-    Segments whose individual duration < min_dur are merged with their neighbours
-    as long as the inter-segment gap is <= max_gap and the combined duration stays
-    <= max_merged.  This handles fine-grained transcripts where each sentence is
-    only 1-2 seconds long.
+    策略：相邻段落如果间距≤max_gap且合并后不超过max_merged，则合并。
+    优先在语义边界（句号、问号、感叹号）处断开，保证主播把一个细节讲完整。
+    max_merged=15s 确保单段不会太长（完播率下降），但足够覆盖一个完整的产品细节说明。
     """
     if not segs:
         return segs
+    
+    # 语义结束标志：句子说完的标点
+    _SENTENCE_ENDERS = re.compile(r'[。！？\?!]\s*$')
+    
     out: List[Seg] = []
     buf = Seg(idx=segs[0].idx, start=segs[0].start, end=segs[0].end, text=segs[0].text)
     for nxt in segs[1:]:
         gap = nxt.start - buf.end
         combined = nxt.end - buf.start
-        if buf.duration < min_dur and gap <= max_gap and combined <= max_merged:
-            buf.end  = nxt.end
+        # 判断是否应该合并
+        should_merge = (
+            gap <= max_gap
+            and combined <= max_merged
+        )
+        # 如果当前 buf 已经以句号结尾且已超过 min_dur，优先断开（语义完整）
+        if should_merge and buf.duration >= min_dur and _SENTENCE_ENDERS.search(buf.text):
+            # 已经是一个完整句子，但如果下一条是同一话题的延续（gap很小且总时长还短），继续合并
+            if combined <= 8.0 or gap <= 0.3:
+                buf.end = nxt.end
+                buf.text = buf.text + " " + nxt.text
+            else:
+                out.append(buf)
+                buf = Seg(idx=nxt.idx, start=nxt.start, end=nxt.end, text=nxt.text)
+        elif should_merge:
+            buf.end = nxt.end
             buf.text = buf.text + " " + nxt.text
         else:
             out.append(buf)
@@ -1712,10 +1729,10 @@ def score_and_tag(seg: Seg) -> None:
         seg.reject_reason = "too_short"
         return
 
-    # Trim over-long segments — product/wearing/detail keywords allow up to 18s（完整介绍一款假发需要时间）
-    # 普通内容 cap 10s
+    # Trim over-long segments — product/wearing/detail keywords allow up to 20s（完整介绍一款假发的一个细节需要时间）
+    # 普通内容 cap 15s
     has_product_kw = any(kw in text for kw in (_PRODUCT_KW | _DETAIL_KW | _WEARING_KW | _COMFORT_KW))
-    max_dur = 18.0 if has_product_kw else 10.0
+    max_dur = 20.0 if has_product_kw else 15.0
     if seg.duration > max_dur:
         seg.end = seg.start + max_dur
 
@@ -1967,7 +1984,7 @@ def _select_from_valid(valid: List[Seg], clip_min: float = CLIP_MIN, clip_max: f
 
     used_ids: set = set()
 
-    def _pick_block(cat: str, budget: float, max_segs: int = 2) -> List[Seg]:
+    def _pick_block(cat: str, budget: float, max_segs: int = 3) -> List[Seg]:
         pool = sorted(
             [s for s in valid if id(s) not in used_ids and s.category == cat and s.score > 0],
             key=lambda s: s.score, reverse=True,
@@ -1976,8 +1993,8 @@ def _select_from_valid(valid: List[Seg], clip_min: float = CLIP_MIN, clip_max: f
         for s in pool:
             if len(chosen) >= max_segs:
                 break
-            # 允许最后一个片段轻微超出budget（最多超2s），避免话说到一半被截断
-            if used > 0 and used + s.duration > budget + 2.0:
+            # 允许最后一个片段轻微超出budget（最多超3s），避免话说到一半被截断
+            if used > 0 and used + s.duration > budget + 3.0:
                 continue
             chosen.append(s)
             used += s.duration
