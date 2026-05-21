@@ -223,72 +223,151 @@ class SemanticMatcher:
         target_duration: float,
     ) -> Optional[Dict]:
         """
-        滑动窗口搜索：在 SRT entries 中找到与 query_text 最匹配的连续段落。
-        窗口大小 1-5 条 SRT entry，优先选择：
-        1. 语义相似度最高
-        2. 时长接近 target_duration（但不强制，保证语义完整性优先）
-        3. 未被之前的 segment 使用过
+        精确匹配：在 SRT entries 中找到与 query_text 内容对应的原始时间点。
+        
+        策略优先级：
+        1. 精确文本匹配（找到原始录像中主播说同样内容的时刻）
+        2. 关键词重叠匹配（多个关键词命中）
+        3. 语义相似度（最后回退）
         
         返回: {start_time, duration, score, used_indices} 或 None
         """
-        if not self.model or not srt_entries:
-            return self._keyword_window_search(query_text, srt_entries, used_indices, target_duration)
+        if not srt_entries:
+            return None
 
         n = len(srt_entries)
         candidates = []
 
-        # 预编码 query
-        try:
-            query_emb = self.model.encode([query_text])[0]
-        except Exception:
-            return self._keyword_window_search(query_text, srt_entries, used_indices, target_duration)
-
-        # 滑动窗口：1-5 条连续 SRT entries
+        # ── Phase 1: 精确文本匹配 ────────────────────────────────────────
+        # AI 文案是从 SRT 提炼的，其中的关键词组应该能在原始 SRT 中找到
+        # 用 2-4 字的 n-gram 做精确匹配（不依赖分词库）
+        def _extract_ngrams(text: str, min_n: int = 2, max_n: int = 4) -> set:
+            """Extract character n-grams (2-4 chars), filtering punctuation."""
+            import re as _re_ng
+            clean = _re_ng.sub(r'[\s\u3000-\u303f\uff00-\uffef.,!?！？，。；]', '', text)
+            grams = set()
+            for n in range(min_n, max_n + 1):
+                for i in range(len(clean) - n + 1):
+                    grams.add(clean[i:i+n])
+            return grams
+        
+        query_ngrams = _extract_ngrams(query_text)
+        if not query_ngrams:
+            query_ngrams = {query_text}  # fallback
+        
+        # 提取关键动作短语（3-6字，如“往两边分”“往里抠”）——这些是音画同步的关键
+        # 也提取更长的子串（6-10字）作为精确匹配信号
+        long_phrases = set()
+        import re as _re_lp
+        clean_query = _re_lp.sub(r'[\s\u3000-\u303f\uff00-\uffef.,!?！？，。；]', '', query_text)
+        for plen in range(6, min(11, len(clean_query) + 1)):
+            for i in range(len(clean_query) - plen + 1):
+                long_phrases.add(clean_query[i:i+plen])
+        
         for window_size in range(1, min(6, n + 1)):
             for start_idx in range(n - window_size + 1):
                 end_idx = start_idx + window_size - 1
-                
-                # 检查是否有已用的 entry（轻度惩罚，不完全排除）
                 indices = set(range(start_idx, end_idx + 1))
+                
+                # 超过一半已用，跳过
                 overlap_ratio = len(indices & used_indices) / len(indices) if indices else 0
                 if overlap_ratio > 0.5:
-                    continue  # 超过一半已用，跳过
+                    continue
 
-                # 拼接窗口文本
                 window_text = " ".join(srt_entries[j]['text'] for j in range(start_idx, end_idx + 1))
                 window_start = srt_entries[start_idx]['start']
                 window_end = srt_entries[end_idx]['end']
                 window_dur = window_end - window_start
 
-                # 时长过短（<2s）或过长（>30s）的窗口跳过
                 if window_dur < 2.0 or window_dur > 30.0:
                     continue
 
-                # 语义相似度
-                try:
-                    window_emb = self.model.encode([window_text])[0]
-                    similarity = float(np.dot(query_emb, window_emb) / (
-                        np.linalg.norm(query_emb) * np.linalg.norm(window_emb)
-                    ))
-                except Exception:
+                # 精确匹配：计算 n-gram 命中率
+                window_ngrams = _extract_ngrams(window_text)
+                if not query_ngrams:
                     continue
-
-                # 时长匹配奖励（时长越接近 target 越好，但不惩罚超出）
-                dur_ratio = min(window_dur, target_duration) / max(window_dur, target_duration)
-                dur_bonus = 0.1 * dur_ratio  # 最多加 0.1 分
-
+                
+                # 双向匹配：query 中的 ngram 在 window 里出现了多少
+                hit_in_window = len(query_ngrams & window_ngrams)
+                precision = hit_in_window / len(query_ngrams)  # query ngram被命中比例
+                
+                # 还要看 window 中多少内容是相关的
+                recall = hit_in_window / max(len(window_ngrams), 1)
+                
+                # F1 score
+                if precision + recall > 0:
+                    f1 = 2 * precision * recall / (precision + recall)
+                else:
+                    f1 = 0.0
+                
+                # 长子串直接匹配加分（精确定位“头发往两边分”这类动作描述）
+                substring_bonus = 0.0
+                clean_window = _re_lp.sub(r'[\s\u3000-\u303f\uff00-\uffef.,!?！？，。；]', '', window_text)
+                for phrase in long_phrases:
+                    if phrase in clean_window:
+                        substring_bonus += 0.1
+                substring_bonus = min(substring_bonus, 0.5)  # cap
+                
                 # 重叠惩罚
                 overlap_penalty = 0.2 * overlap_ratio
+                
+                final_score = f1 + substring_bonus - overlap_penalty
 
-                final_score = similarity + dur_bonus - overlap_penalty
+                if final_score > 0.2:  # 最低阈值
+                    candidates.append({
+                        'start_time': window_start,
+                        'duration': window_dur,
+                        'score': final_score,
+                        'used_indices': list(indices),
+                        'window_size': window_size,
+                        'match_type': 'keyword_f1',
+                    })
 
-                candidates.append({
-                    'start_time': window_start,
-                    'duration': window_dur,
-                    'score': final_score,
-                    'used_indices': list(indices),
-                    'window_size': window_size,
-                })
+        # ── Phase 2: 语义相似度回退 ──────────────────────────────────────
+        if not candidates and self.model:
+            try:
+                query_emb = self.model.encode([query_text])[0]
+            except Exception:
+                query_emb = None
+            
+            if query_emb is not None:
+                for window_size in range(1, min(5, n + 1)):
+                    for start_idx in range(n - window_size + 1):
+                        end_idx = start_idx + window_size - 1
+                        indices = set(range(start_idx, end_idx + 1))
+                        
+                        overlap_ratio = len(indices & used_indices) / len(indices) if indices else 0
+                        if overlap_ratio > 0.5:
+                            continue
+
+                        window_text = " ".join(srt_entries[j]['text'] for j in range(start_idx, end_idx + 1))
+                        window_start = srt_entries[start_idx]['start']
+                        window_end = srt_entries[end_idx]['end']
+                        window_dur = window_end - window_start
+
+                        if window_dur < 2.0 or window_dur > 30.0:
+                            continue
+
+                        try:
+                            window_emb = self.model.encode([window_text])[0]
+                            similarity = float(np.dot(query_emb, window_emb) / (
+                                np.linalg.norm(query_emb) * np.linalg.norm(window_emb)
+                            ))
+                        except Exception:
+                            continue
+
+                        overlap_penalty = 0.2 * overlap_ratio
+                        final_score = similarity - overlap_penalty
+
+                        if final_score > 0.3:
+                            candidates.append({
+                                'start_time': window_start,
+                                'duration': window_dur,
+                                'score': final_score,
+                                'used_indices': list(indices),
+                                'window_size': window_size,
+                                'match_type': 'semantic',
+                            })
 
         if not candidates:
             return self._keyword_window_search(query_text, srt_entries, used_indices, target_duration)
@@ -297,8 +376,7 @@ class SemanticMatcher:
         candidates.sort(key=lambda x: x['score'], reverse=True)
         best = candidates[0]
         
-        # 确保语义完整性：如果最佳窗口末尾的 SRT entry 像是话说到一半
-        # （下一条 SRT 紧跟且有连续性），尝试扩展
+        # 确保语义完整性：如果最佳窗口末尾话说到一半则扩展
         best = self._extend_for_completeness(best, srt_entries, used_indices)
         
         return best

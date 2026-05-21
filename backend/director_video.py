@@ -101,8 +101,7 @@ def _build_director_ass(video_clips: list, transition_dur: float,
     根据 video_clips（含 script_text / duration）生成带关键词高亮的 ASS 字幕。
     优先使用 tts_dur_by_scene（TTS 实际时长）定时，保证字幕与语音同步。
     """
-    MAX_CHARS = 14
-    MAX_LINES = 2
+    MAX_CHARS = 14  # 每屏最多14字
     n = len(video_clips)
     cursor = _SUB_OFFSET  # apply global sync offset
     events: list = []
@@ -121,20 +120,41 @@ def _build_director_ass(video_clips: list, transition_dur: float,
             cursor += duration - (transition_dur if i < n - 1 else 0)
             continue
 
-        # 整段作为一条字幕，覆盖整个 duration（与语音对齐）
-        # 若超过 MAX_CHARS*MAX_LINES 则截断加省略号
-        display = text if len(text) <= MAX_CHARS * MAX_LINES else text[:MAX_CHARS * MAX_LINES - 1] + "…"
-        # 超过 MAX_CHARS 的部分换行（ASS \N）
-        if len(display) > MAX_CHARS:
-            display = display[:MAX_CHARS] + r"\N" + display[MAX_CHARS:]
-        ts = _sec_to_ass(cursor)
-        te = _sec_to_ass(cursor + duration - (transition_dur if i < n - 1 else 0))
-        ann = _annotate_dir(display)
-        events.append(f"Dialogue: 0,{ts},{te},XQN,,0,0,0,,{_B_TEXT}{_ANIM}{ann}")
-        # Layer 1: 右上角关键词大艺术字弹出（仅当句子含高亮词时）
-        kw_match = next((kw for kw in _DIR_SORTED_KWS if kw in text), None)
-        if kw_match:
-            events.append(f"Dialogue: 1,{ts},{te},KWPOP,,0,0,0,,{_ANIM_KW_POP}{kw_match}")
+        # ── 逐句滚动字幕：将整段文案按标点分句，每句独立显示 ──────────────
+        # 按标点切分为多个短句（逗号、句号、感叹号、问号、分号）
+        import re as _re_sub
+        sentences = _re_sub.split(r'(?<=[，。！？；,!?;])', text)
+        sentences = [s.strip() for s in sentences if s.strip()]
+        if not sentences:
+            sentences = [text]
+        
+        # 按字数估算每句的朗读时长（TTS 语速约 4-5 字/秒）
+        total_chars = sum(len(s) for s in sentences)
+        scene_dur = duration - (transition_dur if i < n - 1 else 0)
+        
+        sub_cursor = cursor
+        for si, sentence in enumerate(sentences):
+            # 按字数比例分配时长
+            char_ratio = len(sentence) / max(total_chars, 1)
+            sent_dur = max(1.0, scene_dur * char_ratio)  # 至少 1 秒
+            
+            # 每句超过 MAX_CHARS 则换行
+            display = sentence
+            if len(display) > MAX_CHARS:
+                display = display[:MAX_CHARS] + r"\N" + display[MAX_CHARS:]
+            
+            ts = _sec_to_ass(sub_cursor)
+            te = _sec_to_ass(sub_cursor + sent_dur)
+            ann = _annotate_dir(display)
+            events.append(f"Dialogue: 0,{ts},{te},XQN,,0,0,0,,{_B_TEXT}{_ANIM}{ann}")
+            
+            # 关键词弹出（仅第一个含高亮词的句子触发）
+            if si == 0:
+                kw_match = next((kw for kw in _DIR_SORTED_KWS if kw in sentence), None)
+                if kw_match:
+                    events.append(f"Dialogue: 1,{ts},{te},KWPOP,,0,0,0,,{_ANIM_KW_POP}{kw_match}")
+            
+            sub_cursor += sent_dur
 
         cursor += duration - (transition_dur if i < n - 1 else 0)
 
