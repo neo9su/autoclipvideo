@@ -154,6 +154,7 @@ class SemanticMatcher:
                         'matched_recording_id': rec_id,
                         'matched_start_time': best_match['start_time'],
                         'matched_duration': best_match['duration'],
+                        'matched_rec_duration': rec_dur,
                         'confidence_score': best_match['score'],
                         'match_reason': best_match['reason'],
                     })

@@ -501,7 +501,7 @@ class DirectorVideoComposer:
                 'file_path': video_file,
                 'room_id': rec_info["room_id"],
                 'filename': rec_info["filename"],
-                'rec_duration': rec_info.get("duration", 600.0),
+                'rec_duration': segment_data.get('matched_rec_duration', 600.0),
                 'start_time': segment_data.get('matched_start_time', 0.0),
                 'duration': segment_data.get('matched_duration', 15.0),
                 # voiceover_text 优先，兼容 text 字段
@@ -568,7 +568,7 @@ class DirectorVideoComposer:
         return video_clips
     
     async def _find_recording_file(self, recording_id: int) -> Optional[Dict]:
-        """查找录像原始文件路径，返回 {path, room_id, filename, duration} 或 None。"""
+        """查找录像原始文件路径，返回 {path, room_id, filename} 或 None。"""
         import aiosqlite
         from db import DB_PATH, aio_connect
 
@@ -576,7 +576,7 @@ class DirectorVideoComposer:
             async with aio_connect() as db:
                 db.row_factory = aiosqlite.Row
                 async with db.execute(
-                    "SELECT filename, room_id, duration FROM recordings WHERE id = ?",
+                    "SELECT filename, room_id FROM recordings WHERE id = ?",
                     (recording_id,),
                 ) as cursor:
                     row = await cursor.fetchone()
@@ -587,7 +587,6 @@ class DirectorVideoComposer:
                             "path": str(p),
                             "room_id": row["room_id"],
                             "filename": row["filename"],
-                            "duration": row["duration"] or 600.0,
                         }
 
         except Exception as e:
