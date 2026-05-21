@@ -1555,6 +1555,7 @@ class DirectorJobRequest(BaseModel):
     transition_type: str = "slideleft"
     transition_duration: float = 0.4
     thumb_seek: float = 3.0
+    total_tts_duration: float = 0.0  # 总 TTS 时长，用于 -t 精确控制输出时长（替代 -shortest）
 
 
 def _update_director_job(job_id: str, **kwargs):
@@ -1671,7 +1672,8 @@ async def _nvenc_director_merge(seg_files_with_dur: list, out_dir: str,
 
 async def _do_director_job(job_id: str, clips: list, ass_content: str,
                             tts_audio_b64: str, transition_type: str,
-                            transition_duration: float, thumb_seek: float):
+                            transition_duration: float, thumb_seek: float,
+                            total_tts_duration: float = 0.0):
     """Full director pipeline on GPU: preprocess N clips → xfade merge → subtitle+audio encode."""
     import base64 as _b64
     out_dir = os.path.join(STORAGE_DIR, "director", job_id)
@@ -1829,12 +1831,19 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
             ff_args += ["-map", "[aout]" if audio_filter else "0:a"]
         ff_args += ["-pix_fmt", "yuv420p"]
 
+        # 用 -t 精确控制输出时长（替代 -shortest，避免音视频互截）
+        duration_args = []
+        if total_tts_duration > 0:
+            duration_args = ["-t", f"{total_tts_duration:.3f}"]
+        else:
+            duration_args = ["-shortest"]
+
         rc = await _run_ffmpeg(
             *ff_args,
             "-c:v", "h264_nvenc", "-b:v", "10M",
             "-ar", "44100", "-ac", "2",
             "-c:a", "aac", "-b:a", "192k",
-            "-shortest",
+            *duration_args,
             final_out,
         )
         if rc != 0 or not os.path.exists(final_out):
@@ -1867,10 +1876,12 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
 
 async def _run_director_job(job_id: str, clips: list, ass_content: str,
                              tts_audio_b64: str, transition_type: str,
-                             transition_duration: float, thumb_seek: float):
+                             transition_duration: float, thumb_seek: float,
+                             total_tts_duration: float = 0.0):
     async with _director_sem:
         await _do_director_job(job_id, clips, ass_content, tts_audio_b64,
-                                transition_type, transition_duration, thumb_seek)
+                                transition_type, transition_duration, thumb_seek,
+                                total_tts_duration)
 
 
 @app.post("/director-jobs", status_code=201)
@@ -1888,6 +1899,7 @@ async def create_director_job(req: DirectorJobRequest):
         req.transition_type,
         req.transition_duration,
         req.thumb_seek,
+        req.total_tts_duration,
     ))
     return {"job_id": job_id, "status": "queued"}
 

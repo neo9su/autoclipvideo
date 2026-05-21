@@ -271,8 +271,17 @@ class DirectorVideoComposer:
             tr_type = style_config.get('transition_type', 'slideleft')
             tr_dur  = style_config.get('transition_duration', 0.4)
 
-            # 1. 准备片段元数据（含 room_id）
-            video_clips = await self._prepare_video_clips(matched_segments, config)
+            # 0. 预计算 TTS 时长映射（后续多步骤都需要）
+            tts_dur_by_scene: Dict[int, float] = {}
+            if tts_audio_segments:
+                for seg in tts_audio_segments:
+                    sid = seg.get("scene_id")
+                    dur = seg.get("duration", 0.0)
+                    if sid is not None and dur > 0:
+                        tts_dur_by_scene[sid] = dur
+
+            # 1. 准备片段元数据（含 room_id），用 TTS 时长对齐 video clip duration
+            video_clips = await self._prepare_video_clips(matched_segments, config, tts_dur_by_scene)
             if not video_clips:
                 logger.error("Failed to prepare video clips")
                 return None
@@ -281,14 +290,7 @@ class DirectorVideoComposer:
             await self._ensure_clips_on_gpu(video_clips)
 
             # 3. 构建 ASS 字幕（本地生成，含关键词高亮）
-            # 用 TTS 实际时长定字幕时刻（同步语音）；若无则退化到视频片段时长
-            tts_dur_by_scene: Dict[int, float] = {}
-            if tts_audio_segments:
-                for seg in tts_audio_segments:
-                    sid = seg.get("scene_id")
-                    dur = seg.get("duration", 0.0)
-                    if sid is not None and dur > 0:
-                        tts_dur_by_scene[sid] = dur
+            # video clip duration 已对齐 TTS，字幕用同一个 tts_dur_by_scene 保证同步
             ass_content = _build_director_ass(video_clips, tr_dur, tts_dur_by_scene)
 
             # 4. 读取 TTS 音频 → base64
@@ -325,6 +327,9 @@ class DirectorVideoComposer:
                 }
                 for c in video_clips
             ]
+            # 计算总 TTS 时长，传给 GPU 用 -t 精确控制输出时长（替代 -shortest）
+            total_tts_duration = sum(tts_dur_by_scene.values()) if tts_dur_by_scene else 0.0
+
             payload = {
                 "clips": clips_payload,
                 "ass_content": ass_content,
@@ -332,6 +337,7 @@ class DirectorVideoComposer:
                 "transition_type": tr_type,
                 "transition_duration": tr_dur,
                 "thumb_seek": 3.0,
+                "total_tts_duration": total_tts_duration,
             }
 
             async with _aio_dv.ClientSession() as session:
@@ -445,8 +451,15 @@ class DirectorVideoComposer:
                 logger.warning(f"GPU file check/sync failed for {filename}: {se}")
     
     async def _prepare_video_clips(self, matched_segments: List[Dict], 
-                                 config: Dict) -> List[Dict]:
-        """准备视频片段信息。连续匹配到同一录像且时间衔接的场景合并为一个长片段，避免讲解中途切断。"""
+                                 config: Dict,
+                                 tts_dur_by_scene: Optional[Dict[int, float]] = None) -> List[Dict]:
+        """准备视频片段信息。
+        
+        核心改进：video clip duration 以 TTS 实际时长为准，确保视频和语音天然对齐。
+        连续匹配到同一录像且时间衔接的场景合并为一个长片段，避免讲解中途切断。
+        """
+        if tts_dur_by_scene is None:
+            tts_dur_by_scene = {}
         raw_clips = []
         
         for i, segment_data in enumerate(matched_segments):
@@ -478,6 +491,19 @@ class DirectorVideoComposer:
             
             raw_clips.append(clip_info)
         
+        # ── TTS 时长对齐：video clip duration 以 TTS 实际时长为准 ──────────────────
+        # 这样确保每段视频的长度精确匹配配音时长，不会出现音视频不同步
+        for clip in raw_clips:
+            scene_id = clip.get('scene_id')
+            if scene_id is not None and scene_id in tts_dur_by_scene:
+                tts_dur = tts_dur_by_scene[scene_id]
+                # TTS 时长作为视频片段目标时长，但不超过原始匹配时长的 1.5 倍
+                # （避免录像不够长时超出边界）
+                matched_dur = clip['duration']
+                clip['duration'] = min(tts_dur, matched_dur * 1.5)
+                logger.debug(f"Clip {clip['index']} scene {scene_id}: "
+                           f"duration {matched_dur:.1f}s → {clip['duration']:.1f}s (TTS={tts_dur:.1f}s)")
+        
         # Merge consecutive clips from the same recording file where times are adjacent
         video_clips = []
         for clip in raw_clips:
@@ -488,11 +514,16 @@ class DirectorVideoComposer:
                 prev = video_clips[-1]
                 prev['duration'] = (clip['start_time'] + clip['duration']) - prev['start_time']
                 prev['script_text'] = (prev['script_text'] + ' ' + clip['script_text']).strip()
-                # Keep first scene_id for subtitle timing (will use merged TTS durations)
+                # 跟踪合并的 scene_ids，用于字幕时长计算
                 if clip.get('scene_id') is not None:
                     if 'merged_scene_ids' not in prev:
                         prev['merged_scene_ids'] = [prev.get('scene_id')]
                     prev['merged_scene_ids'].append(clip['scene_id'])
+                # 合并后的总 TTS 时长 = 各 scene 的 TTS 时长之和
+                merged_ids = prev.get('merged_scene_ids', [prev.get('scene_id')])
+                merged_tts_total = sum(tts_dur_by_scene.get(sid, 0) for sid in merged_ids if sid is not None)
+                if merged_tts_total > 0:
+                    prev['duration'] = min(merged_tts_total, prev['duration'])
                 logger.info(f"Merged clip {clip['index']} into previous (same recording, continuous)")
             else:
                 video_clips.append(clip)
