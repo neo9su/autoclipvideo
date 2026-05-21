@@ -517,10 +517,11 @@ class DirectorVideoComposer:
             scene_id = clip.get('scene_id')
             if scene_id is not None and scene_id in tts_dur_by_scene:
                 tts_dur = tts_dur_by_scene[scene_id]
-                # TTS 时长作为视频片段目标时长，但不超过原始匹配时长的 1.5 倍
-                # （避免录像不够长时超出边界）
                 matched_dur = clip['duration']
-                clip['duration'] = min(tts_dur, matched_dur * 1.5)
+                # TTS 时长作为视频片段目标时长
+                # 视频从 matched_start_time 开始播放 tts_dur 秒
+                # 只要不超过录像文件总长度即可（录像 593s，单段 TTS 最多 15s，绰绰有余）
+                clip['duration'] = tts_dur
                 logger.debug(f"Clip {clip['index']} scene {scene_id}: "
                            f"duration {matched_dur:.1f}s → {clip['duration']:.1f}s (TTS={tts_dur:.1f}s)")
         
