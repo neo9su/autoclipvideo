@@ -501,6 +501,7 @@ class DirectorVideoComposer:
                 'file_path': video_file,
                 'room_id': rec_info["room_id"],
                 'filename': rec_info["filename"],
+                'rec_duration': rec_info.get("duration", 600.0),
                 'start_time': segment_data.get('matched_start_time', 0.0),
                 'duration': segment_data.get('matched_duration', 15.0),
                 # voiceover_text 优先，兼容 text 字段
@@ -520,11 +521,16 @@ class DirectorVideoComposer:
                 tts_dur = tts_dur_by_scene[scene_id]
                 matched_dur = clip['duration']
                 start_time = clip['start_time']
+                rec_dur = clip.get('rec_duration', 600.0)
                 # TTS 时长作为视频片段目标时长
-                # 但不能超出录像文件的实际时长（如录像 593s，start=591s 则最多取 2s）
-                # 用 ffprobe 探测录像时长太慢，直接用匹配时获取的 duration 作为参考
-                # 如果 start_time + tts_dur 超出匹配时给的录像时长，回退到更早的起点
                 clip['duration'] = tts_dur
+                # 边界检查：如果 start + tts_dur 超过录像时长，向前调整 start_time
+                if start_time + tts_dur > rec_dur:
+                    new_start = max(0.0, rec_dur - tts_dur)
+                    logger.info(f"Clip {clip['index']} scene {scene_id}: "
+                               f"start {start_time:.1f}s→{new_start:.1f}s "
+                               f"(录像{rec_dur:.0f}s, TTS需{tts_dur:.1f}s)")
+                    clip['start_time'] = new_start
                 logger.debug(f"Clip {clip['index']} scene {scene_id}: "
                            f"duration {matched_dur:.1f}s → {clip['duration']:.1f}s (TTS={tts_dur:.1f}s)")
         
@@ -562,7 +568,7 @@ class DirectorVideoComposer:
         return video_clips
     
     async def _find_recording_file(self, recording_id: int) -> Optional[Dict]:
-        """查找录像原始文件路径，返回 {path, room_id, filename} 或 None。"""
+        """查找录像原始文件路径，返回 {path, room_id, filename, duration} 或 None。"""
         import aiosqlite
         from db import DB_PATH, aio_connect
 
@@ -570,7 +576,7 @@ class DirectorVideoComposer:
             async with aio_connect() as db:
                 db.row_factory = aiosqlite.Row
                 async with db.execute(
-                    "SELECT filename, room_id FROM recordings WHERE id = ?",
+                    "SELECT filename, room_id, duration FROM recordings WHERE id = ?",
                     (recording_id,),
                 ) as cursor:
                     row = await cursor.fetchone()
@@ -581,6 +587,7 @@ class DirectorVideoComposer:
                             "path": str(p),
                             "room_id": row["room_id"],
                             "filename": row["filename"],
+                            "duration": row["duration"] or 600.0,
                         }
 
         except Exception as e:
