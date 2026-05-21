@@ -299,6 +299,7 @@ class DirectorVideoComposer:
                     dur = seg.get("duration", 0.0)
                     if sid is not None and dur > 0:
                         tts_dur_by_scene[sid] = dur
+            logger.info(f"TTS duration map: {tts_dur_by_scene} (total={sum(tts_dur_by_scene.values()):.1f}s)")
 
             # 1. 准备片段元数据（含 room_id），用 TTS 时长对齐 video clip duration
             video_clips = await self._prepare_video_clips(matched_segments, config, tts_dur_by_scene)
@@ -554,6 +555,8 @@ class DirectorVideoComposer:
             c['index'] = i
         
         logger.info(f"Prepared {len(video_clips)} video clips (merged from {len(raw_clips)} segments)")
+        for c in video_clips:
+            logger.info(f"  clip {c['index']}: scene={c.get('scene_id')} dur={c['duration']:.1f}s start={c['start_time']:.1f}s")
         return video_clips
     
     async def _find_recording_file(self, recording_id: int) -> Optional[Dict]:

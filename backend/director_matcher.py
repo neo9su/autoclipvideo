@@ -163,12 +163,19 @@ class SemanticMatcher:
                         f"score={best_match['score']:.2f} ({best_match['reason']})"
                     )
                 else:
-                    # 回退：顺序分配
+                    # 回退：分散分配
                     fallback = await self._fallback_match_single(
                         segment, recordings, used_srt_indices, used_time_ranges
                     )
+                    # 记录 fallback 使用的时间区间，避免后续段落重复
+                    fb_rec_id = fallback['matched_recording_id']
+                    fb_start = fallback['matched_start_time']
+                    fb_dur = fallback['matched_duration']
+                    if fb_rec_id not in used_time_ranges:
+                        used_time_ranges[fb_rec_id] = []
+                    used_time_ranges[fb_rec_id].append((fb_start, fb_start + fb_dur))
                     matched_segments.append(fallback)
-                    logger.info(f"  → fallback: rec {fallback['matched_recording_id']}")
+                    logger.info(f"  → fallback: rec {fb_rec_id}, t={fb_start:.1f}s-{fb_start+fb_dur:.1f}s")
 
             logger.info(f"Matched {len(matched_segments)} segments for group {group_id}")
             return matched_segments
@@ -620,6 +627,7 @@ class SemanticMatcher:
 
         # 找一个远离已用区间的时间点
         # 策略：遍历所有 SRT entries，找距离所有已用区间最远的起点
+        # 约束：起点 + seg_duration 不能超过录像总时长
         best_start = 0.0
         best_distance = -1.0
         
@@ -628,6 +636,9 @@ class SemanticMatcher:
                 if entry['idx'] - 1 in used:  # idx 是 1-based, set 是 0-based index
                     continue
                 t = entry['start']
+                # 确保从这个点开始还有足够的录像剩余时长
+                if t + seg_duration > rec_dur:
+                    continue
                 # 计算到所有已用区间的最小距离
                 if rec_ranges:
                     min_dist = min(abs(t - (s+e)/2) for s, e in rec_ranges)
@@ -646,6 +657,9 @@ class SemanticMatcher:
                        [(used_mids[-1], rec_dur)]
                 biggest_gap = max(gaps, key=lambda g: g[1] - g[0])
                 best_start = (biggest_gap[0] + biggest_gap[1]) / 2
+                # 确保不超出边界
+                if best_start + seg_duration > rec_dur:
+                    best_start = max(0.0, rec_dur - seg_duration)
             else:
                 best_start = 0.0
 

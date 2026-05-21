@@ -573,7 +573,12 @@ def build_ass(selected: List[Seg], all_segs: List[Seg]) -> str:
     rendered_srt_ids: set = set()   # track (srt.idx, sel_seg_idx) to avoid duplicates
     for sel_idx, sel_seg in enumerate(selected):
         offset = cursor
-        cursor += sel_seg.duration  # SEG_PAD=0, no padding
+        # Account for xfade overlap: each segment after the first overlaps
+        # with the previous by FADE_DUR seconds in the final video timeline
+        if sel_idx == 0:
+            cursor += sel_seg.duration
+        else:
+            cursor += sel_seg.duration - FADE_DUR
         for srt in all_segs:
             ov_start = max(srt.start, sel_seg.start)
             ov_end   = min(srt.end,   sel_seg.end)
