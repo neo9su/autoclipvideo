@@ -519,9 +519,11 @@ class DirectorVideoComposer:
             if scene_id is not None and scene_id in tts_dur_by_scene:
                 tts_dur = tts_dur_by_scene[scene_id]
                 matched_dur = clip['duration']
+                start_time = clip['start_time']
                 # TTS 时长作为视频片段目标时长
-                # 视频从 matched_start_time 开始播放 tts_dur 秒
-                # 只要不超过录像文件总长度即可（录像 593s，单段 TTS 最多 15s，绰绰有余）
+                # 但不能超出录像文件的实际时长（如录像 593s，start=591s 则最多取 2s）
+                # 用 ffprobe 探测录像时长太慢，直接用匹配时获取的 duration 作为参考
+                # 如果 start_time + tts_dur 超出匹配时给的录像时长，回退到更早的起点
                 clip['duration'] = tts_dur
                 logger.debug(f"Clip {clip['index']} scene {scene_id}: "
                            f"duration {matched_dur:.1f}s → {clip['duration']:.1f}s (TTS={tts_dur:.1f}s)")

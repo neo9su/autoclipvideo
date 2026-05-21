@@ -217,11 +217,12 @@ class SemanticMatcher:
 
             used_set = used_srt_indices.get(rec_id, set())
             rec_time_ranges = used_time_ranges.get(rec_id, [])
+            rec_dur = rec.get('duration', 600.0)
             
             # 在该录像的 SRT entries 中寻找最佳连续段落（窗口 1-5 条 SRT）
             result = await loop.run_in_executor(
                 None, self._find_best_window_in_srt,
-                segment_text, srt_entries, used_set, segment_duration
+                segment_text, srt_entries, used_set, segment_duration, rec_dur
             )
 
             if result and result['score'] > 0.2:
@@ -266,6 +267,7 @@ class SemanticMatcher:
         srt_entries: List[Dict],
         used_indices: set,
         target_duration: float,
+        rec_duration: float = 600.0,
     ) -> Optional[Dict]:
         """
         精确匹配：在 SRT entries 中找到与 query_text 内容对应的原始时间点。
@@ -325,6 +327,9 @@ class SemanticMatcher:
                 window_dur = window_end - window_start
 
                 if window_dur < 2.0 or window_dur > 30.0:
+                    continue
+                # 边界检查：从这个位置开始必须有足够的录像剩余时长播放 TTS
+                if window_start + target_duration > rec_duration:
                     continue
 
                 # 精确匹配：计算 n-gram 命中率
@@ -391,6 +396,9 @@ class SemanticMatcher:
                         window_dur = window_end - window_start
 
                         if window_dur < 2.0 or window_dur > 30.0:
+                            continue
+                        # 边界检查
+                        if window_start + target_duration > rec_duration:
                             continue
 
                         try:
