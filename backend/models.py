@@ -82,6 +82,7 @@ class BatchScheduleCreate(BaseModel):
     auto_meta: bool = False              # 每个任务触发 LLM 生成文案
     product_ids: Optional[List[int]] = None  # 统一挂载商品（可不填）
     room_id: Optional[int] = None        # 只排期指定直播间的分组（None = 全部）
+    exclude_group_ids: Optional[List[int]] = None  # 排除的分组 ID
 
 
 # ── Director Mode models ──────────────────────────────────────────────────────

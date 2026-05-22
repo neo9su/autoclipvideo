@@ -402,15 +402,16 @@
         </div>
 
         <!-- Preview -->
-        <div v-if="unscheduledGroups.length" class="batch-preview">
+        <div v-if="displayedGroups.length" class="batch-preview">
           <div class="batch-preview-title">
-            待排期分组（{{ unscheduledGroups.length }} 个）：
+            待排期分组（{{ displayedGroups.length }} 个）：
           </div>
           <div class="batch-preview-list">
-            <div v-for="(g, i) in unscheduledGroups" :key="g.id" class="batch-preview-item">
+            <div v-for="(g, i) in displayedGroups" :key="g.id" class="batch-preview-item">
               <span class="batch-idx">{{ i + 1 }}</span>
               <span class="batch-label">{{ g.label }}</span>
               <span class="batch-time muted">{{ previewTime(i) }}</span>
+              <button class="batch-exclude-btn" @click="excludeGroup(g.id)" title="排除此分组">✕</button>
             </div>
           </div>
         </div>
@@ -420,9 +421,9 @@
         <div class="modal-actions">
           <button class="btn-secondary" @click="showBatchModal = false">取消</button>
           <button class="btn-primary"
-            :disabled="!unscheduledGroups.length || !batchForm.start_datetime || batchSubmitting"
+            :disabled="!displayedGroups.length || !batchForm.start_datetime || batchSubmitting"
             @click="submitBatch">
-            {{ batchSubmitting ? '创建中…' : `确认排期（${unscheduledGroups.length} 篇）` }}
+            {{ batchSubmitting ? '创建中…' : `确认排期（${displayedGroups.length} 篇）` }}
           </button>
         </div>
       </div>
@@ -507,6 +508,15 @@ const showBatchModal = ref(false)
 const batchSubmitting = ref(false)
 const batchLoading = ref(false)
 const unscheduledGroups = ref([])
+const excludedGroupIds = ref(new Set())
+
+const displayedGroups = computed(() =>
+  unscheduledGroups.value.filter(g => !excludedGroupIds.value.has(g.id))
+)
+
+function excludeGroup(groupId) {
+  excludedGroupIds.value = new Set([...excludedGroupIds.value, groupId])
+}
 
 function _defaultBatchStart() {
   const now = new Date()
@@ -546,12 +556,13 @@ async function loadUnscheduledGroups() {
 
 async function openBatchModal() {
   batchForm.value.start_datetime = _defaultBatchStart()
+  excludedGroupIds.value = new Set()
   showBatchModal.value = true
   await loadUnscheduledGroups()
 }
 
 async function submitBatch() {
-  if (!batchForm.value.start_datetime || !unscheduledGroups.value.length) return
+  if (!batchForm.value.start_datetime || !displayedGroups.value.length) return
   batchSubmitting.value = true
   try {
     const result = await batchSchedulePublish({
@@ -562,6 +573,7 @@ async function submitBatch() {
       no_cart: batchForm.value.no_cart,
       auto_meta: batchForm.value.auto_meta,
       room_id: batchForm.value.room_id || null,
+      exclude_group_ids: excludedGroupIds.value.size ? [...excludedGroupIds.value] : null,
     })
     showBatchModal.value = false
     await loadTasks()
@@ -1282,6 +1294,8 @@ label { display: block; font-size: 12px; color: #888; margin: 12px 0 4px; }
 .batch-idx { width: 20px; text-align: right; color: #555; flex-shrink: 0; }
 .batch-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .batch-time { flex-shrink: 0; font-size: 11px; }
+.batch-exclude-btn { background: none; border: none; color: #ef4444; cursor: pointer; font-size: 14px; padding: 2px 6px; margin-left: 4px; border-radius: 4px; opacity: 0.6; transition: opacity 0.2s; flex-shrink: 0; }
+.batch-exclude-btn:hover { opacity: 1; background: rgba(239, 68, 68, 0.1); }
 .muted { color: #666; }
 
 .progress-log { background: #111; border: 1px solid #2a2a2a; border-radius: 8px; padding: 12px 14px; margin-bottom: 16px; }

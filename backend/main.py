@@ -2887,7 +2887,7 @@ async def get_unscheduled_groups(platform: str = "douyin", room_id: Optional[int
         if room_id:
             sql += " AND g.room_id = ?"
             params.append(room_id)
-        sql += " ORDER BY g.id ASC"
+        sql += " ORDER BY g.created_at ASC"
         async with db.execute(sql, params) as cur:
             rows = await cur.fetchall()
     return [dict(r) for r in rows]
@@ -2927,9 +2927,14 @@ async def batch_schedule_tasks(body: BatchScheduleCreate):
         if body.room_id:
             sql += " AND g.room_id = ?"
             params.append(body.room_id)
-        sql += " ORDER BY g.id ASC"
+        sql += " ORDER BY g.created_at ASC"
         async with db.execute(sql, params) as cur:
             groups = await cur.fetchall()
+
+    # 过滤排除的分组
+    if body.exclude_group_ids:
+        exclude_set = set(body.exclude_group_ids)
+        groups = [g for g in groups if g["id"] not in exclude_set]
 
     if not groups:
         return {"created": 0, "tasks": [], "message": "没有找到可排期的分组"}
