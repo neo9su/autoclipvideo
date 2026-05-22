@@ -301,6 +301,12 @@ export async function loginPublishAccount(id) {
   return res.json()
 }
 
+export async function checkAccountCookie(id) {
+  const res = await fetch(`${BASE}/api/publish-accounts/${id}/check-cookie`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
 // ── Publish Tasks ─────────────────────────────────────────────────────────────
 
 export async function getPublishTasks(status = null) {

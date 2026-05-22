@@ -465,6 +465,7 @@ import {
   getProducts, getPublishAccounts, createPublishAccount, deletePublishAccount, loginPublishAccount,
   generatePublishMeta, matchGroupProduct, createWS, deleteGroup, reclipRecording,
   getUnscheduledGroups, batchSchedulePublish, regenPublishTaskMeta, reschedulePublishTask,
+  checkAccountCookie,
 } from '../api.js'
 import { useToast } from '../composables/toast.js'
 
@@ -561,8 +562,39 @@ async function openBatchModal() {
   await loadUnscheduledGroups()
 }
 
+const cookieCheckPending = ref(false)
+
 async function submitBatch() {
   if (!batchForm.value.start_datetime || !displayedGroups.value.length) return
+  batchSubmitting.value = true
+  try {
+    // 检查账号 Cookie 是否有效
+    let accountId = batchForm.value.account_id
+    // 未指定账号时，取当前平台第一个账号检查
+    if (!accountId) {
+      const platformAccounts = accounts.value.filter(a => a.platform === batchForm.value.platform)
+      if (platformAccounts.length) accountId = platformAccounts[0].id
+    }
+    if (accountId) {
+      const check = await checkAccountCookie(accountId)
+      if (!check.valid) {
+        batchSubmitting.value = false
+        cookieCheckPending.value = true
+        showToast('Cookie 已过期，请扫码登录后再排期', 'error')
+        // 自动触发登录流程
+        await loginPublishAccount(accountId)
+        showToast('浏览器已启动，请扫码登录，登录成功后自动排期', 'info')
+        return  // 等待 login_done WS 消息后自动重新提交
+      }
+    }
+    await _doSubmitBatch()
+  } catch (e) {
+    showToast('批量排期失败: ' + e.message, 'error')
+    batchSubmitting.value = false
+  }
+}
+
+async function _doSubmitBatch() {
   batchSubmitting.value = true
   try {
     const result = await batchSchedulePublish({
@@ -576,6 +608,7 @@ async function submitBatch() {
       exclude_group_ids: excludedGroupIds.value.size ? [...excludedGroupIds.value] : null,
     })
     showBatchModal.value = false
+    cookieCheckPending.value = false
     await loadTasks()
     showToast(result.message || `已创建 ${result.created} 个排期任务`, 'success')
   } catch (e) {
@@ -1110,8 +1143,14 @@ onMounted(async () => {
       if (msg.success) {
         getPublishAccounts().then(list => { accounts.value = list })
         showToast('登录成功，Cookie 已更新', 'success')
+        // 如果是排期前 Cookie 检查触发的登录，自动继续提交
+        if (cookieCheckPending.value) {
+          cookieCheckPending.value = false
+          _doSubmitBatch()
+        }
       } else {
         showToast('登录失败或超时，请重试', 'error')
+        cookieCheckPending.value = false
       }
     }
   })

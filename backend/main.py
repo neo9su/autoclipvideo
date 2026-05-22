@@ -2731,6 +2731,29 @@ async def _do_login(publisher, account: dict, cookie_file: str, account_id: int)
 
 # ── Publish Tasks ─────────────────────────────────────────────────────────────
 
+
+@app.get("/api/publish-accounts/{account_id}/check-cookie")
+async def check_account_cookie(account_id: int):
+    """Check if the account's saved cookies are still valid (not expired/logged-out)."""
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM publish_accounts WHERE id = ?", (account_id,)) as cur:
+            account = await cur.fetchone()
+    if not account:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    account_dict = dict(account)
+    platform = account_dict.get("platform", "douyin")
+
+    if platform == "douyin":
+        from publisher_douyin import DouyinPublisher
+        publisher = DouyinPublisher()
+        valid = await publisher.login_check(account_dict)
+        return {"account_id": account_id, "valid": valid}
+    else:
+        return {"account_id": account_id, "valid": False, "error": f"Unsupported platform: {platform}"}
+
+
 @app.get("/api/publish-tasks")
 async def list_publish_tasks(status: Optional[str] = None):
     async with aio_connect() as db:
