@@ -33,7 +33,7 @@ class DouyinPublisher(BasePublisher):
 
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True, args=["--no-proxy-server"])
-            ctx = await browser.new_context()
+            ctx = await browser.new_context(proxy={"server": "direct://"})
             await _load_cookies(ctx, cookie_file)
             page = await ctx.new_page()
             await page.goto("https://creator.douyin.com/creator-micro/home", timeout=20000)

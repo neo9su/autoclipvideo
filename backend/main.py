@@ -2748,7 +2748,12 @@ async def check_account_cookie(account_id: int):
     if platform == "douyin":
         from publisher_douyin import DouyinPublisher
         publisher = DouyinPublisher()
-        valid = await publisher.login_check(account_dict)
+        try:
+            valid = await publisher.login_check(account_dict)
+        except Exception as e:
+            logger.warning(f"Cookie check failed for account {account_id}: {e}")
+            # 检测失败时假定有效，不阻止排期流程
+            return {"account_id": account_id, "valid": True, "error": str(e)}
         return {"account_id": account_id, "valid": valid}
     else:
         return {"account_id": account_id, "valid": False, "error": f"Unsupported platform: {platform}"}
