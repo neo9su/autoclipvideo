@@ -25,6 +25,27 @@ from db import DB_PATH, aio_connect
 
 logger = logging.getLogger(__name__)
 
+# Per-file lock to prevent concurrent split/merge operations on the same file.
+# Key: absolute file path, Value: asyncio.Lock
+_file_locks: dict[str, asyncio.Lock] = {}
+_file_locks_mu = asyncio.Lock()  # protects _file_locks dict itself
+
+
+async def _get_file_lock(filepath: str) -> asyncio.Lock:
+    """Get or create an asyncio.Lock for a given file path."""
+    key = os.path.realpath(filepath)
+    async with _file_locks_mu:
+        if key not in _file_locks:
+            _file_locks[key] = asyncio.Lock()
+        return _file_locks[key]
+
+
+async def _release_file_lock(filepath: str):
+    """Remove the lock entry to avoid unbounded memory growth."""
+    key = os.path.realpath(filepath)
+    async with _file_locks_mu:
+        _file_locks.pop(key, None)
+
 SMALL_THRESHOLD  = 50  * 1024 * 1024  # files smaller than this get merged
 STALE_WAIT_SECS  = 600                # force-upload small files after waiting this long
 MERGE_TARGET     = 150 * 1024 * 1024  # target size for merged file
@@ -138,6 +159,12 @@ async def _ffmpeg_split_file(
 
     stem, ext = os.path.splitext(os.path.basename(filepath))
     dir_path = os.path.dirname(filepath)
+
+    # Idempotency check: if chunk000 already exists, another split completed first
+    chunk0_candidate = os.path.join(dir_path, f"{stem}_chunk000{ext}")
+    if os.path.exists(chunk0_candidate):
+        logger.info(f"Split skipped for {filepath}: chunks already exist (chunk000 present)")
+        return None
 
     chunks: list[tuple[str, int]] = []
     for i in range(n_chunks):
@@ -313,11 +340,27 @@ async def maybe_merge_before_upload(
     # Large file — no merge needed, but split if it exceeds the upload cap
     if size >= SMALL_THRESHOLD:
         if size > SPLIT_THRESHOLD:
-            logger.info(
-                f"Recording {recording_id}: file {rec['filename']} is "
-                f"{size // 1024 // 1024}MB > {SPLIT_THRESHOLD // 1024 // 1024}MB, splitting"
-            )
-            result = await _split_and_register(filepath, size, room_id, recording_id)
+            lock = await _get_file_lock(filepath)
+            if lock.locked():
+                # Another coroutine is already splitting this file — skip
+                logger.debug(
+                    f"Recording {recording_id}: split already in progress for {rec['filename']}, skipping"
+                )
+                return None
+            async with lock:
+                # Re-check file existence after acquiring lock (another split may have deleted it)
+                if not os.path.exists(filepath):
+                    logger.info(
+                        f"Recording {recording_id}: file {rec['filename']} gone after lock (already split), skipping"
+                    )
+                    await _release_file_lock(filepath)
+                    return None
+                logger.info(
+                    f"Recording {recording_id}: file {rec['filename']} is "
+                    f"{size // 1024 // 1024}MB > {SPLIT_THRESHOLD // 1024 // 1024}MB, splitting"
+                )
+                result = await _split_and_register(filepath, size, room_id, recording_id)
+            await _release_file_lock(filepath)
             if result:
                 return result
             # Split failed — fall through and upload as-is
