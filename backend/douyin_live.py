@@ -150,6 +150,7 @@ async def _fetch_page(room_id: str) -> Optional[str]:
             cookies=_cookies,
             follow_redirects=True,
             timeout=20.0,
+            trust_env=False,  # 不读系统代理，避免代理未启动时连接失败
         ) as client:
             resp = await client.get(target_url)
         _cookies.update(dict(resp.cookies))
@@ -199,6 +200,7 @@ async def _fetch_webcast_stream(room_id: str) -> Optional[str]:
             cookies=combined_cookies,
             follow_redirects=True,
             timeout=15.0,
+            trust_env=False,  # 不读系统代理
         ) as client:
             resp = await client.get(_WEBCAST_API, params=params)
         if resp.status_code != 200:
