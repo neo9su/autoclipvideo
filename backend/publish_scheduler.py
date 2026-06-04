@@ -24,7 +24,7 @@ async def check_video_quality(video_path: str) -> tuple[bool, str]:
     """
     Check video quality requirements for publishing:
       - Resolution >= 1080x1920 (portrait 1080P)
-      - Duration >= 15 seconds (max 90 seconds)
+      - Duration >= 15 seconds (max 150 seconds)
     Returns (passed, reason). reason is empty string if passed.
     """
     try:
@@ -60,8 +60,8 @@ async def check_video_quality(video_path: str) -> tuple[bool, str]:
         duration = 0.0
     if duration < 15:
         issues.append(f"时长不足（{duration:.1f}s，需要 ≥ 15 秒）")
-    if duration > 90:
-        issues.append(f"时长超限（{duration:.1f}s，需要 ≤ 90 秒）")
+    if duration > 150:
+        issues.append(f"时长超限（{duration:.1f}s，需要 ≤ 150 秒）")
 
     if issues:
         return False, "；".join(issues)
