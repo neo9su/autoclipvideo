@@ -297,17 +297,42 @@ async def poll_transcriptions(broadcast_fn=None):
 
     # Startup recovery: re-trigger editor for recordings whose transcription completed
     # but whose clip task was lost (e.g. backend restarted mid-flight).
+    # Also recovers "stuck" jobs where clipped=1 (clipping in progress) but
+    # clip_filename is NULL — meaning _do_edit crashed before writing the result.
     # Throttled: at most 5 per batch, with a 2s pause between batches, to avoid
     # flooding the queue with hundreds of tasks at startup and pegging local CPU.
     _STARTUP_RECOVERY_BATCH = 5
     try:
         async with aio_connect() as db:
             db.row_factory = aiosqlite.Row
+            # Case 1: normal pending (clipped=0)
             async with db.execute(
                 "SELECT id, filename, clip_count FROM recordings "
                 "WHERE transcribed=2 AND clipped=0 AND local_deleted=0"
             ) as cur:
-                orphaned = await cur.fetchall()
+                pending = await cur.fetchall()
+            # Case 2: stuck mid-clipping (clipped=1, no clip_filename)
+            async with db.execute(
+                "SELECT id, filename, clip_count FROM recordings "
+                "WHERE transcribed=2 AND clipped=1 AND clip_filename IS NULL "
+                "AND local_deleted=0 AND clip_error IS NULL"
+            ) as cur:
+                stuck = await cur.fetchall()
+        # Reset stuck jobs back to pending
+        stuck_ids = []
+        if stuck:
+            async with aio_connect() as db:
+                placeholders = ",".join(["?"] * len(stuck))
+                await db.execute(
+                    f"UPDATE recordings SET clipped = 0 WHERE id IN ({placeholders})",
+                    [r["id"] for r in stuck],
+                )
+                await db.commit()
+            stuck_ids = [r["id"] for r in stuck]
+            logger.info(f"Startup recovery: reset {len(stuck_ids)} stuck clip job(s) from clipped=1 to clipped=0")
+        # Merge pending and stuck for recovery dispatch
+        orphaned = list(pending)
+        orphaned.extend(stuck)
         recoverable = []
         for rec in orphaned:
             mp4_path = os.path.join(RECORDINGS_DIR, rec["filename"])
