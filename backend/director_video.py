@@ -276,9 +276,15 @@ class DirectorVideoComposer:
         """
         合成最终视频 — 提交到 GPU 服务器 (NVENC)，本地只负责调度。
         """
-        if not matched_segments or not Path(audio_path).exists():
-            logger.error("Missing required inputs for video composition")
+        logger.info(f"[DIRECTOR] compose_final_video START: matched_segments={len(matched_segments)}, audio_path={audio_path}, tts_segs={len(tts_audio_segments) if tts_audio_segments else 0}")
+        if not matched_segments:
+            logger.error("[DIRECTOR] compose_final_video: matched_segments is empty")
             return None
+        if not Path(audio_path).exists():
+            logger.error(f"[DIRECTOR] compose_final_video: audio_path MISSING: {audio_path}")
+            return None
+        audio_size = Path(audio_path).stat().st_size
+        logger.info(f"[DIRECTOR] compose_final_video: audio exists, size={audio_size}")
 
         try:
             timestamp = time.time()
@@ -303,9 +309,15 @@ class DirectorVideoComposer:
 
             # 1. 准备片段元数据（含 room_id），用 TTS 时长对齐 video clip duration
             video_clips = await self._prepare_video_clips(matched_segments, config, tts_dur_by_scene)
+            logger.info(f"[DIRECTOR] compose_final_video: prepared {len(video_clips) if video_clips else 0} video_clips")
             if not video_clips:
-                logger.error("Failed to prepare video clips")
+                logger.error("[DIRECTOR] compose_final_video: video_clips is EMPTY after preparation")
                 return None
+            for i, vc in enumerate(video_clips):
+                logger.info(f"[DIRECTOR] compose_final_video clip[{i}]: file_path={vc.get('file_path','?')} room_id={vc.get('room_id')} filename={vc.get('filename')} start={vc.get('start_time')} dur={vc.get('duration')} scene_id={vc.get('scene_id')}")
+                fp = vc.get('file_path', '')
+                if fp:
+                    logger.info(f"[DIRECTOR] compose_final_video clip[{i}]: local file exists={Path(fp).exists()} size={Path(fp).stat().st_size if Path(fp).exists() else '?'}")
 
             # 2. 同步源文件到 GPU（遇到未同步的文件才上传）
             await self._ensure_clips_on_gpu(video_clips)
@@ -318,9 +330,6 @@ class DirectorVideoComposer:
             import base64 as _b64
             tts_b64 = ""
             try:
-                with open(audio_path, "rb") as f:
-                    raw = f.read()
-                # 先转 s16le PCM 防止 CosyVoice2 的 float32 NaN/Inf 崩 AAC
                 import subprocess as _sp
                 clean_wav = audio_path + "_clean.wav"
                 _sp.run(
@@ -328,13 +337,17 @@ class DirectorVideoComposer:
                      "-ar", "44100", clean_wav],
                     capture_output=True,
                 )
+                audio_source = clean_wav if Path(clean_wav).exists() and Path(clean_wav).stat().st_size > 0 else audio_path
+                logger.info(f"[DIRECTOR] compose_final_video: audio_source={audio_source} size={Path(audio_source).stat().st_size}")
+                with open(audio_source, "rb") as f:
+                    raw = f.read()
                 if Path(clean_wav).exists() and Path(clean_wav).stat().st_size > 0:
-                    with open(clean_wav, "rb") as f:
-                        raw = f.read()
                     Path(clean_wav).unlink(missing_ok=True)
                 tts_b64 = _b64.b64encode(raw).decode()
+                logger.info(f"[DIRECTOR] compose_final_video: tts_b64 encoded, len={len(tts_b64)}")
             except Exception as ae:
-                logger.warning(f"TTS audio encode failed: {ae}")
+                logger.error(f"[DIRECTOR] compose_final_video: TTS audio encode FAILED: {ae}")
+                return None
 
             # 5. 提交 GPU director job
             import aiohttp as _aio_dv
@@ -361,6 +374,7 @@ class DirectorVideoComposer:
                 "total_tts_duration": total_tts_duration,
             }
 
+            logger.info(f"[DIRECTOR] compose_final_video: submitting to {self._GPU_SERVICE_URL}/director-jobs, clips={len(clips_payload)}, ass_len={len(ass_content)}, tts_b64_len={len(tts_b64)}, total_tts_dur={total_tts_duration:.1f}s")
             async with _aio_dv.ClientSession() as session:
                 async with session.post(
                     f"{self._GPU_SERVICE_URL}/director-jobs", json=payload,
@@ -368,8 +382,9 @@ class DirectorVideoComposer:
                 ) as resp:
                     _resp_status = resp.status
                     _resp_text = await resp.text()
+                    logger.info(f"[DIRECTOR] compose_final_video: GPU submit response status={_resp_status} text={_resp_text[:200]}")
             if _resp_status != 201:
-                logger.error(f"GPU director job submit failed: {_resp_status} {_resp_text[:300]}")
+                logger.error(f"[DIRECTOR] compose_final_video: GPU job submit FAILED status={_resp_status} error={_resp_text[:500]}")
                 return None
             import json as _json_dv
             job_id = _json_dv.loads(_resp_text)["job_id"]
@@ -377,8 +392,10 @@ class DirectorVideoComposer:
 
             # 6. 轮询（最多 30 分钟）
             deadline = time.time() + 1800
+            poll_count = 0
             while time.time() < deadline:
                 await asyncio.sleep(6)
+                poll_count += 1
                 try:
                     async with _aio_dv.ClientSession() as session:
                         async with session.get(
@@ -387,36 +404,42 @@ class DirectorVideoComposer:
                         ) as r:
                             data = await r.json()
                 except Exception as pe:
-                    logger.warning(f"Poll error: {pe}")
+                    logger.warning(f"[DIRECTOR] compose_final_video poll error #{poll_count}: {pe}")
                     continue
                 status = data.get("status")
                 phase  = data.get("phase", "")
                 pct    = data.get("pct", 0)
-                logger.debug(f"Director job {job_id}: {status} {phase} {pct}%")
+                if poll_count % 5 == 0 or status in ("error", "done"):
+                    logger.info(f"[DIRECTOR] compose_final_video job {job_id}: status={status} phase={phase} pct={pct}%")
                 if status == "done":
+                    logger.info(f"[DIRECTOR] compose_final_video job {job_id} DONE after {poll_count} polls")
                     break
                 if status == "error":
-                    logger.error(f"GPU director job error: {data.get('error')}")
+                    logger.error(f"[DIRECTOR] compose_final_video job {job_id} ERROR: {data.get('error')}")
                     return None
             else:
-                logger.error(f"GPU director job {job_id} timed out")
+                logger.error(f"[DIRECTOR] compose_final_video job {job_id} TIMED OUT after {poll_count} polls")
                 return None
 
             # 7. 下载结果
+            logger.info(f"[DIRECTOR] compose_final_video: downloading job {job_id} mp4")
             async with _aio_dv.ClientSession() as session:
                 async with session.get(
                     f"{self._GPU_SERVICE_URL}/director-jobs/{job_id}/mp4",
                     timeout=_aio_dv.ClientTimeout(total=300),
                 ) as r:
                     if r.status != 200:
-                        logger.error(f"GPU director download failed: {r.status}")
+                        err_text = await r.text()
+                        logger.error(f"[DIRECTOR] compose_final_video download failed: status={r.status} error={err_text[:300]}")
                         return None
                     _content = await r.read()
+                    logger.info(f"[DIRECTOR] compose_final_video: downloaded {len(_content)} bytes")
             with open(str(output_path), "wb") as f:
                 f.write(_content)
             if not output_path.exists() or output_path.stat().st_size == 0:
-                logger.error("Downloaded director video is empty")
+                logger.error(f"[DIRECTOR] compose_final_video: output file empty or missing: {output_path}")
                 return None
+            logger.info(f"[DIRECTOR] compose_final_video: output file size={output_path.stat().st_size}")
 
             logger.info(f"Director video composition complete: {output_path}")
 
@@ -432,7 +455,7 @@ class DirectorVideoComposer:
             return str(output_path)
 
         except Exception as e:
-            logger.error(f"Video composition error: {e}")
+            logger.error(f"[DIRECTOR] compose_final_video UNHANDLED ERROR: {e}", exc_info=True)
             return None
 
     async def _ensure_clips_on_gpu(self, video_clips: List[Dict]) -> None:
@@ -582,15 +605,27 @@ class DirectorVideoComposer:
                     row = await cursor.fetchone()
                 if row:
                     p = self.recordings_dir / row["filename"]
-                    if p.exists():
+                    exists = p.exists()
+                    if not exists:
+                        logger.warning(f"[DIRECTOR] _find_recording_file: recording_id={recording_id} file={row['filename']} DOES NOT EXIST at {p}")
+                        # Try checking alternative paths
+                        alt = Path(row["filename"])
+                        if alt.exists():
+                            logger.info(f"[DIRECTOR] _find_recording_file: found at relative path {alt}")
+                            p = alt
+                            exists = True
+                    if exists:
+                        logger.info(f"[DIRECTOR] _find_recording_file: recording_id={recording_id} file={row['filename']} room_id={row['room_id']} path={p}")
                         return {
                             "path": str(p),
                             "room_id": row["room_id"],
                             "filename": row["filename"],
                         }
+                else:
+                    logger.warning(f"[DIRECTOR] _find_recording_file: recording_id={recording_id} NOT FOUND in DB")
 
         except Exception as e:
-            logger.warning(f"Failed to find recording file for ID {recording_id}: {e}")
+            logger.warning(f"[DIRECTOR] _find_recording_file: failed for ID {recording_id}: {e}")
 
         return None
     

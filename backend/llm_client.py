@@ -16,8 +16,8 @@ logger = logging.getLogger(__name__)
 
 # ── Config (from .env, mirrored from each module) ────────────────────────────
 _LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://10.190.0.214:8080/v1")
-_LLM_API_KEY = os.getenv("LLM_API_KEY", "sk-orx-KEuLek0QWDFoRupT9szOR_KvJ4V0pTsP")
-LLM_MODEL = os.getenv("LLM_MODEL", "us.anthropic.claude-sonnet-4-6")
+_LLM_API_KEY = os.getenv("LLM_API_KEY", "sk-orx-5xpxe1L2Dh1lCjehgL7J0opEe1PkwH1R")
+LLM_MODEL = os.getenv("LLM_MODEL_CHAT", "agnes-2.0-flash")
 
 # ── Global semaphore: 1 concurrent LLM request at a time ─────────────────────
 # The proxy (local-openrouter-gateway) is effectively single-threaded;
@@ -56,6 +56,7 @@ async def llm_post(
     headers = {
         "Authorization": f"Bearer {_LLM_API_KEY}",
         "Content-Type": "application/json",
+        "Accept-Encoding": "identity",
     }
     url = f"{_LLM_BASE_URL}/chat/completions"
     sem = get_llm_sem()
