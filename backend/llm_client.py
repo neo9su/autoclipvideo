@@ -84,11 +84,11 @@ async def llm_post(
                 )
                 return None
 
-            except (httpx.ConnectError, httpx.TimeoutException) as e:
+            except (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError) as e:
                 if attempt < retries:
                     wait = 10 * attempt
                     logger.warning(
-                        f"LLM transient error ({e}) attempt {attempt}/{retries}, retry in {wait}s"
+                        f"LLM transient error ({type(e).__name__}: {e!r}) attempt {attempt}/{retries}, retry in {wait}s"
                     )
                     await asyncio.sleep(wait)
                 else:

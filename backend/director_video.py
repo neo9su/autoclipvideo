@@ -375,20 +375,39 @@ class DirectorVideoComposer:
             }
 
             logger.info(f"[DIRECTOR] compose_final_video: submitting to {self._GPU_SERVICE_URL}/director-jobs, clips={len(clips_payload)}, ass_len={len(ass_content)}, tts_b64_len={len(tts_b64)}, total_tts_dur={total_tts_duration:.1f}s")
-            async with _aio_dv.ClientSession() as session:
-                async with session.post(
-                    f"{self._GPU_SERVICE_URL}/director-jobs", json=payload,
-                    timeout=_aio_dv.ClientTimeout(total=30),
-                ) as resp:
-                    _resp_status = resp.status
-                    _resp_text = await resp.text()
-                    logger.info(f"[DIRECTOR] compose_final_video: GPU submit response status={_resp_status} text={_resp_text[:200]}")
-            if _resp_status != 201:
-                logger.error(f"[DIRECTOR] compose_final_video: GPU job submit FAILED status={_resp_status} error={_resp_text[:500]}")
+            # Retry GPU submission on transient connection errors
+            _resp_status = None
+            _resp_text = ""
+            job_id = None
+            for _retry in range(3):
+                try:
+                    async with _aio_dv.ClientSession() as session:
+                        async with session.post(
+                            f"{self._GPU_SERVICE_URL}/director-jobs", json=payload,
+                            timeout=_aio_dv.ClientTimeout(total=30),
+                        ) as resp:
+                            _resp_status = resp.status
+                            _resp_text = await resp.text()
+                    if _resp_status == 201:
+                        import json as _json_dv
+                        job_id = _json_dv.loads(_resp_text)["job_id"]
+                        logger.info(f"[DIRECTOR] compose_final_video: GPU job queued: {job_id}")
+                        break
+                    elif _resp_status >= 500:
+                        logger.warning(f"[DIRECTOR] compose_final_video: GPU returned {_resp_status}, retry {_retry+1}/3")
+                        await asyncio.sleep(5 * (_retry + 1))
+                    else:
+                        logger.error(f"[DIRECTOR] compose_final_video: GPU submit FAILED status={_resp_status} error={_resp_text[:500]}")
+                        return None
+                except (_aio_dv.ClientConnectorError, _aio_dv.ClientOSError, _aio_dv.ServerDisconnectedError) as ce:
+                    logger.warning(f"[DIRECTOR] compose_final_video: GPU connection error, retry {_retry+1}/3: {ce}")
+                    await asyncio.sleep(5 * (_retry + 1))
+                except Exception as re:
+                    logger.error(f"[DIRECTOR] compose_final_video: unexpected error submitting GPU job: {re}")
+                    return None
+            if job_id is None:
+                logger.error(f"[DIRECTOR] compose_final_video: GPU job submit failed after 3 retries: status={_resp_status} text={_resp_text[:500]}")
                 return None
-            import json as _json_dv
-            job_id = _json_dv.loads(_resp_text)["job_id"]
-            logger.info(f"GPU director job queued: {job_id}")
 
             # 6. 轮询（最多 30 分钟）
             deadline = time.time() + 1800
