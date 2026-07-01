@@ -238,6 +238,25 @@ class DirectorScriptGenerator:
 
 请输出严格的JSON，不要有任何注释或前言，直接输出{{}}：
 
+【camera_direction 填写指南】
+- hook（开头）: pull_out（全景引入）
+- problem: push_in（聚焦问题）
+- comparison: push_in_strong（强烈聚焦对比）
+- wearing: pan_right/pan_left（跟随动作）
+- detail: push_in_strong（特写推进）
+- product: push_in（产品聚焦）
+- result/scene: pull_out（全景展示）
+- social_proof: static（静态展示）
+- conversion/cta: pull_out（收尾拉远）
+
+【transition_type 填写指南】
+- hook: zoomin（快速推进）
+- comparison: dissolve（叠化对比）
+- wearing: xfade（常规切换）
+- detail: fadeblack（黑场过渡）
+- result: fadewhite（白场过渡）
+- cta: fadeblack（黑场收尾）
+
 {{
     "vibe": "{vibe}",
     "vibe_label": "{vc["label"]}",
@@ -257,7 +276,9 @@ class DirectorScriptGenerator:
             "emotion": "natural",
             "visual_requirements": ["镜头描述"],
             "camera_angle": "特写/中景/全景",
-            "transition": "快切/淡入/叠化"
+            "transition": "快切/淡入/叠化",
+            "camera_direction": "push_in/pull_out/pan_right/pan_left/static",
+            "transition_type": "xfade/fadeblack/fadewhite/dissolve/slideleft/slideright/zoomin"
         }}
     ],
     "emotional_arc": ["场景1情绪"],
@@ -333,7 +354,9 @@ warm / clear / natural / persuasive / confident / storytelling"""
             "emotion": "confident",
             "visual_requirements": ["镜头描述"],
             "camera_angle": "特写/中景",
-            "transition": "快切"
+            "transition": "快切",
+            "camera_direction": "push_in/pull_out/pan_right/pan_left/static",
+            "transition_type": "xfade/fadeblack/fadewhite/dissolve/slideleft/slideright/zoomin"
         }}
     ],
     "emotional_arc": ["场景情绪"],
@@ -419,7 +442,9 @@ warm / clear / natural / persuasive / confident / urgent
             "emotion": "natural",
             "visual_requirements": ["镜头描述"],
             "camera_angle": "特写/中景/全景",
-            "transition": "快切/淡入/叠化"
+            "transition": "快切/淡入/叠化",
+            "camera_direction": "push_in/pull_out/pan_right/pan_left/static",
+            "transition_type": "xfade/fadeblack/fadewhite/dissolve/slideleft/slideright/zoomin"
         }}
     ],
     "emotional_arc": ["场景1情绪"],

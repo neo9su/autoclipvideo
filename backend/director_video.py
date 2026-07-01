@@ -358,6 +358,8 @@ class DirectorVideoComposer:
                     "start":     c["start_time"],
                     "duration":  c["duration"],
                     "scene_type": c.get("scene_type", ""),
+                    "camera_direction": c.get("camera_direction", "static"),
+                    "transition_type": c.get("transition_type", "xfade"),
                 }
                 for c in video_clips
             ]
@@ -585,6 +587,9 @@ class DirectorVideoComposer:
                 'scene_type': seg.get('scene_type', ''),
                 'scene_id': seg.get('scene_id'),
                 'confidence': segment_data.get('confidence_score', 0.0),
+                # Camera direction and transition from LLM script
+                'camera_direction': seg.get('camera_direction', 'static'),
+                'transition_type': seg.get('transition_type', 'xfade'),
             }
             
             raw_clips.append(clip_info)
@@ -770,7 +775,12 @@ class DirectorVideoComposer:
             logger.info(f"Processing clip {clip['index']}: {Path(input_file).name} ss={start_time} t={duration}")
 
             output_file = temp_dir / f"clip_{clip['index']:03d}.mp4"
-            vf_base     = self._build_video_filter(style_config, config)
+            # 使用场景感知的滤镜（含 camera_direction 驱动的 zoompan）
+            vf_base = self._build_clip_filter(
+                style_config, config,
+                scene_type=clip.get('scene_type'),
+                camera_direction=clip.get('camera_direction'),
+            )
 
             subtitle_text = (clip.get('script_text', '') or '').strip() if style_config.get('text_overlay', False) else ''
 
@@ -1030,6 +1040,20 @@ class DirectorVideoComposer:
     
     def _build_video_filter(self, style_config: Dict, config: Dict) -> str:
         """构建视频滤镜字符串（输出统一为 yuv420p + fps=30，保证 xfade 兼容性）"""
+        return self._build_clip_filter(style_config, config, scene_type=None, camera_direction=None)
+
+    def _build_clip_filter(self, style_config: Dict, config: Dict, 
+                           scene_type: Optional[str] = None,
+                           camera_direction: Optional[str] = None) -> str:
+        """构建单片段视频滤镜，支持 scene_type 和 camera_direction 差异化处理。
+        
+        场景视觉区分：
+          - problem → cool tone + fast setpts (紧张感)
+          - comparison → vivid + slight shake (对比强调)
+          - detail/wearing → warm + slow push (温暖特写)
+          - result/scene → vivid + bright (明亮展示)
+          - hook → vivid + zoom (吸引注意)
+        """
         filters = []
 
         # 基础缩放和裁剪
@@ -1039,19 +1063,131 @@ class DirectorVideoComposer:
         )
         filters.append(f"crop={self.output_settings['width']}:{self.output_settings['height']}")
 
-        # 轻微加速（zoom 风格，不用 zoompan 避免极慢）
-        if style_config.get('zoom_enabled', False):
-            filters.append("setpts=0.95*PTS")
+        # Scene-specific visual treatment
+        base_speed = "setpts=0.95*PTS" if style_config.get('zoom_enabled', False) else None
+        
+        if scene_type:
+            scene_visuals = {
+                'hook': {
+                    'speed': 'setpts=0.92*PTS',  # 更快开场
+                    'color': 'vivid',
+                    'extra': '',  # 无额外效果
+                },
+                'problem': {
+                    'speed': 'setpts=0.98*PTS',  # 稍慢，制造紧张
+                    'color': 'cool',
+                    'extra': '',
+                },
+                'comparison': {
+                    'speed': 'setpts=0.95*PTS',
+                    'color': 'vivid',
+                    'extra': '',  # 对比用转场区分，此处不做特殊处理
+                },
+                'detail': {
+                    'speed': 'setpts=1.02*PTS',  # 稍慢，让观众看清细节
+                    'color': 'warm',
+                    'extra': '',
+                },
+                'wearing': {
+                    'speed': 'setpts=0.97*PTS',  # 正常偏慢
+                    'color': 'natural',
+                    'extra': '',
+                },
+                'product': {
+                    'speed': 'setpts=0.95*PTS',
+                    'color': 'vivid',
+                    'extra': '',
+                },
+                'result': {
+                    'speed': 'setpts=0.93*PTS',  # 稍快，展示效果
+                    'color': 'vivid',
+                    'extra': '',
+                },
+                'scene': {
+                    'speed': 'setpts=0.95*PTS',
+                    'color': 'warm',
+                    'extra': '',
+                },
+                'social_proof': {
+                    'speed': 'setpts=0.95*PTS',
+                    'color': 'natural',
+                    'extra': '',
+                },
+                'conversion': {
+                    'speed': 'setpts=0.93*PTS',
+                    'color': 'vivid',
+                    'extra': '',
+                },
+                'cta': {
+                    'speed': 'setpts=0.90*PTS',  # 快速收尾
+                    'color': 'vivid',
+                    'extra': '',
+                },
+            }
+            sv = scene_visuals.get(scene_type, {})
+            if sv.get('speed'):
+                filters.append(sv['speed'])
+            grade_key = sv.get('color', style_config.get('color_grade', 'vivid'))
+        else:
+            grade_key = style_config.get('color_grade', 'vivid')
+            if base_speed:
+                filters.append(base_speed)
 
         # 颜色调色
-        grade_key = style_config.get('color_grade', 'vivid')
         filters.append(self._color_grades.get(grade_key, self._color_grades['vivid']))
+
+        # camera_direction 驱动的 zoompan 效果
+        if camera_direction and camera_direction != 'static':
+            w = self.output_settings['width']
+            h = self.output_settings['height']
+            zpan = self._build_zoompan(camera_direction, w, h)
+            if zpan:
+                filters.append(zpan)
 
         # 统一像素格式 + 帧率（xfade 要求两路输入格式完全一致）
         filters.append(f"fps={self.output_settings['fps']}")
         filters.append("format=yuv420p")
 
         return ','.join(filters)
+
+    def _build_zoompan(self, direction: str, w: int, h: int) -> Optional[str]:
+        """根据 camera_direction 构建 zoompan 滤镜字符串。
+        
+        对应经典版的 motion 语义，但简化为纯缩放/平移。
+        """
+        try:
+            fps = self.output_settings['fps']
+            frames = fps * 3  # 3秒效果
+            
+            if direction in ('push_in', 'push_in_strong'):
+                strength = 1.3 if direction == 'push_in_strong' else 1.15
+                zp = (f"zoompan=z='min(zp+0.008,{strength})':"
+                      f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+                      f"d={frames}:fs={w}x{h}:ifmt={fps}")
+                return zp
+            elif direction == 'pull_out':
+                zp = (f"zoompan=z='if(eq(zp,1.0),1.3,z-0.008)':"
+                      f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+                      f"d={frames}:fs={w}x{h}:ifmt={fps}")
+                return zp
+            elif direction == 'pan_right':
+                zp = (f"zoompan=z='1.1':"
+                      f"x='min(on,{w}*0.3)':y='ih/2-(ih/zoom/2)':"
+                      f"d={frames}:fs={w}x{h}:ifmt={fps}")
+                return zp
+            elif direction == 'pan_left':
+                zp = (f"zoompan=z='1.1':"
+                      f"x='max(on-{w}*0.3,{w}*0.1)':y='ih/2-(ih/zoom/2)':"
+                      f"d={frames}:fs={w}x{h}:ifmt={fps}")
+                return zp
+            elif direction == 'zoomin':
+                zp = (f"zoompan=z='min(zp+0.01,1.4)':"
+                      f"x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+                      f"d={frames}:fs={w}x{h}:ifmt={fps}")
+                return zp
+        except Exception as e:
+            logger.warning(f"zoompan build failed for {direction}: {e}")
+        return None
     
     async def _create_concat_file(self, processed_clips: List[str],
                                 concat_file: Path) -> None:

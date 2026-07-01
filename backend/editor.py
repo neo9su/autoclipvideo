@@ -1439,9 +1439,17 @@ async def _gen_detail_pip_frames(
     mp4: str, selected: List[Seg]
 ) -> dict:
     """
-    For each detail-category segment, extract a mid-frame from the upper-centre
-    area (the wig/hair region), apply a circular mask with white border, and
-    return {seg_idx: PNG_path} for PiP overlay in the final encode.
+    Enhanced PiP overlay generator — expanded trigger conditions beyond just "detail" category.
+    
+    Triggers (any match → generate PiP frame):
+      1. category == "detail" — 特写展示
+      2. category == "comparison" — 对比场景（前后对比）
+      3. category == "wearing" — 佩戴步骤
+      4. category == "product" — 产品讲解
+      5. Text contains close-up keywords (网底/发丝/仿真/递针/头皮 etc.)
+      6. Text contains step/action keywords (戴上/分缝/梳顺/固定 etc.)
+    
+    Returns {seg_idx: PNG_path} for PiP overlay in final encode.
     Requires Pillow; silently returns {} if unavailable.
     """
     PIP_DIAM   = 480          # circle diameter in pixels (output video coords)
@@ -1457,20 +1465,57 @@ async def _gen_detail_pip_frames(
         logger.debug("Pillow not available — skipping detail PiP generation")
         return {}
 
-    # 细节关键词（与 _HAIR_DETAIL_KW 同步）
-    _DETAIL_TRIGGERS = frozenset([
+    # 特写关键词 — 产品特性/工艺/材质
+    _CLOSEUP_KWS = frozenset([
         "发丝", "发根", "发纹", "仿真皮", "仿递针", "仿头皮", "头皮",
         "发质", "头顶", "分缝", "发缝", "毛流", "网底",
         "发缝真实", "发根清晰", "分缝自然", "发丝细腻",
-        "特写", "近景", "细节", "放大", "拉近",
         "仿真头皮", "仿生头皮", "递针工艺", "单根勾织",
+        "透气", "轻盈", "轻薄", "服帖", "蓬松",
+        # 英文/拼音关键词
+        "bob", "wig", "假发", "直发", "卷发",
     ])
+
+    # 步骤/动作关键词 — 佩戴/造型操作
+    _STEP_KWS = frozenset([
+        "分两份", "往里塞", "皮扣一勾", "防风扣", "固定好", "戴上去", "套上去",
+        "扎球球", "别上去", "夹好", "梳顺", "摘下来", "取下来",
+        "分缝", "拨开", "盘发", "卷发", "编发", "做造型",
+        "固定", "戴上", "套上", "梳开", "夹住", "扎起",
+    ])
+
+    # 对比/强调关键词
+    _CONTRAST_KWS = frozenset([
+        "佩戴前", "佩戴后", "before", "after", "对比", "比较",
+        "之前", "之后", "变化", "效果", "区别", "不同",
+        "显白", "减龄", "显年轻", "头包脸", "小V脸",
+        "正面", "侧面", "背面", "后面",
+    ])
+
+    # 触发 PiP 的条件：任一匹配即触发
+    _ALL_PIP_KWS = _CLOSEUP_KWS | _STEP_KWS | _CONTRAST_KWS
+
+    # 额外：特写/近景/细节等引导词
+    _GUIDE_KWS = frozenset(["特写", "近景", "细节", "放大", "拉近", "注意看", "聚焦"])
+
+    def _should_generate_pip(seg: Seg) -> bool:
+        """Decide if this segment should get a PiP overlay."""
+        # 1. Category-based triggers (always trigger)
+        if seg.category in ("detail", "comparison", "wearing", "product"):
+            return True
+        # 2. Keyword-based triggers
+        text_lower = seg.text.lower()
+        if any(kw in text_lower for kw in _GUIDE_KWS):
+            return True
+        if any(kw in text_lower for kw in _ALL_PIP_KWS):
+            return True
+        return False
 
     sem = asyncio.Semaphore(1)
     out: dict = {}
 
     async def _one(idx: int, seg: Seg) -> tuple:
-        if seg.category != "detail" and not any(kw in seg.text for kw in _DETAIL_TRIGGERS):
+        if not _should_generate_pip(seg):
             return idx, None
         ts = seg.start + seg.duration * 0.4   # 40% 处提取帧面更稳定
         raw_jpg = tempfile.mktemp(suffix="_pip_raw.jpg")
@@ -1886,7 +1931,15 @@ _STYLE_POOLS: dict[str, list] = {
 
 
 def _assign_styles(assembled: List[Seg], seed: int = 0) -> None:
-    """Assign motion + transition to every segment using composite style presets."""
+    """Assign motion + transition to every segment using composite style presets.
+    
+    Enhanced with semantic motion assignment:
+      - Opening (idx=0): pull_out (全景引入)
+      - Product/Detail: push_in_strong (聚焦产品)
+      - Wearing steps: pan_right/pan_left (跟随动作)
+      - Comparison: zoom_punch (强烈缩放)
+      - Result/Scene: pull_out (全景收尾)
+    """
     import random as _random
     rng = _random.Random(seed)
 
@@ -1914,21 +1967,65 @@ def _assign_styles(assembled: List[Seg], seed: int = 0) -> None:
         "放大", "拉近", "近一点",
     ])
 
+    def _semantic_motion(seg: Seg, idx: int, total: int) -> Optional[str]:
+        """Assign motion based on segment semantics and position.
+        Returns None to fall back to style pool random selection.
+        """
+        # 开场：全景引入（pull_out）
+        if idx == 0:
+            return "pull_out"
+        
+        # 结尾：全景收尾（pull_out）
+        if idx == total - 1:
+            return "pull_out"
+        
+        # 细节特写：强力推进
+        if seg.category == "detail" or any(kw in seg.text for kw in _HAIR_DETAIL_KW):
+            return "push_in_strong"
+        
+        # 对比场景：缩放聚焦
+        if seg.category == "comparison":
+            return "push_in_strong"
+        
+        # 佩戴步骤：水平跟随
+        if seg.category == "wearing":
+            return "pan_right" if idx % 2 == 0 else "pan_left"
+        
+        # 产品讲解：缓慢推进
+        if seg.category == "product":
+            return "push_in"
+        
+        # 结果/场景：拉远展示
+        if seg.category in ("result", "scene"):
+            return "pull_out"
+        
+        # 痛点/社交证明：轻微推进
+        if seg.category in ("problem", "social_proof"):
+            return "push_in"
+        
+        # 默认：不指定，走 style pool 随机
+        return None
+
     def _pos(seg: Seg, idx: int) -> str:
         return "hook" if idx == 0 else seg.category
 
     for i, seg in enumerate(assembled):
         pool_key = _pos(seg, i)
         pool = _STYLE_POOLS.get(pool_key, _STYLE_POOLS["neutral"])
-        seg_seed = seed + i * 31 + (hash(seg.text[:16]) & 0xFFFF)
-        rng.seed(seg_seed)
-        style_name = rng.choice(pool)
-        motion, t_type, t_dur = _STYLES[style_name]
-        if any(kw in seg.text for kw in _HAIR_DETAIL_KW) or seg.category == "detail":
-            motion = "detail_zoom" if rng.random() < 0.5 else "push_in_strong"
-        seg.motion = motion
-        if i > 0:
-            seg.transition = f"{t_type}:{t_dur:.2f}"
+        # Semantic motion override (before random style pool)
+        semantic_motion = _semantic_motion(seg, i, len(assembled))
+        if semantic_motion is not None:
+            seg.motion = semantic_motion
+        else:
+            seg_seed = seed + i * 31 + (hash(seg.text[:16]) & 0xFFFF)
+            rng.seed(seg_seed)
+            style_name = rng.choice(pool)
+            motion, t_type, t_dur = _STYLES[style_name]
+            if any(kw in seg.text for kw in _HAIR_DETAIL_KW) or seg.category == "detail":
+                motion = "detail_zoom" if rng.random() < 0.5 else "push_in_strong"
+            seg.motion = motion
+            if i > 0:
+                seg.transition = f"{t_type}:{t_dur:.2f}"
 
     MIN_MOTION_SEGS = 4
     motion_count = sum(1 for s in assembled if s.motion != "static")
