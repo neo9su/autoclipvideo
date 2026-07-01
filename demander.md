@@ -136,11 +136,14 @@
 3. Phase 3 自动重试 crashed pipelines
 4. Classic pending 仅 10 组，几乎全部完成
 5. 🆕 GPU 监控脚本修复后需持续观察 24h 确认无虚假告警
-6. 🎬 **镜头与场景变化增强**（Phase 1 本周）✅ 全部完成
+6. 🎬 **镜头与场景变化增强**（Phase 1+2 全部完成）✅
    - [x] A2: 增强画中画触发条件（问题/对比/佩戴步骤/特写关键词）— `editor.py`
    - [x] A3: 运镜分配逻辑优化（开场→全景引入，产品→聚焦，步骤→跟随，对比→缩放）— `editor.py`
    - [x] B1: 导演版 camera_direction 字段注入 — `director_script.py` + `director_video.py`
    - [x] B2: 场景视觉区分增强（problem→冷/对比→分屏/detail→暖+PiP）— `director_video.py`
+   - [x] C1: 智能镜头分割细化 — `editor.py` _split_long_segments() SRT/关键词双策略
+   - [x] C2: 动态文字标注 — `director_video.py` 12种场景样式 + 高光增强动画
+   - [x] C3: 对比场景分屏效果 — `gpu_service.py` hstack before/after + 自动标注
 
 ## ✅ 2026-06-29 09:25 — 发布页下载按钮 + 手动标记已发布
 
