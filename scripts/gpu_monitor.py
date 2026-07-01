@@ -72,7 +72,7 @@ def restart_gpu_service():
 
 def get_db_stats():
     """获取数据库中作业统计"""
-    db = sqlite3.connect(DB_PATH)
+    db = sqlite3.connect(DB_PATH, timeout=30)
     db.row_factory = sqlite3.Row
     stats = {}
     
@@ -85,18 +85,30 @@ def get_db_stats():
         "SELECT count(*) as c FROM recordings WHERE synced=0 AND transcribed=0 AND local_deleted=0 AND end_time IS NOT NULL AND end_time != start_time"
     ).fetchone()["c"]
     
-    # 导演版积压
+    # 导演版积压（与 backfill 逻辑一致：需有有效的录制文件）
     stats["director_pending"] = db.execute(
-        "SELECT count(*) as c FROM clip_groups WHERE director_status = 0"
+        """SELECT count(*) as c FROM clip_groups
+           WHERE classic_status = 2 AND director_status = 0
+           AND EXISTS (
+               SELECT 1 FROM recordings
+               WHERE recordings.group_id = clip_groups.id
+                 AND recordings.local_deleted = 0 AND recordings.clipped = 2
+           )"""
     ).fetchone()["c"]
     
     stats["director_running"] = db.execute(
         "SELECT count(*) as c FROM clip_groups WHERE director_status = 1"
     ).fetchone()["c"]
     
-    # creative 积压
+    # creative 积压（与 backfill 逻辑一致：需有有效的录制文件）
     stats["creative_pending"] = db.execute(
-        "SELECT count(*) as c FROM clip_groups WHERE creative_status = 0"
+        """SELECT count(*) as c FROM clip_groups
+           WHERE classic_status = 2 AND director_status = 2 AND creative_status = 0
+           AND EXISTS (
+               SELECT 1 FROM recordings
+               WHERE recordings.group_id = clip_groups.id
+                 AND recordings.local_deleted = 0 AND recordings.clipped = 2
+           )"""
     ).fetchone()["c"]
     
     stats["creative_running"] = db.execute(
@@ -113,8 +125,12 @@ def get_db_stats():
     return stats
 
 def fix_stuck_transcriptions():
-    """修复卡住的转录作业：检查 GPU 上的状态，完成的拉回来"""
-    db = sqlite3.connect(DB_PATH)
+    """修复卡住的转录作业：检查 GPU 上的状态，完成的拉回来
+    
+    注意：此函数只检查 transcribed=1（已提交 GPU）的记录。
+    transcribed=0 的上传由后端 poll 循环自动处理，不需要干预。
+    """
+    db = sqlite3.connect(DB_PATH, timeout=30)
     db.row_factory = sqlite3.Row
     rows = db.execute(
         "SELECT id, gpu_job_id, filename FROM recordings WHERE transcribed = 1 AND gpu_job_id IS NOT NULL"
@@ -143,42 +159,100 @@ def fix_stuck_transcriptions():
     
     db.commit()
     db.close()
-    return {"fixed": fixed, "reset": reset, "total": len(rows)}
+    # 只返回实际操作的计数，total 不再混入 reset
+    return {"fixed": fixed, "reset": reset, "checked": len(rows)}
 
 def fix_stuck_pipelines():
-    """修复卡在 status=1 的导演版/自编版"""
-    db = sqlite3.connect(DB_PATH)
+    """修复卡在 status=1 的导演版/自编版（仅当运行超过 4 小时才重置）"""
+    import time
+    db = sqlite3.connect(DB_PATH, timeout=30)
     
-    director_stuck = db.execute(
-        "SELECT count(*) FROM clip_groups WHERE director_status = 1"
-    ).fetchone()[0]
-    creative_stuck = db.execute(
-        "SELECT count(*) FROM clip_groups WHERE creative_status = 1"
-    ).fetchone()[0]
+    # 只重置运行超过 4 小时的 pipeline，避免中断正常运行的任务
+    four_hours_ago = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - 4*3600))
     
-    if director_stuck > 0:
-        db.execute("UPDATE clip_groups SET director_status = 0 WHERE director_status = 1")
-    if creative_stuck > 0:
-        db.execute("UPDATE clip_groups SET creative_status = 0 WHERE creative_status = 1")
+    director_rows = db.execute(
+        "SELECT id FROM clip_groups WHERE director_status = 1 AND created_at < ?", (four_hours_ago,)
+    ).fetchall()
+    
+    creative_rows = db.execute(
+        "SELECT id FROM clip_groups WHERE creative_status = 1 AND created_at < ?", (four_hours_ago,)
+    ).fetchall()
+    
+    director_reset = 0
+    creative_reset = 0
+    
+    if director_rows:
+        for row in director_rows:
+            db.execute("UPDATE clip_groups SET director_status = 0 WHERE id = ? AND director_status = 1", (row[0],))
+            director_reset += 1
+    
+    if creative_rows:
+        for row in creative_rows:
+            db.execute("UPDATE clip_groups SET creative_status = 0 WHERE id = ? AND creative_status = 1", (row[0],))
+            creative_reset += 1
     
     db.commit()
     db.close()
-    return {"director_reset": director_stuck, "creative_reset": creative_stuck}
+    return {"director_reset": director_reset, "creative_reset": creative_reset, "director_checked": len(director_rows), "creative_checked": len(creative_rows)}
 
 def restart_backend():
-    """重启后端以触发 backfill"""
-    subprocess.run(["kill", "-9"] + subprocess.run(
-        ["lsof", "-ti:8899"], capture_output=True, text=True
-    ).stdout.strip().split(), capture_output=True)
-    time.sleep(2)
-    subprocess.Popen(
-        ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8899"],
-        cwd="/Users/claw/work/douyin-recorder/backend",
-        stdout=open("/private/tmp/douyin_backend.log", "a"),
-        stderr=subprocess.STDOUT,
-        start_new_session=True
-    )
-    time.sleep(3)
+    """重启后端以触发 backfill（通过 kill+reexec，保持 --workers 1）"""
+    # Find the backend process
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "uvicorn main:app.*--port 8899"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            pids = result.stdout.strip().split("\n")
+            for pid_str in pids:
+                pid = int(pid_str)
+                # Don't kill ourselves
+                if pid != os.getpid():
+                    os.kill(pid, 15)  # SIGTERM
+                    print(f"Sent SIGTERM to backend PID {pid}")
+            time.sleep(3)
+            # Verify it's gone
+            alive = subprocess.run(
+                ["pgrep", "-f", "uvicorn main:app.*--port 8899"],
+                capture_output=True, text=True, timeout=5
+            )
+            if alive.returncode != 0:
+                print("Backend stopped, restarting...")
+                # Restart via nohup
+                backend_dir = "/Users/claw/work/douyin-recorder/backend"
+                subprocess.Popen(
+                    ["/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/Resources/Python.app/Contents/MacOS/Python",
+                     "/opt/homebrew/bin/uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8899"],
+                    cwd=backend_dir,
+                    stdout=open(os.path.join(backend_dir, "backend_run.log"), "a"),
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True
+                )
+                time.sleep(5)
+                print("Backend restarted")
+            else:
+                print("Backend still running, trying SIGKILL...")
+                for pid_str in pids:
+                    pid = int(pid_str)
+                    if pid != os.getpid():
+                        os.kill(pid, 9)
+                time.sleep(3)
+                backend_dir = "/Users/claw/work/douyin-recorder/backend"
+                subprocess.Popen(
+                    ["/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/Resources/Python.app/Contents/MacOS/Python",
+                     "/opt/homebrew/bin/uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8899"],
+                    cwd=backend_dir,
+                    stdout=open(os.path.join(backend_dir, "backend_run.log"), "a"),
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True
+                )
+                time.sleep(5)
+                print("Backend restarted (after SIGKILL)")
+        else:
+            print("No backend process found")
+    except Exception as e:
+        print(f"Backend restart failed: {e}")
 
 def main():
     report = []
@@ -218,7 +292,10 @@ def main():
     )
     
     # 3. 检查 GPU 是否持续空闲
-    if gpu_3d < LOW_GPU_THRESHOLD:
+    # 注意：whisper 转录使用 CUDA compute 而非 3D 渲染，gpu_3d_pct 始终为 0%
+    # 因此必须结合 gpu_busy 和 queue_depth 来判断真正空闲
+    if gpu_3d < LOW_GPU_THRESHOLD and not gpu_busy and queue_depth < 100:
+        # 3D 低 + 不忙 + 队列浅 → 真正空闲
         state["low_gpu_count"] = state.get("low_gpu_count", 0) + 1
     else:
         state["low_gpu_count"] = 0
@@ -242,7 +319,11 @@ def main():
         last_restart = state.get("last_restart", 0)
         time_since_restart = time.time() - last_restart
         
-        if queue_depth == 0 and not gpu_busy and time_since_restart > 3600:
+        # Only restart backend if it hasn't been restarted in the last 30 minutes.
+        # Frequent restarts break the backfill's stagger loop (405 groups × 2s = 13.5min).
+        BACKEND_RESTART_COOLDOWN = 1800  # 30 minutes
+        
+        if queue_depth == 0 and not gpu_busy and time_since_restart > BACKEND_RESTART_COOLDOWN:
             # GPU 完全空闲，队列空，有积压 → 重启 GPU 服务 + 后端
             report.append("🔄 GPU 完全空闲且队列为空，执行重启...")
             
@@ -260,7 +341,7 @@ def main():
             actions_taken.append("🔄 重启后端服务，触发 backfill")
             
             state["last_restart"] = time.time()
-        elif queue_depth == 0 and not gpu_busy and time_since_restart <= 3600:
+        elif queue_depth == 0 and not gpu_busy and time_since_restart <= BACKEND_RESTART_COOLDOWN:
             # 最近已重启过，只重启后端
             restart_backend()
             actions_taken.append("🔄 重启后端触发 backfill（GPU 最近已重启，跳过 GPU 重启）")

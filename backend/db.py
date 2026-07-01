@@ -179,6 +179,9 @@ async def init_db():
             # 封面候选图 (JSON array of relative paths) 和已选封面
             "ALTER TABLE clip_groups ADD COLUMN cover_candidates TEXT",
             "ALTER TABLE clip_groups ADD COLUMN selected_cover TEXT",
+            # 手动标记已发布（用户自行下载发布，不走系统发布）
+            "ALTER TABLE publish_tasks ADD COLUMN manual_published INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE publish_tasks ADD COLUMN manual_published_at TEXT",
         ]:
             try:
                 await db.execute(migration)

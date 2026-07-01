@@ -273,7 +273,7 @@ import {
 import { useToast } from '../composables/toast.js'
 
 const { show } = useToast()
-const apiBase = import.meta.env.DEV ? 'http://localhost:8899' : ''
+const apiBase = import.meta.env.DEV ? 'http://localhost:8899' : 'http://localhost:8899'
 
 // ── Upload state ──────────────────────────────────────────────────────────────
 const rooms     = ref([])

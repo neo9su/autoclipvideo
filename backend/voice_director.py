@@ -433,18 +433,38 @@ class VoiceDirector:
         elif voice_ref_job_id:
             payload["ref_voice_id"] = voice_ref_job_id
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(f"{_GPU_SERVICE_URL}/tts-jobs", json=payload,
-                                        timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                    _tts_sc = resp.status
-                    _tts_body = await resp.json() if _tts_sc == 201 else None
-            if _tts_sc != 201:
-                logger.warning(f"GPU TTS submit failed: {_tts_sc}")
+            # Retry GPU TTS submit (GPU may be temporarily offline)
+            _tts_sc = None
+            _tts_body = None
+            job_id = None
+            for _tts_retry in range(3):
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.post(f"{_GPU_SERVICE_URL}/tts-jobs", json=payload,
+                                                timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                            _tts_sc = resp.status
+                            _tts_body = await resp.json() if _tts_sc == 201 else None
+                    if _tts_sc == 201:
+                        job_id = _tts_body["job_id"]
+                        break
+                    elif _tts_sc >= 500:
+                        logger.warning(f"GPU TTS returned {_tts_sc}, retry {_tts_retry+1}/3")
+                        await asyncio.sleep(3 * (_tts_retry + 1))
+                    else:
+                        logger.warning(f"GPU TTS submit failed: {_tts_sc}")
+                        return 0.0
+                except (aiohttp.ClientConnectorError, aiohttp.ClientOSError, aiohttp.ServerDisconnectedError) as ce:
+                    logger.warning(f"GPU TTS connection error, retry {_tts_retry+1}/3: {ce}")
+                    await asyncio.sleep(3 * (_tts_retry + 1))
+                except Exception as te:
+                    logger.warning(f"GPU TTS unexpected error, retry {_tts_retry+1}/3: {te}")
+                    await asyncio.sleep(3 * (_tts_retry + 1))
+            if job_id is None:
+                logger.warning("GPU TTS failed after 3 retries, falling back to Tencent")
                 return 0.0
-            job_id = _tts_body["job_id"]
 
-            # 轮询（最多 600 秒 — CosyVoice2 首次推理需加载模型，可能需要数分钟）
-            deadline = time.time() + 600
+            # 轮询（最多 1800 秒 — CosyVoice2 首次推理需加载模型，可能需要数分钟）
+            deadline = time.time() + 1800
             while time.time() < deadline:
                 await asyncio.sleep(2)
                 async with aiohttp.ClientSession() as session:

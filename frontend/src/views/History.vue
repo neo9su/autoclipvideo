@@ -205,7 +205,7 @@ const reclipCount = ref(1)
 const page = ref(1)
 const total = ref(0)
 const totalPages = ref(1)
-const apiBase = import.meta.env.DEV ? 'http://localhost:8899' : ''
+const apiBase = import.meta.env.DEV ? 'http://localhost:8899' : 'http://localhost:8899'
 const stats = ref({ transcribe_pending: 0, transcribe_running: 0, transcribe_failed: 0,
                     clip_pending: 0, clip_running: 0, clip_failed: 0 })
 const clipJobs = ref({})        // { recording_id: { pct, msg } }

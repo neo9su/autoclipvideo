@@ -6,7 +6,7 @@
         <h3>发布任务</h3>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
           <button class="btn-secondary" @click="openBatchModal">批量排期</button>
-          <button class="btn-warn-sm" @click="doBulkCancel" title="取消所有待发/定时任务">批量取消</button>
+          <button class="btn-secondary" @click="doBulkCancel" title="取消所有待发/定时任务">批量取消</button>
           <button class="btn-primary" @click="showCreateModal = true">+ 创建任务</button>
         </div>
       </div>
@@ -35,6 +35,7 @@
           <div class="task-item-top">
             <span class="task-platform">{{ t.platform }}</span>
             <span :class="['badge', statusClass(t.status)]">{{ statusLabel(t.status) }}</span>
+            <span v-if="t.manual_published" class="badge badge-manual">手动</span>
             <span v-if="t.no_cart" class="badge badge-no-cart">无车</span>
             <button v-if="['failed','publishing'].includes(t.status) || (t.status === 'scheduled' && isExpired(t.scheduled_at))"
               class="btn-xs btn-retry" @click.stop="retryTask(t.id)" title="重试">↺</button>
@@ -117,6 +118,35 @@
             <label>发布时间</label>
             <div>{{ selectedTask.published_at }}</div>
           </div>
+          <div class="field" v-if="selectedTask.manual_published_at">
+            <label>手动标记发布</label>
+            <div style="display:flex;align-items:center;gap:6px">
+              <span style="color:#34d399">✓ 已手动标记</span>
+              <span class="muted" style="font-size:11px">{{ selectedTask.manual_published_at }}</span>
+            </div>
+          </div>
+        </div>
+        <!-- Video download section -->
+        <div v-if="selectedTask" class="video-download-section">
+          <div class="video-download-title">📥 下载视频（自行发布）</div>
+          <div class="video-download-links">
+            <a :href="`${apiBase}/api/groups/${selectedTask.group_id}/download`" class="dl-btn dl-classic" target="_blank" title="经典版（合并版）">
+              📹 经典版
+            </a>
+            <a v-if="selectedTask.video_path && selectedTask.video_path.includes('director')" :href="`${apiBase}/api/groups/${selectedTask.group_id}/director-download`" class="dl-btn dl-director" target="_blank" title="导演版">
+              🎬 导演版
+            </a>
+            <a v-if="selectedTask.video_path && selectedTask.video_path.includes('creative')" :href="`${apiBase}/api/groups/${selectedTask.group_id}/creative-download`" class="dl-btn dl-creative" target="_blank" title="自编版">
+              ✍️ 自编版
+            </a>
+          </div>
+        </div>
+        <!-- Manual publish mark button -->
+        <div v-if="selectedTask && !selectedTask.manual_published && selectedTask.status !== 'publishing' && selectedTask.status !== 'done'" class="manual-publish-section">
+          <button class="btn-mark-manual" @click="doManualPublish(selectedTask.id)">
+            ✓ 手动标记已发布
+          </button>
+          <div class="muted manual-hint">点击下方按钮可将此任务标记为「已发布」，用于自行下载发布的情况</div>
         </div>
       </div>
       <div v-else class="empty-detail">← 选择左侧任务查看详情</div>
@@ -401,6 +431,32 @@
           </label>
         </div>
 
+        <!-- 商品选择（仅挂车时显示） -->
+        <template v-if="!batchForm.no_cart">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin:10px 0 4px">
+            <label style="margin:0;font-size:13px">小黄车商品（可多选，应用于所有排期任务）</label>
+            <button v-if="products.length" class="btn-xs" @click="toggleAllBatchProducts">
+              {{ batchForm.product_ids.length === products.length ? '取消全选' : '全选' }}
+            </button>
+          </div>
+          <input
+            v-model="batchCartSearch"
+            class="input"
+            style="margin:6px 0 4px;padding:5px 10px;font-size:12px"
+            placeholder="搜索商品名/关键词…"
+          />
+          <div class="product-multi">
+            <div class="product-multi-list" style="max-height:200px;overflow-y:auto">
+              <label v-for="p in batchFilteredProducts" :key="p.id" class="product-check-item">
+                <input type="checkbox" :value="p.id" v-model="batchForm.product_ids" />
+                <span v-if="p.room_name" class="product-room-tag">{{ p.room_name }}</span>
+                <span>{{ p.product_name }}</span>
+              </label>
+              <div v-if="!batchFilteredProducts.length" class="muted" style="font-size:12px;padding:6px 0">暂无匹配商品</div>
+            </div>
+          </div>
+        </template>
+
         <!-- Preview -->
         <div v-if="displayedGroups.length" class="batch-preview">
           <div class="batch-preview-title">
@@ -465,7 +521,7 @@ import {
   getProducts, getPublishAccounts, createPublishAccount, deletePublishAccount, loginPublishAccount,
   generatePublishMeta, matchGroupProduct, createWS, deleteGroup, reclipRecording,
   getUnscheduledGroups, batchSchedulePublish, regenPublishTaskMeta, reschedulePublishTask,
-  checkAccountCookie,
+  checkAccountCookie, markManualPublish,
 } from '../api.js'
 import { useToast } from '../composables/toast.js'
 
@@ -495,7 +551,7 @@ const previewGroup = ref(null)   // group being previewed in video modal
 const previewVersion = ref('director')  // 'director' | 'classic'
 const reclipModal = ref(null)    // {group, feedback, saving, submitted}
 const selectedPublishVersion = ref('both')
-const BASE_URL = import.meta.env.VITE_API_BASE || ''
+const apiBase = import.meta.env.VITE_API_BASE || ''
 const scheduleMode = ref('now')
 const progressLog = ref({})   // task_id → string[]
 let ws = null
@@ -537,7 +593,23 @@ const batchForm = ref({
   interval_minutes: 90,
   no_cart: false,
   auto_meta: false,
+  product_ids: [],
 })
+const batchCartSearch = ref('')
+
+const batchFilteredProducts = computed(() => {
+  if (!batchCartSearch.value) return products.value
+  const q = batchCartSearch.value.toLowerCase()
+  return products.value.filter(p =>
+    p.product_name.toLowerCase().includes(q) ||
+    (p.keywords && p.keywords.toLowerCase().includes(q))
+  )
+})
+
+function toggleAllBatchProducts() {
+  const allSelected = batchForm.value.product_ids.length === products.value.length
+  batchForm.value.product_ids = allSelected ? [] : products.value.map(p => p.id)
+}
 
 function previewTime(index) {
   if (!batchForm.value.start_datetime) return ''
@@ -603,6 +675,7 @@ async function _doSubmitBatch() {
       start_datetime: new Date(batchForm.value.start_datetime).toISOString(),
       interval_minutes: batchForm.value.interval_minutes,
       no_cart: batchForm.value.no_cart,
+      product_ids: batchForm.value.product_ids.length ? batchForm.value.product_ids : null,
       auto_meta: batchForm.value.auto_meta,
       room_id: batchForm.value.room_id || null,
       exclude_group_ids: excludedGroupIds.value.size ? [...excludedGroupIds.value] : null,
@@ -825,6 +898,20 @@ async function cancelTask(id) {
     showToast('任务已取消', 'success')
   } catch (e) {
     showToast('取消失败: ' + e.message, 'error')
+  }
+}
+
+async function doManualPublish(id) {
+  if (!confirm('确认将此任务标记为「已发布」？\n你将自行下载视频并发布到平台。')) return
+  try {
+    await markManualPublish(id)
+    await loadTasks()
+    if (selectedTask.value?.id === id) {
+      selectedTask.value = { ...selectedTask.value, status: 'done', manual_published: 1 }
+    }
+    showToast('已标记为手动发布', 'success')
+  } catch (e) {
+    showToast('标记失败: ' + e.message, 'error')
   }
 }
 
@@ -1319,6 +1406,8 @@ label { display: block; font-size: 12px; color: #888; margin: 12px 0 4px; }
 .badge-orange { background: rgba(249,115,22,0.15); color: #fb923c; }
 .badge-red { background: rgba(254,44,85,0.15); color: #fe2c55; }
 .badge-no-cart { background: rgba(100,200,255,0.15); color: #67d4f0; }
+.badge-manual { background: rgba(96,165,250,0.15); color: #60a5fa; }
+.badge-manual:hover { background: rgba(96,165,250,0.25); }
 .no-cart-row { margin: 8px 0; }
 .no-cart-btn { width: 100%; padding: 9px 12px; border-radius: 8px; border: 1px solid; font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.15s; text-align: center; }
 .no-cart-btn-off { background: rgba(254,44,85,0.08); border-color: rgba(254,44,85,0.3); color: #fe2c55; }
@@ -1351,4 +1440,22 @@ label { display: block; font-size: 12px; color: #888; margin: 12px 0 4px; }
 .acc-platform { font-size: 11px; background: #2a2a2a; border-radius: 3px; padding: 1px 6px; color: #888; }
 .add-account { display: flex; gap: 8px; margin-top: 8px; padding-top: 8px; border-top: 1px solid #2a2a2a; }
 .input-sm { background: #111; border: 1px solid #333; color: #e0e0e0; border-radius: 5px; padding: 5px 8px; font-size: 12px; }
+
+/* Video download section */
+.video-download-section { margin-top: 16px; padding-top: 16px; border-top: 1px solid #2a2a2a; }
+.video-download-title { font-size: 13px; font-weight: 600; color: #e0e0e0; margin-bottom: 10px; }
+.video-download-links { display: flex; gap: 8px; flex-wrap: wrap; }
+.dl-btn { display: inline-flex; align-items: center; gap: 4px; padding: 8px 16px; border-radius: 8px; text-decoration: none; font-size: 13px; font-weight: 500; transition: all 0.15s; }
+.dl-classic { background: rgba(52,211,153,0.12); border: 1px solid rgba(52,211,153,0.3); color: #34d399; }
+.dl-classic:hover { background: rgba(52,211,153,0.2); }
+.dl-director { background: rgba(167,139,250,0.12); border: 1px solid rgba(167,139,250,0.3); color: #a78bfa; }
+.dl-director:hover { background: rgba(167,139,250,0.2); }
+.dl-creative { background: rgba(251,191,36,0.12); border: 1px solid rgba(251,191,36,0.3); color: #fbbf24; }
+.dl-creative:hover { background: rgba(251,191,36,0.2); }
+
+/* Manual publish section */
+.manual-publish-section { margin-top: 12px; padding-top: 12px; border-top: 1px solid #2a2a2a; }
+.btn-mark-manual { background: rgba(96,165,250,0.12); color: #60a5fa; border: 1px solid rgba(96,165,250,0.3); border-radius: 8px; padding: 8px 20px; cursor: pointer; font-size: 13px; font-weight: 500; transition: all 0.15s; }
+.btn-mark-manual:hover { background: rgba(96,165,250,0.2); }
+.manual-hint { font-size: 11px; color: #666; margin-top: 6px; line-height: 1.4; }
 </style>

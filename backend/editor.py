@@ -2230,7 +2230,7 @@ async def _feedback_to_hints(srt_path: str, feedback: str) -> dict:
     avoid_keywords, prefer_longer, clip_min_override, clip_max_override.
     Falls back to empty hints on any error.
     """
-    _llm_url   = os.environ.get("LLM_BASE_URL", "http://10.190.0.214:8080/v1")
+    _llm_url   = os.environ.get("LLM_BASE_URL", "https://api.deepseek.com")
     _llm_key   = os.environ.get("LLM_API_KEY", "sk-orx-ukMXZXaPzL_Du1Xkcx3UuiSEjcf7TiXJ")
     _llm_model = os.environ.get("LLM_MODEL", "us.anthropic.claude-sonnet-4-6")
     import httpx, json as _json, re as _re

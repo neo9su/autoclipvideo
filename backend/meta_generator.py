@@ -19,7 +19,7 @@ from llm_client import llm_post
 logger = logging.getLogger(__name__)
 
 # 兼容旧引用
-BEDROCK_URL = os.environ.get("LLM_BASE_URL", "http://10.190.0.214:8080/v1")
+BEDROCK_URL = os.environ.get("LLM_BASE_URL", "https://api.deepseek.com")
 BEDROCK_TOKEN = os.environ.get("LLM_API_KEY", "")
 RECORDINGS_DIR = os.path.join(os.path.dirname(__file__), "..", "recordings")
 

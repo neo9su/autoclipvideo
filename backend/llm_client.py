@@ -15,9 +15,9 @@ import httpx
 logger = logging.getLogger(__name__)
 
 # ── Config (from .env, mirrored from each module) ────────────────────────────
-_LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://10.190.0.214:8080/v1")
-_LLM_API_KEY = os.getenv("LLM_API_KEY", "sk-orx-5xpxe1L2Dh1lCjehgL7J0opEe1PkwH1R")
-LLM_MODEL = os.getenv("LLM_MODEL_CHAT", "agnes-2.0-flash")
+_LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.deepseek.com")
+_LLM_API_KEY = os.getenv("LLM_API_KEY", "")
+LLM_MODEL = os.getenv("LLM_MODEL_CHAT", "deepseek-v4-flash")
 
 # ── Global semaphore: 1 concurrent LLM request at a time ─────────────────────
 # The proxy (local-openrouter-gateway) is effectively single-threaded;
@@ -52,6 +52,7 @@ async def llm_post(
         "messages": messages,
         "max_tokens": max_tokens,
         "temperature": temperature,
+        "response_format": {"type": "text"},
     }
     headers = {
         "Authorization": f"Bearer {_LLM_API_KEY}",

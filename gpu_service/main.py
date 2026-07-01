@@ -369,13 +369,25 @@ async def _has_audio_stream(path: str) -> bool:
     return bool(stdout.strip())
 
 
+_FFMPEG_TIMEOUT = 600  # 10 min — prevents hung ffmpeg from blocking the entire event loop
+
 async def _run_ffmpeg(*cmd) -> int:
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
     )
-    _, stderr = await proc.communicate()
+    try:
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=_FFMPEG_TIMEOUT)
+    except asyncio.TimeoutError:
+        import logging as _logging
+        _logging.getLogger(__name__).error("ffmpeg TIMED OUT after %ds: %s", _FFMPEG_TIMEOUT, " ".join(cmd[:5]))
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        await proc.wait()
+        return -1
     if proc.returncode != 0 and stderr:
         import logging as _logging
         _logging.getLogger(__name__).warning(
@@ -1698,6 +1710,7 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
 
     try:
         _update_director_job(job_id, status="processing", phase="preprocess", pct=0)
+        _job_start = time.time()
 
         n = len(clips)
         _SF = (
@@ -1709,6 +1722,8 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
         # ── Phase 1: preprocess each clip ─────────────────────────────────────
         seg_files_with_dur = []
         for i, clip in enumerate(clips):
+            if time.time() - _job_start > 900:
+                raise TimeoutError(f"Preprocess phase exceeded 900s timeout")
             mp4_path = os.path.join(STORAGE_DIR, str(clip["room_id"]), clip["filename"])
             if not os.path.exists(mp4_path):
                 # Fallback: try URL-encoded filename (legacy sync used percent-encoding)
@@ -1894,10 +1909,16 @@ async def _run_director_job(job_id: str, clips: list, ass_content: str,
                              tts_audio_b64: str, transition_type: str,
                              transition_duration: float, thumb_seek: float,
                              total_tts_duration: float = 0.0):
-    async with _director_sem:
-        await _do_director_job(job_id, clips, ass_content, tts_audio_b64,
-                                transition_type, transition_duration, thumb_seek,
-                                total_tts_duration)
+    try:
+        async with _director_sem:
+            await asyncio.wait_for(
+                _do_director_job(job_id, clips, ass_content, tts_audio_b64,
+                    transition_type, transition_duration, thumb_seek, total_tts_duration),
+                timeout=1800,  # 30 min hard timeout
+            )
+    except asyncio.TimeoutError:
+        logger.error(f"Director job {job_id} TIMED OUT after 30min — releasing semaphore")
+        _update_director_job(job_id, status="error", error="Timed out after 30min")
 
 
 @app.post("/director-jobs", status_code=201)

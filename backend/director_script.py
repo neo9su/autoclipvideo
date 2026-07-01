@@ -15,7 +15,7 @@ from llm_client import llm_post, LLM_MODEL as BEDROCK_MODEL
 logger = logging.getLogger(__name__)
 
 # 兼容旧变量名（部分地方引用）
-_LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://10.190.0.214:8080/v1")
+_LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://api.deepseek.com")
 BEDROCK_URL = _LLM_BASE_URL
 
 
@@ -299,20 +299,27 @@ warm / clear / natural / persuasive / confident / storytelling"""
 8. 开场第一句必须是强钉子：用提问（「你知道为什么这款这么火吗？」）、悬念（「很多人第一次看到这个颜色都怠住了」）或场景代入，禁止无聊开场
 9. 禁止虚假紧迫感：不写「限时/最后X件/仅剩X单/抢完就没了」，催单用「直播间小黄车/点关注」代替
 
+【时长硬性要求】
+- 总配音时长必须达到 50-60 秒（约 180-240 字）
+- 每个场景配音 20-30 字，朗读约 3-5 秒
+- 场景数量必须 ≥ 6 个（确保总时长足够）
+- 如果场景少于6个，说明文案太短，必须增加场景直到总字数≥180字
+- 写完自检：把所有 voiceover_text 加起来，如果总字数<180字，必须重写加长
+
 叙事结构：根据产品款式和颜色选择最适合的叙事线，从以下3种中选一种：
    A) 痛点驱动型：「你有没有遇到过...」痛点共情 → 「我找到了一个方法」解决方案 → 具体展示 → 场景代入 → 轻收尾
    B) 细节发现型：从最打动人的一个细节切入（颜色/质感/工艺）→ 延伸到整体 → 适合场景 → 互动收尾
    C) 社交验证型：从他人反应切入（同事问/朋友夸）→ 揭秘是什么 → 展示产品 → 同类人群 → 收尾
    在 narrative_structure 字段注明选了哪条叙事线。
 
-请输出严格的JSON，直接输出{{}}不要前言：
+请输出严格的JSON，直接输出{{}}不要前言不要解释不要markdown代码块标记：
 
 {{
     "vibe": "creative",
     "vibe_label": "自编文案",
     "script_type": "{script_type}",
     "narrative_structure": "创意叙事结构概述",
-    "total_duration": 50,
+    "total_duration": 55,
     "music_style": "动感电子、节拍清晰",
     "pacing": "fast",
     "scenes": [
@@ -322,7 +329,7 @@ warm / clear / natural / persuasive / confident / storytelling"""
             "timestamp_end": 8,
             "scene_type": "hook",
             "description": "画面描述",
-            "voiceover_text": "配音文案（完整一句话，15字以内）",
+            "voiceover_text": "配音文案（完整一句话，20-30字，语义完整）",
             "emotion": "confident",
             "visual_requirements": ["镜头描述"],
             "camera_angle": "特写/中景",
@@ -346,8 +353,10 @@ warm / clear / natural / persuasive / confident / storytelling"""
 
 替代方案参考：「最好」→「很好用」；「顶级」→「优质」；「100%」→「基本上」；「永久」→「长期」；「防脱发」→「呵护发丝」；「旺夫/辟邪」→直接删除
 
-场景数量：{min_scenes}~{max_scenes}个，emotion 从以下选择：
-warm / clear / natural / persuasive / confident / urgent"""
+场景数量：{min_scenes}~{max_scenes}个（最少6个），emotion 从以下选择：
+warm / clear / natural / persuasive / confident / urgent
+
+⚠️ 重要：输出必须是合法JSON，不要任何额外文字、注释或markdown标记。直接以{{开头。"""
 
     def _build_kuku_prompt(self, srt_content: str, wig_model: str, wig_color: str,
                            min_scenes: int, max_scenes: int, script_type: str) -> str:
@@ -389,7 +398,7 @@ warm / clear / natural / persuasive / confident / urgent"""
 9. 禁止「已销售XX单/明星同款/万人好评/全网最火」等无授权声称
 10. 信息覆盖：外观（颜色/款式）+ 功能（解决什么/适合谁）+ 体验（佩戴感受）三个维度都要有
 
-请输出严格的JSON，直接输出{{}}不要前言：
+请输出严格的JSON，直接输出{{}}不要前言不要解释不要markdown代码块标记：
 
 {{
     "vibe": "kuku",
@@ -474,37 +483,100 @@ warm / clear / natural / persuasive / confident / storytelling"""
         return text
 
     def _parse_script_response(self, script_text: str, vibe: str) -> Dict:
-        """解析Claude返回的脚本JSON"""
+        """解析Claude返回的脚本JSON，增强容错能力"""
         import re
 
         try:
-            # 优先提取 markdown code block 内的 JSON（Bedrock 有时会包裹在 ```json ... ``` 中）
-            code_block = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", script_text)
+            text = script_text
+
+            # 1. 优先提取 markdown code block 内的 JSON
+            code_block = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
             if code_block:
-                script_text = code_block.group(1)
-            json_match = re.search(r"\{[\s\S]*\}", script_text)
-            if json_match:
-                script_json = json.loads(json_match.group())
-                if self._validate_script(script_json):
-                    # 违禁词后处理：对每个场景的配音文案做安全替换
-                    if "scenes" in script_json:
-                        for scene in script_json["scenes"]:
-                            if scene.get("voiceover_text"):
-                                scene["voiceover_text"] = self._sanitize_voiceover(scene["voiceover_text"])
-                    # 确保 vibe 字段存在
-                    script_json.setdefault("vibe", vibe)
-                    script_json.setdefault("vibe_label", VIBE_CONFIGS.get(vibe, {}).get("label", vibe))
-                    return {
-                        "success": True,
-                        "script": script_json,
-                        "generated_at": time.time(),
-                    }
+                text = code_block.group(1)
+
+            # 2. 尝试直接找到第一个 { 到最后一个 } 的范围
+            first_brace = text.find("{")
+            last_brace = text.rfind("}")
+            if first_brace >= 0 and last_brace > first_brace:
+                candidate = text[first_brace:last_brace + 1]
+
+                # 2a. 先试直接解析
+                try:
+                    script_json = json.loads(candidate)
+                    if self._validate_script(script_json):
+                        return self._finalize_script(script_json, vibe)
+                except json.JSONDecodeError:
+                    pass
+
+                # 2b. 解析失败 → 尝试清理常见干扰（注释、尾随逗号等）
+                cleaned = self._clean_json_string(candidate)
+                if cleaned != candidate:
+                    try:
+                        script_json = json.loads(cleaned)
+                        if self._validate_script(script_json):
+                            return self._finalize_script(script_json, vibe)
+                    except json.JSONDecodeError:
+                        pass
+
+                # 2c. 如果包含 "scenes" 但字段名有问题 → 尝试修复字段名
+                if '"scenes"' in cleaned or '"scenes"' in candidate:
+                    fixed = self._fix_json_fields(cleaned if cleaned != candidate else candidate)
+                    if fixed:
+                        try:
+                            script_json = json.loads(fixed)
+                            if self._validate_script(script_json):
+                                return self._finalize_script(script_json, vibe)
+                        except json.JSONDecodeError:
+                            pass
 
             return self._fallback_script(vibe, reason="no valid JSON found in response")
 
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse script JSON: {e}")
             return self._fallback_script(vibe, reason=f"JSONDecodeError: {e}")
+
+    def _finalize_script(self, script_json: Dict, vibe: str) -> Dict:
+        """对成功解析的脚本做后处理"""
+        if "scenes" in script_json:
+            for scene in script_json["scenes"]:
+                if scene.get("voiceover_text"):
+                    scene["voiceover_text"] = self._sanitize_voiceover(scene["voiceover_text"])
+        script_json.setdefault("vibe", vibe)
+        script_json.setdefault("vibe_label", VIBE_CONFIGS.get(vibe, {}).get("label", vibe))
+        return {
+            "success": True,
+            "script": script_json,
+            "generated_at": time.time(),
+        }
+
+    def _clean_json_string(self, raw: str) -> str:
+        """清理 JSON 字符串中的常见问题：尾随逗号、单引号键等"""
+        import re as _re
+        text = raw
+        # 移除尾随逗号（在 } 或 ] 之前）
+        text = _re.sub(r',\s*([}\]])', r'\1', text)
+        # 尝试将单引号键转为双引号
+        text = _re.sub(r"(?<=[{,])\s*'([^']+)'\s*:", r' "\1":', text)
+        text = _re.sub(r":\s*'([^']*)'\s*(?=[,}\]])", r': "\1"', text)
+        return text
+
+
+    def _fix_json_fields(self, raw: str) -> Optional[str]:
+        """尝试修复常见的 JSON 字段问题"""
+        import re as _re
+        text = raw
+        # 修复未转义的中文引号
+        text = _re.sub(r'"([^"]*)"', r'""', text)
+        text = _re.sub(r'' + chr(8216) + '([^' + chr(8217) + ']*)' + chr(8217), r"''", text)
+        # 修复缺失逗号（场景对象之间）
+        text = _re.sub(r'(\})\s*(\{)', r'\1,\2', text)
+        # 修复注释（// 或 # 开头的行）
+        text = _re.sub(r'^\s*[#/].*$', '', text, flags=_re.MULTILINE)
+        try:
+            json.loads(text)
+            return text
+        except json.JSONDecodeError:
+            return None
 
     def _validate_script(self, script: Dict) -> bool:
         """验证脚本结构完整性"""

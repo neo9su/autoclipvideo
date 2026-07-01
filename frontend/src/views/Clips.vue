@@ -43,7 +43,7 @@ import { useToast } from '../composables/toast.js'
 
 const { show } = useToast()
 const clips = ref([])
-const apiBase = import.meta.env.DEV ? 'http://localhost:8899' : ''
+const apiBase = import.meta.env.DEV ? 'http://localhost:8899' : 'http://localhost:8899'
 const fmtTime = (s) => s ? new Date(s).toLocaleString('zh-CN') : '—'
 
 async function load() {

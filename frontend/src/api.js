@@ -342,6 +342,16 @@ export async function regenPublishTaskMeta(id) {
   return res.json()
 }
 
+export async function bulkRegenPublishTaskMeta(task_ids) {
+  const res = await fetch(`${BASE}/api/publish-tasks/bulk-regen-meta`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ task_ids }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
 export async function reschedulePublishTask(id, scheduledAt) {
   const res = await fetch(`${BASE}/api/publish-tasks/${id}`, {
     method: 'PATCH',
@@ -374,6 +384,14 @@ export async function batchSchedulePublish(body) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function markManualPublish(taskId) {
+  const res = await fetch(`${BASE}/api/publish-tasks/${taskId}/manual-publish`, {
+    method: 'POST',
   })
   if (!res.ok) throw new Error(await res.text())
   return res.json()

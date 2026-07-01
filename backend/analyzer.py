@@ -42,7 +42,7 @@ async def _call_bedrock(text: str) -> Optional[dict]:
     prompt = _PROMPT.format(text=text)
     raw = await llm_post(
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=400,
+        max_tokens=1000,
         temperature=0,
         timeout=120.0,
     )
@@ -233,6 +233,12 @@ async def _gpu_concat(gpu_url: str, job_ids: list, out_path: str, group_id: int)
             (out_filename, group_id),
         )
         await db.commit()
+
+    # Clean up original recordings after successful merge
+    del_count = await _cleanup_original_recordings(group_id)
+    if del_count:
+        logger.info(f"Group {group_id}: cleaned up {del_count} original recording files")
+
     return out_filename
 
 
@@ -327,7 +333,65 @@ async def _gpu_classic_concat(gpu_url: str, clip_paths: list, out_path: str, gro
             (out_filename, group_id),
         )
         await db.commit()
+
+    # Clean up original recordings after successful merge
+    del_count = await _cleanup_original_recordings(group_id)
+    if del_count:
+        logger.info(f"Group {group_id}: cleaned up {del_count} original recording files")
+
     return out_filename
+
+
+async def _cleanup_original_recordings(group_id: int) -> int:
+    """Only delete original recordings AFTER BOTH director AND creative are complete.
+    Deleting originals before director/creative finishes breaks their segment matching.
+    Returns the number of files deleted.
+    """
+    # Check if director and creative are both done
+    async with aio_connect() as db:
+        cur = await db.execute(
+            "SELECT director_status, creative_status FROM clip_groups WHERE id=?",
+            (group_id,),
+        )
+        row = await cur.fetchone()
+    if not row:
+        return 0
+    director_done, creative_done = row[0], row[1]
+    # Only delete if BOTH are completed (status=2)
+    if director_done != 2 or creative_done != 2:
+        logger.debug(f"Group {group_id}: director={director_done} creative={creative_done}, skipping cleanup")
+        return 0
+
+    deleted_count = 0
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT r.filename, r.size_bytes
+               FROM recordings r
+               WHERE r.group_id = ? AND r.clipped = 2 AND r.clip_filename IS NULL
+               ORDER BY r.start_time ASC""",
+            (group_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+
+    for row in rows:
+        fp = os.path.join(RECORDINGS_DIR, row["filename"])
+        try:
+            if os.path.exists(fp):
+                os.unlink(fp)
+                deleted_count += 1
+                logger.info(f"Deleted original recording: {row['filename']}")
+            # Mark as deleted in DB
+            async with aio_connect() as db2:
+                await db2.execute(
+                    "UPDATE recordings SET local_deleted = 1 WHERE group_id = ? AND filename = ?",
+                    (group_id, row["filename"]),
+                )
+                await db2.commit()
+        except Exception as e:
+            logger.warning(f"Failed to delete {fp}: {e}")
+
+    return deleted_count
 
 
 async def _build_merged_srt(group_id: int, merged_filename: str) -> None:
@@ -533,6 +597,12 @@ async def merge_group(group_id: int) -> Optional[str]:
             )
             await db.commit()
         await _build_merged_srt(group_id, out_filename)
+
+        # Clean up original recordings after successful merge
+        del_count = await _cleanup_original_recordings(group_id)
+        if del_count:
+            logger.info(f"Group {group_id}: cleaned up {del_count} original recording files")
+
         return out_filename
     else:
         err_msg = stderr.decode(errors="replace")[-400:].strip()

@@ -147,6 +147,38 @@ async def _execute_task(task: dict, broadcast_fn: Optional[Callable] = None):
                     await db.commit()
             raise RuntimeError(f"视频质量不达标，请重新剪辑：{quality_reason}")
 
+        # Content gate: require title and description before publishing
+        title = task.get("title")
+        description = task.get("description")
+        if not title:
+            # Try to generate meta on-the-fly if we have a group_id
+            if task.get("group_id"):
+                try:
+                    from meta_generator import generate_meta
+                    meta = await generate_meta(task["group_id"])
+                    if meta:
+                        schemes = meta.get("schemes", [])
+                        best = schemes[0] if schemes else meta
+                        title = best.get("title") or meta.get("title")
+                        description = best.get("description") or meta.get("description")
+                        tags = best.get("tags") or meta.get("tags")
+                    else:
+                        # Absolute fallback
+                        title = f"分组 {task['group_id']}"
+                        description = ""
+                        tags = ""
+                    # Persist the generated meta
+                    async with aio_connect() as db:
+                        await db.execute(
+                            "UPDATE publish_tasks SET title=?, description=?, tags=? WHERE id=?",
+                            (title, description, tags, task_id),
+                        )
+                        await db.commit()
+                except Exception as e:
+                    logger.warning(f"[publish] Failed to generate meta for task {task_id}: {e}")
+            if not title:
+                raise RuntimeError("⚠️ 缺少标题，无法发布。请在任务列表点击「🤖 批量生成文案」或「重生成文案」生成后重试。")
+
         # Build task context
         task_ctx = dict(task)
         if task.get("cookie_file"):

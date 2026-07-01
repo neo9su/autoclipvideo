@@ -60,7 +60,9 @@ async def _reset_stuck_clip_tasks():
     """On startup, reset recordings stuck at clipped=1 (server killed mid-clip).
     If clip_filename is already set → mark done (clipped=2); otherwise reset to pending (clipped=0).
     Also verify clipped=2 recordings still have their files on disk (GPU server may have restarted
-    and purged clips); if the file is missing, reset to clipped=0 so it gets re-queued."""
+    and purged clips); if the file is missing, reset to clipped=0 so it gets re-queued.
+    
+    Also reset clip_groups stuck at director_status=1 or creative_status=1 (server killed mid-pipeline)."""
     recordings_dir = os.path.join(os.path.dirname(__file__), "..", "recordings")
     async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
@@ -110,6 +112,79 @@ async def _reset_stuck_clip_tasks():
         if r3.rowcount:
             logger.info(f"Reset {r3.rowcount} stuck merge(s) to pending")
 
+        # Reset clip_groups stuck at director_status=1 or creative_status=1 (server killed mid-pipeline)
+        r4 = await db.execute(
+            "UPDATE clip_groups SET director_status = 0 WHERE director_status = 1"
+        )
+        r5 = await db.execute(
+            "UPDATE clip_groups SET creative_status = 0 WHERE creative_status = 1"
+        )
+        await db.commit()
+        if r4.rowcount:
+            logger.info(f"Reset {r4.rowcount} stuck director pipeline(s) to pending")
+        if r5.rowcount:
+            logger.info(f"Reset {r5.rowcount} stuck creative pipeline(s) to pending")
+
+
+async def _startup_trigger_pipelines():
+    """On startup, trigger director+creative pipelines for groups that have
+    classic done but pipelines not yet started.
+    Strategy: run director first, then creative only after director is done.
+    Throttled to batches of 10 to avoid flooding the GPU TTS/concattenation queue.
+    
+    If GPU service is offline, skip dispatching — the periodic dispatch will retry
+    when GPU comes back online."""
+    from gpu_state import is_online as gpu_is_online
+    if not gpu_is_online():
+        logger.info("Startup pipeline trigger: GPU service offline — skipping dispatch")
+        return
+    from transcribe import _run_director_pipeline, _run_creative_pipeline
+    BATCH_SIZE = 10
+    try:
+        async with aio_connect() as db:
+            db.row_factory = aiosqlite.Row
+            # Director groups: classic done, director not done
+            async with db.execute(
+                """SELECT id FROM clip_groups
+                   WHERE classic_status = 2
+                     AND (director_status IN (0, -1, -3))
+                   ORDER BY id DESC"""
+            ) as cur:
+                pending_director = [r["id"] for r in await cur.fetchall()]
+            # Creative groups: classic done, director done, creative not done
+            async with db.execute(
+                """SELECT id FROM clip_groups
+                   WHERE classic_status = 2
+                     AND director_status = 2
+                     AND (creative_status IN (0, -1, -3) OR creative_status IS NULL)
+                   ORDER BY id DESC"""
+            ) as cur:
+                pending_creative = [r["id"] for r in await cur.fetchall()]
+        if not pending_director and not pending_creative:
+            logger.info("Startup pipeline trigger: no pending groups")
+            return
+        logger.info(f"Startup pipeline trigger: launching {len(pending_director)} director + {len(pending_creative)} creative groups")
+        # Phase 1: dispatch director groups first
+        for i in range(0, len(pending_director), BATCH_SIZE):
+            batch = pending_director[i:i + BATCH_SIZE]
+            for gid in batch:
+                asyncio.create_task(_run_director_pipeline(gid))
+                await asyncio.sleep(0.1)
+            logger.info(f"Startup pipeline trigger: dispatched director batch {i//BATCH_SIZE + 1} ({len(batch)} groups)")
+            if i + BATCH_SIZE < len(pending_director):
+                await asyncio.sleep(1)
+        # Phase 2: dispatch creative groups (director already done)
+        for i in range(0, len(pending_creative), BATCH_SIZE):
+            batch = pending_creative[i:i + BATCH_SIZE]
+            for gid in batch:
+                asyncio.create_task(_run_creative_pipeline(gid))
+                await asyncio.sleep(0.1)
+            logger.info(f"Startup pipeline trigger: dispatched creative batch {i//BATCH_SIZE + 1} ({len(batch)} groups)")
+            if i + BATCH_SIZE < len(pending_creative):
+                await asyncio.sleep(1)
+    except Exception as e:
+        logger.error(f"Startup pipeline trigger failed: {e}")
+
 
 async def _memory_monitor(broadcast_fn=None):
     """Monitor system RAM every 30 s.
@@ -125,7 +200,7 @@ async def _memory_monitor(broadcast_fn=None):
 
     # macOS: vm.used includes file cache; vm.available is what actually matters
     # GPU jobs run on remote server — local memory cost is minimal (file upload/download only)
-    MEM_AVAIL_MIN_GB = 0.5  # pause only when truly critical (< 500 MB free)
+    MEM_AVAIL_MIN_GB = 0.4  # pause only when truly critical (< 400 MB free)
     MEM_AVAIL_OK_GB  = 0.8  # recover when > 800 MB available
     INTERVAL         = 10   # seconds
 
@@ -223,21 +298,35 @@ async def _on_gpu_online():
             await broadcast({"type": "gpu_auto_retry", "recording_ids": queued})
 
         # Also trigger director+creative for groups that have classic done but pipelines not run
+        # Strategy: run director first, then creative only after director is done
         from transcribe import _run_director_pipeline, _run_creative_pipeline
         async with aio_connect() as db:
             db.row_factory = aiosqlite.Row
+            # Director groups first
             async with db.execute(
                 """SELECT id FROM clip_groups
                    WHERE classic_status = 2
-                     AND (director_status = 0 OR director_status = -1)
-                     AND (creative_status = 0 OR creative_status IS NULL OR creative_status = -1)
+                     AND (director_status IN (0, -1, -3))
                    ORDER BY id DESC"""
             ) as cur:
-                pending_groups = [r["id"] for r in await cur.fetchall()]
-        if pending_groups:
-            logger.info(f"GPU online — triggering director+creative for {len(pending_groups)} pending group(s)")
-            for gid in pending_groups:
+                pending_director = [r["id"] for r in await cur.fetchall()]
+            # Creative groups where director is done
+            async with db.execute(
+                """SELECT id FROM clip_groups
+                   WHERE classic_status = 2
+                     AND director_status = 2
+                     AND (creative_status IN (0, -1, -3) OR creative_status IS NULL)
+                   ORDER BY id DESC"""
+            ) as cur:
+                pending_creative = [r["id"] for r in await cur.fetchall()]
+        if pending_director:
+            logger.info(f"GPU online — triggering director for {len(pending_director)} groups")
+            for gid in pending_director:
                 asyncio.create_task(_run_director_pipeline(gid))
+                await asyncio.sleep(0.2)
+        if pending_creative:
+            logger.info(f"GPU online — triggering creative for {len(pending_creative)} groups (director done)")
+            for gid in pending_creative:
                 asyncio.create_task(_run_creative_pipeline(gid))
                 await asyncio.sleep(0.2)
     except Exception as e:
@@ -340,6 +429,10 @@ async def _periodic_cleanup():
 async def lifespan(app: FastAPI):
     await init_db()
     await _reset_stuck_clip_tasks()
+    try:
+        await _startup_trigger_pipelines()
+    except Exception as e:
+        logger.error(f"Startup pipeline trigger failed: {e}")
     # Load human-approved keyword score overrides into the scoring table
     from editor import load_rule_overrides
     await load_rule_overrides()
@@ -353,6 +446,8 @@ async def lifespan(app: FastAPI):
     memory_task = asyncio.create_task(_memory_monitor(broadcast_fn=broadcast))
     enhance_worker_task = asyncio.create_task(_enhance_worker())
     cleanup_task = asyncio.create_task(_periodic_cleanup())
+    creative_dispatch_task = asyncio.create_task(_periodic_creative_dispatch())
+    director_dispatch_task = asyncio.create_task(_periodic_director_dispatch())
     yield
     gpu_watcher_task.cancel()
     transcribe_task.cancel()
@@ -360,7 +455,9 @@ async def lifespan(app: FastAPI):
     memory_task.cancel()
     enhance_worker_task.cancel()
     cleanup_task.cancel()
-    for t in [gpu_watcher_task, transcribe_task, scheduler_task, memory_task, enhance_worker_task, cleanup_task]:
+    creative_dispatch_task.cancel()
+    director_dispatch_task.cancel()
+    for t in [gpu_watcher_task, transcribe_task, scheduler_task, memory_task, enhance_worker_task, cleanup_task, creative_dispatch_task, director_dispatch_task]:
         try:
             await t
         except asyncio.CancelledError:
@@ -2767,7 +2864,8 @@ async def list_publish_tasks(status: Optional[str] = None):
             async with db.execute(
                 """SELECT t.*, g.label as group_label, g.merged_filename,
                           pa.account_name, pa.platform as account_platform,
-                          p.product_name, t.product_ids, rm.name as room_name
+                          p.product_name, t.product_ids, rm.name as room_name,
+                          t.manual_published, t.manual_published_at
                    FROM publish_tasks t
                    JOIN clip_groups g ON t.group_id = g.id
                    LEFT JOIN rooms rm ON g.room_id = rm.id
@@ -2782,7 +2880,8 @@ async def list_publish_tasks(status: Optional[str] = None):
             async with db.execute(
                 """SELECT t.*, g.label as group_label, g.merged_filename,
                           pa.account_name, pa.platform as account_platform,
-                          p.product_name, t.product_ids, rm.name as room_name
+                          p.product_name, t.product_ids, rm.name as room_name,
+                          t.manual_published, t.manual_published_at
                    FROM publish_tasks t
                    JOIN clip_groups g ON t.group_id = g.id
                    LEFT JOIN rooms rm ON g.room_id = rm.id
@@ -2843,13 +2942,22 @@ async def create_publish_task(body: PublishTaskCreate):
     description = body.description
     tags = body.tags
 
-    # Auto-generate metadata via LLM if requested
-    if body.auto_meta:
+    # Auto-generate metadata via LLM if requested, OR if title is empty
+    if body.auto_meta or (not title):
         meta = await generate_meta(body.group_id)
         if meta:
             title = title or meta.get("title")
             description = description or meta.get("description")
             tags = tags or meta.get("tags")
+        # Fallback if still no title
+        if not title:
+            async with aio_connect() as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute("SELECT label FROM clip_groups WHERE id = ?", (body.group_id,)) as cur:
+                    grp = await cur.fetchone()
+                title = grp["label"] if grp else f"分组 {body.group_id}"
+                description = ""
+                tags = ""
 
     if use_creative:
         video_path = group["creative_final_video"]
@@ -2904,6 +3012,7 @@ async def get_unscheduled_groups(platform: str = "douyin", room_id: Optional[int
             LEFT JOIN rooms rm ON g.room_id = rm.id
             WHERE (g.merge_status = 2 OR g.classic_status = 2 OR g.director_status = 2 OR g.creative_status = 2)
               AND (g.merged_filename IS NOT NULL OR g.director_final_video IS NOT NULL OR g.creative_final_video IS NOT NULL)
+              AND g.label != '未分类'
               AND NOT EXISTS (
                   SELECT 1 FROM publish_tasks pt
                   WHERE pt.group_id = g.id
@@ -2944,6 +3053,7 @@ async def batch_schedule_tasks(body: BatchScheduleCreate):
             FROM clip_groups g
             WHERE (g.merge_status = 2 OR g.classic_status = 2 OR g.director_status = 2 OR g.creative_status = 2)
               AND (g.merged_filename IS NOT NULL OR g.director_final_video IS NOT NULL OR g.creative_final_video IS NOT NULL)
+              AND g.label != '未分类'
               AND NOT EXISTS (
                   SELECT 1 FROM publish_tasks pt
                   WHERE pt.group_id = g.id
@@ -3056,6 +3166,7 @@ async def batch_schedule_tasks(body: BatchScheduleCreate):
                 try:
                     meta = await generate_meta(item["group_id"])
                     if not meta:
+                        logger.warning(f"[meta] generate_meta returned None for group {item['group_id']} (task {item['task_id']})")
                         continue
                     # generate_meta returns {"schemes": [...]} — pick first scheme
                     schemes = meta.get("schemes", [])
@@ -3067,15 +3178,19 @@ async def batch_schedule_tasks(body: BatchScheduleCreate):
                     description = best.get("description") or meta.get("description")
                     tags = best.get("tags") or meta.get("tags")
                     if not title:
-                        continue
+                        logger.warning(f"[meta] No title generated for group {item['group_id']} (task {item['task_id']}), using fallback")
+                        # Fallback: use group label as title
+                        title = item.get("group_label", f"分组 {item['group_id']}")
+                        description = ""
+                        tags = ""
                     async with aio_connect() as db2:
                         await db2.execute(
                             "UPDATE publish_tasks SET title=?, description=?, tags=? WHERE id=?",
                             (title, description, tags, item["task_id"]),
                         )
                         await db2.commit()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.error(f"[meta] Failed to fill meta for task {item.get('task_id')}: {e}")
         asyncio.create_task(_fill_meta_background(list(created_tasks)))
 
     return {
@@ -3225,6 +3340,79 @@ async def regen_publish_task_meta(task_id: int):
         )
         await db.commit()
     return {"task_id": task_id, "title": title, "description": description, "tags": tags}
+
+
+@app.post("/api/publish-tasks/bulk-regen-meta")
+async def bulk_regen_publish_task_meta(body: dict):
+    """Re-generate title/description/tags for all publish tasks with null titles."""
+    task_ids = body.get("task_ids")  # None = all null-title tasks
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        if task_ids:
+            placeholders = ",".join("?" * len(task_ids))
+            async with db.execute(
+                f"SELECT id, group_id FROM publish_tasks WHERE id IN ({placeholders}) AND title IS NULL",
+                task_ids,
+            ) as cur:
+                tasks = await cur.fetchall()
+        else:
+            async with db.execute(
+                "SELECT id, group_id FROM publish_tasks WHERE title IS NULL"
+            ) as cur:
+                tasks = await cur.fetchall()
+
+    if not tasks:
+        return {"updated": 0, "message": "没有需要重新生成文案的任务"}
+
+    updated = 0
+    skipped = 0
+    for task in tasks:
+        try:
+            meta = await generate_meta(task["group_id"])
+            if not meta:
+                # Use fallback
+                meta = {"schemes": [{"type": "种草", "title": f"分组 {task['group_id']}"}]}
+            schemes = meta.get("schemes", [])
+            best = schemes[0] if schemes else meta
+            title = best.get("title") or meta.get("title")
+            description = best.get("description") or meta.get("description")
+            tags = best.get("tags") or meta.get("tags")
+            if not title:
+                skipped += 1
+                continue
+            async with aio_connect() as db2:
+                await db2.execute(
+                    "UPDATE publish_tasks SET title=?, description=?, tags=? WHERE id=?",
+                    (title, description, tags, task["id"]),
+                )
+                await db2.commit()
+            updated += 1
+        except Exception as e:
+            logger.error(f"[bulk-meta] Failed for task {task['id']}: {e}")
+            skipped += 1
+
+    return {"updated": updated, "skipped": skipped, "total": len(tasks)}
+
+
+# ── Manual publish mark ───────────────────────────────────────────────────────
+
+@app.post("/api/publish-tasks/{task_id}/manual-publish")
+async def mark_manual_publish(task_id: int):
+    """Mark a publish task as manually published (user downloaded and published externally)."""
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT id, status FROM publish_tasks WHERE id = ?", (task_id,)) as cur:
+            task = await cur.fetchone()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    now = datetime.now().isoformat()
+    async with aio_connect() as db:
+        await db.execute(
+            "UPDATE publish_tasks SET status = 'done', manual_published = 1, manual_published_at = ? WHERE id = ?",
+            (now, task_id),
+        )
+        await db.commit()
+    return {"task_id": task_id, "status": "done", "manual_published": True, "manual_published_at": now}
 
 
 # ── Meta generation ───────────────────────────────────────────────────────────
@@ -3479,9 +3667,113 @@ if os.path.exists(frontend_dist):
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def serve_spa(full_path: str):
+        # Exclude API and WS paths from SPA catch-all
+        if full_path.startswith("api/") or full_path.startswith("ws/"):
+            raise HTTPException(status_code=404, detail="Not found")
         # Serve any file that actually exists in dist (e.g. favicon.ico)
         candidate = os.path.join(frontend_dist, full_path)
         if os.path.isfile(candidate):
             return FileResponse(candidate)
         return FileResponse(_spa_index)
 
+
+async def _periodic_director_dispatch():
+    """Periodically check and dispatch pending director pipeline groups.
+    
+    Dispatches groups with classic_status=2 and director_status IN (0, -1, -3)
+    that haven't been recently attempted. Retries failed groups (-1, -3) and
+    dispatches never-attempted groups (0).
+    Skips groups whose SRT files are missing from disk.
+    Skips groups that failed with 'no SRT content available' (SRT files are gone).
+    """
+    from gpu_state import is_online as gpu_is_online
+    from transcribe import _run_director_pipeline
+    BATCH_LIMIT = 10
+    while True:
+        try:
+            if not gpu_is_online():
+                logger.debug("Periodic director dispatch: GPU offline — skipping")
+                await asyncio.sleep(300)
+                continue
+            async with aio_connect() as db:
+                db.row_factory = aiosqlite.Row
+                # Get pending director groups, excluding those with unrecoverable errors
+                async with db.execute(
+                    """SELECT id, director_error FROM clip_groups
+                       WHERE editing_mode = 'director'
+                         AND classic_status = 2
+                         AND director_status IN (0, -1, -3)
+                         AND director_error != 'no SRT content available'
+                       ORDER BY id ASC
+                       LIMIT ?""",
+                    (BATCH_LIMIT,),
+                ) as cur:
+                    rows = await cur.fetchall()
+                    pending_director = [r["id"] for r in rows]
+                
+                if not pending_director:
+                    logger.debug("Periodic director dispatch: no recoverable pending groups")
+                else:
+                    logger.info(f"Periodic director dispatch: found {len(pending_director)} pending groups")
+                    for gid in pending_director:
+                        asyncio.create_task(_run_director_pipeline(gid))
+                        await asyncio.sleep(0.1)
+        except Exception as e:
+            logger.warning(f"Periodic director dispatch failed: {e}")
+        
+        await asyncio.sleep(300)  # Check every 5 minutes
+
+
+async def _periodic_creative_dispatch():
+    """Periodically check and dispatch pending creative pipeline groups.
+    
+    Only dispatches when GPU service is online. When GPU is offline, skips
+    and retries on next cycle.
+    """
+    from gpu_state import is_online as gpu_is_online
+    while True:
+        try:
+            if not gpu_is_online():
+                logger.debug("Periodic creative dispatch: GPU offline — skipping")
+                await asyncio.sleep(300)
+                continue
+            async with aio_connect() as db:
+                db.row_factory = aiosqlite.Row
+                # Get pending creative groups (status=0) that haven't been dispatched recently
+                async with db.execute(
+                    """SELECT id FROM clip_groups
+                       WHERE classic_status = 2
+                         AND director_status = 2
+                         AND creative_status = 0
+                         AND merged_filename IS NOT NULL
+                       ORDER BY id ASC
+                       LIMIT 10"""
+                ) as cur:
+                    pending_creative = [r["id"] for r in await cur.fetchall()]
+                
+                if pending_creative:
+                    logger.info(f"Periodic creative dispatch: found {len(pending_creative)} pending groups")
+                    from transcribe import _run_creative_pipeline
+                    for gid in pending_creative:
+                        asyncio.create_task(_run_creative_pipeline(gid))
+                        await asyncio.sleep(0.1)
+        except Exception as e:
+            logger.warning(f"Periodic creative dispatch failed: {e}")
+        
+        await asyncio.sleep(300)  # Check every 5 minutes
+
+# Add this to the main function
+async def main():
+    # ... existing code ...
+    
+    # Start periodic creative dispatch
+    cleanup_task = asyncio.create_task(_periodic_cleanup())
+    creative_dispatch_task = asyncio.create_task(_periodic_creative_dispatch())
+    director_dispatch_task = asyncio.create_task(_periodic_director_dispatch())
+    
+    # ... rest of existing code ...
+    
+    cleanup_task.cancel()
+    creative_dispatch_task.cancel()
+    director_dispatch_task.cancel()
+    director_dispatch_task.cancel()

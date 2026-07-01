@@ -3,6 +3,7 @@ import heapq
 import logging
 import os
 import time
+from pathlib import Path
 from typing import Optional
 
 import aiohttp
@@ -73,6 +74,7 @@ POLL_INTERVAL = 60  # seconds
 
 # Pipeline concurrency: GPU has headroom (RTX 4080S 16GB), LLM semaphore is separate (=3).
 # Director and creative use independent semaphores to maximize throughput.
+# Increased to 4 to reduce backlog (515 jobs pending, GPU idle ~70h).
 _DIRECTOR_SEM = asyncio.Semaphore(4)
 _CREATIVE_SEM = asyncio.Semaphore(4)
 
@@ -908,6 +910,49 @@ async def _extract_srt_for_director(group_id: int) -> Optional[str]:
         return None
 
 
+async def _get_group_total_duration(group_id: int) -> float:
+    """Calculate total duration of all valid recordings in a group.
+    Returns 0.0 if no recordings exist or all are invalid."""
+    total = 0.0
+    try:
+        async with aio_connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT id, filename FROM recordings WHERE group_id = ? AND transcribed = 2 AND local_deleted = 0",
+                (group_id,),
+            ) as cur:
+                rows = await cur.fetchall()
+        for r in rows:
+            mp4_path = os.path.join(RECORDINGS_DIR, r["filename"])
+            dur = await _get_video_duration(mp4_path)
+            if dur > 0:
+                total += dur
+    except Exception as e:
+        logger.warning(f"_get_group_total_duration group {group_id}: {e}")
+    return total
+
+
+async def _check_group_recordings_exist(group_id: int) -> tuple[bool, list]:
+    """Check if all recordings for a group exist on disk.
+    Returns (all_exist, list_of_missing_filenames)."""
+    missing = []
+    try:
+        async with aio_connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT id, filename FROM recordings WHERE group_id = ? AND local_deleted = 0",
+                (group_id,),
+            ) as cur:
+                rows = await cur.fetchall()
+        for r in rows:
+            mp4_path = os.path.join(RECORDINGS_DIR, r["filename"])
+            if not os.path.exists(mp4_path):
+                missing.append(f"{r['id']}:{r['filename']}")
+    except Exception as e:
+        logger.warning(f"_check_group_recordings_exist group {group_id}: {e}")
+    return len(missing) == 0, missing
+
+
 async def _run_director_pipeline(group_id: int):
     """
     Full director pipeline: generate script → match segments → voiceover → compose video.
@@ -930,7 +975,18 @@ async def _run_director_pipeline(group_id: int):
 
     async with _DIRECTOR_SEM:
         try:
-            await _run_director_pipeline_inner(group_id)
+            await asyncio.wait_for(_run_director_pipeline_inner(group_id), timeout=1800)  # 30 min timeout
+        except asyncio.TimeoutError:
+            logger.error(f"Director pipeline group {group_id} timed out after 30min")
+            try:
+                async with aio_connect() as db:
+                    await db.execute(
+                        "UPDATE clip_groups SET director_status = -1, director_error = ? WHERE id = ?",
+                        ("pipeline timeout (30min exceeded)", group_id),
+                    )
+                    await db.commit()
+            except Exception:
+                pass
         except Exception as e:
             import traceback
             logger.error(f"Director pipeline {group_id} unhandled exception: {e}\n{traceback.format_exc()}")
@@ -960,6 +1016,35 @@ async def _run_director_pipeline_inner(group_id: int):
             row = await cur.fetchone()
     if row and row[0] == 2:
         logger.info(f"Director pipeline group {group_id} already complete (post-semaphore check) — skipping")
+        return
+
+    # Early check: skip groups without any recordings
+    async with aio_connect() as db:
+        async with db.execute(
+            "SELECT COUNT(*) FROM recordings WHERE group_id = ?",
+            (group_id,),
+        ) as cur:
+            rec_count = (await cur.fetchone())[0]
+    if rec_count == 0:
+        logger.info(f"Director pipeline group {group_id} has no recordings — skipping")
+        async with aio_connect() as db:
+            await db.execute(
+                "UPDATE clip_groups SET director_status = -2, director_error = 'no recordings in group' WHERE id = ?",
+                (group_id,),
+            )
+            await db.commit()
+        return
+
+    # Pre-filter: check if all recording files exist on disk
+    all_exist, missing_files = await _check_group_recordings_exist(group_id)
+    if not all_exist:
+        logger.info(f"Director pipeline group {group_id} skipping: {len(missing_files)} recording files missing")
+        async with aio_connect() as db:
+            await db.execute(
+                "UPDATE clip_groups SET director_status = -2, director_error = ? WHERE id = ?",
+                (f'recording files missing ({len(missing_files)}): ' + ', '.join(missing_files[:5]), group_id),
+            )
+            await db.commit()
         return
 
     async def _fail(reason: str):
@@ -1007,8 +1092,29 @@ async def _run_director_pipeline_inner(group_id: int):
             room_name=grp["room_name"] or "",
         )
         if not result.get("success"):
-            return await _fail(f"script generation: {result.get('error', 'unknown')}")
-        script = result["script"]
+            # Fallback: use existing director_script from DB if generation fails
+            existing_script = None
+            try:
+                async with aio_connect() as db2:
+                    async with db2.execute(
+                        "SELECT director_script FROM clip_groups WHERE id = ?", (group_id,)
+                    ) as cur2:
+                        row2 = await cur2.fetchone()
+                    if row2 and row2[0]:
+                        import json as _json
+                        try:
+                            existing_script = _json.loads(row2[0])
+                            logger.info(f"Director pipeline group {group_id}: script generation failed ({result.get('error')}), using existing script from DB")
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            if existing_script:
+                script = existing_script
+            else:
+                return await _fail(f"script generation: {result.get('error', 'unknown')}")
+        else:
+            script = result["script"]
         async with aio_connect() as db:
             await db.execute(
                 "UPDATE clip_groups SET director_script = ? WHERE id = ?",
@@ -1037,6 +1143,8 @@ async def _run_director_pipeline_inner(group_id: int):
 
         # 6. Compose final video
         audio_path = vo_result.get("merged_audio_path")
+        
+        
         tts_audio_segments = vo_result.get("audio_segments", [])
         config = {
             "video_style": "trendy",
@@ -1076,6 +1184,9 @@ async def _run_director_pipeline_inner(group_id: int):
         logger.info(f"Director pipeline complete for group {group_id}: {os.path.basename(out_path)}")
 
     except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        logger.error(f"Director pipeline group {group_id} EXCEPTION: {e}\n{tb}")
         await _fail(str(e))
 
 
@@ -1085,7 +1196,18 @@ async def _run_director_pipeline_inner(group_id: int):
 async def _run_creative_pipeline(group_id: int):
     async with _CREATIVE_SEM:
         try:
-            await _run_creative_pipeline_inner(group_id)
+            await asyncio.wait_for(_run_creative_pipeline_inner(group_id), timeout=1800)  # 30 min timeout
+        except asyncio.TimeoutError:
+            logger.error(f"Creative pipeline group {group_id} timed out after 30min")
+            try:
+                async with aio_connect() as db:
+                    await db.execute(
+                        "UPDATE clip_groups SET creative_status = -1, creative_error = ? WHERE id = ?",
+                        ("pipeline timeout (30min exceeded)", group_id),
+                    )
+                    await db.commit()
+            except Exception:
+                pass
         except Exception as e:
             logger.error(f"Creative pipeline group {group_id} unhandled: {e}")
             try:
@@ -1112,6 +1234,35 @@ async def _run_creative_pipeline_inner(group_id: int):
         ) as cur:
             row = await cur.fetchone()
     if row and row[0] == 2:
+        return
+
+    # Early check: skip groups without any recordings
+    async with aio_connect() as db:
+        async with db.execute(
+            "SELECT COUNT(*) FROM recordings WHERE group_id = ?",
+            (group_id,),
+        ) as cur:
+            rec_count = (await cur.fetchone())[0]
+    if rec_count == 0:
+        logger.info(f"Creative pipeline group {group_id} has no recordings — skipping")
+        async with aio_connect() as db:
+            await db.execute(
+                "UPDATE clip_groups SET creative_status = -2, creative_error = 'no recordings in group' WHERE id = ?",
+                (group_id,),
+            )
+            await db.commit()
+        return
+
+    # Pre-filter: check total recording duration before wasting GPU resources
+    total_dur = await _get_group_total_duration(group_id)
+    if total_dur < 30.0:
+        logger.info(f"Creative pipeline group {group_id} skipping: total recording duration {total_dur:.1f}s < 30s minimum")
+        async with aio_connect() as db:
+            await db.execute(
+                "UPDATE clip_groups SET creative_status = -2, creative_error = ? WHERE id = ?",
+                (f'total recording duration {total_dur:.1f}s < 30s minimum', group_id),
+            )
+            await db.commit()
         return
 
     async def _fail(reason: str):
@@ -1153,8 +1304,29 @@ async def _run_creative_pipeline_inner(group_id: int):
             vibe="creative",
         )
         if not result.get("success"):
-            return await _fail(f"script generation: {result.get('error', 'unknown')}")
-        script = result["script"]
+            # Fallback: use existing creative_script from DB if generation fails
+            existing_script = None
+            try:
+                async with aio_connect() as db2:
+                    async with db2.execute(
+                        "SELECT creative_script FROM clip_groups WHERE id = ?", (group_id,)
+                    ) as cur2:
+                        row2 = await cur2.fetchone()
+                    if row2 and row2[0]:
+                        import json as _json
+                        try:
+                            existing_script = _json.loads(row2[0])
+                            logger.info(f"Creative pipeline group {group_id}: script generation failed ({result.get('error')}), using existing script from DB")
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            if existing_script:
+                script = existing_script
+            else:
+                return await _fail(f"script generation: {result.get('error', 'unknown')}")
+        else:
+            script = result["script"]
         async with aio_connect() as db:
             await db.execute(
                 "UPDATE clip_groups SET creative_script = ? WHERE id = ?",
@@ -1272,27 +1444,77 @@ async def backfill_auto_merge():
         # Phase 2: auto-trigger director+creative for groups that have classic done
         # but never ran the new pipelines (status=0). These are groups merged before
         # director/creative was added. Skip groups with status != 0 to avoid re-running.
+        # Also verify recording files actually exist on disk (not just in DB).
         await asyncio.sleep(2)  # let Phase 1 tasks settle
         async with aio_connect() as db:
             db.row_factory = aiosqlite.Row
-            # Groups where director not started
+            # First get candidate groups from DB
+            # Exclude -2 (permanently failed: no recordings / duration too short) to avoid infinite re-queue
             async with db.execute(
                 """SELECT id FROM clip_groups
                    WHERE classic_status = 2
-                     AND director_status = 0
-                     AND (creative_status = 0 OR creative_status IS NULL)
+                     AND director_status IN (0, -1, -3)
+                     AND (creative_status IN (0, -1, -3) OR creative_status IS NULL)
+                     AND EXISTS (SELECT 1 FROM recordings WHERE recordings.group_id = clip_groups.id AND recordings.local_deleted = 0 AND recordings.clipped = 2)
                    ORDER BY id DESC"""
             ) as cur:
-                pending_director = [r["id"] for r in await cur.fetchall()]
-            # Groups where director done but creative not started
+                raw_director = [dict(r) for r in await cur.fetchall()]
+            
+            # Verify files actually exist on disk
+            backend_dir = Path(__file__).resolve().parent
+            recordings_dir = backend_dir.parent / 'recordings'
+            valid_director = []
+            for g in raw_director:
+                gid = g['id']
+                async with db.execute(
+                    """SELECT filename FROM recordings 
+                       WHERE group_id = ? AND local_deleted = 0 AND clipped = 2 
+                       LIMIT 1""", (gid,)
+                ) as rcur:
+                    rows = await rcur.fetchall()
+                    for row in rows:
+                        fp = recordings_dir / row['filename']
+                        if fp.exists():
+                            valid_director.append(gid)
+                            break
+            
+            # Groups where director done but creative not started (must have recordings with valid files)
+            # Exclude -2 (permanently failed: no recordings / duration too short) to avoid infinite re-queue
             async with db.execute(
                 """SELECT id FROM clip_groups
                    WHERE classic_status = 2
                      AND director_status = 2
-                     AND (creative_status = 0 OR creative_status IS NULL)
+                     AND (creative_status IN (0, -1, -3) OR creative_status IS NULL)
+                     AND EXISTS (SELECT 1 FROM recordings WHERE recordings.group_id = clip_groups.id AND recordings.local_deleted = 0 AND recordings.clipped = 2)
                    ORDER BY id DESC"""
             ) as cur:
-                pending_creative_only = [r["id"] for r in await cur.fetchall()]
+                raw_creative = [dict(r) for r in await cur.fetchall()]
+            
+            # Verify files actually exist on disk
+            valid_creative = []
+            for g in raw_creative:
+                gid = g['id']
+                async with db.execute(
+                    """SELECT filename FROM recordings 
+                       WHERE group_id = ? AND local_deleted = 0 AND clipped = 2 
+                       LIMIT 1""", (gid,)
+                ) as rcur:
+                    rows = await rcur.fetchall()
+                    for row in rows:
+                        fp = recordings_dir / row['filename']
+                        if fp.exists():
+                            valid_creative.append(gid)
+                            break
+            
+            pending_director = valid_director
+            pending_creative_only = valid_creative
+            
+            skipped_director = len(raw_director) - len(valid_director)
+            skipped_creative = len(raw_creative) - len(valid_creative)
+            if skipped_director > 0:
+                logger.warning(f"Backfill: skipping {skipped_director} director groups with missing recording files")
+            if skipped_creative > 0:
+                logger.warning(f"Backfill: skipping {skipped_creative} creative groups with missing recording files")
 
         pending = list(set(pending_director) | set(pending_creative_only))
 
@@ -1301,15 +1523,324 @@ async def backfill_auto_merge():
         if pending_creative_only:
             logger.info(f"Backfill: {len(pending_creative_only)} groups with director done but creative not run — scheduling...")
 
-        if pending:
-            for gid in pending:
-                if gid in pending_director:
+        # Phase 2b: Separate scheduling — director first, creative only after director done
+        # This prevents wasting resources on creative groups whose director hasn't finished.
+        pending_director_groups = pending_director
+        pending_creative_groups = pending_creative_only
+
+        # Phase 3: Reset recently failed director/creative groups and re-queue them.
+        # Groups that failed due to GPU issues (composition_no_output, ffmpeg_path_error,
+        # script_gen, JSON parse) should be retried after GPU restart.
+        # Skip groups that have been failing repeatedly (we track this via error patterns).
+        # Only retry if GPU is online — otherwise they'll just fail again.
+        from gpu_state import is_online as gpu_is_online
+        if gpu_is_online():
+            await asyncio.sleep(1)  # let Phase 2 tasks settle
+            async with aio_connect() as db:
+                db.row_factory = aiosqlite.Row
+                # Director groups with common recoverable errors (GPU timeout, ffmpeg path, script gen,
+                # segment matching, database locked) — permanently-failures (no SRT, no recordings,
+                # duration too short) are excluded from retry.
+                async with db.execute(
+                    """SELECT id FROM clip_groups
+                       WHERE classic_status = 2
+                         AND director_status IN (-1, -2)
+                         AND (
+                             director_error LIKE '%video composition returned no output%'
+                             OR director_error LIKE '%expected str, bytes or os.PathLike%'
+                             OR director_error LIKE '%script generation:%'
+                             OR director_error LIKE '%JSON parse%'
+                             OR director_error LIKE '%segment matching%'
+                             OR director_error LIKE '%database is locked%'
+                             OR director_error IS NULL OR director_error = ''
+                         )
+                         AND NOT (
+                             director_error LIKE '%no SRT content%'
+                             OR director_error = 'no recordings in group'
+                             OR director_error LIKE '%no recordings in group%'
+                             OR director_error LIKE '%duration%'
+                         )
+                         AND EXISTS (SELECT 1 FROM recordings WHERE recordings.group_id = clip_groups.id)
+                       ORDER BY id DESC"""
+                ) as cur:
+                    retry_director = [r["id"] for r in await cur.fetchall()]
+                # Creative groups with common recoverable errors
+                # (includes groups where director also failed — creative will re-run after director succeeds)
+                # Permanently-failed (no recordings, duration too short) excluded.
+                async with db.execute(
+                    """SELECT id FROM clip_groups
+                       WHERE classic_status = 2
+                         AND creative_status IN (-1, -2)
+                         AND (
+                             creative_error LIKE '%video composition returned no output%'
+                             OR creative_error LIKE '%expected str, bytes or os.PathLike%'
+                             OR creative_error LIKE '%script generation:%'
+                             OR creative_error LIKE '%JSON parse%'
+                             OR creative_error LIKE '%segment matching%'
+                             OR creative_error LIKE '%database is locked%'
+                             OR creative_error IS NULL OR creative_error = ''
+                         )
+                         AND NOT (
+                             creative_error LIKE '%no SRT content%'
+                             OR creative_error = 'no recordings in group'
+                             OR creative_error LIKE '%no recordings in group%'
+                             OR creative_error LIKE '%duration%'
+                         )
+                         AND EXISTS (SELECT 1 FROM recordings WHERE recordings.group_id = clip_groups.id)
+                       ORDER BY id DESC"""
+                ) as cur:
+                    retry_creative = [r["id"] for r in await cur.fetchall()]
+
+            reset_count = 0
+            for gid in retry_director:
+                try:
+                    async with aio_connect() as db2:
+                        await db2.execute(
+                            "UPDATE clip_groups SET director_status = 0, director_error = NULL WHERE id = ?",
+                            (gid,)
+                        )
+                        await db2.commit()
                     asyncio.create_task(_run_director_pipeline(gid))
+                    reset_count += 1
+                    await asyncio.sleep(0.1)
+                except Exception as e:
+                    logger.warning(f"Backfill: failed to reset director group {gid}: {e}")
+            for gid in retry_creative:
+                try:
+                    async with aio_connect() as db2:
+                        await db2.execute(
+                            "UPDATE clip_groups SET creative_status = 0, creative_error = NULL WHERE id = ?",
+                            (gid,)
+                        )
+                        await db2.commit()
+                    asyncio.create_task(_run_creative_pipeline(gid))
+                    reset_count += 1
+                    await asyncio.sleep(0.1)
+                except Exception as e:
+                    logger.warning(f"Backfill: failed to reset creative group {gid}: {e}")
+
+            if reset_count:
+                logger.info(f"Backfill Phase 3: reset and re-queued {reset_count} failed groups ({len(retry_director)} director, {len(retry_creative)} creative)")
+            else:
+                logger.info("Backfill Phase 3: no failed groups to retry")
+        else:
+            logger.info("Backfill Phase 3: GPU offline — skipping failed group retry")
+
+        # Phase 2c: Schedule director groups first (only if GPU is online)
+        if gpu_is_online() and pending_director_groups:
+            logger.info(f"Backfill Phase 2c: queuing {len(pending_director_groups)} director groups first")
+            for gid in pending_director_groups:
+                asyncio.create_task(_run_director_pipeline(gid))
+                await asyncio.sleep(0.1)
+        elif pending_director_groups:
+            logger.info(f"Backfill Phase 2c: GPU offline — skipping {len(pending_director_groups)} director groups")
+
+        # Phase 2d: Schedule creative groups only where director is already done (only if GPU is online)
+        if gpu_is_online() and pending_creative_groups:
+            logger.info(f"Backfill Phase 2d: queuing {len(pending_creative_groups)} creative groups (director already done)")
+            for gid in pending_creative_groups:
                 asyncio.create_task(_run_creative_pipeline(gid))
-                await asyncio.sleep(0.3)  # stagger to avoid flooding
-            logger.info(f"Backfill: queued tasks for {len(pending)} groups")
+                await asyncio.sleep(0.1)
+        elif pending_creative_groups:
+            logger.info(f"Backfill Phase 2d: GPU offline — skipping {len(pending_creative_groups)} creative groups")
         else:
             logger.info("Backfill: all groups already have director/creative results or in progress")
+
+        # Phase 4.5: Handle orphaned -3 status groups (never triggered)
+        # These are groups that were created with editing_mode=director but never had their
+        # pipeline triggered (likely from an old code path or manual intervention).
+        await asyncio.sleep(1)
+        orphaned_director = []
+        orphaned_creative = []
+        cleaned_orphans = 0
+        try:
+            async with aio_connect() as db:
+                db.row_factory = aiosqlite.Row
+                # Director orphans: classic done, director=-3, has valid recordings
+                async with db.execute(
+                    """SELECT id FROM clip_groups
+                       WHERE classic_status = 2
+                         AND director_status = -3
+                         AND EXISTS (SELECT 1 FROM recordings WHERE recordings.group_id = clip_groups.id AND recordings.local_deleted = 0 AND recordings.clipped = 2)
+                       ORDER BY id DESC"""
+                ) as cur:
+                    orphaned_director = [r["id"] for r in await cur.fetchall()]
+                # Creative orphans: classic done, director done, creative=-3, has valid recordings
+                async with db.execute(
+                    """SELECT id FROM clip_groups
+                       WHERE classic_status = 2
+                         AND director_status = 2
+                         AND creative_status = -3
+                         AND EXISTS (SELECT 1 FROM recordings WHERE recordings.group_id = clip_groups.id AND recordings.local_deleted = 0 AND recordings.clipped = 2)
+                       ORDER BY id DESC"""
+                ) as cur:
+                    orphaned_creative = [r["id"] for r in await cur.fetchall()]
+                # Clean up truly empty groups (no recordings at all) — set to -2
+                async with db.execute(
+                    """UPDATE clip_groups SET director_status = -2, director_error = 'no recordings in group'
+                       WHERE editing_mode = 'director'
+                         AND director_status = -3
+                         AND classic_status = 2
+                         AND NOT EXISTS (SELECT 1 FROM recordings WHERE recordings.group_id = clip_groups.id AND recordings.local_deleted = 0)"""
+                ) as cur:
+                    cleaned_orphans += cur.rowcount
+                async with db.execute(
+                    """UPDATE clip_groups SET creative_status = -2, creative_error = 'no recordings in group'
+                       WHERE editing_mode = 'director'
+                         AND creative_status = -3
+                         AND classic_status = 2
+                         AND director_status = 2
+                         AND NOT EXISTS (SELECT 1 FROM recordings WHERE recordings.group_id = clip_groups.id AND recordings.local_deleted = 0 AND recordings.clipped = 2)"""
+                ) as cur:
+                    cleaned_orphans += cur.rowcount
+                await db.commit()
+        except Exception as e:
+            logger.error(f"Backfill Phase 4.5 orphan cleanup error: {e}")
+
+        if cleaned_orphans:
+            logger.info(f"Backfill Phase 4.5: cleaned {cleaned_orphans} empty orphan groups")
+
+        # Only re-queue orphans if GPU is online
+        if gpu_is_online():
+            if orphaned_director:
+                logger.info(f"Backfill Phase 4.5: re-queuing {len(orphaned_director)} orphaned director groups (status=-3)")
+                for gid in orphaned_director:
+                    try:
+                        async with aio_connect() as db2:
+                            await db2.execute(
+                                "UPDATE clip_groups SET director_status = 0, director_error = NULL WHERE id = ?",
+                                (gid,)
+                            )
+                            await db2.commit()
+                        asyncio.create_task(_run_director_pipeline(gid))
+                        await asyncio.sleep(0.1)
+                    except Exception as e:
+                        logger.warning(f"Backfill Phase 4.5: failed to reset director orphan group {gid}: {e}")
+            if orphaned_creative:
+                # Only re-queue creative orphans where director is already done
+                valid_orphaned_creative = []
+                for gid in orphaned_creative:
+                    try:
+                        async with aio_connect() as db2:
+                            db2.row_factory = aiosqlite.Row
+                            async with db2.execute(
+                                "SELECT director_status FROM clip_groups WHERE id = ?",
+                                (gid,)
+                            ) as rcur:
+                                row = await rcur.fetchone()
+                            if row and row["director_status"] == 2:
+                                valid_orphaned_creative.append(gid)
+                            else:
+                                logger.info(f"Backfill Phase 4.5: skipping creative orphan {gid}, director not done (status={row['director_status'] if row else 'unknown'})")
+                    except Exception as e:
+                        logger.warning(f"Backfill Phase 4.5: failed to check director status for creative orphan {gid}: {e}")
+
+                if valid_orphaned_creative:
+                    logger.info(f"Backfill Phase 4.5: re-queuing {len(valid_orphaned_creative)} valid orphaned creative groups (director done)")
+                    for gid in valid_orphaned_creative:
+                        try:
+                            async with aio_connect() as db2:
+                                await db2.execute(
+                                    "UPDATE clip_groups SET creative_status = 0, creative_error = NULL WHERE id = ?",
+                                    (gid,)
+                                )
+                                await db2.commit()
+                            asyncio.create_task(_run_creative_pipeline(gid))
+                            await asyncio.sleep(0.1)
+                        except Exception as e:
+                            logger.warning(f"Backfill Phase 4.5: failed to reset creative orphan group {gid}: {e}")
+        else:
+            logger.info("Backfill Phase 4.5: GPU offline — skipping orphan re-queuing")
+
+        # Phase 4: Periodic retry of failed groups (runs every 30 min after backfill completes)
+        # Handles groups that failed during backfill execution or failed later.
+        async def _periodic_retry():
+            while True:
+                await asyncio.sleep(1800)  # 30 minutes
+                try:
+                    async with aio_connect() as db:
+                        db.row_factory = aiosqlite.Row
+                        async with db.execute(
+                            """SELECT id FROM clip_groups
+                               WHERE classic_status = 2
+                                 AND director_status IN (-1, -2)
+                                 AND (
+                                     director_error LIKE '%video composition returned no output%'
+                                     OR director_error LIKE '%expected str, bytes or os.PathLike%'
+                                     OR director_error LIKE '%script generation:%'
+                                     OR director_error LIKE '%JSON parse%'
+                                     OR director_error LIKE '%segment matching%'
+                                     OR director_error LIKE '%database is locked%'
+                                     OR director_error IS NULL OR director_error = ''
+                                 )
+                                 AND NOT (
+                                     director_error LIKE '%no SRT content%'
+                                     OR director_error = 'no recordings in group'
+                                     OR director_error LIKE '%no recordings in group%'
+                                     OR director_error LIKE '%duration%'
+                                 )
+                                 AND EXISTS (SELECT 1 FROM recordings WHERE recordings.group_id = clip_groups.id)
+                               ORDER BY id DESC
+                               LIMIT 100"""  # batch of 100 per cycle (increased from 20)
+                        ) as cur:
+                            retry_ids = [r["id"] for r in await cur.fetchall()]
+                        if retry_ids:
+                            logger.info(f"Periodic retry: found {len(retry_ids)} failed groups, re-queuing...")
+                            for gid in retry_ids:
+                                try:
+                                    async with aio_connect() as db2:
+                                        await db2.execute(
+                                            "UPDATE clip_groups SET director_status = 0, director_error = NULL WHERE id = ?",
+                                            (gid,)
+                                        )
+                                        await db2.commit()
+                                    asyncio.create_task(_run_director_pipeline(gid))
+                                except Exception as e:
+                                    logger.warning(f"Periodic retry: failed to reset director group {gid}: {e}")
+
+                        # Also retry creative — but ONLY where director is already done
+                        async with db.execute(
+                            """SELECT id FROM clip_groups
+                               WHERE classic_status = 2
+                                 AND creative_status IN (-1, -2)
+                                 AND director_status = 2
+                                 AND (
+                                     creative_error LIKE '%video composition returned no output%'
+                                     OR creative_error LIKE '%expected str, bytes or os.PathLike%'
+                                     OR creative_error LIKE '%script generation:%'
+                                     OR creative_error LIKE '%JSON parse%'
+                                     OR creative_error LIKE '%segment matching%'
+                                     OR creative_error LIKE '%database is locked%'
+                                     OR creative_error IS NULL OR creative_error = ''
+                                 )
+                                 AND NOT (
+                                     creative_error LIKE '%no SRT content%'
+                                     OR creative_error = 'no recordings in group'
+                                     OR creative_error LIKE '%no recordings in group%'
+                                     OR creative_error LIKE '%duration%'
+                                 )
+                                 AND EXISTS (SELECT 1 FROM recordings WHERE recordings.group_id = clip_groups.id)
+                               ORDER BY id DESC
+                               LIMIT 100"""  # batch of 100 per cycle (increased from 20)
+                        ) as cur:
+                            retry_creative_ids = [r["id"] for r in await cur.fetchall()]
+                        if retry_creative_ids:
+                            logger.info(f"Periodic retry: found {len(retry_creative_ids)} creative failed groups (director done), re-queuing...")
+                            for gid in retry_creative_ids:
+                                try:
+                                    async with aio_connect() as db2:
+                                        await db2.execute(
+                                            "UPDATE clip_groups SET creative_status = 0, creative_error = NULL WHERE id = ?",
+                                            (gid,)
+                                        )
+                                        await db2.commit()
+                                    asyncio.create_task(_run_creative_pipeline(gid))
+                                except Exception as e:
+                                    logger.warning(f"Periodic retry: failed to reset creative group {gid}: {e}")
+                except Exception as e:
+                    logger.warning(f"Periodic retry error: {e}")
+
+        asyncio.create_task(_periodic_retry())
 
     except Exception as e:
         logger.error(f"Backfill auto-merge error: {e}")

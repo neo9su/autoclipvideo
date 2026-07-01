@@ -409,8 +409,10 @@ class DirectorVideoComposer:
                 logger.error(f"[DIRECTOR] compose_final_video: GPU job submit failed after 3 retries: status={_resp_status} text={_resp_text[:500]}")
                 return None
 
-            # 6. 轮询（最多 30 分钟）
-            deadline = time.time() + 1800
+            # 6. 轮询（最多 5 分钟，GPU 队列卡住时快速 fallback 到本地 ffmpeg）
+            deadline = time.time() + 300
+            stuck_count = 0  # consecutive polls still "queued"
+            consecutive_none = 0  # consecutive polls returning status=None (job disappeared)
             poll_count = 0
             while time.time() < deadline:
                 await asyncio.sleep(6)
@@ -421,6 +423,12 @@ class DirectorVideoComposer:
                             f"{self._GPU_SERVICE_URL}/director-jobs/{job_id}",
                             timeout=_aio_dv.ClientTimeout(total=15),
                         ) as r:
+                            if r.status == 404:
+                                # Job disappeared — GPU service likely restarted
+                                logger.warning(f"[DIRECTOR] compose_final_video job {job_id} disappeared (404) — falling back to local ffmpeg")
+                                return await self._compose_with_ffmpeg(
+                                    video_clips, audio_path, str(output_path), style_config, config
+                                )
                             data = await r.json()
                 except Exception as pe:
                     logger.warning(f"[DIRECTOR] compose_final_video poll error #{poll_count}: {pe}")
@@ -434,11 +442,33 @@ class DirectorVideoComposer:
                     logger.info(f"[DIRECTOR] compose_final_video job {job_id} DONE after {poll_count} polls")
                     break
                 if status == "error":
-                    logger.error(f"[DIRECTOR] compose_final_video job {job_id} ERROR: {data.get('error')}")
-                    return None
+                    logger.warning(f"[DIRECTOR] compose_final_video job {job_id} ERROR: {data.get('error')} — falling back to local ffmpeg")
+                    return await self._compose_with_ffmpeg(
+                        video_clips, audio_path, str(output_path), style_config, config
+                    )
+                # Detect job disappearance: status=None means GPU service restarted and lost the job
+                if status is None:
+                    consecutive_none += 1
+                    if consecutive_none >= 2:
+                        logger.warning(f"[DIRECTOR] compose_final_video job {job_id} vanished (status=None x{consecutive_none}) — GPU service restarted, falling back to local ffmpeg")
+                        return await self._compose_with_ffmpeg(
+                            video_clips, audio_path, str(output_path), style_config, config
+                        )
+                else:
+                    consecutive_none = 0  # reset counter on valid status
+                # 检测队列卡死：超过 3 分钟仍 queued → 主动 fallback
+                if status == "queued" and poll_count >= 10:
+                    stuck_count += 1
+                    if stuck_count >= 1:
+                        logger.warning(f"[DIRECTOR] compose_final_video job {job_id} stuck in queued for ~{poll_count*6:.0f}s — falling back to local ffmpeg")
+                        return await self._compose_with_ffmpeg(
+                            video_clips, audio_path, str(output_path), style_config, config
+                        )
             else:
-                logger.error(f"[DIRECTOR] compose_final_video job {job_id} TIMED OUT after {poll_count} polls")
-                return None
+                logger.warning(f"[DIRECTOR] compose_final_video job {job_id} TIMED OUT — falling back to local ffmpeg")
+                return await self._compose_with_ffmpeg(
+                    video_clips, audio_path, str(output_path), style_config, config
+                )
 
             # 7. 下载结果
             logger.info(f"[DIRECTOR] compose_final_video: downloading job {job_id} mp4")
@@ -449,18 +479,22 @@ class DirectorVideoComposer:
                 ) as r:
                     if r.status != 200:
                         err_text = await r.text()
-                        logger.error(f"[DIRECTOR] compose_final_video download failed: status={r.status} error={err_text[:300]}")
-                        return None
+                        logger.warning(f"[DIRECTOR] compose_final_video download failed (status={r.status}) — falling back to local ffmpeg")
+                        return await self._compose_with_ffmpeg(
+                            video_clips, audio_path, str(output_path), style_config, config
+                        )
                     _content = await r.read()
                     logger.info(f"[DIRECTOR] compose_final_video: downloaded {len(_content)} bytes")
             with open(str(output_path), "wb") as f:
                 f.write(_content)
             if not output_path.exists() or output_path.stat().st_size == 0:
-                logger.error(f"[DIRECTOR] compose_final_video: output file empty or missing: {output_path}")
-                return None
+                logger.warning(f"[DIRECTOR] compose_final_video: output empty — falling back to local ffmpeg")
+                return await self._compose_with_ffmpeg(
+                    video_clips, audio_path, str(output_path), style_config, config
+                )
             logger.info(f"[DIRECTOR] compose_final_video: output file size={output_path.stat().st_size}")
 
-            logger.info(f"Director video composition complete: {output_path}")
+            logger.info(f"Director video composition complete (GPU): {output_path}")
 
             # 8. 封面（anime 风格）
             try:
@@ -650,8 +684,8 @@ class DirectorVideoComposer:
     
     async def _compose_with_ffmpeg(self, video_clips: List[Dict], 
                                  audio_path: str, output_path: str,
-                                 style_config: Dict, config: Dict) -> bool:
-        """使用FFmpeg合成视频"""
+                                 style_config: Dict, config: Dict) -> Optional[str]:
+        """使用FFmpeg合成视频 — 返回输出路径或 None。"""
         try:
             # 创建临时目录
             with tempfile.TemporaryDirectory() as temp_dir:
@@ -670,7 +704,7 @@ class DirectorVideoComposer:
 
                 if not processed_clips:
                     logger.error("No clips were successfully processed")
-                    return False
+                    return None
                 
                 # 第二步：转场合并
                 tr_type = style_config.get('transition_type', 'slideleft')
@@ -707,16 +741,17 @@ class DirectorVideoComposer:
 
                 if not merged_video or not Path(merged_video).exists():
                     logger.error("Clip merge failed")
-                    return False
+                    return None
 
                 # 第三步：合并音频
-                return await self._final_composition(
+                ok = await self._final_composition(
                     merged_video, audio_path, output_path, style_config
                 )
+                return output_path if ok else None
         
         except Exception as e:
             logger.error(f"FFmpeg composition failed: {e}")
-            return False
+            return None
     
     async def _process_single_clip(self, clip: Dict, temp_dir: Path,
                                  style_config: Dict, config: Dict) -> Optional[str]:

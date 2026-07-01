@@ -2,10 +2,10 @@
 Segment merger: merge small recording segments before transcription.
 
 Files < SMALL_THRESHOLD (50 MB) are merged with consecutive adjacent segments
-from the same room until the combined file approaches MERGE_TARGET (150 MB).
+from the same room until the combined duration approaches MERGE_TARGET_DUR (15 min).
 
 Merge is triggered when:
-  - Combined size of the consecutive group >= SMALL_THRESHOLD, OR
+  - Combined duration of the consecutive group >= 15 minutes, OR
   - The room is no longer actively recording (stream ended)
 
 While the room is still recording and the group is too small, upload is deferred
@@ -48,8 +48,8 @@ async def _release_file_lock(filepath: str):
 
 SMALL_THRESHOLD  = 50  * 1024 * 1024  # files smaller than this get merged
 STALE_WAIT_SECS  = 600                # force-upload small files after waiting this long
-MERGE_TARGET     = 150 * 1024 * 1024  # target size for merged file
-MERGE_MAX        = 200 * 1024 * 1024  # hard cap: never produce a merged file larger than this
+MERGE_TARGET_DUR = 900                # target duration for merged file: 15 minutes (seconds)
+MERGE_MAX_DUR    = 1200               # hard cap: never merge beyond 20 minutes total duration
 SPLIT_THRESHOLD  = 200 * 1024 * 1024  # standalone files larger than this get split before upload
 SPLIT_CHUNK_SIZE = 150 * 1024 * 1024  # target chunk size when splitting large files
 
@@ -72,18 +72,40 @@ async def _is_room_still_recording(room_id: int) -> bool:
 
 
 async def _get_pending_unsynced(room_id: int) -> list:
-    """Return finished, unsynced, non-deleted segments for room ordered by segment_index."""
+    """Return finished, unsynced, non-deleted segments for room ordered by segment_index.
+    Also computes duration from size_bytes assuming ~1 Mbps bitrate (conservative estimate).
+    """
     async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            """SELECT id, filename, segment_index, size_bytes, start_time
+            """SELECT id, filename, segment_index, size_bytes, start_time, end_time
                FROM recordings
                WHERE room_id=? AND synced=0 AND transcribed=0
                  AND local_deleted=0 AND end_time IS NOT NULL AND size_bytes IS NOT NULL
                ORDER BY segment_index, start_time""",
             (room_id,),
         ) as cur:
-            return await cur.fetchall()
+            rows = await cur.fetchall()
+    # Compute approximate duration from start/end times
+    # Convert sqlite3.Row to dict so we can add _dur field
+    result = []
+    for row in rows:
+        d = dict(row)
+        try:
+            if d["start_time"] and d["end_time"]:
+                st = d["start_time"].replace(" ", "T")
+                et = d["end_time"].replace(" ", "T")
+                dt_s = datetime.fromisoformat(st)
+                dt_e = datetime.fromisoformat(et)
+                d["_dur"] = (dt_e - dt_s).total_seconds()
+            else:
+                # Fallback: estimate from file size (~1 Mbps for phone recordings)
+                sz = d["size_bytes"] or 0
+                d["_dur"] = max(0, (sz * 8) / (1_000_000))  # seconds
+        except Exception:
+            d["_dur"] = 0
+        result.append(d)
+    return result
 
 
 def _consecutive_group_for(segments: list, target_id: int) -> list:
@@ -372,24 +394,29 @@ async def maybe_merge_before_upload(
     group = _consecutive_group_for(pending, recording_id)
 
     # Collect group members that exist on disk
-    valid: list[tuple] = []  # (row, filepath, size)
+    valid: list[tuple] = []  # (row, filepath, size, duration)
     for seg in group:
         p = os.path.join(RECORDINGS_DIR, seg["filename"])
         if os.path.exists(p):
             sz = seg["size_bytes"] or os.path.getsize(p)
-            valid.append((seg, p, sz))
+            dur = seg.get("_dur", 0)
+            valid.append((seg, p, sz, dur))
 
     if not valid:
         return (filepath, recording_id)
 
-    total_size = sum(sz for _, _, sz in valid)
+    total_size = sum(sz for _, _, sz, _ in valid)
+    total_dur = sum(dur for _, _, _, dur in valid)
     still_recording = await _is_room_still_recording(room_id)
 
+    # Check if we've reached duration target — merge immediately
+    if total_dur >= MERGE_TARGET_DUR:
+        pass  # proceed to merge below
     # Not enough data and room still active — defer, but only up to STALE_WAIT_SECS
-    if total_size < SMALL_THRESHOLD and still_recording:
+    elif total_dur < MERGE_TARGET_DUR and still_recording:
         # Check how long the oldest segment in the group has been waiting
         oldest_start = min(
-            (seg["start_time"] for seg, _, _ in valid if seg["start_time"]),
+            (seg["start_time"] for seg, _, _, _ in valid if seg["start_time"]),
             default=None,
         )
         wait_secs = 0
@@ -407,29 +434,29 @@ async def maybe_merge_before_upload(
         if wait_secs < STALE_WAIT_SECS:
             logger.info(
                 f"Room {room_id}: small group {len(valid)} segs "
-                f"{total_size // 1024 // 1024}MB < {SMALL_THRESHOLD // 1024 // 1024}MB, "
+                f"~{total_dur:.0f}s < {MERGE_TARGET_DUR}s, "
                 f"waiting for more segments (waited {wait_secs}s / {STALE_WAIT_SECS}s)"
             )
             return None
         logger.info(
             f"Room {room_id}: small group waited {wait_secs}s >= {STALE_WAIT_SECS}s, "
-            "force-uploading despite active recording"
+            "force-merging despite active recording"
         )
 
     # Only one file — upload as-is (can't merge alone)
     if len(valid) == 1:
         return (filepath, recording_id)
 
-    # Select segments up to MERGE_TARGET, but never let the total exceed MERGE_MAX
+    # Select segments up to MERGE_TARGET_DUR, but never let the total exceed MERGE_MAX_DUR
     selected: list[tuple] = []
-    selected_size = 0
-    for seg, p, sz in valid:
-        if selected_size + sz > MERGE_MAX:
-            break  # adding this file would push merged size over 200 MB
-        if selected_size >= MERGE_TARGET:
-            break  # already at target size
-        selected.append((seg, p, sz))
-        selected_size += sz
+    selected_dur = 0
+    for seg, p, sz, dur in valid:
+        if selected_dur + dur > MERGE_MAX_DUR:
+            break  # adding this file would push merged duration over 20 min
+        if selected_dur >= MERGE_TARGET_DUR:
+            break  # already at target duration
+        selected.append((seg, p, sz, dur))
+        selected_dur += dur
 
     if len(selected) <= 1:
         return (filepath, recording_id)
@@ -444,10 +471,11 @@ async def maybe_merge_before_upload(
     )
     merged_path = os.path.join(RECORDINGS_DIR, merged_filename)
 
-    file_paths = [p for _, p, _ in selected]
+    file_paths = [p for _, p, _, _ in selected]
+    total_sel_size = sum(sz for _, _, sz, _ in selected)
     logger.info(
         f"Room {room_id}: merging {len(selected)} segments "
-        f"({selected_size // 1024 // 1024}MB) → {merged_filename}"
+        f"(~{total_dur:.0f}s, {total_sel_size // 1024 // 1024}MB) → {merged_filename}"
     )
 
     ok = await _ffmpeg_concat(file_paths, merged_path)
@@ -462,7 +490,7 @@ async def maybe_merge_before_upload(
     #   - First segment record gets the merged filename
     #   - Remaining segments get local_deleted=1 (their content is now in the merged file)
     first_id  = first_seg["id"]
-    other_ids = [seg["id"] for seg, _, _ in selected[1:]]
+    other_ids = [seg["id"] for seg, _, _, _ in selected[1:]]
 
     async with aio_connect() as db:
         await db.execute(
