@@ -128,6 +128,7 @@
 - `PROJECT_SUMMARY.md`: 新增 v1.5-v1.9 变更说明
 - `MONITOR_LOG.md`: 新增 GPU 监控日志
 - `demander.md`: 更新当前统计和待办
+- `SHOT_VARIETY_EVAL.md`: 新增镜头与场景变化能力评估报告
 
 ## 待办
 1. 🟡 评估将部分 TTS 作业路由到 222 (8878) GPU 服务以减轻 203 压力
@@ -135,6 +136,11 @@
 3. Phase 3 自动重试 crashed pipelines
 4. Classic pending 仅 10 组，几乎全部完成
 5. 🆕 GPU 监控脚本修复后需持续观察 24h 确认无虚假告警
+6. 🎬 **镜头与场景变化增强**（Phase 1 本周）
+   - [ ] A2: 增强画中画触发条件（问题/对比/佩戴步骤/特写关键词）— `editor.py`
+   - [ ] A3: 运镜分配逻辑优化（开场→全景引入，产品→聚焦，步骤→跟随，对比→缩放）— `editor.py`
+   - [ ] B1: 导演版 camera_direction 字段注入 — `director_script.py` + `director_video.py`
+   - [ ] B2: 场景视觉区分增强（problem→冷/对比→分屏/detail→暖+PiP）— `director_video.py`
 
 ## ✅ 2026-06-29 09:25 — 发布页下载按钮 + 手动标记已发布
 
