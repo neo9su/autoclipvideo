@@ -95,6 +95,101 @@ def _sec_to_ass(s: float) -> str:
 _SUB_OFFSET = 0.30
 
 
+# Scene-type specific subtitle styles for dynamic text annotation
+# Each scene type gets a distinct color palette for visual distinction
+_SCENE_SUBTITLE_STYLES = {
+    'hook': {
+        'font_size': 112,  # 更大字号吸引注意
+        'color': '&H00FFCC00&',  # 亮黄色
+        'bold': 1,
+        'shadow': 3,
+        'anim': r"{\fad(0,150)\t(0,200,\fscx120\fscy120)\t(200,400,\fscx100\fscy100)}",
+    },
+    'problem': {
+        'font_size': 104,
+        'color': '&H0088CCFF&',  # 冷蓝色
+        'bold': 0,
+        'shadow': 2,
+        'anim': r"{\fad(120,80)}",
+    },
+    'comparison': {
+        'font_size': 104,
+        'color': '&H00FF88CC&',  # 品红
+        'bold': 1,
+        'shadow': 2,
+        'anim': r"{\fad(120,80)\t(0,200,\fry20)\t(200,400,\fry0)}",  # 轻微翻转
+    },
+    'detail': {
+        'font_size': 104,
+        'color': '&H00FFDD88&',  # 暖金色
+        'bold': 0,
+        'shadow': 2,
+        'anim': r"{\fad(150,100)}",  # 缓慢淡入
+    },
+    'wearing': {
+        'font_size': 104,
+        'color': '&H0088FFCC&',  # 青绿色
+        'bold': 0,
+        'shadow': 2,
+        'anim': r"{\fad(120,80)}",
+    },
+    'product': {
+        'font_size': 104,
+        'color': '&H00FFCC00&',  # 橙色
+        'bold': 1,
+        'shadow': 2,
+        'anim': r"{\fad(120,80)}",
+    },
+    'result': {
+        'font_size': 112,  # 更大字号展示效果
+        'color': '&H00FFEE44&',  # 亮黄
+        'bold': 1,
+        'shadow': 3,
+        'anim': r"{\fad(100,60)\t(0,300,\fscx110\fscy110)\t(300,600,\fscx100\fscy100)}",
+    },
+    'scene': {
+        'font_size': 104,
+        'color': '&H00AAEEFF&',  # 天蓝
+        'bold': 0,
+        'shadow': 2,
+        'anim': r"{\fad(120,80)}",
+    },
+    'social_proof': {
+        'font_size': 104,
+        'color': '&H00DDAAFF&',  # 紫色
+        'bold': 0,
+        'shadow': 2,
+        'anim': r"{\fad(120,80)}",
+    },
+    'conversion': {
+        'font_size': 112,  # 大字号促转化
+        'color': '&H00FF4444&',  # 红色
+        'bold': 1,
+        'shadow': 3,
+        'anim': r"{\fad(80,40)\t(0,150,\fscx115\fscy115)\t(150,300,\fscx100\fscy100)}",
+    },
+    'cta': {
+        'font_size': 120,  # 最大字号
+        'color': '&H00FF2222&',  # 大红
+        'bold': 1,
+        'shadow': 4,
+        'anim': r"{\fad(60,30)\t(0,200,\fscx125\fscy125)\t(200,400,\fscx100\fscy100)}",
+    },
+    'neutral': {
+        'font_size': 104,
+        'color': '&H00FFFFFF&',  # 白色
+        'bold': 0,
+        'shadow': 2,
+        'anim': r"{\fad(120,80)}",
+    },
+}
+
+
+def _get_scene_subtitle_style(scene_type: str) -> dict:
+    """获取场景类型的字幕样式配置。"""
+    return _SCENE_SUBTITLE_STYLES.get(scene_type, _SCENE_SUBTITLE_STYLES['neutral'])
+
+
 def _build_director_ass(video_clips: list, transition_dur: float,
                         tts_dur_by_scene: dict = None) -> str:
     """
@@ -128,6 +223,13 @@ def _build_director_ass(video_clips: list, transition_dur: float,
         if not sentences:
             sentences = [text]
         
+        # 获取场景类型对应的字幕样式
+        scene_type = clip.get('scene_type', 'neutral')
+        style_cfg = _get_scene_subtitle_style(scene_type)
+        scene_color = style_cfg.get('color', '&H00FFFFFF&')
+        scene_anim = style_cfg.get('anim', _ANIM)
+        is_highlight = scene_type in ('hook', 'result', 'conversion', 'cta')
+        
         # 按字数估算每句的朗读时长（TTS 语速约 4-5 字/秒）
         total_chars = sum(len(s) for s in sentences)
         scene_dur = duration - (transition_dur if i < n - 1 else 0)
@@ -146,13 +248,19 @@ def _build_director_ass(video_clips: list, transition_dur: float,
             ts = _sec_to_ass(sub_cursor)
             te = _sec_to_ass(sub_cursor + sent_dur)
             ann = _annotate_dir(display)
-            events.append(f"Dialogue: 0,{ts},{te},XQN,,0,0,0,,{_B_TEXT}{_ANIM}{ann}")
+            # 使用场景特定的样式
+            events.append(f"Dialogue: 0,{ts},{te},XQN,,0,0,0,,{_B_TEXT}{scene_anim}{ann}")
             
             # 关键词弹出（仅第一个含高亮词的句子触发）
             if si == 0:
                 kw_match = next((kw for kw in _DIR_SORTED_KWS if kw in sentence), None)
                 if kw_match:
-                    events.append(f"Dialogue: 1,{ts},{te},KWPOP,,0,0,0,,{_ANIM_KW_POP}{kw_match}")
+                    # 高光场景使用更大的关键词弹出动画
+                    if is_highlight:
+                        kw_anim = r"{\fad(0,100)\t(0,150,\fscx140\fscy140)\t(150,350,\fscx95\fscy95)\t(350,500,\fscx105\fscy105)\t(500,650,\fscx100\fscy100)}"
+                        events.append(f"Dialogue: 1,{ts},{te},KWPOP,,0,0,0,,{kw_anim}{kw_match}")
+                    else:
+                        events.append(f"Dialogue: 1,{ts},{te},KWPOP,,0,0,0,,{_ANIM_KW_POP}{kw_match}")
             
             sub_cursor += sent_dur
 

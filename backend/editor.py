@@ -1758,6 +1758,205 @@ def _merge_short_segs(segs: List[Seg], min_dur: float = 3.0, max_gap: float = 1.
     return out
 
 
+# ── Phase 2: Smart Shot Splitting ──────────────────────────────────────────────
+# Splits long segments (>8s) into finer shots at speech boundaries for better shot variety.
+
+# Speech boundary keywords that indicate a natural pause/cut point
+_SPEECH_BOUNDARY_KWS = [
+    # 标点符号（SRT 文本中常见）
+    '。', '！', '？', '；', ',', '!', '?', ';',
+    # 语气词/转折词（表示段落切换）
+    '那么', '所以', '但是', '而且', '另外', '还有', '然后',
+    '接下来', '下面', '大家', '各位', '姐妹们',
+    # 动作指示词（佩戴步骤切换）
+    '首先', '其次', '最后', '第一步', '第二步',
+]
+
+# Minimum duration for a split sub-segment (avoid too-short clips)
+_SPLIT_MIN_DURATION = 2.5
+
+
+def _split_long_segments(segs: List[Seg], srt_path: Optional[str] = None) -> List[Seg]:
+    """智能分割长片段：将 >8s 的片段在语音边界处拆分为更细粒度的 shot。
+    
+    策略：
+    1. 对每个 >8s 的片段，尝试按 SRT 时间轴拆分（如果有 SRT）
+    2. 无 SRT 时，按文本中的边界关键词拆分
+    3. 拆分后的子片段继承原片段的 score/category，但可能因时长更短获得 bonus
+    
+    返回新的 segments 列表（原始片段被替换为拆分结果）。
+    """
+    result = []
+    
+    for seg in segs:
+        if seg.duration <= 8.0:
+            result.append(seg)
+            continue
+        
+        # Try SRT-based splitting first
+        if srt_path:
+            srt_splits = _split_by_srt_boundary(seg, srt_path)
+            if srt_splits:
+                result.extend(srt_splits)
+                continue
+        
+        # Fallback: keyword-based splitting
+        kw_splits = _split_by_keywords(seg)
+        if len(kw_splits) > 1:
+            result.extend(kw_splits)
+        else:
+            result.append(seg)
+    
+    return result
+
+
+def _split_by_srt_boundary(seg: Seg, srt_path: str) -> Optional[List[Seg]]:
+    """基于 SRT 时间轴，在语音停顿处拆分片段。
+    
+    返回拆分后的 Segments 列表，或 None（如果无法拆分）。
+    """
+    try:
+        # Parse SRT to get sentence-level timestamps
+        sentences = _parse_srt_sentences(srt_path, seg.start, seg.end)
+        if not sentences or len(sentences) < 2:
+            return None
+        
+        splits = []
+        for i, (sent_start, sent_end, sent_text) in enumerate(sentences):
+            # Ensure minimum duration
+            dur = sent_end - sent_start
+            if dur < _SPLIT_MIN_DURATION and splits:
+                # Merge with previous segment
+                splits[-1].end = sent_end
+                splits[-1].text = splits[-1].text + ' ' + sent_text.strip()
+            else:
+                new_seg = Seg(
+                    idx=seg.idx,
+                    start=sent_start,
+                    end=sent_end,
+                    text=sent_text.strip(),
+                    score=seg.score,
+                    valid=seg.valid,
+                    category=seg.category,
+                    motion=seg.motion,
+                    transition=seg.transition,
+                )
+                # Boost short segments (3-4s sweet spot)
+                if 3.0 <= new_seg.duration <= 4.0:
+                    new_seg.score *= 1.2
+                splits.append(new_seg)
+        
+        return splits if len(splits) >= 2 else None
+    except Exception as e:
+        logger.debug(f"SRT split failed for seg [{seg.start:.1f}-{seg.end:.1f}]: {e}")
+        return None
+
+
+def _parse_srt_sentences(srt_path: str, seg_start: float, seg_end: float) -> List[Tuple[float, float, str]]:
+    """解析 SRT 文件，提取落在 [seg_start, seg_end] 范围内的句子及其时间戳。
+    
+    返回 [(start, end, text), ...] 列表。
+    """
+    sentences = []
+    try:
+        with open(srt_path, encoding='utf-8') as f:
+            lines = f.readlines()
+        
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            # Skip index line
+            if line.isdigit():
+                # Next line should be timestamp
+                if i + 1 < len(lines):
+                    ts_line = lines[i + 1].strip()
+                    if '-->' in ts_line:
+                        parts = ts_line.split('-->')
+                        if len(parts) == 2:
+                            try:
+                                start_s = _parse_srt_time(parts[0].strip())
+                                end_s = _parse_srt_time(parts[1].strip())
+                                
+                                # Check if this SRT entry overlaps with our segment
+                                if start_s < seg_end and end_s > seg_start:
+                                    # Collect text lines until next index or empty line
+                                    j = i + 2
+                                    text_lines = []
+                                    while j < len(lines) and lines[j].strip() and not lines[j].strip().isdigit():
+                                        text_lines.append(lines[j].strip())
+                                        j += 1
+                                    
+                                    text = ' '.join(text_lines)
+                                    if text and start_s >= seg_start - 0.5 and end_s <= seg_end + 0.5:
+                                        sentences.append((start_s, end_s, text))
+                                    
+                                    i = j - 1  # will be incremented
+                            except Exception:
+                                pass
+            i += 1
+    except Exception:
+        return []
+    
+    return sentences
+
+
+def _parse_srt_time(time_str: str) -> float:
+    """解析 SRT 时间戳为秒数。"""
+    # Format: HH:MM:SS,mmm or HH:MM:SS.mmm
+    time_str = time_str.replace(',', '.')
+    parts = time_str.split(':')
+    if len(parts) != 3:
+        raise ValueError(f"Invalid time: {time_str}")
+    h, m, s = int(parts[0]), int(parts[1]), float(parts[2])
+    return h * 3600 + m * 60 + s
+
+
+def _split_by_keywords(seg: Seg) -> List[Seg]:
+    """使用关键词在文本内部拆分片段。
+    
+    按边界关键词切割文本，生成多个子 Segments。
+    """
+    text = seg.text
+    splits = []
+    last_pos = 0
+    
+    for kw in _SPEECH_BOUNDARY_KWS:
+        pos = text.find(kw, last_pos)
+        if pos > 0 and pos < len(text) - 1:
+            # Found boundary keyword — split after it
+            split_point = pos + len(kw)
+            if split_point - last_pos > _SPLIT_MIN_DURATION * 10:  # rough char count threshold
+                # Estimate duration proportionally
+                chunk_dur = (split_point - last_pos) / len(text) * seg.duration
+                if chunk_dur >= _SPLIT_MIN_DURATION:
+                    splits.append(Seg(
+                        idx=seg.idx,
+                        start=seg.start,
+                        end=seg.start + chunk_dur,
+                        text=text[last_pos:split_point].strip(),
+                        score=seg.score,
+                        valid=seg.valid,
+                        category=seg.category,
+                        motion=seg.motion,
+                        transition=seg.transition,
+                    ))
+                    last_pos = split_point
+    
+    if last_pos < len(text):
+        splits.append(Seg(
+            idx=seg.idx,
+            start=seg.start + (last_pos / len(text)) * seg.duration,
+            end=seg.end,
+            text=text[last_pos:].strip(),
+            score=seg.score,
+            valid=seg.valid,
+            category=seg.category,
+            motion=seg.motion,
+            transition=seg.transition,
+        ))
+    
+    return splits if len(splits) >= 2 else [seg]
+
 def score_and_tag(seg: Seg) -> None:
     text = seg.text
 
@@ -2758,12 +2957,14 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
         logger.error(f"SRT not found: {srt_path}")
         return None
 
-    # Parse + merge short segments + score
+    # Parse + merge short segments + smart split + score
     segs = parse_srt(srt_path)
     if not segs:
         logger.warning(f"Empty SRT: {srt_path}")
         return None
     segs = _merge_short_segs(segs)
+    # Phase 2: Smart shot splitting — split long segments (>8s) at speech boundaries
+    segs = _split_long_segments(segs, srt_path)
     for seg in segs:
         score_and_tag(seg)
 
