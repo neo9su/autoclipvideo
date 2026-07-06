@@ -15,8 +15,10 @@ os.environ.setdefault("MS_OFFLINE", "1")
 
 import asyncio
 import logging
+import os as _os
 import sqlite3
 import subprocess
+import sys as _sys
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -324,17 +326,18 @@ def _do_transcribe(job_id: str):
     srt_path = job["srt_path"]
     try:
         model = _get_model()
-        segments, info = model.transcribe(
-            mp4_path,
-            language="zh",
-            beam_size=5,
-            vad_filter=True,
-            vad_parameters={
-                "threshold": 0.3,              # more sensitive — catches speech under background music
-                "min_silence_duration_ms": 300, # shorter gap needed to split segments
-                "speech_pad_ms": 400,
-            },
-        )
+        with _SuppressStdout():
+            segments, info = model.transcribe(
+                mp4_path,
+                language="zh",
+                beam_size=5,
+                vad_filter=True,
+                vad_parameters={
+                    "threshold": 0.3,              # more sensitive — catches speech under background music
+                    "min_silence_duration_ms": 300, # shorter gap needed to split segments
+                    "speech_pad_ms": 400,
+                },
+            )
         with open(srt_path, "w", encoding="utf-8") as f:
             for i, seg in enumerate(segments, 1):
                 f.write(f"{i}\n")
@@ -706,6 +709,22 @@ async def _run_concat_job(job_id: str, clip_job_ids: list):
 
 # ── CosyVoice2 TTS ───────────────────────────────────────────────────────────
 
+# Suppress tqdm / progress-bar stdout noise during TTS synthesis.
+# CosyVoice2's inference methods write "Batches: XX%" to stdout which
+# pollutes the backend_run.log when stdout is redirected there.
+class _SuppressStdout:
+    """Temporarily redirect stdout/stderr to /dev/null."""
+    def __enter__(self):
+        self._orig_stdout = _sys.stdout
+        self._orig_stderr = _sys.stderr
+        devnull = _os.open(_os.devnull, _os.O_WRONLY)
+        _sys.stdout = _os.fdopen(devnull, 'w')
+        _sys.stderr = _os.fdopen(devnull, 'w')
+        return self
+    def __exit__(self, *exc):
+        _sys.stdout = self._orig_stdout
+        _sys.stderr = self._orig_stderr
+
 import logging as _logging
 _log = _logging.getLogger(__name__)
 
@@ -776,14 +795,16 @@ def _synth_audio(text: str, emotion: str, ref_audio_path: str, out_path: str, pr
     if sft_spk.strip():
         spk = sft_spk.strip()
         _log.info("_synth_audio: sft mode, speaker=%r", spk)
-        results = list(model.inference_sft(text, spk, stream=False))
+        with _SuppressStdout():
+            results = list(model.inference_sft(text, spk, stream=False))
     elif ref_audio_path and os.path.isfile(ref_audio_path):
         # ── Zero-shot mode: full voice cloning from reference audio ───────────
         # LLM sees speech tokens extracted from the reference (via ONNX tokenizer on CPU)
         # AND the flow model uses reference mel features — strongest voice match.
         _log.info("_synth_audio: zero_shot mode, ref=%r, prompt_text=%r",
                   ref_audio_path, (prompt_text or "")[:40])
-        results = list(model.inference_zero_shot(text, prompt_text or "", ref_audio_path, stream=False))
+        with _SuppressStdout():
+            results = list(model.inference_zero_shot(text, prompt_text or "", ref_audio_path, stream=False))
     else:
         # ── Instruct2 fallback: no valid reference, use default wav ───────────
         ref = _DEFAULT_REF_AUDIO
@@ -791,7 +812,8 @@ def _synth_audio(text: str, emotion: str, ref_audio_path: str, out_path: str, pr
             raise FileNotFoundError(f"No reference audio available (default: {ref!r}).")
         instruct_text = _EMOTION_INSTRUCT.get(emotion, _EMOTION_INSTRUCT["natural"])
         _log.info("_synth_audio: instruct2 fallback, emotion=%r", emotion)
-        results = list(model.inference_instruct2(text, instruct_text, ref, stream=False))
+        with _SuppressStdout():
+            results = list(model.inference_instruct2(text, instruct_text, ref, stream=False))
 
     if not results:
         raise RuntimeError("CosyVoice2 returned no audio chunks")

@@ -144,19 +144,31 @@ async def _startup_trigger_pipelines():
         async with aio_connect() as db:
             db.row_factory = aiosqlite.Row
             # Director groups: classic done, director not done
+            # Exclude groups with unrecoverable errors (missing files, no recordings, etc.)
             async with db.execute(
                 """SELECT id FROM clip_groups
                    WHERE classic_status = 2
                      AND (director_status IN (0, -1, -3))
+                     AND (director_error IS NULL OR director_error = '')
+                     AND director_error NOT LIKE '%no recordings%'
+                     AND director_error NOT LIKE '%recording files missing%'
+                     AND director_error NOT LIKE '%physically deleted%'
+                     AND director_error NOT LIKE '%无录像文件%'
+                     AND director_error NOT LIKE '%无合并素材%'
+                     AND director_error NOT LIKE '%时长%'
                    ORDER BY id DESC"""
             ) as cur:
                 pending_director = [r["id"] for r in await cur.fetchall()]
             # Creative groups: classic done, director done, creative not done
+            # Exclude groups with unrecoverable errors
             async with db.execute(
                 """SELECT id FROM clip_groups
                    WHERE classic_status = 2
                      AND director_status = 2
                      AND (creative_status IN (0, -1, -3) OR creative_status IS NULL)
+                     AND (creative_error IS NULL OR creative_error = '')
+                     AND creative_error NOT LIKE '%duration 0%'
+                     AND creative_error NOT LIKE '%no recordings%'
                    ORDER BY id DESC"""
             ) as cur:
                 pending_creative = [r["id"] for r in await cur.fetchall()]
@@ -3704,6 +3716,13 @@ async def _periodic_director_dispatch():
                          AND classic_status = 2
                          AND director_status IN (0, -1, -3)
                          AND director_error != 'no SRT content available'
+                         AND director_error NOT LIKE '%no recordings%'
+                         AND director_error NOT LIKE '%recording files missing%'
+                         AND director_error NOT LIKE '%physically deleted%'
+                         AND director_error NOT LIKE '%无录像文件%'
+                         AND director_error NOT LIKE '%无合并素材%'
+                         AND director_error NOT LIKE '%时长%'
+                         AND director_error NOT LIKE '%video_clips is EMPTY%'
                        ORDER BY id ASC
                        LIMIT ?""",
                     (BATCH_LIMIT,),
@@ -3740,12 +3759,16 @@ async def _periodic_creative_dispatch():
             async with aio_connect() as db:
                 db.row_factory = aiosqlite.Row
                 # Get pending creative groups (status=0) that haven't been dispatched recently
+                # Exclude groups with unrecoverable errors
                 async with db.execute(
                     """SELECT id FROM clip_groups
                        WHERE classic_status = 2
                          AND director_status = 2
                          AND creative_status = 0
                          AND merged_filename IS NOT NULL
+                         AND (creative_error IS NULL OR creative_error = '')
+                         AND creative_error NOT LIKE '%duration 0%'
+                         AND creative_error NOT LIKE '%no recordings%'
                        ORDER BY id ASC
                        LIMIT 10"""
                 ) as cur:
