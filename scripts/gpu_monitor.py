@@ -24,7 +24,7 @@ from datetime import datetime
 GPU_HOST = "10.190.0.203"
 GPU_PORT = 8877
 WATCHDOG_PORT = 8878
-BACKEND_PORT = 8899
+BACKEND_PORT = 8099
 DB_PATH = "/Users/claw/work/douyin-recorder/douyin.db"
 STATE_FILE = "/tmp/gpu_monitor_state.json"
 LOW_GPU_THRESHOLD = 20  # 3D% below this is "idle"
@@ -200,7 +200,7 @@ def restart_backend():
     # Find the backend process
     try:
         result = subprocess.run(
-            ["pgrep", "-f", "uvicorn main:app.*--port 8899"],
+            ["pgrep", "-f", "uvicorn main:app.*--port 8099"],
             capture_output=True, text=True, timeout=5
         )
         if result.returncode == 0:
@@ -214,7 +214,7 @@ def restart_backend():
             time.sleep(3)
             # Verify it's gone
             alive = subprocess.run(
-                ["pgrep", "-f", "uvicorn main:app.*--port 8899"],
+                ["pgrep", "-f", "uvicorn main:app.*--port 8099"],
                 capture_output=True, text=True, timeout=5
             )
             if alive.returncode != 0:
@@ -223,7 +223,7 @@ def restart_backend():
                 backend_dir = "/Users/claw/work/douyin-recorder/backend"
                 subprocess.Popen(
                     ["/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/Resources/Python.app/Contents/MacOS/Python",
-                     "/opt/homebrew/bin/uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8899"],
+                     "/opt/homebrew/bin/uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8099"],
                     cwd=backend_dir,
                     stdout=open(os.path.join(backend_dir, "backend_run.log"), "a"),
                     stderr=subprocess.STDOUT,
@@ -241,7 +241,7 @@ def restart_backend():
                 backend_dir = "/Users/claw/work/douyin-recorder/backend"
                 subprocess.Popen(
                     ["/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/Resources/Python.app/Contents/MacOS/Python",
-                     "/opt/homebrew/bin/uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8899"],
+                     "/opt/homebrew/bin/uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8099"],
                     cwd=backend_dir,
                     stdout=open(os.path.join(backend_dir, "backend_run.log"), "a"),
                     stderr=subprocess.STDOUT,

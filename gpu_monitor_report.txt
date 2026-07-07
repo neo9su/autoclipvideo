@@ -1,0 +1,14 @@
+⚠️ GPU 监控告警（04:02 CST → 04:07 CST, 2026-06-22）
+
+📊 GPU 状态: 3D=0%, queue=0, busy=False
+📋 转录: waiting_gpu=0, ready_upload=19
+📋 导演版: pending=397, running=2
+📋 自编版: pending=149→146, running=2
+
+⚠️ GPU 空闲超 3885 分钟，但有作业积压！
+
+### 自动修复操作
+🔧 重置 pipeline: {'director_reset': 2, 'creative_reset': 2, 'director_checked': 2, 'creative_checked': 2}
+🔄 重启后端触发 backfill（GPU 最近已重启，跳过 GPU 重启）
+
+⚠️ 二次确认仍异常：后端重启后 GPU 仍未开始处理作业。自编版 pending 从 146→149 略有增加，说明 backfill 未生效。可能需要手动排查后端日志或 GPU 服务连接。

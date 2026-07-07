@@ -1,0 +1,24 @@
+total 108
+drwxr-xr-x  5 neo neo  4096 May 30 07:37 .
+drwxr-x--- 13 neo neo  4096 May 26 10:10 ..
+-rwxr-xr-x  1 neo neo   263 Apr 18 11:59 ._.
+-rwxr-xr-x  1 neo neo   163 Apr 18 10:30 ._app
+drwxr-xr-x  3 neo neo  4096 May 14 13:00 app
+-rw-r--r--  1 neo neo   163 Apr 18 10:30 ._docker-compose.yml
+-rw-r--r--  1 neo neo   659 May 15 03:12 docker-compose.yml
+-rw-r--r--  1 neo neo   659 May 15 03:12 docker-compose.yml.bak
+-rwxr-xr-x  1 neo neo   163 Apr 18 11:59 ._docs
+drwxr-xr-x  2 neo neo  4096 May 14 13:00 docs
+-rw-r--r--  1 neo neo   163 Apr 18 10:30 ._.env
+-rw-r--r--  1 neo neo   789 May 30 08:59 .env
+-rw-r--r--  1 neo neo   605 May 30 07:29 .env.bak
+-rw-r--r--  1 neo neo   163 Apr 18 10:30 ._.env.example
+-rw-r--r--  1 neo neo   571 Apr 18 10:30 .env.example
+-rw-r--r--  1 neo neo   163 Apr 18 10:57 ._.gitignore
+-rw-r--r--  1 neo neo    32 Apr 18 10:57 .gitignore
+-rw-r--r--  1 neo neo   163 Apr 18 08:01 ._openrouter-stack.tgz
+-rw-r--r--  1 neo neo 12528 Apr 18 08:01 openrouter-stack.tgz
+-rw-r--r--  1 neo neo   163 May 14 12:48 ._README.md
+-rw-r--r--  1 neo neo  6228 May 14 12:48 README.md
+-rwxr-xr-x  1 neo neo   163 Apr 18 11:59 ._scripts
+drwxr-xr-x  2 neo neo  4096 May 14 13:00 scripts

@@ -1,0 +1,18 @@
+# GPU 监控报告 - 2026-06-19 02:37 CST
+
+⚠️ GPU 作业队列健康警报
+
+📊 GPU 状态: 空闲 3D=0%，无任务运行
+📋 转录: waiting_gpu=0, ready_upload=0
+📋 导演版: pending=1543, running=2
+📋 自编版: pending=436, running=2
+
+⚠️ GPU 空闲超 1385 分钟（~23小时），但积压 1979 个作业未处理！
+
+### 自动修复操作
+🔧 Pipeline 重置完成:
+  • 导演版: reset=2, checked=2
+  • 自编版: reset=2, checked=2
+🔄 已重启后端触发 backfill（GPU 服务最近已重启，跳过 GPU 重启）
+
+建议：等待约 1 分钟后重新运行监控确认作业开始推进。

@@ -1,0 +1,16 @@
+# GPU 监控报告 - 2026-06-21 11:48 CST
+
+## 状态
+⚠️ GPU 空闲超 2815 分钟（~47小时），但有作业积压
+
+## 队列详情
+- 转录：waiting_gpu=0, ready_upload=0
+- 导演版：pending=856, running=2
+- 自编版：pending=508, running=2
+
+## 自动修复操作
+- 🔧 重置 pipeline: director_reset=2, creative_reset=2, director_checked=2, creative_checked=2
+- 🔄 重启后端触发 backfill（GPU 最近已重启，跳过 GPU 重启）
+
+## 备注
+Telegram bot token 未配置，无法自动发送通知。请手动检查后端恢复情况。

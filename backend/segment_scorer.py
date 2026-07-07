@@ -524,6 +524,7 @@ async def _call_bedrock_vision(frame_paths: list[str]) -> dict | None:
     Call Bedrock Claude Haiku with 1–2 JPEG frames.
     Returns parsed analysis dict or None on failure.
     """
+    global _semantic_disabled, _semantic_fail_count
     content = []
     for fp in frame_paths:
         try:
@@ -559,7 +560,6 @@ async def _call_bedrock_vision(frame_paths: list[str]) -> dict | None:
         if resp.status_code != 200:
             logger.warning(f"LLM vision {resp.status_code}: {resp.text[:200]}")
             if resp.status_code in (400, 403, 404):
-                global _semantic_disabled
                 _semantic_disabled = True
                 logger.error(
                     f"LLM vision permanently disabled (status {resp.status_code}). "
@@ -576,7 +576,6 @@ async def _call_bedrock_vision(frame_paths: list[str]) -> dict | None:
             logger.warning(f"No JSON in vision response: {raw[:200]}")
     except Exception as e:
         logger.warning(f"Bedrock vision call failed: {e}")
-        global _semantic_fail_count, _semantic_disabled
         _semantic_fail_count += 1
         if _semantic_fail_count >= _SEMANTIC_FAIL_THRESHOLD:
             _semantic_disabled = True
