@@ -138,7 +138,7 @@ async def _startup_trigger_pipelines():
     if not gpu_is_online():
         logger.info("Startup pipeline trigger: GPU service offline — skipping dispatch")
         return
-    from transcribe import _run_director_pipeline, _run_creative_pipeline
+    from transcribe import _run_director_pipeline, _run_creative_pipeline, _extract_srt_for_director
     BATCH_SIZE = 10
     try:
         async with aio_connect() as db:
@@ -149,16 +149,41 @@ async def _startup_trigger_pipelines():
                 """SELECT id FROM clip_groups
                    WHERE classic_status = 2
                      AND (director_status IN (0, -1, -3))
-                     AND (director_error IS NULL OR director_error = '')
-                     AND director_error NOT LIKE '%no recordings%'
-                     AND director_error NOT LIKE '%recording files missing%'
-                     AND director_error NOT LIKE '%physically deleted%'
-                     AND director_error NOT LIKE '%无录像文件%'
-                     AND director_error NOT LIKE '%无合并素材%'
-                     AND director_error NOT LIKE '%时长%'
+                     AND (
+                       director_error IS NULL OR director_error = '' OR (
+                         director_error NOT LIKE '%no recordings%'
+                         AND director_error NOT LIKE '%recording files missing%'
+                         AND director_error NOT LIKE '%physically deleted%'
+                         AND director_error NOT LIKE '%无录像文件%'
+                         AND director_error NOT LIKE '%无合并素材%'
+                         AND director_error NOT LIKE '%no SRT content%'
+                         AND director_error NOT LIKE '%SRT%'
+                         AND director_error NOT LIKE '%video_clips is EMPTY%'
+                         AND director_error NOT LIKE '%时长%'
+                       )
+                     )
                    ORDER BY id DESC"""
             ) as cur:
                 pending_director = [r["id"] for r in await cur.fetchall()]
+
+            # Director mode requires SRT content. Old records often have DB status
+            # transcribed=2 but no .srt file on disk, so mark those as permanent
+            # skips before dispatching to avoid endless startup retries.
+            srt_ready_director = []
+            skipped_no_srt = 0
+            for gid in pending_director:
+                if await _extract_srt_for_director(gid):
+                    srt_ready_director.append(gid)
+                else:
+                    await db.execute(
+                        "UPDATE clip_groups SET director_status = -2, director_error = ? WHERE id = ?",
+                        ("no SRT content available", gid),
+                    )
+                    skipped_no_srt += 1
+            if skipped_no_srt:
+                await db.commit()
+                logger.warning(f"Startup pipeline trigger: skipped {skipped_no_srt} director groups with missing SRT")
+            pending_director = srt_ready_director
             # Creative groups: classic done, director done, creative not done
             # Exclude groups with unrecoverable errors
             async with db.execute(
@@ -3699,7 +3724,7 @@ async def _periodic_director_dispatch():
     Skips groups that failed with 'no SRT content available' (SRT files are gone).
     """
     from gpu_state import is_online as gpu_is_online
-    from transcribe import _run_director_pipeline
+    from transcribe import _run_director_pipeline, _extract_srt_for_director
     BATCH_LIMIT = 10
     while True:
         try:
@@ -3715,21 +3740,40 @@ async def _periodic_director_dispatch():
                        WHERE editing_mode = 'director'
                          AND classic_status = 2
                          AND director_status IN (0, -1, -3)
-                         AND director_error != 'no SRT content available'
-                         AND director_error NOT LIKE '%no recordings%'
-                         AND director_error NOT LIKE '%recording files missing%'
-                         AND director_error NOT LIKE '%physically deleted%'
-                         AND director_error NOT LIKE '%无录像文件%'
-                         AND director_error NOT LIKE '%无合并素材%'
-                         AND director_error NOT LIKE '%时长%'
-                         AND director_error NOT LIKE '%video_clips is EMPTY%'
+                         AND (director_error IS NULL OR director_error = '' OR (
+                           director_error NOT LIKE '%no recordings%'
+                           AND director_error NOT LIKE '%recording files missing%'
+                           AND director_error NOT LIKE '%physically deleted%'
+                           AND director_error NOT LIKE '%无录像文件%'
+                           AND director_error NOT LIKE '%无合并素材%'
+                           AND director_error NOT LIKE '%no SRT content%'
+                           AND director_error NOT LIKE '%SRT%'
+                           AND director_error NOT LIKE '%时长%'
+                           AND director_error NOT LIKE '%video_clips is EMPTY%'
+                         ))
                        ORDER BY id ASC
                        LIMIT ?""",
                     (BATCH_LIMIT,),
                 ) as cur:
                     rows = await cur.fetchall()
                     pending_director = [r["id"] for r in rows]
-                
+
+                srt_ready_director = []
+                skipped_no_srt = 0
+                for gid in pending_director:
+                    if await _extract_srt_for_director(gid):
+                        srt_ready_director.append(gid)
+                    else:
+                        await db.execute(
+                            "UPDATE clip_groups SET director_status = -2, director_error = ? WHERE id = ?",
+                            ("no SRT content available", gid),
+                        )
+                        skipped_no_srt += 1
+                if skipped_no_srt:
+                    await db.commit()
+                    logger.warning(f"Periodic director dispatch: skipped {skipped_no_srt} groups with missing SRT")
+                pending_director = srt_ready_director
+
                 if not pending_director:
                     logger.debug("Periodic director dispatch: no recoverable pending groups")
                 else:

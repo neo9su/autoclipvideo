@@ -479,3 +479,41 @@
 - 14 个 director pending 组应被自动调度处理
 - 3 个 creative ready 组应被自动调度处理
 
+
+---
+
+## ✅ 2026-07-09 00:35 — Backfill 防重复失败 + 29.x 秒成片补尾帧
+
+### 本次修复
+1. **Director/Creative 29.x 秒边界处理**
+   - 文件：`backend/transcribe.py`
+   - 新增 `_pad_video_to_min_duration()`：当成片时长在 **28.0s ~ 30.0s** 时，不再直接失败，而是用 ffmpeg `tpad` 克隆尾帧并 `apad` 补音频到 **30.5s**。
+   - Director 与 Creative 共用该逻辑；低于 28s 的明显异常视频仍按最低时长失败处理。
+
+2. **无 SRT 历史组不再反复调度**
+   - 文件：`backend/transcribe.py`, `backend/main.py`
+   - Startup trigger / periodic director dispatch / backfill Phase 2 调度前统一检查 `_extract_srt_for_director()`。
+   - 对 MP4 存在但 `.srt` 缺失的历史 Director 组，标记：
+     - `director_status = -2`
+     - `director_error = 'no SRT content available'`
+   - 避免每次后端重启或 5 分钟周期调度都重复触发 `no SRT content available`。
+
+3. **SQL 过滤修正**
+   - 修复 `director_error IS NULL` 与 `NOT LIKE` 混用导致 NULL 待处理任务被误排除的问题。
+   - 不可恢复错误（无 SRT、无录像、物理删除、时长不足、video_clips empty）统一排除。
+
+### 验证
+- `python3 -m py_compile backend/transcribe.py backend/main.py` ✅
+- `git diff --check -- backend/transcribe.py backend/main.py` ✅
+- 后端已重启，监听 `0.0.0.0:8899` ✅
+- GPU 服务健康：`10.190.0.203:8877/health` 返回 OK，queue_depth=1 ✅
+- `backend_run.log` 中 `Batches:` 计数为 0 ✅
+- 重启后日志显示：
+  - `Backfill: skipping 1 director groups with missing recording/SRT files`
+  - 未再看到本轮启动后 `group 3703 failed: no SRT content available` 重复调度
+
+### 当前仍未完成/阻塞
+- 发布失败任务仍有约 **490** 个，核心阻塞仍是抖音 Cookie/页面超时问题，需要重新登录刷新 Cookie 后再重置可恢复发布任务。
+- 历史 Director pending 仍较多（约 **1370**），其中大量是历史数据状态不一致/缺 SRT/缺素材，需要后续批量清理或按近 7 天选择性恢复。
+- Creative pending 约 **528**，当前后端会继续调度 director 已完成的 Creative 组。
+- GPU 侧服务仍无可用重启接口，若需 GPU 进程级修复仍需要 SSH/管理员协助。

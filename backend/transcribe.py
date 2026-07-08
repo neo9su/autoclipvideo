@@ -932,6 +932,54 @@ async def _get_group_total_duration(group_id: int) -> float:
     return total
 
 
+def _pad_video_to_min_duration(out_path: str, current_duration: float, min_duration: float = 30.0, target_duration: float = 30.5) -> Optional[str]:
+    """Pad near-threshold videos by cloning the last frame instead of failing.
+
+    Some GPU compositions land at 29.x seconds because of transition/audio
+    rounding. Douyin needs >=30s, so for near misses we extend video/audio to
+    30.5s. Returns the usable output path, or None if padding failed or the
+    clip is too short to rescue safely.
+    """
+    if current_duration >= min_duration:
+        return out_path
+    if current_duration < 28.0:
+        return None
+
+    import subprocess as _sp
+    from pathlib import Path as _Path
+
+    src = _Path(out_path)
+    padded = src.with_name(src.stem + "_padded.mp4")
+    pad = max(0.1, target_duration - current_duration)
+    cmd = [
+        "ffmpeg", "-y", "-i", str(src),
+        "-vf", f"tpad=stop_mode=clone:stop_duration={pad:.3f}",
+        "-af", f"apad=pad_dur={pad:.3f}",
+        "-t", f"{target_duration:.3f}",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart",
+        str(padded),
+    ]
+    result = _sp.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0 or not padded.exists() or padded.stat().st_size <= 0:
+        logger.warning(
+            "Failed to pad near-threshold video %s from %.1fs to %.1fs: %s",
+            out_path, current_duration, target_duration, (result.stderr or "")[-300:],
+        )
+        try:
+            padded.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return None
+
+    try:
+        src.unlink(missing_ok=True)
+    except Exception:
+        pass
+    return str(padded)
+
+
 async def _check_group_recordings_exist(group_id: int) -> tuple[bool, list]:
     """Check if all recordings for a group exist on disk.
     Returns (all_exist, list_of_missing_filenames)."""
@@ -1166,11 +1214,16 @@ async def _run_director_pipeline_inner(group_id: int):
         )
         _dur = float(_dur_result.stdout.strip()) if _dur_result.stdout.strip() else 0.0
         if _dur < 30.0:
-            try:
-                os.remove(out_path)
-            except Exception:
-                pass
-            return await _fail(f"导演版视频时长 {_dur:.1f}s < 30s 最低要求")
+            padded_path = _pad_video_to_min_duration(out_path, _dur)
+            if padded_path:
+                logger.info(f"Director pipeline group {group_id}: padded video from {_dur:.1f}s to >=30s")
+                out_path = padded_path
+            else:
+                try:
+                    os.remove(out_path)
+                except Exception:
+                    pass
+                return await _fail(f"导演版视频时长 {_dur:.1f}s < 30s 最低要求")
 
         async with aio_connect() as db:
             await db.execute(
@@ -1373,11 +1426,16 @@ async def _run_creative_pipeline_inner(group_id: int):
         )
         _dur = float(_dur_result.stdout.strip()) if _dur_result.stdout.strip() else 0.0
         if _dur < 30.0:
-            try:
-                os.remove(out_path)
-            except Exception:
-                pass
-            return await _fail(f"自编版视频时长 {_dur:.1f}s < 30s 最低要求")
+            padded_path = _pad_video_to_min_duration(out_path, _dur)
+            if padded_path:
+                logger.info(f"Creative pipeline group {group_id}: padded video from {_dur:.1f}s to >=30s")
+                out_path = padded_path
+            else:
+                try:
+                    os.remove(out_path)
+                except Exception:
+                    pass
+                return await _fail(f"自编版视频时长 {_dur:.1f}s < 30s 最低要求")
 
         async with aio_connect() as db:
             await db.execute(
@@ -1472,11 +1530,16 @@ async def backfill_auto_merge():
                        LIMIT 1""", (gid,)
                 ) as rcur:
                     rows = await rcur.fetchall()
-                    for row in rows:
-                        fp = recordings_dir / row['filename']
-                        if fp.exists():
-                            valid_director.append(gid)
-                            break
+                    has_mp4 = any((recordings_dir / row['filename']).exists() for row in rows)
+                has_srt = bool(await _extract_srt_for_director(gid))
+                if has_mp4 and has_srt:
+                    valid_director.append(gid)
+                else:
+                    await db.execute(
+                        "UPDATE clip_groups SET director_status = -2, director_error = ? WHERE id = ?",
+                        ("no SRT content available", gid),
+                    )
+            await db.commit()
             
             # Groups where director done but creative not started (must have recordings with valid files)
             # Exclude -2 (permanently failed: no recordings / duration too short) to avoid infinite re-queue
@@ -1512,7 +1575,7 @@ async def backfill_auto_merge():
             skipped_director = len(raw_director) - len(valid_director)
             skipped_creative = len(raw_creative) - len(valid_creative)
             if skipped_director > 0:
-                logger.warning(f"Backfill: skipping {skipped_director} director groups with missing recording files")
+                logger.warning(f"Backfill: skipping {skipped_director} director groups with missing recording/SRT files")
             if skipped_creative > 0:
                 logger.warning(f"Backfill: skipping {skipped_creative} creative groups with missing recording files")
 
