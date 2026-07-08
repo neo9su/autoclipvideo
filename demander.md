@@ -517,3 +517,49 @@
 - 历史 Director pending 仍较多（约 **1370**），其中大量是历史数据状态不一致/缺 SRT/缺素材，需要后续批量清理或按近 7 天选择性恢复。
 - Creative pending 约 **528**，当前后端会继续调度 director 已完成的 Creative 组。
 - GPU 侧服务仍无可用重启接口，若需 GPU 进程级修复仍需要 SSH/管理员协助。
+
+---
+
+## ✅ 2026-07-09 03:58 — 修复脚本 JSON 解析鲁棒性 + Tencent TTS Unicode 异常
+
+### 当前巡检
+- 后端仍在 `0.0.0.0:8899` 运行。
+- GPU 服务与 watchdog 均健康：`10.190.0.203:8877/health`、`10.190.0.203:8878/health` 返回 OK。
+- `backend_run.log` 中 `Batches:` 计数仍为 0，日志污染未复发。
+- Publish scheduler 当前处于 00:00-07:00 低活跃时段，会跳过发布调度。
+
+### 本次发现的新主要失败
+1. `script generation: no valid JSON found in response`
+   - LLM 偶发返回 markdown code fence、前后说明文本或尾随逗号，旧解析逻辑直接失败。
+2. `Tencent TTS exception: 'ascii' codec can't encode character '\u2026'`
+   - 文案中出现中文省略号 `…` 等 Unicode 标点时，TTS 请求/签名链路触发 ASCII 编码异常。
+
+### 本次修复
+1. **Director/Creative 脚本 JSON 提取增强**
+   - 文件：`backend/director_script.py`
+   - 新增 `_extract_json_object()`：
+     - 支持从 markdown ```json code fence 中提取 JSON。
+     - 支持从前后有说明文字的响应里按括号平衡提取首个 JSON object。
+     - 自动清理对象/数组尾随逗号。
+   - 目标：减少 `no valid JSON found in response` 造成的 Director/Creative 偶发失败。
+
+2. **Tencent TTS 文本 Unicode 防护**
+   - 文件：`backend/voice_director.py`
+   - ASCII 编码路径改为 UTF-8；并新增 `_normalize_tts_text()` 规整高风险标点：
+     - `…` → `...`
+     - `—` → `-`
+   - 目标：避免 TTS 遇到中文省略号/破折号时异常中断。
+
+### 验证
+- `python3 -m py_compile backend/voice_director.py backend/director_script.py backend/transcribe.py backend/main.py` ✅
+- `git diff --check -- backend/voice_director.py backend/director_script.py` ✅
+- 函数级自测 ✅
+  - `_extract_json_object('```json\n{"a":1,}\n```')` 可解析。
+  - `_extract_json_object('说明文字 {"a": [1,2,], "b": "ok",} 结束')` 可解析。
+  - `_normalize_tts_text('这个颜色很好看…适合通勤—约会')` 输出 `这个颜色很好看...适合通勤-约会`。
+- 后端已重启使修复生效。
+
+### 当前仍未完成
+- 发布失败任务仍约 490 个：需刷新抖音发布 Cookie 后处理。
+- 低于 28s 的 Director/Creative 成片仍会失败，这是有效保护；需后续从脚本时长/TTS 时长/片段匹配侧优化。
+- 少量转写 pending 与 clip failed 仍需继续观察：当前多数 clip failed 是短录像（如 10s < 30s），属于可跳过数据。

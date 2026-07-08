@@ -18,6 +18,16 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+
+def _normalize_tts_text(text: str) -> str:
+    """Normalize punctuation before cloud TTS/signing.
+
+    Tencent request signing and some fallback clients are sensitive to a few
+    unicode punctuation marks. Keep Chinese text intact but replace characters
+    that have repeatedly caused encoding/signing issues.
+    """
+    return (text or "").replace("…", "...").replace("—", "-").strip()
+
 # ── 配置 ───────────────────────────────────────────────────────────────────────
 _GPU_SERVICE_URL  = os.environ.get("GPU_SERVICE_URL", "http://10.190.0.203:8877")
 _DB_PATH          = os.path.join(os.path.dirname(__file__), "..", "douyin.db")

@@ -14,6 +14,61 @@ from llm_client import llm_post, LLM_MODEL as BEDROCK_MODEL
 
 logger = logging.getLogger(__name__)
 
+
+def _extract_json_object(response_text: str) -> dict:
+    """Extract the first valid JSON object from an LLM response.
+
+    LLMs occasionally wrap JSON in markdown fences or add explanatory text.
+    This parser walks balanced braces and tolerates trailing commas so script
+    generation does not fail on otherwise usable responses.
+    """
+    import json as _json
+    import re as _re
+
+    text = (response_text or "").strip()
+    if not text:
+        raise ValueError("empty response")
+    text = _re.sub(r"^```(?:json)?\s*", "", text, flags=_re.I)
+    text = _re.sub(r"\s*```$", "", text)
+
+    candidates = [text]
+    start = text.find("{")
+    if start >= 0:
+        depth = 0
+        in_str = False
+        esc = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+            else:
+                if ch == '"':
+                    in_str = True
+                elif ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        candidates.append(text[start:i + 1])
+                        break
+
+    last_error = None
+    for cand in candidates:
+        cleaned = _re.sub(r",\s*([}\]])", r"\1", cand.strip())
+        try:
+            obj = __extract_json_object(cleaned)
+            if isinstance(obj, dict):
+                return obj
+        except Exception as e:
+            last_error = e
+    raise ValueError(f"no valid JSON found in response: {last_error}")
+
+
 # 兼容旧变量名（部分地方引用）
 _LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://api.deepseek.com")
 BEDROCK_URL = _LLM_BASE_URL
@@ -537,7 +592,7 @@ warm / clear / natural / persuasive / confident / storytelling"""
                 cleaned = self._clean_json_string(candidate)
                 if cleaned != candidate:
                     try:
-                        script_json = json.loads(cleaned)
+                        script_json = _extract_json_object(cleaned)
                         if self._validate_script(script_json):
                             return self._finalize_script(script_json, vibe)
                     except json.JSONDecodeError:
@@ -598,7 +653,7 @@ warm / clear / natural / persuasive / confident / storytelling"""
         # 修复注释（// 或 # 开头的行）
         text = _re.sub(r'^\s*[#/].*$', '', text, flags=_re.MULTILINE)
         try:
-            json.loads(text)
+            _extract_json_object(text)
             return text
         except json.JSONDecodeError:
             return None
