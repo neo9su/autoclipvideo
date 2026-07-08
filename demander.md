@@ -563,3 +563,12 @@
 - 发布失败任务仍约 490 个：需刷新抖音发布 Cookie 后处理。
 - 低于 28s 的 Director/Creative 成片仍会失败，这是有效保护；需后续从脚本时长/TTS 时长/片段匹配侧优化。
 - 少量转写 pending 与 clip failed 仍需继续观察：当前多数 clip failed 是短录像（如 10s < 30s），属于可跳过数据。
+
+## 2026-07-09 v2.0.1 维护记录
+
+- 直接本地修复 28~30 秒剪辑边界，不再依赖 Claude Code。
+- 后端录制/剪辑硬下限从 30s 调整为 28s：`MIN_RECORDING_DURATION=28`、经典剪辑 `CLIP_MIN=28.0`、合并校验 `_MIN_DURATION_SEC=28`。
+- 导演版/自编版最终视频新增统一边界：`MIN_FINAL_VIDEO_DURATION=28.0`，28s 以下直接忽略/失败，28s~30.5s 自动用 ffmpeg `tpad + apad` 补到 30.5s，避免 29.x 被 30s 最低要求卡死。
+- 周期/启动调度允许旧的 28/29/30.0 秒时长失败重新入队；仍排除无录像、无 SRT、文件缺失等不可恢复错误。
+- 数据库已备份后仅重置旧 28~30s 时长失败的 `clip_groups` 为待处理；未处理失败发布任务，按当前策略人工处理。
+- 版本更新：README / frontend package version 升至 v2.0.1。

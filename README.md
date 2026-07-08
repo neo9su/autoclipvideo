@@ -1,6 +1,6 @@
 # AutoClipVideo — 抖音直播录屏全自动剪辑发布系统
 
-> **v2.0.0** — 直播录屏 → GPU 转录 → 三模式智能剪辑 → AI 文案 → 唇型同步 → 自动发布
+> **v2.0.1** — 直播录屏 → GPU 转录 → 三模式智能剪辑 → AI 文案 → 唇型同步 → 自动发布
 
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-green.svg)](https://fastapi.tiangolo.com)

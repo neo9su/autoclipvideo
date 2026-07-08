@@ -20,7 +20,9 @@ logger = logging.getLogger(__name__)
 GPU_SERVICE_URL = os.environ.get("GPU_SERVICE_URL", "http://10.190.0.203:8877")
 
 MIN_RECORDING_HEIGHT = 720  # recordings below this height are skipped from clip jobs
-MIN_RECORDING_DURATION = 30  # recordings shorter than this (seconds) are skipped
+MIN_RECORDING_DURATION = 28  # recordings shorter than this (seconds) are skipped
+MIN_FINAL_VIDEO_DURATION = 28.0  # director/creative final clips below this are not worth rescuing
+TARGET_PUBLISH_DURATION = 30.5  # pad near-threshold clips above Douyin's 30s boundary
 
 
 async def _get_video_duration(mp4_path: str) -> float:
@@ -932,17 +934,18 @@ async def _get_group_total_duration(group_id: int) -> float:
     return total
 
 
-def _pad_video_to_min_duration(out_path: str, current_duration: float, min_duration: float = 30.0, target_duration: float = 30.5) -> Optional[str]:
+def _pad_video_to_min_duration(out_path: str, current_duration: float, min_duration: float = MIN_FINAL_VIDEO_DURATION, target_duration: float = TARGET_PUBLISH_DURATION) -> Optional[str]:
     """Pad near-threshold videos by cloning the last frame instead of failing.
 
-    Some GPU compositions land at 29.x seconds because of transition/audio
-    rounding. Douyin needs >=30s, so for near misses we extend video/audio to
-    30.5s. Returns the usable output path, or None if padding failed or the
-    clip is too short to rescue safely.
+    Some GPU compositions land at 28-30 seconds because of transition/audio
+    rounding. Treat 28s as the business floor, and extend 28s+ outputs to
+    TARGET_PUBLISH_DURATION so Douyin's 30s boundary never rejects 29.x clips.
+    Returns the usable output path, or None if padding failed or the clip is
+    too short to rescue safely.
     """
-    if current_duration >= min_duration:
+    if current_duration >= target_duration:
         return out_path
-    if current_duration < 28.0:
+    if current_duration < min_duration:
         return None
 
     import subprocess as _sp
@@ -1213,17 +1216,19 @@ async def _run_director_pipeline_inner(group_id: int):
             capture_output=True, text=True,
         )
         _dur = float(_dur_result.stdout.strip()) if _dur_result.stdout.strip() else 0.0
-        if _dur < 30.0:
+        if _dur <= 0:
+            return await _fail("导演版视频时长探测失败")
+        if _dur < TARGET_PUBLISH_DURATION:
             padded_path = _pad_video_to_min_duration(out_path, _dur)
             if padded_path:
-                logger.info(f"Director pipeline group {group_id}: padded video from {_dur:.1f}s to >=30s")
+                logger.info(f"Director pipeline group {group_id}: padded video from {_dur:.1f}s to >={TARGET_PUBLISH_DURATION:.1f}s")
                 out_path = padded_path
             else:
                 try:
                     os.remove(out_path)
                 except Exception:
                     pass
-                return await _fail(f"导演版视频时长 {_dur:.1f}s < 30s 最低要求")
+                return await _fail(f"导演版视频时长 {_dur:.1f}s < {MIN_FINAL_VIDEO_DURATION:.0f}s 最低要求")
 
         async with aio_connect() as db:
             await db.execute(
@@ -1306,14 +1311,15 @@ async def _run_creative_pipeline_inner(group_id: int):
             await db.commit()
         return
 
-    # Pre-filter: check total recording duration before wasting GPU resources
+    # Pre-filter: check total recording duration before wasting GPU resources.
+    # Business rule: ignore unrecoverable <28s material, but allow/pad 28-30s.
     total_dur = await _get_group_total_duration(group_id)
-    if total_dur < 30.0:
-        logger.info(f"Creative pipeline group {group_id} skipping: total recording duration {total_dur:.1f}s < 30s minimum")
+    if 0 < total_dur < MIN_FINAL_VIDEO_DURATION:
+        logger.info(f"Creative pipeline group {group_id} skipping: total recording duration {total_dur:.1f}s < {MIN_FINAL_VIDEO_DURATION:.0f}s minimum")
         async with aio_connect() as db:
             await db.execute(
                 "UPDATE clip_groups SET creative_status = -2, creative_error = ? WHERE id = ?",
-                (f'total recording duration {total_dur:.1f}s < 30s minimum', group_id),
+                (f'total recording duration {total_dur:.1f}s < {MIN_FINAL_VIDEO_DURATION:.0f}s minimum', group_id),
             )
             await db.commit()
         return
@@ -1425,17 +1431,19 @@ async def _run_creative_pipeline_inner(group_id: int):
             capture_output=True, text=True,
         )
         _dur = float(_dur_result.stdout.strip()) if _dur_result.stdout.strip() else 0.0
-        if _dur < 30.0:
+        if _dur <= 0:
+            return await _fail("自编版视频时长探测失败")
+        if _dur < TARGET_PUBLISH_DURATION:
             padded_path = _pad_video_to_min_duration(out_path, _dur)
             if padded_path:
-                logger.info(f"Creative pipeline group {group_id}: padded video from {_dur:.1f}s to >=30s")
+                logger.info(f"Creative pipeline group {group_id}: padded video from {_dur:.1f}s to >={TARGET_PUBLISH_DURATION:.1f}s")
                 out_path = padded_path
             else:
                 try:
                     os.remove(out_path)
                 except Exception:
                     pass
-                return await _fail(f"自编版视频时长 {_dur:.1f}s < 30s 最低要求")
+                return await _fail(f"自编版视频时长 {_dur:.1f}s < {MIN_FINAL_VIDEO_DURATION:.0f}s 最低要求")
 
         async with aio_connect() as db:
             await db.execute(

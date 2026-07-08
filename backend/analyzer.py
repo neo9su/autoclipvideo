@@ -154,7 +154,8 @@ async def analyze_recording(recording_id: int, filename: str, room_id: int):
 # ── Group merge ───────────────────────────────────────────────────────────────
 
 _GPU_SERVICE_URL = os.environ.get("GPU_SERVICE_URL", "http://10.190.0.203:8877")
-_MIN_DURATION_SEC = 30
+_MIN_DURATION_SEC = 28
+_TARGET_PUBLISH_DURATION_SEC = 30.5
 
 
 class _ShortDurationError(RuntimeError):

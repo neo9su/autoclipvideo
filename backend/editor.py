@@ -48,7 +48,7 @@ def _pick_music() -> Optional[str]:
     except Exception as e:
         logger.warning(f"BGM generation failed: {e}")
         return None
-CLIP_MIN = 30.0   # seconds (三段式叙事最短时长)
+CLIP_MIN = 28.0   # seconds (业务最低时长；28-30s 由发布前补帧补音频兜底)
 CLIP_MAX = 60.0   # seconds（抖音完播率最佳上限 60s，>60s 完播率明显下降）
 MAX_CLIP_SEGMENTS = 50  # cap to avoid ffmpeg resource exhaustion
 SEG_PAD = 0.0     # no padding — avoids duplicate audio at segment boundaries
@@ -2259,9 +2259,9 @@ def _select_from_valid(valid: List[Seg], clip_min: float = CLIP_MIN, clip_max: f
     if not valid:
         return []
 
-    # Hard requirement: total valid material must be >= CLIP_MIN (30s).
+    # Hard requirement: total valid material must be >= CLIP_MIN (28s).
     # If there isn't enough content, return empty so the caller can reject the clip
-    # rather than produce an under-length video.
+    # rather than produce an under-length video. 28-30s outputs are padded later.
     total_valid_dur = sum(s.duration for s in valid)
     if total_valid_dur < CLIP_MIN:
         logger.warning(
