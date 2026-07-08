@@ -383,7 +383,7 @@ class SemanticMatcher:
         # ── Phase 2: 语义相似度回退 ──────────────────────────────────────
         if not candidates and self.model:
             try:
-                query_emb = self.model.encode([query_text])[0]
+                query_emb = self.model.encode([query_text], show_progress_bar=False)[0]
             except Exception:
                 query_emb = None
             
@@ -409,7 +409,7 @@ class SemanticMatcher:
                             continue
 
                         try:
-                            window_emb = self.model.encode([window_text])[0]
+                            window_emb = self.model.encode([window_text], show_progress_bar=False)[0]
                             similarity = float(np.dot(query_emb, window_emb) / (
                                 np.linalg.norm(query_emb) * np.linalg.norm(window_emb)
                             ))
@@ -710,7 +710,7 @@ class SemanticMatcher:
         if not self.model or not text1 or not text2:
             return 0.0
         try:
-            embeddings = self.model.encode([text1, text2])
+            embeddings = self.model.encode([text1, text2], show_progress_bar=False)
             similarity = np.dot(embeddings[0], embeddings[1]) / (
                 np.linalg.norm(embeddings[0]) * np.linalg.norm(embeddings[1])
             )

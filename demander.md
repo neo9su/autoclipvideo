@@ -2,6 +2,35 @@
 
 > 最后更新: 2026-07-08 01:09 CST
 
+## ✅ 2026-07-09 00:10 — 后端恢复、tqdm 本地污染修复、剪辑逻辑审计
+
+### 已执行
+1. 启动后端 FastAPI:8899，恢复监控/转录/剪辑/发布调度。
+2. 检查 GPU 服务：10.190.0.203:8877 正常，queue=0；watchdog 8878 正常。
+3. 排查日志污染：GPU 服务侧 `_SuppressStdout` 已存在，但本地 `sentence_transformers.encode()` 仍输出 tqdm `Batches:`。
+4. 修复 `backend/director_matcher.py`：所有本地 `SentenceTransformer.encode()` 增加 `show_progress_bar=False`。
+5. 重启后端验证：新日志 `Batches:` 计数为 0，`py_compile backend/director_matcher.py` 通过，`git diff --check` 通过。
+
+### 发现的问题 / 未完成任务
+1. **发布任务失败**：抖音发布 cookie 失效，日志反复出现 `Cookie 失效`、`upload area not found`、`Locator.wait_for timeout`。需要重新扫码登录或刷新发布账号 cookie。
+2. **老数据 SRT 大量缺失**：活跃且 `transcribed=2` 的历史录音中，仅近期 7/8 之后部分 SRT 文件仍在；旧 SRT 大量缺失，导致 Director backfill 中 4 组报 `no SRT content available`。这些组不适合继续重试，应标记永久失败或重新转录。
+3. **少量剪辑低于 30 秒**：Creative group 4655 生成视频 29.2s，被 30s 最低时长保护拒绝。需要调整补时/片段选择，或降低最低时长阈值。
+4. **GPU 服务重启接口不可用**：`/admin/restart` 与 watchdog `/restart` 返回 404，SSH 失败；如果要让 GPU 侧 suppress 生效，需要服务器管理员重启服务。
+
+### 当前剪辑逻辑总结
+- Classic：录音转写完成后按 SRT 智能选段，使用音频/视觉/语义/LLM 评分，支持长段拆分、动态字幕、转场、运镜、缩放、PiP 等效果；输出写回 `recordings.clip_filename` / `clipped=2`。
+- Director：基于分组 SRT + 商品信息生成 7-8 段导演脚本，匹配原始录像片段，按房间 voice clone 合成旁白，GPU 合成最终视频；带文件存在性、SRT、30min 超时、最终时长 >=30s 校验。
+- Creative：不依赖 SRT 文案生成，按商品信息生成自编卖点脚本；仍依赖原始录像做画面匹配和 GPU 合成；同样有总素材时长、30min 超时、最终时长 >=30s 校验。
+- 场景增强：导演/自编版支持 scene_type 驱动的视觉区分、动态文字标注、特写/细节 PiP、对比场景分屏、camera_direction 运镜字段注入。
+
+### 建议下一步
+1. 优先刷新抖音发布 cookie，避免 490+ failed publish 继续堆积。
+2. 对 `no SRT content available` 的历史 Director 组做一次性永久失败标记，避免每次后端启动重复调度。
+3. 修复 Creative 29.x 秒边界：合成阶段自动补 1-2 秒尾帧或把最低阈值改成 28s。
+4. 如需清理历史 SRT 缺失影响，可只对近 7 天有 MP4 的 `transcribed=2` 录音重新转录，老数据不建议全量重转。
+
+---
+
 ## ✅ 2026-07-08 01:09 — 磁盘空间深度清理
 
 ### 问题
