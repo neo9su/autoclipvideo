@@ -562,6 +562,41 @@ async def _compose_video_bg(
             if not output_path:
                 raise RuntimeError("视频合成失败，请查看后端日志")
 
+            # Keep API/manual director workflow aligned with the automatic
+            # pipeline: <28s is too short to rescue; 28s~30.5s gets padded so
+            # Douyin never rejects near-boundary 29.x clips as under 30s.
+            import subprocess as _sp
+            from transcribe import (
+                MIN_FINAL_VIDEO_DURATION,
+                TARGET_PUBLISH_DURATION,
+                _pad_video_to_min_duration,
+            )
+
+            _dur_result = _sp.run(
+                ["ffprobe", "-v", "quiet", "-show_entries", "format=duration", "-of", "csv=p=0", output_path],
+                capture_output=True,
+                text=True,
+            )
+            _dur = float(_dur_result.stdout.strip()) if _dur_result.stdout.strip() else 0.0
+            if _dur <= 0:
+                raise RuntimeError("导演版视频时长探测失败")
+            if _dur < TARGET_PUBLISH_DURATION:
+                padded_path = _pad_video_to_min_duration(output_path, _dur)
+                if padded_path:
+                    logger.info(
+                        "Director API compose group %s: padded video from %.1fs to >=%.1fs",
+                        group_id,
+                        _dur,
+                        TARGET_PUBLISH_DURATION,
+                    )
+                    output_path = padded_path
+                else:
+                    try:
+                        os.remove(output_path)
+                    except Exception:
+                        pass
+                    raise RuntimeError(f"导演版视频时长 {_dur:.1f}s < {MIN_FINAL_VIDEO_DURATION:.0f}s 最低要求")
+
             # 清理配音文件（已嵌入视频）
             try:
                 if os.path.isfile(audio_path):
