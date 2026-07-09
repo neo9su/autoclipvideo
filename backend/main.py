@@ -3363,11 +3363,10 @@ async def regen_publish_task_meta(task_id: int):
     meta = await generate_meta(task["group_id"])
     if not meta:
         raise HTTPException(status_code=500, detail="LLM metadata generation failed")
-    schemes = meta.get("schemes", [])
-    best = schemes[0] if schemes else meta
-    title = best.get("title") or meta.get("title")
-    description = best.get("description") or meta.get("description")
-    tags = best.get("tags") or meta.get("tags")
+    parsed = _extract_publish_meta(meta)
+    title = parsed["title"]
+    description = parsed["description"]
+    tags = parsed["tags"]
     if not title:
         raise HTTPException(status_code=500, detail="No title generated")
     async with aio_connect() as db:
@@ -3379,41 +3378,67 @@ async def regen_publish_task_meta(task_id: int):
     return {"task_id": task_id, "title": title, "description": description, "tags": tags}
 
 
+def _extract_publish_meta(meta: Optional[dict], fallback_title: str = "") -> dict:
+    """Normalize meta_generator output to title/description/tags with safe fallbacks."""
+    meta = meta or {}
+    schemes = meta.get("schemes", []) if isinstance(meta, dict) else []
+    best = schemes[0] if schemes else meta
+    title = (best.get("title") or meta.get("title") or fallback_title or "").strip()
+    description = (best.get("description") or meta.get("description") or "").strip()
+    tags = (best.get("tags") or meta.get("tags") or "").strip()
+    return {"title": title, "description": description, "tags": tags}
+
+
 @app.post("/api/publish-tasks/bulk-regen-meta")
 async def bulk_regen_publish_task_meta(body: dict):
-    """Re-generate title/description/tags for all publish tasks with null titles."""
-    task_ids = body.get("task_ids")  # None = all null-title tasks
+    """Batch-generate title/description/tags for pending/scheduled publish tasks.
+
+    Default behavior fills only tasks missing title or description, so existing manually-edited
+    publish copy is not overwritten. Pass {force: true} to regenerate selected tasks anyway.
+    """
+    task_ids = body.get("task_ids")  # None = all pending/scheduled tasks missing metadata
+    force = bool(body.get("force", False))
+    statuses = body.get("statuses") or ["pending", "scheduled"]
+    statuses = [s for s in statuses if s in {"pending", "scheduled", "failed"}]
+    if not statuses:
+        statuses = ["pending", "scheduled"]
+
+    where = [f"status IN ({','.join('?' * len(statuses))})"]
+    params: list = list(statuses)
+
+    if task_ids:
+        task_ids = [int(i) for i in task_ids]
+        where.append(f"id IN ({','.join('?' * len(task_ids))})")
+        params.extend(task_ids)
+    if not force:
+        where.append("(title IS NULL OR TRIM(title) = '' OR description IS NULL OR TRIM(description) = '')")
+
+    where_sql = " AND ".join(where)
     async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
-        if task_ids:
-            placeholders = ",".join("?" * len(task_ids))
-            async with db.execute(
-                f"SELECT id, group_id FROM publish_tasks WHERE id IN ({placeholders}) AND title IS NULL",
-                task_ids,
-            ) as cur:
-                tasks = await cur.fetchall()
-        else:
-            async with db.execute(
-                "SELECT id, group_id FROM publish_tasks WHERE title IS NULL"
-            ) as cur:
-                tasks = await cur.fetchall()
+        async with db.execute(
+            f"""SELECT t.id, t.group_id, g.label as group_label
+                FROM publish_tasks t
+                JOIN clip_groups g ON t.group_id = g.id
+                WHERE {where_sql}
+                ORDER BY t.scheduled_at ASC, t.created_at ASC""",
+            params,
+        ) as cur:
+            tasks = await cur.fetchall()
 
     if not tasks:
-        return {"updated": 0, "message": "没有需要重新生成文案的任务"}
+        return {"updated": 0, "skipped": 0, "total": 0, "message": "没有需要生成文案的待发布/定时任务"}
 
     updated = 0
     skipped = 0
+    updated_ids = []
     for task in tasks:
         try:
             meta = await generate_meta(task["group_id"])
-            if not meta:
-                # Use fallback
-                meta = {"schemes": [{"type": "种草", "title": f"分组 {task['group_id']}"}]}
-            schemes = meta.get("schemes", [])
-            best = schemes[0] if schemes else meta
-            title = best.get("title") or meta.get("title")
-            description = best.get("description") or meta.get("description")
-            tags = best.get("tags") or meta.get("tags")
+            parsed = _extract_publish_meta(meta, task["group_label"] or f"分组 {task['group_id']}")
+            title = parsed["title"]
+            description = parsed["description"]
+            tags = parsed["tags"]
             if not title:
                 skipped += 1
                 continue
@@ -3424,11 +3449,12 @@ async def bulk_regen_publish_task_meta(body: dict):
                 )
                 await db2.commit()
             updated += 1
+            updated_ids.append(task["id"])
         except Exception as e:
             logger.error(f"[bulk-meta] Failed for task {task['id']}: {e}")
             skipped += 1
 
-    return {"updated": updated, "skipped": skipped, "total": len(tasks)}
+    return {"updated": updated, "skipped": skipped, "total": len(tasks), "task_ids": updated_ids}
 
 
 # ── Manual publish mark ───────────────────────────────────────────────────────

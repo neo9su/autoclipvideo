@@ -6,6 +6,7 @@
         <h3>发布任务</h3>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
           <button class="btn-secondary" @click="openBatchModal">批量排期</button>
+          <button class="btn-secondary" @click="doBulkRegenMeta" :disabled="bulkRegenning" title="为待发布/定时任务批量生成缺失的标题和描述">{{ bulkRegenning ? '生成中…' : '批量生成文案' }}</button>
           <button class="btn-secondary" @click="doBulkCancel" title="取消所有待发/定时任务">批量取消</button>
           <button class="btn-primary" @click="showCreateModal = true">+ 创建任务</button>
         </div>
@@ -427,7 +428,7 @@
         <div style="margin-bottom:10px">
           <label class="no-cart-toggle" style="color:#a78bfa">
             <input type="checkbox" v-model="batchForm.auto_meta" />
-            <span>自动 AI 生成文案（每篇独立生成，耗时较长）</span>
+            <span>自动 AI 生成标题和描述（每篇独立生成，耗时较长）</span>
           </label>
         </div>
 
@@ -520,7 +521,7 @@ import {
   getRooms, getGroups, getGroup, getPublishTasks, createPublishTask, retryPublishTask, cancelPublishTask, bulkCancelPublishTasks,
   getProducts, getPublishAccounts, createPublishAccount, deletePublishAccount, loginPublishAccount,
   generatePublishMeta, matchGroupProduct, createWS, deleteGroup, reclipRecording,
-  getUnscheduledGroups, batchSchedulePublish, regenPublishTaskMeta, reschedulePublishTask,
+  getUnscheduledGroups, batchSchedulePublish, regenPublishTaskMeta, bulkRegenPublishTaskMeta, reschedulePublishTask,
   checkAccountCookie, markManualPublish,
 } from '../api.js'
 import { useToast } from '../composables/toast.js'
@@ -530,6 +531,7 @@ const { showToast } = useToast()
 const tasks = ref([])
 const selectedTask = ref(null)
 const regenning = ref(false)
+const bulkRegenning = ref(false)
 const showRescheduleModal = ref(false)
 const rescheduleTask = ref(null)
 const rescheduleTime = ref('')
@@ -592,7 +594,7 @@ const batchForm = ref({
   start_datetime: _defaultBatchStart(),
   interval_minutes: 90,
   no_cart: false,
-  auto_meta: false,
+  auto_meta: true,
   product_ids: [],
 })
 const batchCartSearch = ref('')
@@ -926,6 +928,32 @@ async function doBulkCancel() {
   }
 }
 
+async function doBulkRegenMeta() {
+  if (bulkRegenning.value) return
+  const missingCount = tasks.value.filter(t =>
+    ['pending', 'scheduled'].includes(t.status) &&
+    (!(t.title || '').trim() || !(t.description || '').trim())
+  ).length
+  if (!missingCount) {
+    showToast('当前没有缺少标题/描述的待发布或定时任务', 'info')
+    return
+  }
+  if (!confirm(`将为 ${missingCount} 个待发布/定时任务生成标题和描述，可能需要一些时间。继续？`)) return
+  bulkRegenning.value = true
+  try {
+    const result = await bulkRegenPublishTaskMeta(null)
+    await loadTasks()
+    if (selectedTask.value?.id) {
+      selectedTask.value = tasks.value.find(t => t.id === selectedTask.value.id) || selectedTask.value
+    }
+    showToast(result.message || `已生成 ${result.updated} 个任务文案，跳过 ${result.skipped || 0} 个`, 'success')
+  } catch (e) {
+    showToast('批量生成失败: ' + e.message, 'error')
+  } finally {
+    bulkRegenning.value = false
+  }
+}
+
 async function deleteFailedTask(id) {
   try {
     await cancelPublishTask(id)
@@ -1137,7 +1165,7 @@ async function submitCreate() {
     description: newTask.value.description || null,
     tags: newTask.value.tags || null,
     product_ids: newTask.value.product_ids.length ? newTask.value.product_ids : null,
-    auto_meta: false,
+    auto_meta: !(newTask.value.title || '').trim() || !(newTask.value.description || '').trim(),
     no_cart: newTask.value.no_cart,
   }
   try {

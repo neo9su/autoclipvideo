@@ -23,7 +23,7 @@
 
 ### 验证
 - 待执行：`python3 -m py_compile backend/director_video.py backend/api_v2.py`
-- 待执行：`git diff --check`
+- `git diff --check` ✅
 
 ---
 
@@ -597,3 +597,16 @@
 - 周期/启动调度允许旧的 28/29/30.0 秒时长失败重新入队；仍排除无录像、无 SRT、文件缺失等不可恢复错误。
 - 数据库已备份后仅重置旧 28~30s 时长失败的 `clip_groups` 为待处理；未处理失败发布任务，按当前策略人工处理。
 - 版本更新：README / frontend package version 升至 v2.0.1。
+
+## 2026-07-09 16:55 — 待发布定时任务自动/批量生成标题描述
+
+- 创建发布任务默认启用 `auto_meta=true`：用户不手填标题/描述时，后端会自动调用 AI 生成标题、描述、标签，不再产生 `(无标题)` 的定时任务。
+- 批量排期弹窗默认勾选「自动 AI 生成标题和描述」，批量创建后后台逐条补齐文案。
+- 发布任务列表新增「批量生成文案」按钮：仅处理 `pending/scheduled` 且标题或描述为空的任务，避免覆盖已有人工文案。
+- 后端批量文案接口 `/api/publish-tasks/bulk-regen-meta` 增强：支持按状态筛选、按任务 ID 筛选、可选 `force` 重生成；默认只补齐缺失标题/描述的待发布/定时任务。
+- 单条/批量文案生成统一通过 `_extract_publish_meta()` 解析 `meta_generator` 输出，兼容多方案和旧单方案结构，并用分组名兜底标题。
+
+### 验证
+- `python3 -m py_compile backend/main.py` ✅
+- `npm run build`（frontend）✅
+- `git diff --check` ✅
