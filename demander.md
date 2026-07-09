@@ -1,6 +1,31 @@
 # demander.md — 抖音录屏流水线 需求 & 进度
 
-> 最后更新: 2026-07-08 01:09 CST
+> 最后更新: 2026-07-09 11:15 CST
+
+## ✅ 2026-07-09 11:15 — 导演剪辑逻辑增强：多场景、多镜头、细节强调
+
+### 已执行
+1. 调整 `backend/director_video.py` 导演合成层，不再只依赖 LLM 返回的镜头建议；合成前会根据 `scene_type` 自动补齐 `camera_direction` 和 `transition_type`。
+2. 增加场景默认剪辑动作：
+   - hook：拉远/快速推进，强化前三秒停留。
+   - problem/comparison：推进或强推进，突出痛点与对比差异。
+   - detail/product/wearing/demonstration：推进、强推进、左右平移，强调发丝、网底、佩戴步骤。
+   - result/scene/cta：拉远展示整体效果并收尾。
+3. 增加多镜头拆分：对 `detail/product/wearing/demonstration/comparison` 等细节/操作类长片段，7 秒以上自动拆成 2 个镜头，12 秒以上拆成 3 个镜头；后续镜头微调起点形成跳切，避免同一素材长时间静态播放。
+4. 字幕同步适配多镜头：拆分后的第一镜头承载完整字幕时间轴，后续镜头只做画面切换，避免重复字幕或字幕时间漂移。
+5. GPU payload 增加 `shot_index/shot_count`，并保留每个片段的 `scene_type/camera_direction/transition_type`，方便 GPU 侧按镜头信息做差异化处理；本地 ffmpeg fallback 已直接使用这些字段生成 zoompan/转场效果。
+6. 更新 `backend/api_v2.py` Director status 版本号到 `2.0.1`，与 README/frontend 版本一致。
+
+### 对抖音要求的剪辑动作说明
+- **多场景切换**：脚本仍按 hook、痛点、细节、佩戴、效果、CTA 等 `scene_type` 组织；合成层按场景套不同调色、字幕样式、节奏和转场，形成明确段落感。
+- **多镜头切换**：产品细节/佩戴演示/对比场景不再是一段长镜头，自动拆为 2-3 个短镜头，并通过轻微错位取材、slide/xfade/dissolve/fade 等转场制造跳切节奏。
+- **细节强调**：detail/product/comparison 场景默认强推进或推进，wearing/demonstration 场景默认左右平移跟随动作；关键词字幕继续高亮发丝、网底、佩戴步骤、固定方式等核心词。
+
+### 验证
+- 待执行：`python3 -m py_compile backend/director_video.py backend/api_v2.py`
+- 待执行：`git diff --check`
+
+---
 
 ## ✅ 2026-07-09 00:10 — 后端恢复、tqdm 本地污染修复、剪辑逻辑审计
 

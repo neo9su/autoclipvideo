@@ -83,7 +83,7 @@ async def get_director_status():
             k: {"label": v["label"], "description": v["description"], "pacing": v["pacing"]}
             for k, v in VIBE_CONFIGS.items()
         },
-        "version": "2.0.0",
+        "version": "2.0.1",
     }
 
 @director_router.post("/generate-script", response_model=ScriptGenerationResponse)

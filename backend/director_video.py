@@ -205,14 +205,18 @@ def _build_director_ass(video_clips: list, transition_dur: float,
         text      = (clip.get("script_text") or "").strip()
         vid_dur   = float(clip.get("duration") or 5.0)
         scene_id  = clip.get("scene_id")
-        # 优先用 TTS 实际时长，保证字幕跟语音同步；无则退化到视频片段时长
-        if tts_dur_by_scene and scene_id is not None and scene_id in tts_dur_by_scene:
+        # 优先用 TTS 实际时长，保证字幕跟语音同步；拆成多镜头的场景用 subtitle_duration 覆盖
+        # （第一镜头字幕覆盖整段，后续镜头只负责画面切换，不重复推进字幕时间轴）。
+        if clip.get("subtitle_duration"):
+            duration = float(clip.get("subtitle_duration") or vid_dur)
+        elif tts_dur_by_scene and scene_id is not None and scene_id in tts_dur_by_scene:
             duration = tts_dur_by_scene[scene_id]
         else:
             duration = vid_dur
 
         if not text:
-            cursor += duration - (transition_dur if i < n - 1 else 0)
+            if not clip.get("subtitle_timing_consumed"):
+                cursor += duration - (transition_dur if i < n - 1 else 0)
             continue
 
         # ── 逐句滚动字幕：将整段文案按标点分句，每句独立显示 ──────────────
@@ -371,6 +375,45 @@ class DirectorVideoComposer:
             'bitrate': '8M',
             'audio_sample_rate': 44100
         }
+
+        # 抖音审核/推荐更偏好多场景、多镜头和细节停留。
+        # LLM 偶尔会漏填 camera_direction / transition_type，合成层在这里兜底，
+        # 确保最终剪辑不是一条静态镜头拼接。
+        self._scene_camera_defaults = {
+            'hook': 'pull_out',
+            'problem': 'push_in',
+            'comparison': 'push_in_strong',
+            'transformation': 'pull_out',
+            'demonstration': 'pan_right',
+            'wearing': 'pan_right',
+            'detail': 'push_in_strong',
+            'product': 'push_in',
+            'result': 'pull_out',
+            'scene': 'pull_out',
+            'social_proof': 'static',
+            'promotion': 'push_in',
+            'urgency': 'push_in',
+            'conversion': 'pull_out',
+            'cta': 'pull_out',
+        }
+        self._scene_transition_defaults = {
+            'hook': 'zoomin',
+            'problem': 'xfade',
+            'comparison': 'dissolve',
+            'transformation': 'dissolve',
+            'demonstration': 'slideleft',
+            'wearing': 'slideleft',
+            'detail': 'fadeblack',
+            'product': 'xfade',
+            'result': 'fadewhite',
+            'scene': 'slideright',
+            'social_proof': 'xfade',
+            'promotion': 'slideleft',
+            'urgency': 'slideleft',
+            'conversion': 'fadeblack',
+            'cta': 'fadeblack',
+        }
+        self._detail_scene_types = {'detail', 'product', 'wearing', 'demonstration', 'comparison'}
     
     # ── GPU service URL (mirrors editor.py) ──────────────────────────────────
     _GPU_SERVICE_URL: str = __import__('os').environ.get(
@@ -468,6 +511,8 @@ class DirectorVideoComposer:
                     "scene_type": c.get("scene_type", ""),
                     "camera_direction": c.get("camera_direction", "static"),
                     "transition_type": c.get("transition_type", "xfade"),
+                    "shot_index": c.get("shot_index", 0),
+                    "shot_count": c.get("shot_count", 1),
                 }
                 for c in video_clips
             ]
@@ -621,6 +666,88 @@ class DirectorVideoComposer:
             logger.error(f"[DIRECTOR] compose_final_video UNHANDLED ERROR: {e}", exc_info=True)
             return None
 
+    def _enrich_clip_directives(self, clip: Dict, shot_index: int = 0) -> Dict:
+        """补齐场景驱动的镜头/转场指令，保证 GPU 与本地 fallback 都有明确剪辑动作。
+
+        目的：抖音要求多场景切换、多镜头切换、细节强调。这里把这些要求落到
+        可执行字段：scene_type → camera_direction / transition_type；同一场景拆分
+        出来的 shot_index 会交替左右平移/推进，避免连续镜头看起来一样。
+        """
+        scene_type = (clip.get('scene_type') or 'neutral').strip() or 'neutral'
+        enriched = dict(clip)
+
+        camera = (enriched.get('camera_direction') or '').strip()
+        if not camera or camera == 'static':
+            camera = self._scene_camera_defaults.get(scene_type, camera or 'static')
+
+        # 同一场景拆成多镜头时做镜头差异：动作/佩戴场景左右摇移，细节场景强推进+普通推进交替。
+        if shot_index > 0:
+            if scene_type in ('wearing', 'demonstration'):
+                camera = 'pan_left' if shot_index % 2 else 'pan_right'
+            elif scene_type in ('detail', 'product', 'comparison'):
+                camera = 'push_in' if shot_index % 2 else 'push_in_strong'
+            elif camera == 'static':
+                camera = 'push_in'
+
+        transition = (enriched.get('transition_type') or '').strip()
+        if not transition or transition in ('xfade', 'cut'):
+            transition = self._scene_transition_defaults.get(scene_type, transition or 'xfade')
+
+        enriched['scene_type'] = scene_type
+        enriched['camera_direction'] = camera
+        enriched['transition_type'] = transition
+        enriched['shot_index'] = shot_index
+        return enriched
+
+    def _split_clip_for_shots(self, clip: Dict) -> List[Dict]:
+        """把较长的讲解/细节片段拆成 2-3 个镜头段。
+
+        原始匹配常会把同一录像的一段讲解当成一个长片段。为了增加多镜头切换，
+        对产品细节、佩戴演示、对比类场景按时长拆分，并给第二/第三镜头微调
+        start_time，形成“同素材不同取景/运镜”的跳切效果。
+        """
+        duration = float(clip.get('duration') or 0.0)
+        scene_type = clip.get('scene_type') or 'neutral'
+        if scene_type not in self._detail_scene_types or duration < 7.0:
+            return [self._enrich_clip_directives(clip, 0)]
+
+        # 7-11 秒拆 2 镜头；12 秒以上拆 3 镜头，单镜头不低于约 3 秒。
+        shot_count = 3 if duration >= 12.0 else 2
+        part_dur = max(3.0, duration / shot_count)
+        rec_duration = float(clip.get('rec_duration') or 0.0)
+        base_start = float(clip.get('start_time') or 0.0)
+        shots: List[Dict] = []
+        remaining = duration
+        cursor = base_start
+
+        for si in range(shot_count):
+            d = part_dur if si < shot_count - 1 else remaining
+            d = max(1.0, d)
+            # 轻微跳切：后续镜头向前错开 0.45s，既保持语义连续，又制造镜头变化。
+            shot_start = cursor + (0.45 if si > 0 else 0.0)
+            if rec_duration > 0 and shot_start + d > rec_duration:
+                shot_start = max(0.0, rec_duration - d)
+            shot = dict(clip)
+            shot['start_time'] = shot_start
+            shot['duration'] = d
+            shot['script_text'] = clip.get('script_text', '') if si == 0 else ''
+            if si == 0:
+                # 字幕仍覆盖拆分前的完整场景时长；后续镜头只做画面切换。
+                shot['subtitle_duration'] = duration
+            else:
+                shot['subtitle_timing_consumed'] = True
+            shot['shot_parent_index'] = clip.get('index')
+            shot['shot_count'] = shot_count
+            shots.append(self._enrich_clip_directives(shot, si))
+            cursor += d
+            remaining -= d
+
+        logger.info(
+            "Split scene clip index=%s scene=%s dur=%.1fs into %s shots for multi-shot editing",
+            clip.get('index'), scene_type, duration, len(shots),
+        )
+        return shots
+
     async def _ensure_clips_on_gpu(self, video_clips: List[Dict]) -> None:
         """确保所有源文件都在 GPU 服务器上；缺少的文件通过 sync.py 上传。"""
         import aiohttp as _aio_ensure
@@ -747,14 +874,28 @@ class DirectorVideoComposer:
             else:
                 video_clips.append(clip)
         
-        # Re-index after merge
+        # Re-index after merge, then split long detail/product/wearing scenes into multiple shots.
+        enriched_clips = []
         for i, c in enumerate(video_clips):
             c['index'] = i
+            enriched_clips.extend(self._split_clip_for_shots(c))
+
+        # Re-index after multi-shot splitting
+        for i, c in enumerate(enriched_clips):
+            c['index'] = i
         
-        logger.info(f"Prepared {len(video_clips)} video clips (merged from {len(raw_clips)} segments)")
-        for c in video_clips:
-            logger.info(f"  clip {c['index']}: scene={c.get('scene_id')} dur={c['duration']:.1f}s start={c['start_time']:.1f}s")
-        return video_clips
+        logger.info(
+            f"Prepared {len(enriched_clips)} video clips "
+            f"(merged from {len(raw_clips)} segments; pre_split={len(video_clips)})"
+        )
+        for c in enriched_clips:
+            logger.info(
+                f"  clip {c['index']}: scene={c.get('scene_id')} type={c.get('scene_type')} "
+                f"shot={c.get('shot_index', 0)+1}/{c.get('shot_count', 1)} "
+                f"dur={c['duration']:.1f}s start={c['start_time']:.1f}s "
+                f"camera={c.get('camera_direction')} transition={c.get('transition_type')}"
+            )
+        return enriched_clips
     
     async def _find_recording_file(self, recording_id: int) -> Optional[Dict]:
         """查找录像原始文件路径，返回 {path, room_id, filename} 或 None。"""
