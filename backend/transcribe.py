@@ -14,6 +14,7 @@ from db import DB_PATH, aio_connect
 from editor import edit_recording, edit_recording_multi
 from analyzer import analyze_recording
 from thumbnail import generate_thumbnail
+from final_video import postprocess_final_video
 
 logger = logging.getLogger(__name__)
 
@@ -1230,6 +1231,11 @@ async def _run_director_pipeline_inner(group_id: int):
                     pass
                 return await _fail(f"导演版视频时长 {_dur:.1f}s < {MIN_FINAL_VIDEO_DURATION:.0f}s 最低要求")
 
+        processed_path = await postprocess_final_video(out_path)
+        if not processed_path:
+            return await _fail("导演版4K/50fps背景补齐后处理失败")
+        out_path = processed_path
+
         async with aio_connect() as db:
             await db.execute(
                 """UPDATE clip_groups SET
@@ -1444,6 +1450,11 @@ async def _run_creative_pipeline_inner(group_id: int):
                 except Exception:
                     pass
                 return await _fail(f"自编版视频时长 {_dur:.1f}s < {MIN_FINAL_VIDEO_DURATION:.0f}s 最低要求")
+
+        processed_path = await postprocess_final_video(out_path)
+        if not processed_path:
+            return await _fail("自编版4K/50fps背景补齐后处理失败")
+        out_path = processed_path
 
         async with aio_connect() as db:
             await db.execute(

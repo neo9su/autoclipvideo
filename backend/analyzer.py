@@ -17,6 +17,7 @@ import httpx
 
 from db import DB_PATH, aio_connect
 from llm_client import llm_post, LLM_MODEL as BEDROCK_MODEL, _LLM_BASE_URL, _LLM_API_KEY
+from final_video import postprocess_final_video
 
 logger = logging.getLogger(__name__)
 BEDROCK_URL   = _LLM_BASE_URL
@@ -176,6 +177,42 @@ async def _probe_duration(path: str) -> float:
         return 0.0
 
 
+async def _finalize_classic_merge(out_path: str, out_filename: str, group_id: int) -> Optional[str]:
+    """Apply final 4K/50fps/background-fill postprocess and persist classic output."""
+    processed_path = await postprocess_final_video(out_path)
+    if not processed_path:
+        err_msg = "经典版4K/50fps背景补齐后处理失败"
+        logger.error(f"Group {group_id}: {err_msg}")
+        async with aio_connect() as db:
+            await db.execute(
+                "UPDATE clip_groups SET classic_status = -1, merge_error = ? WHERE id = ?",
+                (err_msg, group_id),
+            )
+            await db.commit()
+        return None
+
+    final_filename = os.path.basename(processed_path)
+    size_mb = os.path.getsize(processed_path) / 1024 / 1024
+    logger.info(f"Group {group_id}: final classic video → {final_filename} ({size_mb:.1f} MB)")
+
+    async with aio_connect() as db:
+        await db.execute(
+            """UPDATE clip_groups SET
+               merge_status = 2, classic_status = 2, merged_filename = ?, merged_at = datetime('now')
+               WHERE id = ?""",
+            (final_filename, group_id),
+        )
+        await db.commit()
+
+    await _build_merged_srt(group_id, final_filename)
+
+    del_count = await _cleanup_original_recordings(group_id)
+    if del_count:
+        logger.info(f"Group {group_id}: cleaned up {del_count} original recording files")
+
+    return final_filename
+
+
 async def _gpu_concat(gpu_url: str, job_ids: list, out_path: str, group_id: int) -> Optional[str]:
     """Submit concat job to GPU server (stream-copy, requires in-memory clip job IDs)."""
     async with aiohttp.ClientSession() as session:
@@ -226,21 +263,7 @@ async def _gpu_concat(gpu_url: str, job_ids: list, out_path: str, group_id: int)
     size_mb = os.path.getsize(out_path) / 1024 / 1024
     logger.info(f"Group {group_id}: GPU concat done → {out_filename} ({size_mb:.1f} MB)")
 
-    async with aio_connect() as db:
-        await db.execute(
-            """UPDATE clip_groups SET
-               merge_status = 2, classic_status = 2, merged_filename = ?, merged_at = datetime('now')
-               WHERE id = ?""",
-            (out_filename, group_id),
-        )
-        await db.commit()
-
-    # Clean up original recordings after successful merge
-    del_count = await _cleanup_original_recordings(group_id)
-    if del_count:
-        logger.info(f"Group {group_id}: cleaned up {del_count} original recording files")
-
-    return out_filename
+    return await _finalize_classic_merge(out_path, out_filename, group_id)
 
 
 async def _gpu_classic_concat(gpu_url: str, clip_paths: list, out_path: str, group_id: int) -> Optional[str]:
@@ -326,21 +349,7 @@ async def _gpu_classic_concat(gpu_url: str, clip_paths: list, out_path: str, gro
     size_mb = os.path.getsize(out_path) / 1024 / 1024
     logger.info(f"Group {group_id}: GPU classic-concat done → {out_filename} ({size_mb:.1f} MB)")
 
-    async with aio_connect() as db:
-        await db.execute(
-            """UPDATE clip_groups SET
-               merge_status = 2, classic_status = 2, merged_filename = ?, merged_at = datetime('now')
-               WHERE id = ?""",
-            (out_filename, group_id),
-        )
-        await db.commit()
-
-    # Clean up original recordings after successful merge
-    del_count = await _cleanup_original_recordings(group_id)
-    if del_count:
-        logger.info(f"Group {group_id}: cleaned up {del_count} original recording files")
-
-    return out_filename
+    return await _finalize_classic_merge(out_path, out_filename, group_id)
 
 
 async def _cleanup_original_recordings(group_id: int) -> int:
@@ -589,22 +598,8 @@ async def merge_group(group_id: int) -> Optional[str]:
             return None
         size_mb = os.path.getsize(out_path) / 1024 / 1024
         logger.info(f"Group {group_id} merged (local fallback): {out_filename} ({size_mb:.1f} MB)")
-        async with aio_connect() as db:
-            await db.execute(
-                """UPDATE clip_groups SET
-                   merge_status = 2, classic_status = 2, merged_filename = ?, merged_at = datetime('now')
-                   WHERE id = ?""",
-                (out_filename, group_id),
-            )
-            await db.commit()
-        await _build_merged_srt(group_id, out_filename)
+        return await _finalize_classic_merge(out_path, out_filename, group_id)
 
-        # Clean up original recordings after successful merge
-        del_count = await _cleanup_original_recordings(group_id)
-        if del_count:
-            logger.info(f"Group {group_id}: cleaned up {del_count} original recording files")
-
-        return out_filename
     else:
         err_msg = stderr.decode(errors="replace")[-400:].strip()
         logger.error(f"Merge failed for group {group_id}: {err_msg}")

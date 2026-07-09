@@ -1,6 +1,31 @@
 # demander.md — 抖音录屏流水线 需求 & 进度
 
-> 最后更新: 2026-07-09 11:15 CST
+> 最后更新: 2026-07-09 20:13 CST
+
+## ✅ 2026-07-09 20:13 — 成片最终后处理：4K / 50fps / 背景补齐
+
+### 需求
+在剪辑完成的最后增加一道统一后处理工序：将最终短视频补分辨率到竖屏 4K、补帧率到 50fps，并对非 9:16 画面做背景补齐。
+
+### 已执行
+1. 新增 `backend/final_video.py`，提供统一 `postprocess_final_video(...)`：
+   - 输出画布固定为竖屏 4K：`2160x3840`。
+   - 输出帧率固定为 `50fps`。
+   - 视频主体等比缩放居中。
+   - 背景层使用原画面等比铺满、裁切、强模糊、轻微调暗/增饱和，解决横屏/非 9:16 素材黑边或空白边问题。
+   - 音频统一转 AAC 160k / 48k，并保留 `+faststart`。
+2. 接入导演模式自动流水线：`backend/transcribe.py` 的 `director_final_video` 写库前，先完成 28s/30.5s 时长兜底，再执行 4K/50fps/背景补齐。
+3. 接入自编/创意模式自动流水线：`creative_final_video` 写库前执行同一后处理。
+4. 接入手动/API 导演合成路径：`backend/api_v2.py` 在写入 `director_final_video` 前执行同一后处理，保证前端手动生成和后台自动生成一致。
+5. 接入经典剪辑合并路径：`backend/analyzer.py` 新增 `_finalize_classic_merge(...)`，三条经典合并路径（GPU classic-concat、GPU stream-copy concat、本地 ffmpeg concat）完成后统一进入 4K/50fps/背景补齐，再写入 `merged_filename`。
+6. 后处理失败时不静默降级：对应任务标记失败，避免发布不符合规格的视频。
+
+### 验证
+- `python3 -m py_compile backend/final_video.py backend/transcribe.py backend/analyzer.py backend/api_v2.py` ✅
+- ffmpeg 合成 640x360/25fps 测试视频后执行 `postprocess_final_video(...)`，ffprobe 输出：`2160,3840,50/1` ✅
+- 待执行：`git diff --check`、提交并推送。
+
+---
 
 ## ✅ 2026-07-09 11:15 — 导演剪辑逻辑增强：多场景、多镜头、细节强调
 

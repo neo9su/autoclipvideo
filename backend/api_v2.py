@@ -571,6 +571,7 @@ async def _compose_video_bg(
                 TARGET_PUBLISH_DURATION,
                 _pad_video_to_min_duration,
             )
+            from final_video import postprocess_final_video
 
             _dur_result = _sp.run(
                 ["ffprobe", "-v", "quiet", "-show_entries", "format=duration", "-of", "csv=p=0", output_path],
@@ -596,6 +597,11 @@ async def _compose_video_bg(
                     except Exception:
                         pass
                     raise RuntimeError(f"导演版视频时长 {_dur:.1f}s < {MIN_FINAL_VIDEO_DURATION:.0f}s 最低要求")
+
+            processed_path = await postprocess_final_video(output_path)
+            if not processed_path:
+                raise RuntimeError("导演版4K/50fps背景补齐后处理失败")
+            output_path = processed_path
 
             # 清理配音文件（已嵌入视频）
             try:
