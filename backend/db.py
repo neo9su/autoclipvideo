@@ -15,6 +15,22 @@ def aio_connect(path: str = None, timeout: float = None):
     )
 
 
+async def _ensure_columns(db, table: str, columns: dict) -> None:
+    """Idempotently add missing columns and verify schema after migration."""
+    async with db.execute(f"PRAGMA table_info({table})") as cur:
+        existing = {row[1] for row in await cur.fetchall()}
+    for name, definition in columns.items():
+        if name in existing:
+            continue
+        await db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+    await db.commit()
+    async with db.execute(f"PRAGMA table_info({table})") as cur:
+        after = {row[1] for row in await cur.fetchall()}
+    missing = [name for name in columns if name not in after]
+    if missing:
+        raise RuntimeError(f"Missing columns on {table}: {', '.join(missing)}")
+
+
 async def init_db():
     async with aio_connect() as db:
         # WAL mode: readers never block writers, writers never block readers
@@ -63,6 +79,14 @@ async def init_db():
                 director_audio_path TEXT,
                 director_final_video TEXT,
                 director_error TEXT,
+                qianchuan_status INTEGER DEFAULT 0,
+                qianchuan_script TEXT,
+                qianchuan_segments TEXT,
+                qianchuan_audio_path TEXT,
+                qianchuan_final_video TEXT,
+                qianchuan_error TEXT,
+                qianchuan_score REAL,
+                qianchuan_review TEXT,
                 vibe TEXT DEFAULT 'trendy'
             )
         """)
@@ -182,12 +206,32 @@ async def init_db():
             # 手动标记已发布（用户自行下载发布，不走系统发布）
             "ALTER TABLE publish_tasks ADD COLUMN manual_published INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE publish_tasks ADD COLUMN manual_published_at TEXT",
+            # 千川投流版独立流水线字段（0 未开始 / 1 生成中 / 2 完成 / -2 商品不匹配 / -3 质量失败 / -4 编码或探测失败）
+            "ALTER TABLE clip_groups ADD COLUMN qianchuan_status INTEGER DEFAULT 0",
+            "ALTER TABLE clip_groups ADD COLUMN qianchuan_script TEXT",
+            "ALTER TABLE clip_groups ADD COLUMN qianchuan_segments TEXT",
+            "ALTER TABLE clip_groups ADD COLUMN qianchuan_audio_path TEXT",
+            "ALTER TABLE clip_groups ADD COLUMN qianchuan_final_video TEXT",
+            "ALTER TABLE clip_groups ADD COLUMN qianchuan_error TEXT",
+            "ALTER TABLE clip_groups ADD COLUMN qianchuan_score REAL",
+            "ALTER TABLE clip_groups ADD COLUMN qianchuan_review TEXT",
         ]:
             try:
                 await db.execute(migration)
                 await db.commit()
             except Exception:
                 pass  # Column already exists
+
+        await _ensure_columns(db, "clip_groups", {
+            "qianchuan_status": "INTEGER DEFAULT 0",
+            "qianchuan_script": "TEXT",
+            "qianchuan_segments": "TEXT",
+            "qianchuan_audio_path": "TEXT",
+            "qianchuan_final_video": "TEXT",
+            "qianchuan_error": "TEXT",
+            "qianchuan_score": "REAL",
+            "qianchuan_review": "TEXT",
+        })
 
         # Backfill classic_status for existing merged groups (idempotent)
         await db.execute(

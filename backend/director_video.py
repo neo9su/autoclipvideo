@@ -395,6 +395,10 @@ class DirectorVideoComposer:
             'urgency': 'push_in',
             'conversion': 'pull_out',
             'cta': 'pull_out',
+            'result_hook': 'push_in',
+            'pain_point': 'push_in',
+            'product_proof': 'push_in_strong',
+            'tryon_result': 'pan_right',
         }
         self._scene_transition_defaults = {
             'hook': 'zoomin',
@@ -412,8 +416,12 @@ class DirectorVideoComposer:
             'urgency': 'slideleft',
             'conversion': 'fadeblack',
             'cta': 'fadeblack',
+            'result_hook': 'zoomin',
+            'pain_point': 'xfade',
+            'product_proof': 'fadeblack',
+            'tryon_result': 'slideleft',
         }
-        self._detail_scene_types = {'detail', 'product', 'wearing', 'demonstration', 'comparison'}
+        self._detail_scene_types = {'detail', 'product', 'wearing', 'demonstration', 'comparison', 'product_proof', 'tryon_result'}
     
     # ── GPU service URL (mirrors editor.py) ──────────────────────────────────
     _GPU_SERVICE_URL: str = __import__('os').environ.get(
@@ -475,7 +483,7 @@ class DirectorVideoComposer:
 
             # 3. 构建 ASS 字幕（本地生成，含关键词高亮）
             # video clip duration 已对齐 TTS，字幕用同一个 tts_dur_by_scene 保证同步
-            ass_content = _build_director_ass(video_clips, tr_dur, tts_dur_by_scene)
+            ass_content = config.get("qianchuan_ass_content") or _build_director_ass(video_clips, tr_dur, tts_dur_by_scene)
 
             # 4. 读取 TTS 音频 → base64
             import base64 as _b64
@@ -513,6 +521,7 @@ class DirectorVideoComposer:
                     "transition_type": c.get("transition_type", "xfade"),
                     "shot_index": c.get("shot_index", 0),
                     "shot_count": c.get("shot_count", 1),
+                    "edit_actions": c.get("edit_actions", []),
                 }
                 for c in video_clips
             ]
@@ -527,6 +536,9 @@ class DirectorVideoComposer:
                 "transition_duration": tr_dur,
                 "thumb_seek": 3.0,
                 "total_tts_duration": total_tts_duration,
+                "mode": config.get("mode", "director"),
+                "qianchuan_sound_cues": config.get("qianchuan_sound_cues", []),
+                "qianchuan_output_spec": config.get("qianchuan_output_spec"),
             }
 
             logger.info(f"[DIRECTOR] compose_final_video: submitting to {self._GPU_SERVICE_URL}/director-jobs, clips={len(clips_payload)}, ass_len={len(ass_content)}, tts_b64_len={len(tts_b64)}, total_tts_dur={total_tts_duration:.1f}s")
@@ -697,7 +709,49 @@ class DirectorVideoComposer:
         enriched['camera_direction'] = camera
         enriched['transition_type'] = transition
         enriched['shot_index'] = shot_index
+        enriched['edit_actions'] = self._normalize_edit_actions(enriched.get('edit_actions') or [])
+
+        # 千川脚本会把高级动作落在 edit_actions 中。GPU 直接消费 edit_actions；
+        # 本地 fallback 同步把这些动作降级成已有 camera_direction/scene_type 语义，
+        # 避免 GPU 不可用时丢失重点运镜。
+        if enriched['edit_actions']:
+            enriched['camera_direction'] = self._camera_from_edit_actions(enriched['edit_actions'], camera)
         return enriched
+
+    @staticmethod
+    def _normalize_edit_actions(actions: List[Dict]) -> List[Dict]:
+        """Deduplicate safe edit-action dictionaries for GPU/local fallback."""
+        normalized: List[Dict] = []
+        seen = set()
+        for action in actions or []:
+            if not isinstance(action, dict):
+                continue
+            action_type = str(action.get("type") or "").strip()
+            if not action_type:
+                continue
+            clean = {k: v for k, v in action.items() if isinstance(k, str) and k in {"type", "intensity", "region", "layout", "direction"}}
+            clean["type"] = action_type
+            key = tuple(sorted((k, str(v)) for k, v in clean.items()))
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(clean)
+        return normalized
+
+    @staticmethod
+    def _camera_from_edit_actions(actions: List[Dict], fallback: str) -> str:
+        """Map Qianchuan edit_actions onto existing local ffmpeg camera directives."""
+        action_types = [str(a.get("type") or "") for a in actions]
+        if any(t in action_types for t in ("detail_zoom", "crop_zoom")):
+            return "push_in_strong"
+        if "push_in" in action_types or "keyword_pop" in action_types:
+            return "push_in"
+        if "pull_out" in action_types:
+            return "pull_out"
+        if "pan" in action_types:
+            direction = next((str(a.get("direction") or "") for a in actions if a.get("type") == "pan"), "")
+            return "pan_left" if "left" in direction else "pan_right"
+        return fallback
 
     def _split_clip_for_shots(self, clip: Dict) -> List[Dict]:
         """把较长的讲解/细节片段拆成 2-3 个镜头段。
@@ -825,6 +879,7 @@ class DirectorVideoComposer:
                 # Camera direction and transition from LLM script
                 'camera_direction': seg.get('camera_direction', 'static'),
                 'transition_type': seg.get('transition_type', 'xfade'),
+                'edit_actions': segment_data.get('edit_actions') or seg.get('edit_actions') or [],
             }
             
             raw_clips.append(clip_info)
@@ -860,6 +915,7 @@ class DirectorVideoComposer:
                 prev = video_clips[-1]
                 prev['duration'] = (clip['start_time'] + clip['duration']) - prev['start_time']
                 prev['script_text'] = (prev['script_text'] + ' ' + clip['script_text']).strip()
+                prev['edit_actions'] = self._normalize_edit_actions((prev.get('edit_actions') or []) + (clip.get('edit_actions') or []))
                 # 跟踪合并的 scene_ids，用于字幕时长计算
                 if clip.get('scene_id') is not None:
                     if 'merged_scene_ids' not in prev:
@@ -999,7 +1055,7 @@ class DirectorVideoComposer:
 
                 # 第三步：合并音频
                 ok = await self._final_composition(
-                    merged_video, audio_path, output_path, style_config
+                    merged_video, audio_path, output_path, style_config, config
                 )
                 return output_path if ok else None
         
@@ -1372,6 +1428,26 @@ class DirectorVideoComposer:
                     'color': 'vivid',
                     'extra': '',
                 },
+                'result_hook': {
+                    'speed': 'setpts=0.90*PTS',
+                    'color': 'vivid',
+                    'extra': '',
+                },
+                'pain_point': {
+                    'speed': 'setpts=0.96*PTS',
+                    'color': 'cool',
+                    'extra': '',
+                },
+                'product_proof': {
+                    'speed': 'setpts=1.01*PTS',
+                    'color': 'warm',
+                    'extra': '',
+                },
+                'tryon_result': {
+                    'speed': 'setpts=0.96*PTS',
+                    'color': 'vivid',
+                    'extra': '',
+                },
             }
             sv = scene_visuals.get(scene_type, {})
             if sv.get('speed'):
@@ -1726,9 +1802,11 @@ class DirectorVideoComposer:
         return None
 
     async def _final_composition(self, merged_video: str, audio_path: str,
-                               output_path: str, style_config: Dict) -> bool:
+                               output_path: str, style_config: Dict, config: Optional[Dict] = None) -> bool:
         """最终合成（将合并好的视频片段与音频合并）"""
+        config = config or {}
         clean_audio_path = None
+        ass_path = None
         try:
             # Pre-convert audio to s16le: CosyVoice2 produces float32 PCM which can contain
             # NaN/Inf samples that crash the AAC encoder. Converting to integer PCM sanitises
@@ -1746,11 +1824,44 @@ class DirectorVideoComposer:
             if not Path(clean_audio_path).exists():
                 clean_audio_path = audio_path  # fallback to original
 
+            ass_content = config.get("qianchuan_ass_content")
+            qianchuan_cues = config.get("qianchuan_sound_cues") or []
+            filter_parts = []
+            video_map = "0:v"
+            audio_inputs = ["1:a"]
+
             cmd = [
                 'ffmpeg', '-y',
                 '-i', merged_video,
                 '-i', clean_audio_path,
             ]
+
+            if ass_content:
+                ass_path = str(Path(output_path).with_suffix(".qianchuan.ass"))
+                Path(ass_path).write_text(ass_content, encoding="utf-8")
+                # Escape for ffmpeg filter syntax while preserving local filesystem paths.
+                escaped_ass = ass_path.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+                filter_parts.append(f"[0:v]subtitles='{escaped_ass}'[vsub]")
+                video_map = "vsub"
+
+            for cue in qianchuan_cues:
+                sfx_path = cue.get("sfx_path") if isinstance(cue, dict) else None
+                if not sfx_path or not Path(str(sfx_path)).exists():
+                    continue
+                cue_time_ms = max(0, int(float(cue.get("time") or 0) * 1000))
+                input_index = 2 + len(audio_inputs) - 1
+                cmd.extend(['-i', str(sfx_path)])
+                label = f"cue{input_index}"
+                gain_db = float(cue.get("gain_db", -12))
+                filter_parts.append(f"[{input_index}:a]adelay={cue_time_ms}:all=1,volume={gain_db}dB[{label}]")
+                audio_inputs.append(f"[{label}]")
+
+            audio_map = "1:a"
+            if len(audio_inputs) > 1:
+                filter_parts.append(f"{''.join(audio_inputs)}amix=inputs={len(audio_inputs)}:duration=first:dropout_transition=0[amix]")
+                audio_map = "amix"
+            if filter_parts:
+                cmd.extend(['-filter_complex', ';'.join(filter_parts), '-map', f'[{video_map}]' if video_map != '0:v' else video_map, '-map', f'[{audio_map}]' if audio_map != '1:a' else audio_map])
 
             cmd.extend([
                 '-c:v', 'h264_videotoolbox',
@@ -1785,6 +1896,11 @@ class DirectorVideoComposer:
             if clean_audio_path and clean_audio_path != audio_path:
                 try:
                     Path(clean_audio_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
+            if ass_path:
+                try:
+                    Path(ass_path).unlink(missing_ok=True)
                 except Exception:
                     pass
     
