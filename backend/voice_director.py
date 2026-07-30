@@ -16,6 +16,8 @@ import aiohttp
 import aiosqlite
 import httpx
 
+from local_media_guard import local_media_slot
+
 logger = logging.getLogger(__name__)
 
 
@@ -265,6 +267,7 @@ class VoiceDirector:
 
         scenes: List[Dict] = script.get("scenes", [])
         is_creative = script.get("vibe") == "creative"
+        is_qianchuan = script.get("mode") == "qianchuan"
         if not scenes:
             return await self._synthesize_full_text(script, group_id, room_id_for_tts)
 
@@ -311,21 +314,22 @@ class VoiceDirector:
         # ── 时长保底：自编/导演模式合成音频 < 30s 时自动降速拉长 ──────────────
         _MIN_AUDIO_DUR = 30.0
         actual_merged_dur = await self._probe_duration(merged)
-        if actual_merged_dur > 0 and actual_merged_dur < _MIN_AUDIO_DUR:
+        if (not is_qianchuan) and actual_merged_dur > 0 and actual_merged_dur < _MIN_AUDIO_DUR:
             stretch_ratio = _MIN_AUDIO_DUR / actual_merged_dur  # e.g. 16s→30s = 1.875x 拉慢
             stretch_ratio = min(stretch_ratio, 2.0)  # atempo 下限 0.5，即最多拉慢2倍
             atempo_val = 1.0 / stretch_ratio          # atempo<1 = 降速
             stretched_path = merged + "_stretched.wav"
             logger.info(f"Creative audio too short ({actual_merged_dur:.1f}s < {_MIN_AUDIO_DUR}s), "
                         f"stretching {stretch_ratio:.2f}x (atempo={atempo_val:.3f})")
-            proc = await asyncio.create_subprocess_exec(
-                "ffmpeg", "-y", "-i", merged,
-                "-filter:a", f"atempo={atempo_val:.3f}",
-                stretched_path,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            await proc.communicate()
+            async with local_media_slot("voice director audio stretch"):
+                proc = await asyncio.create_subprocess_exec(
+                    "ffmpeg", "-y", "-i", merged,
+                    "-filter:a", f"atempo={atempo_val:.3f}",
+                    stretched_path,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await proc.communicate()
             if os.path.exists(stretched_path) and os.path.getsize(stretched_path) > 0:
                 os.replace(stretched_path, merged)
                 total_duration = await self._probe_duration(merged)
@@ -518,14 +522,15 @@ class VoiceDirector:
                     # 分两级：sqrt(speed) × sqrt(speed)
                     half = speed ** 0.5
                     atempo = f"atempo={half:.3f},atempo={half:.3f}"
-                proc = await asyncio.create_subprocess_exec(
-                    "ffmpeg", "-y", "-i", output_path,
-                    "-filter:a", atempo,
-                    fixed_path,
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
-                )
-                await proc.communicate()
+                async with local_media_slot("voice director audio speed correction"):
+                    proc = await asyncio.create_subprocess_exec(
+                        "ffmpeg", "-y", "-i", output_path,
+                        "-filter:a", atempo,
+                        fixed_path,
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.DEVNULL,
+                    )
+                    await proc.communicate()
                 if os.path.exists(fixed_path) and os.path.getsize(fixed_path) > 0:
                     os.replace(fixed_path, output_path)
                     actual_dur = await self._probe_duration(output_path)
@@ -699,15 +704,16 @@ class VoiceDirector:
     async def _probe_duration(self, path: str) -> float:
         """ffprobe 获取音频时长（秒）。"""
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "ffprobe", "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1",
-                path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            stdout, _ = await proc.communicate()
+            async with local_media_slot(f"voice director ffprobe {os.path.basename(path)}"):
+                proc = await asyncio.create_subprocess_exec(
+                    "ffprobe", "-v", "error",
+                    "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1",
+                    path,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                stdout, _ = await proc.communicate()
             return float(stdout.decode().strip())
         except Exception:
             return 0.0
@@ -725,16 +731,17 @@ class VoiceDirector:
             with open(list_file, "w", encoding="utf-8") as f:
                 for seg in segments:
                     f.write(f"file '{seg['audio_path']}'\n")
-            proc = await asyncio.create_subprocess_exec(
-                "ffmpeg", "-y",
-                "-f", "concat", "-safe", "0",
-                "-i", list_file,
-                "-c", "copy",
-                merged_path,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            await proc.communicate()
+            async with local_media_slot(f"voice director audio concat group {group_id}"):
+                proc = await asyncio.create_subprocess_exec(
+                    "ffmpeg", "-y",
+                    "-f", "concat", "-safe", "0",
+                    "-i", list_file,
+                    "-c", "copy",
+                    merged_path,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await proc.communicate()
             if not os.path.exists(merged_path) or os.path.getsize(merged_path) == 0:
                 logger.error("Audio merge produced empty output")
                 return None

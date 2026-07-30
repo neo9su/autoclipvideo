@@ -13,3 +13,10 @@ data/
 *.log
 *.bak
 
+.pid
+*.pid
+jobs.db
+gpu_service/jobs.db
+*.db.backup.*
+*.backup.*
+gpu_storage/

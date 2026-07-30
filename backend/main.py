@@ -516,12 +516,13 @@ app.add_middleware(
 
 # 集成导演模式API路由
 try:
-    from api_v2 import director_router, set_broadcast_fn
+    from api_v2 import director_router, qianchuan_router, set_broadcast_fn
     app.include_router(director_router)
+    app.include_router(qianchuan_router)
     set_broadcast_fn(broadcast)
-    logger.info("导演模式API路由已加载")
+    logger.info("导演模式/千川投流版API路由已加载")
 except ImportError as e:
-    logger.warning(f"导演模式API加载失败: {e}")
+    logger.warning(f"导演模式/千川投流版API加载失败: {e}")
 
 
 # ── Rooms ────────────────────────────────────────────────────────────────────
@@ -1253,7 +1254,7 @@ async def set_publish_versions(group_id: int, body: dict):
 
 
 @app.get("/api/groups/{group_id}/download")
-async def download_merged(group_id: int):
+async def download_merged(group_id: int, request: Request):
     async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM clip_groups WHERE id = ?", (group_id,)) as cur:
@@ -1276,7 +1277,13 @@ async def download_merged(group_id: int):
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="File missing")
     filename = os.path.basename(rel_path)
-    return FileResponse(path, media_type="video/mp4", filename=filename)
+    disposition_type = "inline" if request.headers.get("range") else "attachment"
+    return FileResponse(
+        path,
+        media_type="video/mp4",
+        filename=filename,
+        content_disposition_type=disposition_type,
+    )
 
 
 @app.get("/api/groups/{group_id}/director-download")
@@ -1328,10 +1335,11 @@ async def download_director_video(group_id: int, request: Request):
         return StreamingResponse(iter_range(), status_code=206, media_type="video/mp4", headers=headers)
 
     # Full file response
+    disposition_type = "inline" if range_header else "attachment"
     headers = {
         "Accept-Ranges": "bytes",
         "Content-Length": str(file_size),
-        "Content-Disposition": f'inline; filename="{filename}"',
+        "Content-Disposition": f'{disposition_type}; filename="{filename}"',
     }
     def iter_file():
         with open(path, "rb") as f:
@@ -1393,7 +1401,7 @@ async def download_creative_video(group_id: int, request: Request):
     headers = {
         "Accept-Ranges": "bytes",
         "Content-Length": str(file_size),
-        "Content-Disposition": f'inline; filename="{filename}"',
+        "Content-Disposition": f'attachment; filename="{filename}"',
     }
     def iter_file_creative():
         with open(path, "rb") as f:

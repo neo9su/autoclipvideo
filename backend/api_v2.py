@@ -5,20 +5,25 @@
 import asyncio
 import json
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from director_script import DirectorScriptGenerator
 from voice_director import VoiceDirector
 from director_matcher import SemanticMatcher, get_matcher
 from director_video import DirectorVideoComposer
+from qianchuan_script import generate_qianchuan_script
+from qianchuan_matcher import QianchuanMatcher, load_group_context, score_product_match
+from qianchuan_video import QianchuanVideoComposer
+from qianchuan_quality import check_qianchuan_video_quality
 
 logger = logging.getLogger(__name__)
 
 # 创建导演模式路由
 director_router = APIRouter(prefix="/api/v2/director", tags=["director"])
+qianchuan_router = APIRouter(prefix="/api/v2/qianchuan", tags=["qianchuan"])
 
 # WebSocket broadcast function — injected by main.py at startup
 _broadcast_fn = None
@@ -71,6 +76,26 @@ class DirectorModeToggleRequest(BaseModel):
     group_id: int
     enabled: bool
 
+class QianchuanGenerateRequest(BaseModel):
+    group_id: int = Field(gt=0)
+    product_id: Optional[str] = Field(default=None, max_length=128)
+    product_keywords: List[str] = Field(default_factory=list, max_length=20)
+    target_duration: float = Field(default=22.0, ge=18.0, le=35.0)
+    match_threshold: float = Field(default=0.58, ge=0.0, le=1.0)
+    dry_run: bool = False
+    generate_video: bool = True
+
+class QianchuanGenerateResponse(BaseModel):
+    success: bool
+    started: bool = False
+    group_id: int
+    status: int
+    script: Optional[Dict] = None
+    output_path: Optional[str] = None
+    score: Optional[float] = None
+    review: Optional[Dict] = None
+    error: Optional[str] = None
+
 @director_router.get("/status")
 async def get_director_status():
     """获取导演模式系统状态"""
@@ -85,6 +110,216 @@ async def get_director_status():
         },
         "version": "2.0.1",
     }
+
+
+@qianchuan_router.get("/status")
+async def get_qianchuan_status():
+    return {
+        "qianchuan_available": True,
+        "default_duration": 22,
+        "duration_range": "18-25s recommended, 35s hard max",
+        "structure": "0-3s结果钩子 / 3-7s痛点 / 7-13s产品证据 / 13-19s上脸效果 / 19-23s CTA",
+        "version": "1.0.0",
+    }
+
+
+@qianchuan_router.post("/generate", response_model=QianchuanGenerateResponse)
+async def generate_qianchuan(request: QianchuanGenerateRequest):
+    """生成千川投流版：强商品匹配 → 固定广告脚本 → 可选后台合成视频。"""
+    import aiosqlite
+    from db import DB_PATH
+
+    product_keywords = [kw.strip()[:80] for kw in request.product_keywords if kw and kw.strip()]
+
+    context = await load_group_context(DB_PATH, request.group_id, request.product_id)
+    if not context:
+        raise HTTPException(status_code=404, detail="分组不存在")
+
+    match = score_product_match(
+        context,
+        product_id=request.product_id,
+        keywords=product_keywords,
+        threshold=request.match_threshold,
+    )
+    if not match.get("ok"):
+        err = match.get("reason") or "商品强匹配不足"
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                """UPDATE clip_groups SET qianchuan_status = -2, qianchuan_error = ?,
+                   qianchuan_score = ?, qianchuan_review = ? WHERE id = ?""",
+                (err[:500], match.get("score"), json.dumps(match, ensure_ascii=False), request.group_id),
+            )
+            await db.commit()
+        return QianchuanGenerateResponse(
+            success=False, group_id=request.group_id, status=-2,
+            score=match.get("score"), review=match, error=err,
+        )
+
+    script = generate_qianchuan_script(
+        context["group"],
+        product_context=match.get("product") or {},
+        target_duration=request.target_duration,
+        selling_points=product_keywords,
+    )
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """UPDATE clip_groups SET qianchuan_status = ?, qianchuan_error = NULL,
+               qianchuan_script = ?, qianchuan_score = ?, qianchuan_review = ? WHERE id = ?""",
+            (
+                0 if request.dry_run or not request.generate_video else 1,
+                json.dumps(script, ensure_ascii=False),
+                match.get("score"),
+                json.dumps(match, ensure_ascii=False),
+                request.group_id,
+            ),
+        )
+        await db.commit()
+
+    if request.dry_run or not request.generate_video:
+        return QianchuanGenerateResponse(
+            success=True, started=False, group_id=request.group_id, status=0,
+            script=script, score=match.get("score"), review=match,
+        )
+
+    asyncio.create_task(_qianchuan_generate_bg(request.group_id, script))
+    return QianchuanGenerateResponse(
+        success=True, started=True, group_id=request.group_id, status=1,
+        script=script, score=match.get("score"), review=match,
+    )
+
+
+@qianchuan_router.post("/compose", response_model=QianchuanGenerateResponse)
+async def compose_qianchuan(request: QianchuanGenerateRequest):
+    """Alias for /generate, kept for callers that use compose wording."""
+    return await generate_qianchuan(request)
+
+
+@qianchuan_router.get("/group/{group_id}/result")
+async def get_qianchuan_result(group_id: int):
+    import aiosqlite
+    from db import DB_PATH
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            """SELECT qianchuan_status, qianchuan_script, qianchuan_segments,
+                      qianchuan_audio_path, qianchuan_final_video, qianchuan_error,
+                      qianchuan_score, qianchuan_review
+               FROM clip_groups WHERE id = ?""",
+            (group_id,),
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="分组不存在")
+    return {
+        "group_id": group_id,
+        "status": row[0],
+        "script": _loads_qianchuan_json(row[1]),
+        "segments": _loads_qianchuan_json(row[2]),
+        "audio_path": row[3],
+        "final_video": row[4],
+        "error": row[5],
+        "score": row[6],
+        "review": _loads_qianchuan_json(row[7]),
+    }
+
+
+def _loads_qianchuan_json(value: Optional[str]) -> Optional[Any]:
+    if not value:
+        return None
+    try:
+        return json.loads(value)
+    except Exception:
+        return {"raw": str(value)[:1000], "parse_error": True}
+
+
+async def _set_qianchuan_error(group_id: int, status: int, error: str, review: Optional[Dict] = None):
+    import aiosqlite
+    from db import DB_PATH
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """UPDATE clip_groups SET qianchuan_status = ?, qianchuan_error = ?,
+               qianchuan_review = COALESCE(?, qianchuan_review) WHERE id = ?""",
+            (status, (error or "")[:500], json.dumps(review, ensure_ascii=False) if review else None, group_id),
+        )
+        await db.commit()
+
+
+async def _qianchuan_generate_bg(group_id: int, script: Dict) -> None:
+    import aiosqlite
+    import os
+    from db import DB_PATH
+
+    async with _COMPOSE_SEM:
+        try:
+            # 1) Voiceover: reuse existing voice clone/TTS controller but keep qianchuan DB fields isolated.
+            voice_result = await voice_director.generate_voiceover(script=script, group_id=group_id, reference_audio_path=None)
+            if not voice_result.get("success"):
+                raise RuntimeError(voice_result.get("error") or "千川配音生成失败")
+            audio_path = voice_result.get("merged_audio_path")
+            audio_segments = voice_result.get("audio_segments") or []
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "UPDATE clip_groups SET qianchuan_audio_path = ?, qianchuan_segments = ? WHERE id = ?",
+                    (audio_path, json.dumps(audio_segments, ensure_ascii=False), group_id),
+                )
+                await db.commit()
+
+            # 2) Strong shot matching with ad-oriented metadata.
+            matcher = QianchuanMatcher(DB_PATH)
+            script_segments = [
+                {
+                    "text": s.get("voiceover_text", ""),
+                    "voiceover_text": s.get("voiceover_text", ""),
+                    "visual_keywords": s.get("visual_requirements", []),
+                    "priority_shots": s.get("priority_shots", []),
+                    "duration": max(2.5, next((a.get("duration", 0) for a in audio_segments if a.get("scene_id") == s.get("scene_id")), s.get("duration", 3.0))),
+                    "scene_type": s.get("scene_type", ""),
+                    "scene_id": s.get("scene_id"),
+                }
+                for s in script.get("scenes", [])
+            ]
+            matched = await matcher.match_qianchuan_segments(script_segments, group_id)
+            if len(matched) < max(3, len(script_segments) - 1):
+                raise RuntimeError("千川镜头匹配不足，拒绝生成")
+
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "UPDATE clip_groups SET qianchuan_segments = ? WHERE id = ?",
+                    (json.dumps({"audio_segments": audio_segments, "matched_segments": matched}, ensure_ascii=False), group_id),
+                )
+                await db.commit()
+
+            # 3) Compose via isolated composer wrapper.
+            recordings_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "recordings"))
+            composer = QianchuanVideoComposer(recordings_dir)
+            output_path = await composer.compose_qianchuan_video(matched, audio_path, script, audio_segments)
+            if not output_path:
+                raise RuntimeError("千川视频合成失败")
+
+            # 4) Quality gate. Keep statuses separate: -3 quality failure, -4 probe/encode failure.
+            try:
+                quality = await check_qianchuan_video_quality(output_path)
+            except Exception as qe:
+                await _set_qianchuan_error(group_id, -4, f"质量探测失败: {qe}")
+                await _broadcast({"type": "qianchuan_error", "group_id": group_id, "error": str(qe)})
+                return
+            if not quality.get("ok"):
+                await _set_qianchuan_error(group_id, -3, "; ".join(quality.get("errors", [])), quality)
+                await _broadcast({"type": "qianchuan_error", "group_id": group_id, "error": quality.get("errors", [])})
+                return
+
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    """UPDATE clip_groups SET qianchuan_final_video = ?, qianchuan_error = NULL,
+                       qianchuan_status = 2, qianchuan_review = ? WHERE id = ?""",
+                    (output_path, json.dumps(quality, ensure_ascii=False), group_id),
+                )
+                await db.commit()
+            await _broadcast({"type": "qianchuan_done", "group_id": group_id, "output_path": output_path})
+        except Exception as e:
+            msg = f"千川生成失败: {e}"
+            logger.error(f"_qianchuan_generate_bg failed for group {group_id}: {e}")
+            await _set_qianchuan_error(group_id, -1, msg)
+            await _broadcast({"type": "qianchuan_error", "group_id": group_id, "error": msg})
 
 @director_router.post("/generate-script", response_model=ScriptGenerationResponse)
 async def generate_script(request: ScriptGenerationRequest):
@@ -565,24 +800,19 @@ async def _compose_video_bg(
             # Keep API/manual director workflow aligned with the automatic
             # pipeline: <28s is too short to rescue; 28s~30.5s gets padded so
             # Douyin never rejects near-boundary 29.x clips as under 30s.
-            import subprocess as _sp
             from transcribe import (
                 MIN_FINAL_VIDEO_DURATION,
                 TARGET_PUBLISH_DURATION,
+                _get_video_duration,
                 _pad_video_to_min_duration,
             )
             from final_video import postprocess_final_video
 
-            _dur_result = _sp.run(
-                ["ffprobe", "-v", "quiet", "-show_entries", "format=duration", "-of", "csv=p=0", output_path],
-                capture_output=True,
-                text=True,
-            )
-            _dur = float(_dur_result.stdout.strip()) if _dur_result.stdout.strip() else 0.0
+            _dur = await _get_video_duration(output_path)
             if _dur <= 0:
                 raise RuntimeError("导演版视频时长探测失败")
             if _dur < TARGET_PUBLISH_DURATION:
-                padded_path = _pad_video_to_min_duration(output_path, _dur)
+                padded_path = await _pad_video_to_min_duration(output_path, _dur)
                 if padded_path:
                     logger.info(
                         "Director API compose group %s: padded video from %.1fs to >=%.1fs",
