@@ -18,7 +18,7 @@ from typing import Optional, Set
 
 import aiosqlite
 import httpx
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
@@ -39,6 +39,8 @@ from publish_scheduler import poll_publish_tasks
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
+STALE_OPEN_RECORDING_HOURS = 6
+
 # WebSocket connections
 _ws_clients: Set[WebSocket] = set()
 
@@ -54,6 +56,97 @@ async def broadcast(message: dict):
 
 
 monitor = MonitorManager(broadcast_fn=broadcast)
+
+
+def _recording_file_path(filename: str | None) -> str | None:
+    """Return the expected local MP4 path for a recording filename."""
+    if not filename:
+        return None
+    return os.path.join(RECORDINGS_DIR, filename)
+
+
+def _recording_file_exists(filename: str | None) -> bool:
+    """Return True when the recording source file is present locally."""
+    path = _recording_file_path(filename)
+    return bool(path and os.path.exists(path))
+
+
+def _parse_recording_time(value: str | None) -> datetime | None:
+    """Parse DB timestamps stored with either ISO 'T' or SQLite space separators."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace(" ", "T"))
+    except ValueError:
+        return None
+
+
+def _is_finished_unsynced_upload_candidate(row) -> bool:
+    """Return True when an unsynced recording can actually enter upload processing.
+
+    The transcription poll loop only processes finished recordings with a real duration.
+    Mirroring that guard here prevents crash-left placeholders (end_time NULL and no MP4)
+    from inflating the queue denominator and making the UI look stuck at 98%.
+    """
+    if row["transcribed"] != 0 or row["synced"] != 0 or row["local_deleted"] != 0:
+        return False
+    if not row["end_time"] or row["end_time"] == row["start_time"]:
+        return False
+    return _recording_file_exists(row["filename"])
+
+
+async def _cleanup_stale_open_recording_placeholders(max_age_hours: int = STALE_OPEN_RECORDING_HOURS) -> int:
+    """Mark old open recording placeholders without MP4 files as skipped.
+
+    Active recordings intentionally have end_time NULL, so only records older than the
+    grace window and missing their source file are cleaned up. This handles recorder
+    crashes without removing the currently-recording segment.
+    """
+    cutoff = datetime.now() - timedelta(hours=max_age_hours)
+    stale_ids: list[int] = []
+
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT id, filename, start_time
+               FROM recordings
+               WHERE transcribed = 0
+                 AND synced = 0
+                 AND local_deleted = 0
+                 AND end_time IS NULL"""
+        ) as cur:
+            rows = await cur.fetchall()
+
+    for rec in rows:
+        started_at = _parse_recording_time(rec["start_time"])
+        if started_at is None or started_at > cutoff:
+            continue
+        if _recording_file_exists(rec["filename"]):
+            continue
+        stale_ids.append(rec["id"])
+
+    if not stale_ids:
+        return 0
+
+    placeholders = ",".join("?" * len(stale_ids))
+    reason = "stale open recording placeholder: missing local MP4"
+    async with aio_connect() as db:
+        await db.execute(
+            f"""UPDATE recordings
+                SET local_deleted = 1,
+                    transcribed = -1,
+                    transcribe_error = ?,
+                    skip_reason = ?
+                WHERE id IN ({placeholders})""",
+            [reason, reason, *stale_ids],
+        )
+        await db.commit()
+    logger.warning(
+        "Marked %d stale open recording placeholder(s) as skipped after %dh grace window",
+        len(stale_ids),
+        max_age_hours,
+    )
+    return len(stale_ids)
 
 
 async def _reset_stuck_clip_tasks():
@@ -456,6 +549,8 @@ async def _periodic_cleanup():
                     await db.commit()
                 logger.info(f"[cleanup] Removed {len(stale_rc_ids)} stale recording_clips rows")
 
+            await _cleanup_stale_open_recording_placeholders()
+
         except asyncio.CancelledError:
             return
         except Exception as e:
@@ -466,6 +561,7 @@ async def _periodic_cleanup():
 async def lifespan(app: FastAPI):
     await init_db()
     await _reset_stuck_clip_tasks()
+    await _cleanup_stale_open_recording_placeholders()
     try:
         await _startup_trigger_pipelines()
     except Exception as e:
@@ -2219,10 +2315,15 @@ async def get_transcribe_queue():
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT r.id, r.filename, r.transcribed, r.transcribe_error, r.start_time,
-                      r.gpu_job_id, r.synced, r.size_bytes, rm.name as room_name
+                      r.end_time, r.gpu_job_id, r.synced, r.local_deleted, r.size_bytes,
+                      rm.name as room_name
                FROM recordings r LEFT JOIN rooms rm ON r.room_id = rm.id
                WHERE (r.transcribed IN (0, 1) AND (r.synced = 1 OR r.gpu_job_id IS NOT NULL))
-                  OR (r.transcribed = 0 AND r.synced = 0 AND r.local_deleted = 0)
+                  OR (r.transcribed = 0
+                      AND r.synced = 0
+                      AND r.local_deleted = 0
+                      AND r.end_time IS NOT NULL
+                      AND r.end_time != r.start_time)
                ORDER BY r.id ASC
                LIMIT 100"""
         ) as cur:
@@ -2234,6 +2335,15 @@ async def get_transcribe_queue():
     jobs = []
     queue_pos = 0  # position among waiting-for-GPU jobs
     for row in rows:
+        if row["synced"] == 0 and row["transcribed"] == 0 and not _is_finished_unsynced_upload_candidate(row):
+            logger.info(
+                "Transcribe queue skipped non-processable recording %s (%s): "
+                "not finished, zero-duration, deleted, or missing local MP4",
+                row["id"],
+                row["filename"],
+            )
+            continue
+
         if row["transcribed"] == 1 and row["gpu_job_id"]:
             status = "转录中"
             level = "running"
