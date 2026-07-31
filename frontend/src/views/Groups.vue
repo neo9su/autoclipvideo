@@ -143,8 +143,40 @@
           <div v-if="g.director_error" class="director-error">⚠ {{ g.director_error }}</div>
         </div>
 
+        <!-- 千川投流版操作面板 -->
+        <div class="qianchuan-panel">
+          <div class="qianchuan-header">
+            <div class="qianchuan-title-row">
+              <span class="qianchuan-title">千川投流版</span>
+              <span :class="['qianchuan-status', qianchuanStatusMeta(g).className]">{{ qianchuanStatusMeta(g).label }}</span>
+              <span v-if="g.qianchuan_score !== null && g.qianchuan_score !== undefined" class="qianchuan-score">匹配/质量分 {{ formatQianchuanScore(g.qianchuan_score) }}</span>
+            </div>
+            <div class="qianchuan-actions">
+              <button
+                v-if="g.qianchuan_status !== 2"
+                class="btn-qianchuan"
+                :disabled="qianchuanBusy[g.id] || g.qianchuan_status === 1"
+                @click="generateQianchuan(g)">
+                {{ qianchuanBusy[g.id] || g.qianchuan_status === 1 ? '生成中…' : (isQianchuanFailure(g.qianchuan_status) ? '↺ 重试千川版' : '生成千川版') }}
+              </button>
+              <template v-if="g.qianchuan_status === 2 && g.qianchuan_final_video">
+                <button class="btn-action cyan" @click="openQianchuanPreview(g)">▶ 预览</button>
+                <a :href="`${apiBase}/api/groups/${g.id}/qianchuan-download`" class="btn-action cyan" download>↓ 下载</a>
+                <button
+                  class="btn-action orange"
+                  :disabled="qianchuanBusy[g.id]"
+                  @click="generateQianchuan(g)">
+                  {{ qianchuanBusy[g.id] ? '生成中…' : '↺ 重新生成' }}
+                </button>
+              </template>
+            </div>
+          </div>
+          <div class="qianchuan-hint">{{ qianchuanStatusMeta(g).hint }}</div>
+          <div v-if="g.qianchuan_error" class="qianchuan-error">⚠ {{ summarizeQianchuanError(g.qianchuan_error) }}</div>
+        </div>
+
         <!-- 封面生成面板 -->
-        <div class="cover-panel" v-if="g.classic_status === 2 || g.director_status === 2 || g.creative_status === 2">
+        <div class="cover-panel" v-if="g.classic_status === 2 || g.director_status === 2 || g.creative_status === 2 || g.qianchuan_status === 2">
           <div class="cover-panel-header">
             <span class="cover-panel-title">封面</span>
             <button
@@ -303,7 +335,7 @@
           v-model="groupModal.importPaths"
           class="modal-input"
           rows="4"
-          placeholder="/Users/claw/work/douyin-recorder/recordings/video1.mp4&#10;/Users/claw/work/douyin-recorder/recordings/video2.mp4"
+          placeholder="/path/to/recordings/video1.mp4&#10;/path/to/recordings/video2.mp4"
         ></textarea>
         <div v-if="importPreviewCount > 0" class="import-preview">已填入 {{ importPreviewCount }} 个路径</div>
       </div>
@@ -427,6 +459,27 @@
       <div v-if="creativePreviewError" class="preview-err">视频加载失败</div>
       <div class="preview-footer">
         <a :href="`${apiBase}/api/groups/${creativePreviewGroup.id}/creative-download`" class="btn-action green" download>↓ 下载</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- Qianchuan Video Preview Modal -->
+  <div v-if="qianchuanPreviewGroup" class="modal-backdrop" @click.self="closeQianchuanPreview">
+    <div class="preview-modal">
+      <div class="preview-header">
+        <span class="preview-title">千川投流版 · {{ qianchuanPreviewGroup.label }}</span>
+        <button class="modal-close" @click="closeQianchuanPreview">✕</button>
+      </div>
+      <video
+        :src="`${apiBase}/api/groups/${qianchuanPreviewGroup.id}/qianchuan-download`"
+        controls
+        autoplay
+        class="preview-video"
+        @error="qianchuanPreviewError = true"
+      ></video>
+      <div v-if="qianchuanPreviewError" class="preview-err">视频加载失败</div>
+      <div class="preview-footer">
+        <a :href="`${apiBase}/api/groups/${qianchuanPreviewGroup.id}/qianchuan-download`" class="btn-action cyan" download>↓ 下载</a>
       </div>
     </div>
   </div>
@@ -624,7 +677,7 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { getGroups, getGroup, getRooms, mergeGroup, retryModes, createGroup, updateGroup, reassignRecording, importGroupVideos, createWS, getThumbnailUrl, createCustomGroup, uploadCustomGroupVideo, deleteGroup, getProcessingProgress, reclipRecording, reclipGroupAll } from '../api.js'
+import { getGroups, getGroup, getRooms, mergeGroup, retryModes, createGroup, updateGroup, reassignRecording, importGroupVideos, createWS, getThumbnailUrl, createCustomGroup, uploadCustomGroupVideo, deleteGroup, getProcessingProgress, reclipRecording, reclipGroupAll, generateQianchuanGroup } from '../api.js'
 import { useToast } from '../composables/toast.js'
 
 const groups = ref([])
@@ -632,7 +685,7 @@ const rooms = ref([])
 const openId = ref(null)
 const detail = ref(null)
 const detailLoading = ref(false)
-const apiBase = import.meta.env.DEV ? 'http://localhost:8899' : 'http://localhost:8899'
+const apiBase = import.meta.env.DEV ? 'http://localhost:8899' : ''
 let ws = null
 
 const { show } = useToast()
@@ -724,6 +777,12 @@ const creativePreviewError = ref(false)
 function openCreativePreview(g) { creativePreviewGroup.value = g; creativePreviewError.value = false }
 function closeCreativePreview() { creativePreviewGroup.value = null }
 
+// Qianchuan video preview
+const qianchuanPreviewGroup = ref(null)
+const qianchuanPreviewError = ref(false)
+function openQianchuanPreview(g) { qianchuanPreviewGroup.value = g; qianchuanPreviewError.value = false }
+function closeQianchuanPreview() { qianchuanPreviewGroup.value = null }
+
 // Re-clip (single recording)
 const reclipModal = ref(null)
 const reclipSaving = ref(false)
@@ -731,6 +790,7 @@ function openReclip(r) { reclipModal.value = { rec: r, feedback: '' } }
 
 // Director mode busy state: { [groupId]: 'script' | 'voice' | 'video' | null }
 const directorBusy = ref({})
+const qianchuanBusy = ref({})
 
 const vibeHints = {
   trendy:    '快节奏·强钩子·追热点',
@@ -739,6 +799,36 @@ const vibeHints = {
   luxury:    '品质感·精致·仪式感',
   contrast:  '反差感·意外·强对比',
   creative:  '自由创作·编造卖点·催单节奏',
+}
+
+const qianchuanStatusMap = {
+  0: { label: '未开始', className: 'idle', hint: '适合投流的强匹配广告管线，可生成固定结构短视频。' },
+  1: { label: '生成中', className: 'running', hint: '正在生成千川投流版，请勿重复提交。' },
+  2: { label: '已完成', className: 'done', hint: '千川投流版已生成，可预览或下载。' },
+  '-1': { label: '普通失败', className: 'failed', hint: '生成失败，可查看错误摘要后重试。' },
+  '-2': { label: '商品不匹配', className: 'blocked', hint: '商品/颜色/镜头匹配不足，已拒绝生成。' },
+  '-3': { label: '质量失败', className: 'failed', hint: '质量检测不通过，请调整素材后重试。' },
+  '-4': { label: '编码/探测失败', className: 'failed', hint: '视频编码或质量探测失败，可重试或检查素材。' },
+}
+
+function qianchuanStatusMeta(group) {
+  const status = group.qianchuan_status ?? 0
+  return qianchuanStatusMap[status] || { label: `状态 ${status}`, className: 'failed', hint: '千川投流版状态异常，请查看错误摘要。' }
+}
+
+function isQianchuanFailure(status) {
+  return Number(status) < 0
+}
+
+function formatQianchuanScore(score) {
+  const value = Number(score)
+  if (!Number.isFinite(value)) return '—'
+  return value <= 1 ? `${Math.round(value * 100)}%` : value.toFixed(1)
+}
+
+function summarizeQianchuanError(error) {
+  if (!error) return ''
+  return String(error).replace(/\s+/g, ' ').slice(0, 160)
 }
 
 // Cover generation
@@ -1069,6 +1159,30 @@ async function generateVoiceover(group) {
   }
 }
 
+async function generateQianchuan(group) {
+  qianchuanBusy.value[group.id] = true
+  group.qianchuan_error = null
+  group.qianchuan_status = 1
+  try {
+    const result = await generateQianchuanGroup(group.id)
+    if (!result.success && result.status !== 1) {
+      group.qianchuan_status = result.status
+      group.qianchuan_score = result.score
+      group.qianchuan_error = result.error || '千川投流版生成失败'
+      throw new Error(group.qianchuan_error)
+    }
+    show(result.started ? '千川投流版生成已启动' : '千川投流版脚本已生成', 'info')
+    await load()
+  } catch (e) {
+    if (group.qianchuan_status === 1) group.qianchuan_status = -1
+    group.qianchuan_error = e.message || '千川投流版生成失败'
+    show(group.qianchuan_error, 'error')
+    await load().catch(() => {})
+  } finally {
+    qianchuanBusy.value[group.id] = false
+  }
+}
+
 async function composeDirectorVideo(group) {
   directorBusy.value[group.id] = 'video'
   group.director_error = null
@@ -1162,6 +1276,14 @@ onMounted(() => {
       load()
     } else if (msg.type === 'director_voice_done') {
       show('配音生成完成', 'success')
+      load()
+    } else if (msg.type === 'qianchuan_done') {
+      qianchuanBusy.value[msg.group_id] = false
+      show('千川投流版生成完成', 'success')
+      load()
+    } else if (msg.type === 'qianchuan_error') {
+      qianchuanBusy.value[msg.group_id] = false
+      show(msg.error || '千川投流版生成失败', 'error')
       load()
     }
   })
@@ -1375,6 +1497,7 @@ onUnmounted(() => { ws?.close(); stopProgressPolling() })
 .btn-action.yellow { background: rgba(251,191,36,0.12); color: #fbbf24; border-color: transparent; }
 .btn-action.teal { background: rgba(45,212,191,0.12); color: #2dd4bf; border-color: rgba(45,212,191,0.3); }
 .btn-action.green { background: rgba(34,197,94,0.12); color: #22c55e; border-color: rgba(34,197,94,0.3); }
+.btn-action.cyan { background: rgba(6,182,212,0.12); color: #22d3ee; border-color: rgba(6,182,212,0.3); }
 .btn-action.red { background: rgba(254,44,85,0.12); color: #fe2c55; border-color: rgba(254,44,85,0.3); }
 .btn-action.orange { background: rgba(251,146,60,0.15); color: #c2540a; border-color: rgba(251,146,60,0.4); }
 .btn-sm { background: #222; border: 1px solid #333; color: #888; padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
@@ -1471,6 +1594,23 @@ onUnmounted(() => { ws?.close(); stopProgressPolling() })
 .btn-director:disabled { opacity: 0.4; cursor: not-allowed; }
 .step-done { font-size: 11px; color: #6ee7b7; white-space: nowrap; }
 .director-error { margin-top: 6px; font-size: 11px; color: #f87171; }
+.qianchuan-panel { padding: 12px 16px; background: rgba(6,182,212,0.07); border-top: 1px solid rgba(6,182,212,0.2); border-bottom: 1px solid rgba(6,182,212,0.18); }
+.qianchuan-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.qianchuan-title-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.qianchuan-title { font-size: 12px; font-weight: 700; color: #22d3ee; }
+.qianchuan-status { font-size: 11px; padding: 2px 8px; border-radius: 999px; }
+.qianchuan-status.idle { background: rgba(148,163,184,0.16); color: #cbd5e1; }
+.qianchuan-status.running { background: rgba(251,191,36,0.14); color: #fbbf24; }
+.qianchuan-status.done { background: rgba(52,211,153,0.14); color: #6ee7b7; }
+.qianchuan-status.failed { background: rgba(254,44,85,0.14); color: #f87171; }
+.qianchuan-status.blocked { background: rgba(251,146,60,0.16); color: #fb923c; }
+.qianchuan-score { font-size: 11px; color: #a5f3fc; }
+.qianchuan-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.btn-qianchuan { padding: 6px 14px; font-size: 12px; border-radius: 6px; border: 1px solid rgba(6,182,212,0.4); background: rgba(6,182,212,0.15); color: #22d3ee; cursor: pointer; white-space: nowrap; }
+.btn-qianchuan:hover:not(:disabled) { background: rgba(6,182,212,0.28); }
+.btn-qianchuan:disabled { opacity: 0.45; cursor: not-allowed; }
+.qianchuan-hint { margin-top: 6px; font-size: 11px; color: #67e8f9; line-height: 1.5; }
+.qianchuan-error { margin-top: 6px; font-size: 11px; color: #f87171; line-height: 1.5; word-break: break-all; }
 /* Review modal */
 .review-modal { width: 680px; max-width: 95vw; max-height: 90vh; display: flex; flex-direction: column; }
 .review-loading { text-align: center; color: #666; padding: 30px 0; flex: 1; }

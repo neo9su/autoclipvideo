@@ -1413,6 +1413,70 @@ async def download_creative_video(group_id: int, request: Request):
     return StreamingResponse(iter_file_creative(), media_type="video/mp4", headers=headers)
 
 
+@app.get("/api/groups/{group_id}/qianchuan-download")
+async def download_qianchuan_video(group_id: int, request: Request):
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT qianchuan_final_video FROM clip_groups WHERE id = ?", (group_id,)
+        ) as cur:
+            row = await cur.fetchone()
+    if not row or not row["qianchuan_final_video"]:
+        raise HTTPException(status_code=404, detail="No qianchuan video available")
+    path = row["qianchuan_final_video"]
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Qianchuan video file missing")
+    filename = os.path.basename(path)
+    file_size = os.path.getsize(path)
+
+    range_header = request.headers.get("range")
+    if range_header:
+        try:
+            range_val = range_header.strip().replace("bytes=", "")
+            start_str, end_str = range_val.split("-")
+            start = int(start_str)
+            end = int(end_str) if end_str else file_size - 1
+        except Exception:
+            raise HTTPException(status_code=416, detail="Invalid Range header")
+        end = min(end, file_size - 1)
+        chunk_size = end - start + 1
+
+        def iter_range_qianchuan():
+            with open(path, "rb") as f:
+                f.seek(start)
+                remaining = chunk_size
+                while remaining > 0:
+                    data = f.read(min(65536, remaining))
+                    if not data:
+                        break
+                    remaining -= len(data)
+                    yield data
+
+        headers = {
+            "Content-Range": f"bytes {start}-{end}/{file_size}",
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(chunk_size),
+            "Content-Disposition": f'inline; filename="{filename}"',
+        }
+        return StreamingResponse(iter_range_qianchuan(), status_code=206, media_type="video/mp4", headers=headers)
+
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(file_size),
+        "Content-Disposition": f'attachment; filename="{filename}"',
+    }
+
+    def iter_file_qianchuan():
+        with open(path, "rb") as f:
+            while True:
+                data = f.read(65536)
+                if not data:
+                    break
+                yield data
+
+    return StreamingResponse(iter_file_qianchuan(), media_type="video/mp4", headers=headers)
+
+
 @app.get("/api/recordings/processing-progress")
 async def get_processing_progress():
     """Return progress for all currently processing recordings (transcribing + clipping)."""

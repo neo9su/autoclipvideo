@@ -39,6 +39,7 @@ PY
 
 run_gate tests python - <<'PY'
 import asyncio, json, os, sqlite3, tempfile, sys
+from pathlib import Path
 sys.path.insert(0, 'backend')
 import db as dbmod
 from db import init_db
@@ -74,7 +75,15 @@ async def main():
     con.execute("UPDATE clip_groups SET qianchuan_status=?, qianchuan_script=?, qianchuan_score=?, qianchuan_review=? WHERE id=1", (0, json.dumps(script, ensure_ascii=False), good['score'], json.dumps(good, ensure_ascii=False)))
     row = con.execute('SELECT qianchuan_status,qianchuan_script,qianchuan_score FROM clip_groups WHERE id=1').fetchone()
     assert row[0] == 0 and row[1] and row[2] >= 0.2
+    group_cols = {r[1] for r in con.execute('PRAGMA table_info(clip_groups)')}
+    assert {'qianchuan_status', 'qianchuan_score', 'qianchuan_error', 'qianchuan_final_video'} <= group_cols
     con.close(); os.unlink(db_path)
+    groups_vue = Path('frontend/src/views/Groups.vue').read_text()
+    api_js = Path('frontend/src/api.js').read_text()
+    main_py = Path('backend/main.py').read_text()
+    assert '千川投流版' in groups_vue and 'qianchuanStatusMap' in groups_vue
+    assert '/api/v2/qianchuan/generate' in api_js
+    assert '/api/groups/{group_id}/qianchuan-download' in main_py
 asyncio.run(main())
 print('qianchuan workflow smoke ok')
 PY
