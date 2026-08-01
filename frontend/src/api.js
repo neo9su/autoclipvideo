@@ -450,6 +450,25 @@ export async function reclipGroupAll(groupId) {
   return res.json()
 }
 
+// ── Qianchuan ────────────────────────────────────────────────────────────────
+
+export async function generateQianchuanGroup(groupId) {
+  const res = await fetch(`${BASE}/api/v2/qianchuan/generate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group_id: groupId, generate_video: true }),
+  })
+  const payload = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(payload.detail || '千川投流版生成失败')
+  return payload
+}
+
+export async function getQianchuanGroupResult(groupId) {
+  const res = await fetch(`${BASE}/api/v2/qianchuan/group/${groupId}/result`)
+  if (!res.ok) throw new Error((await res.json()).detail || '千川投流版结果加载失败')
+  return res.json()
+}
+
 // ── 画质增强 ──────────────────────────────────────────────────────────────────
 
 export async function getEnhanceServiceStatus() {
