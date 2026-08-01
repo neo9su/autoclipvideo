@@ -42,6 +42,7 @@
                   <option value="director">🎬 导演版</option>
                   <option value="classic">📹 经典版</option>
                   <option value="creative">✍️ 自编版</option>
+                  <option value="qianchuan">📣 千川投流</option>
                 </select>
               </div>
             </div>
@@ -54,11 +55,11 @@
           <div class="group-actions">
             <!-- 三模式触发按钮 -->
             <button
-              v-if="g.classic_status !== 1 && g.director_status !== 1 && (g.creative_status || 0) !== 1"
+              v-if="g.classic_status !== 1 && g.director_status !== 1 && (g.creative_status || 0) !== 1 && (g.qianchuan_status || 0) !== 1"
               class="btn-action"
               :disabled="g.ready_count === 0"
               @click="doMerge(g)">
-              {{ (g.classic_status === 2 || g.director_status === 2 || g.creative_status === 2) ? '↺ 重新合并' : '剪辑并合并' }}
+              {{ (g.classic_status === 2 || g.director_status === 2 || g.creative_status === 2 || g.qianchuan_status === 2) ? '↺ 重新合并' : '剪辑并合并' }}
             </button>
             <button v-else class="btn-action yellow" disabled>处理中…</button>
             <!-- 经典版结果 -->
@@ -1090,7 +1091,7 @@ async function setPublishVersions(group, versions) {
       const error = await response.json().catch(() => ({}))
       throw new Error(error.detail || '设置失败')
     }
-    const labels = { both: '两个版本', director: '导演版', classic: '经典版' }
+    const labels = { both: '全部版本', director: '导演版', classic: '经典版', creative: '自编版', qianchuan: '千川投流' }
     show(`发布版本已设为：${labels[versions] || versions}`, 'success')
   } catch (e) {
     show(e.message || '设置发布版本失败', 'error')
@@ -1500,6 +1501,7 @@ onUnmounted(() => { ws?.close(); stopProgressPolling() })
 .btn-action.cyan { background: rgba(6,182,212,0.12); color: #22d3ee; border-color: rgba(6,182,212,0.3); }
 .btn-action.red { background: rgba(254,44,85,0.12); color: #fe2c55; border-color: rgba(254,44,85,0.3); }
 .btn-action.orange { background: rgba(251,146,60,0.15); color: #c2540a; border-color: rgba(251,146,60,0.4); }
+.btn-action.rose { background: rgba(251,113,133,0.12); color: #fb7185; border-color: rgba(251,113,133,0.3); }
 .btn-sm { background: #222; border: 1px solid #333; color: #888; padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
 .btn-sm:hover { background: #2a2a2a; color: #ccc; }
 .merge-error { font-size: 12px; color: #fe2c55; margin-top: 8px; display: flex; align-items: center; gap: 8px; }

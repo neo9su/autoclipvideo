@@ -112,18 +112,23 @@ async def _reset_stuck_clip_tasks():
         if r3.rowcount:
             logger.info(f"Reset {r3.rowcount} stuck merge(s) to pending")
 
-        # Reset clip_groups stuck at director_status=1 or creative_status=1 (server killed mid-pipeline)
+        # Reset clip_groups stuck at director_status=1, creative_status=1, or qianchuan_status=1 (server killed mid-pipeline)
         r4 = await db.execute(
             "UPDATE clip_groups SET director_status = 0 WHERE director_status = 1"
         )
         r5 = await db.execute(
             "UPDATE clip_groups SET creative_status = 0 WHERE creative_status = 1"
         )
+        r6 = await db.execute(
+            "UPDATE clip_groups SET qianchuan_status = 0 WHERE qianchuan_status = 1"
+        )
         await db.commit()
         if r4.rowcount:
             logger.info(f"Reset {r4.rowcount} stuck director pipeline(s) to pending")
         if r5.rowcount:
             logger.info(f"Reset {r5.rowcount} stuck creative pipeline(s) to pending")
+        if r6.rowcount:
+            logger.info(f"Reset {r6.rowcount} stuck qianchuan pipeline(s) to pending")
 
 
 async def _startup_trigger_pipelines():
@@ -1243,8 +1248,8 @@ async def retry_director_creative(group_id: int):
 @app.patch("/api/groups/{group_id}/publish-versions")
 async def set_publish_versions(group_id: int, body: dict):
     versions = body.get("publish_versions", "both")
-    if versions not in ("classic", "director", "creative", "both"):
-        raise HTTPException(status_code=400, detail="publish_versions must be 'classic', 'director', 'creative', or 'both'")
+    if versions not in ("classic", "director", "creative", "qianchuan", "both"):
+        raise HTTPException(status_code=400, detail="publish_versions must be 'classic', 'director', 'creative', 'qianchuan', or 'both'")
     async with aio_connect() as db:
         await db.execute(
             "UPDATE clip_groups SET publish_versions = ? WHERE id = ?", (versions, group_id)
@@ -1793,15 +1798,16 @@ async def import_group_videos(group_id: int, body: ImportVideosRequest):
                 existing = await cur.fetchone()
             if existing:
                 await db.execute(
-                    "UPDATE recordings SET group_id = ? WHERE id = ?",
+                    "UPDATE recordings SET group_id = ?, local_deleted = 0 WHERE id = ?",
                     (group_id, existing["id"]),
                 )
             else:
+                imported_at = datetime.utcnow().isoformat()
                 await db.execute(
                     """INSERT INTO recordings
-                       (room_id, filename, size_bytes, group_id, synced, transcribed, clipped, local_deleted, segment_index)
-                       VALUES (?, ?, ?, ?, 0, 0, 0, 0, 0)""",
-                    (room_id, filename, size, group_id),
+                       (room_id, filename, start_time, end_time, size_bytes, group_id, synced, transcribed, clipped, local_deleted, segment_index)
+                       VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0)""",
+                    (room_id, filename, imported_at, imported_at, size, group_id),
                 )
             imported += 1
 
@@ -3015,10 +3021,15 @@ async def create_publish_task(body: PublishTaskCreate):
     publish_versions = group["publish_versions"] or "both"
     _dir_ok = group["director_final_video"] and os.path.exists(group["director_final_video"])
     _cr_ok = group["creative_final_video"] and os.path.exists(group["creative_final_video"])
-    # Priority: explicit creative/director > "both" prefers director > creative > classic
-    use_creative = publish_versions == "creative" or (publish_versions == "both" and _cr_ok and not _dir_ok)
-    use_director = not use_creative and (publish_versions == "director" or (publish_versions == "both" and _dir_ok))
-    if use_creative:
+    _qc_ok = group["qianchuan_final_video"] and os.path.exists(group["qianchuan_final_video"])
+    # Priority: explicit qianchuan/creative/director > "both" prefers qianchuan > director > creative > classic
+    use_qianchuan = publish_versions == "qianchuan" or (publish_versions == "both" and _qc_ok)
+    use_creative = not use_qianchuan and (publish_versions == "creative" or (publish_versions == "both" and _cr_ok and not _dir_ok))
+    use_director = not use_qianchuan and not use_creative and (publish_versions == "director" or (publish_versions == "both" and _dir_ok))
+    if use_qianchuan:
+        if not _qc_ok:
+            raise HTTPException(status_code=409, detail="Qianchuan video not ready")
+    elif use_creative:
         if not _cr_ok:
             raise HTTPException(status_code=409, detail="Creative video not ready")
     elif use_director:
@@ -3068,7 +3079,9 @@ async def create_publish_task(body: PublishTaskCreate):
                 description = ""
                 tags = ""
 
-    if use_creative:
+    if use_qianchuan:
+        video_path = group["qianchuan_final_video"]
+    elif use_creative:
         video_path = group["creative_final_video"]
     elif use_director:
         video_path = group["director_final_video"]
@@ -3116,11 +3129,11 @@ async def get_unscheduled_groups(platform: str = "douyin", room_id: Optional[int
         db.row_factory = aiosqlite.Row
         sql = """
             SELECT g.id, g.label, g.merged_filename, g.director_final_video,
-                   g.creative_final_video, g.publish_versions, g.room_id, rm.name as room_name
+                   g.creative_final_video, g.qianchuan_final_video, g.publish_versions, g.room_id, rm.name as room_name
             FROM clip_groups g
             LEFT JOIN rooms rm ON g.room_id = rm.id
-            WHERE (g.merge_status = 2 OR g.classic_status = 2 OR g.director_status = 2 OR g.creative_status = 2)
-              AND (g.merged_filename IS NOT NULL OR g.director_final_video IS NOT NULL OR g.creative_final_video IS NOT NULL)
+            WHERE (g.merge_status = 2 OR g.classic_status = 2 OR g.director_status = 2 OR g.creative_status = 2 OR g.qianchuan_status = 2)
+              AND (g.merged_filename IS NOT NULL OR g.director_final_video IS NOT NULL OR g.creative_final_video IS NOT NULL OR g.qianchuan_final_video IS NOT NULL)
               AND g.label != '未分类'
               AND NOT EXISTS (
                   SELECT 1 FROM publish_tasks pt
@@ -3158,10 +3171,10 @@ async def batch_schedule_tasks(body: BatchScheduleCreate):
         db.row_factory = aiosqlite.Row
         sql = """
             SELECT g.id, g.label, g.merged_filename, g.director_final_video,
-                   g.creative_final_video, g.publish_versions, g.room_id
+                   g.creative_final_video, g.qianchuan_final_video, g.publish_versions, g.room_id
             FROM clip_groups g
-            WHERE (g.merge_status = 2 OR g.classic_status = 2 OR g.director_status = 2 OR g.creative_status = 2)
-              AND (g.merged_filename IS NOT NULL OR g.director_final_video IS NOT NULL OR g.creative_final_video IS NOT NULL)
+            WHERE (g.merge_status = 2 OR g.classic_status = 2 OR g.director_status = 2 OR g.creative_status = 2 OR g.qianchuan_status = 2)
+              AND (g.merged_filename IS NOT NULL OR g.director_final_video IS NOT NULL OR g.creative_final_video IS NOT NULL OR g.qianchuan_final_video IS NOT NULL)
               AND g.label != '未分类'
               AND NOT EXISTS (
                   SELECT 1 FROM publish_tasks pt
@@ -3230,18 +3243,25 @@ async def batch_schedule_tasks(body: BatchScheduleCreate):
             scheduled_at = _snap_to_golden_hour(raw_dt).isoformat()
             # Pick video based on publish_versions
             pub_ver = group["publish_versions"] or "both"
-            use_creative = pub_ver == "creative" or (
+            use_qianchuan = pub_ver == "qianchuan" or (
+                pub_ver == "both"
+                and group["qianchuan_final_video"]
+                and os.path.exists(group["qianchuan_final_video"])
+            )
+            use_creative = not use_qianchuan and (pub_ver == "creative" or (
                 pub_ver == "both"
                 and group["creative_final_video"]
                 and os.path.exists(group["creative_final_video"])
                 and not (group["director_final_video"] and os.path.exists(group["director_final_video"]))
-            )
-            use_dir = not use_creative and (pub_ver == "director" or (
+            ))
+            use_dir = not use_qianchuan and not use_creative and (pub_ver == "director" or (
                 pub_ver == "both"
                 and group["director_final_video"]
                 and os.path.exists(group["director_final_video"])
             ))
-            if use_creative:
+            if use_qianchuan:
+                video_path = group["qianchuan_final_video"]
+            elif use_creative:
                 video_path = group["creative_final_video"]
             elif use_dir:
                 video_path = group["director_final_video"]
