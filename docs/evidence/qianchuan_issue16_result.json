@@ -1,0 +1,448 @@
+{
+  "group_id": 5130,
+  "status": 2,
+  "script": {
+    "mode": "qianchuan",
+    "version": "1.0",
+    "target_duration": 18.0,
+    "structure": "0-3s结果钩子 / 3-7s痛点 / 7-13s产品证据 / 13-19s上脸效果 / 19-23s CTA",
+    "product_context": {
+      "id": 18,
+      "platform": "douyin",
+      "product_id": "",
+      "product_name": "小圆-夺回&人生【仿递针·免发网假发】发型师精修日常大波浪假发套",
+      "product_url": "https://haohuo.jinritemai.com/ecommerce/trade/detail/index.html?id=3718933356298240815&origin_type=pc_buyin_selection_decision",
+      "keywords": "小圆,夺回人生 ,仿递针 免发网假发, 大波浪",
+      "enabled": 1,
+      "created_at": "2026-03-25 09:19:45",
+      "room_id": 1,
+      "short_title": "小圆精修大波浪假发",
+      "product_thumb": null
+    },
+    "selling_points": [
+      "夺回人生",
+      "免发网",
+      "大波浪",
+      "不用戴发网",
+      "显白",
+      "发缝自然",
+      "稳固",
+      "小黄车"
+    ],
+    "generated_at": 1785592689.404022,
+    "scenes": [
+      {
+        "scene_id": 1,
+        "scene_type": "result_hook",
+        "title": "结果钩子",
+        "timestamp_start": 0.0,
+        "timestamp_end": 2.35,
+        "duration": 2.35,
+        "voiceover_text": "戴上直接看效果，黑茶色真的很显白，发缝也很自然。",
+        "visual_requirements": [
+          "最终效果",
+          "正脸",
+          "显白",
+          "发缝自然",
+          "快速吸睛"
+        ],
+        "priority_shots": [
+          "最终效果",
+          "正脸",
+          "显白",
+          "发缝自然",
+          "快速吸睛"
+        ],
+        "subtitle_keywords": [
+          "显白"
+        ]
+      },
+      {
+        "scene_id": 2,
+        "scene_type": "pain_point",
+        "title": "痛点",
+        "timestamp_start": 2.35,
+        "timestamp_end": 5.48,
+        "duration": 3.13,
+        "voiceover_text": "不想戴发网、怕勒头又怕假？这款重点就是省步骤，出门前快速整理。",
+        "visual_requirements": [
+          "痛点",
+          "低头少",
+          "手不要遮脸",
+          "发网",
+          "发际线"
+        ],
+        "priority_shots": [
+          "痛点",
+          "低头少",
+          "手不要遮脸",
+          "发网",
+          "发际线"
+        ],
+        "subtitle_keywords": [
+          "夺回人生",
+          "免发网",
+          "大波浪"
+        ]
+      },
+      {
+        "scene_id": 3,
+        "scene_type": "product_proof",
+        "title": "产品证据",
+        "timestamp_start": 5.48,
+        "timestamp_end": 10.17,
+        "duration": 4.69,
+        "voiceover_text": "近看发丝和头顶细节，夺回人生、免发网、大波浪，颜色和卷度都要对版。",
+        "visual_requirements": [
+          "发缝近景",
+          "头顶近景",
+          "发丝特写",
+          "颜色特写",
+          "材质证据"
+        ],
+        "priority_shots": [
+          "发缝近景",
+          "头顶近景",
+          "发丝特写",
+          "颜色特写",
+          "材质证据"
+        ],
+        "subtitle_keywords": [
+          "夺回人生",
+          "免发网",
+          "大波浪"
+        ]
+      },
+      {
+        "scene_id": 4,
+        "scene_type": "tryon_result",
+        "title": "上脸/使用效果",
+        "timestamp_start": 10.17,
+        "timestamp_end": 14.87,
+        "duration": 4.7,
+        "voiceover_text": "正脸侧脸都看一下，梳理和轻甩也稳，日常通勤拍照都能撑住。",
+        "visual_requirements": [
+          "上脸效果",
+          "侧脸",
+          "背面",
+          "全身",
+          "稳定测试",
+          "甩头",
+          "梳理"
+        ],
+        "priority_shots": [
+          "上脸效果",
+          "侧脸",
+          "背面",
+          "全身",
+          "稳定测试",
+          "甩头",
+          "梳理"
+        ],
+        "subtitle_keywords": [
+          "夺回人生",
+          "免发网",
+          "大波浪"
+        ]
+      },
+      {
+        "scene_id": 5,
+        "scene_type": "cta",
+        "title": "CTA",
+        "timestamp_start": 14.87,
+        "timestamp_end": 18.0,
+        "duration": 3.13,
+        "voiceover_text": "喜欢夺回人生的姐妹，点小黄车看同款，先收藏再下单。",
+        "visual_requirements": [
+          "小黄车",
+          "下单",
+          "同款",
+          "购买引导",
+          "主播正脸"
+        ],
+        "priority_shots": [
+          "小黄车",
+          "下单",
+          "同款",
+          "购买引导",
+          "主播正脸"
+        ],
+        "subtitle_keywords": [
+          "夺回人生",
+          "小黄车"
+        ]
+      }
+    ]
+  },
+  "segments": {
+    "audio_segments": [
+      {
+        "scene_id": 1,
+        "audio_path": "/Users/claw/work/douyin-recorder/backend/../voice_output/group5130_scene1_1785592689.wav",
+        "duration": 3.607083,
+        "timestamp_start": 0.0,
+        "timestamp_end": 2.35
+      },
+      {
+        "scene_id": 2,
+        "audio_path": "/Users/claw/work/douyin-recorder/backend/../voice_output/group5130_scene2_1785592695.wav",
+        "duration": 4.342125,
+        "timestamp_start": 2.35,
+        "timestamp_end": 5.48
+      },
+      {
+        "scene_id": 3,
+        "audio_path": "/Users/claw/work/douyin-recorder/backend/../voice_output/group5130_scene3_1785592702.wav",
+        "duration": 4.741458,
+        "timestamp_start": 5.48,
+        "timestamp_end": 10.17
+      },
+      {
+        "scene_id": 4,
+        "audio_path": "/Users/claw/work/douyin-recorder/backend/../voice_output/group5130_scene4_1785592708.wav",
+        "duration": 3.977375,
+        "timestamp_start": 10.17,
+        "timestamp_end": 14.87
+      },
+      {
+        "scene_id": 5,
+        "audio_path": "/Users/claw/work/douyin-recorder/backend/../voice_output/group5130_scene5_1785592714.wav",
+        "duration": 4.55775,
+        "timestamp_start": 14.87,
+        "timestamp_end": 18.0
+      }
+    ],
+    "matched_segments": [
+      {
+        "script_segment": {
+          "text": "戴上直接看效果，黑茶色真的很显白，发缝也很自然。",
+          "voiceover_text": "戴上直接看效果，黑茶色真的很显白，发缝也很自然。",
+          "visual_keywords": [
+            "最终效果",
+            "正脸",
+            "显白",
+            "发缝自然",
+            "快速吸睛"
+          ],
+          "priority_shots": [
+            "最终效果",
+            "正脸",
+            "显白",
+            "发缝自然",
+            "快速吸睛"
+          ],
+          "duration": 3.607083,
+          "scene_type": "result_hook",
+          "scene_id": 1
+        },
+        "matched_recording_id": 8201,
+        "matched_start_time": 203.53,
+        "matched_duration": 6.280000000000001,
+        "matched_rec_duration": 458.532,
+        "confidence_score": 0.683509349822998,
+        "match_reason": "srt_match=0.68 time_pen=0.00",
+        "qianchuan_shot_score": 2.278,
+        "edit_actions": [
+          {
+            "type": "push_in",
+            "intensity": 0.1
+          },
+          {
+            "type": "keyword_pop"
+          }
+        ]
+      },
+      {
+        "script_segment": {
+          "text": "不想戴发网、怕勒头又怕假？这款重点就是省步骤，出门前快速整理。",
+          "voiceover_text": "不想戴发网、怕勒头又怕假？这款重点就是省步骤，出门前快速整理。",
+          "visual_keywords": [
+            "痛点",
+            "低头少",
+            "手不要遮脸",
+            "发网",
+            "发际线"
+          ],
+          "priority_shots": [
+            "痛点",
+            "低头少",
+            "手不要遮脸",
+            "发网",
+            "发际线"
+          ],
+          "duration": 4.342125,
+          "scene_type": "pain_point",
+          "scene_id": 2
+        },
+        "matched_recording_id": 8201,
+        "matched_start_time": 47.82,
+        "matched_duration": 4.619999999999997,
+        "matched_rec_duration": 458.532,
+        "confidence_score": 0.678493082523346,
+        "match_reason": "srt_match=0.68 time_pen=0.00",
+        "qianchuan_shot_score": 1.728,
+        "edit_actions": [
+          {
+            "type": "crop_zoom",
+            "region": "face_upper",
+            "intensity": 0.12
+          }
+        ]
+      },
+      {
+        "script_segment": {
+          "text": "近看发丝和头顶细节，夺回人生、免发网、大波浪，颜色和卷度都要对版。",
+          "voiceover_text": "近看发丝和头顶细节，夺回人生、免发网、大波浪，颜色和卷度都要对版。",
+          "visual_keywords": [
+            "发缝近景",
+            "头顶近景",
+            "发丝特写",
+            "颜色特写",
+            "材质证据"
+          ],
+          "priority_shots": [
+            "发缝近景",
+            "头顶近景",
+            "发丝特写",
+            "颜色特写",
+            "材质证据"
+          ],
+          "duration": 4.741458,
+          "scene_type": "product_proof",
+          "scene_id": 3
+        },
+        "matched_recording_id": 8201,
+        "matched_start_time": 239.75,
+        "matched_duration": 4.699999999999989,
+        "matched_rec_duration": 458.532,
+        "confidence_score": 0.6387196779251099,
+        "match_reason": "srt_match=0.64 time_pen=0.00",
+        "qianchuan_shot_score": 2.521,
+        "edit_actions": [
+          {
+            "type": "detail_zoom",
+            "region": "hairline_or_color",
+            "intensity": 0.22
+          },
+          {
+            "type": "pip",
+            "layout": "detail_top_right"
+          }
+        ]
+      },
+      {
+        "script_segment": {
+          "text": "正脸侧脸都看一下，梳理和轻甩也稳，日常通勤拍照都能撑住。",
+          "voiceover_text": "正脸侧脸都看一下，梳理和轻甩也稳，日常通勤拍照都能撑住。",
+          "visual_keywords": [
+            "上脸效果",
+            "侧脸",
+            "背面",
+            "全身",
+            "稳定测试",
+            "甩头",
+            "梳理"
+          ],
+          "priority_shots": [
+            "上脸效果",
+            "侧脸",
+            "背面",
+            "全身",
+            "稳定测试",
+            "甩头",
+            "梳理"
+          ],
+          "duration": 3.977375,
+          "scene_type": "tryon_result",
+          "scene_id": 4
+        },
+        "matched_recording_id": 8201,
+        "matched_start_time": 75.55,
+        "matched_duration": 9.400000000000006,
+        "matched_rec_duration": 458.532,
+        "confidence_score": 0.6722468733787537,
+        "match_reason": "srt_match=0.67 time_pen=0.00",
+        "qianchuan_shot_score": 2.966,
+        "edit_actions": [
+          {
+            "type": "pan",
+            "direction": "left_to_right"
+          },
+          {
+            "type": "pull_out",
+            "intensity": 0.08
+          }
+        ]
+      },
+      {
+        "script_segment": {
+          "text": "喜欢夺回人生的姐妹，点小黄车看同款，先收藏再下单。",
+          "voiceover_text": "喜欢夺回人生的姐妹，点小黄车看同款，先收藏再下单。",
+          "visual_keywords": [
+            "小黄车",
+            "下单",
+            "同款",
+            "购买引导",
+            "主播正脸"
+          ],
+          "priority_shots": [
+            "小黄车",
+            "下单",
+            "同款",
+            "购买引导",
+            "主播正脸"
+          ],
+          "duration": 4.55775,
+          "scene_type": "cta",
+          "scene_id": 5
+        },
+        "matched_recording_id": 8201,
+        "matched_start_time": 362.23,
+        "matched_duration": 6.599999999999966,
+        "matched_rec_duration": 458.532,
+        "confidence_score": 0.6306706666946411,
+        "match_reason": "srt_match=0.63 time_pen=0.00",
+        "qianchuan_shot_score": 2.057,
+        "edit_actions": [
+          {
+            "type": "push_in",
+            "intensity": 0.08
+          },
+          {
+            "type": "keyword_pop"
+          }
+        ]
+      }
+    ]
+  },
+  "audio_path": "group5130_merged_1785592720.wav",
+  "final_video": "director_output_1785592798.mp4",
+  "error": null,
+  "score": 0.763,
+  "review": {
+    "path": "director_output_1785592798.mp4",
+    "ok": true,
+    "errors": [],
+    "warnings": [
+      "fps 25.00 is not near 30"
+    ],
+    "duration": 21.226009,
+    "width": 1080,
+    "height": 1920,
+    "video_codec": "h264",
+    "pix_fmt": "yuv420p",
+    "fps": 25.0,
+    "audio_codec": "aac",
+    "sample_rate": "44100",
+    "volume": {
+      "ok": true,
+      "mean_volume_db": -26.4,
+      "max_volume_db": -9.7
+    },
+    "decode": {
+      "ok": true,
+      "returncode": 0,
+      "errors": ""
+    }
+  }
+}
