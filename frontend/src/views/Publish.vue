@@ -140,6 +140,9 @@
             <a v-if="selectedTask.video_path && selectedTask.video_path.includes('creative')" :href="`${apiBase}/api/groups/${selectedTask.group_id}/creative-download`" class="dl-btn dl-creative" target="_blank" title="自编版">
               ✍️ 自编版
             </a>
+            <a v-if="selectedTask.video_path && selectedTask.video_path.includes('qianchuan')" :href="`${apiBase}/api/groups/${selectedTask.group_id}/qianchuan-download`" class="dl-btn dl-qianchuan" target="_blank" title="千川投流">
+              📣 千川
+            </a>
           </div>
         </div>
         <!-- Manual publish mark button -->
@@ -181,6 +184,7 @@
               <span v-if="g.director_status === 2" class="vbadge vbadge-director">🎬</span>
               <span v-if="g.classic_status === 2" class="vbadge vbadge-classic">📹</span>
               <span v-if="g.creative_status === 2" class="vbadge vbadge-creative">✍️</span>
+              <span v-if="g.qianchuan_status === 2" class="vbadge vbadge-qianchuan">📣</span>
             </div>
             <span v-if="publishedGroupIds.has(g.id)" class="group-published-badge">✓ 已发布</span>
             <div class="group-item-actions" @click.stop>
@@ -192,7 +196,7 @@
         </div>
 
         <!-- Version selector: shown when selected group has both versions -->
-        <template v-if="selectedGroup && ((selectedGroup.classic_status === 2 ? 1 : 0) + (selectedGroup.director_status === 2 ? 1 : 0) + (selectedGroup.creative_status === 2 ? 1 : 0)) >= 2">
+        <template v-if="selectedGroup && availableVersionCount(selectedGroup) >= 2">
           <label>发布版本</label>
           <div class="version-switcher">
             <div :class="['vsw-option', selectedPublishVersion === 'director' && 'vsw-active']"
@@ -210,6 +214,12 @@
                  @click="setPublishVersion('creative')">
               <span class="vsw-label">✍️ 自编版</span>
               <span class="vsw-preview-btn" @click.stop="previewGroup = selectedGroup; previewVersion = 'creative'">▶ 预览</span>
+            </div>
+            <div v-if="selectedGroup && selectedGroup.qianchuan_status === 2"
+                 :class="['vsw-option', selectedPublishVersion === 'qianchuan' && 'vsw-active']"
+                 @click="setPublishVersion('qianchuan')">
+              <span class="vsw-label">📣 千川投流</span>
+              <span class="vsw-preview-btn" @click.stop="previewGroup = selectedGroup; previewVersion = 'qianchuan'">▶ 预览</span>
             </div>
           </div>
         </template>
@@ -334,10 +344,11 @@
       <div class="preview-modal">
         <div class="preview-header">
           <span>{{ previewGroup.label }}</span>
-          <div v-if="((previewGroup.classic_status === 2 ? 1 : 0) + (previewGroup.director_status === 2 ? 1 : 0) + (previewGroup.creative_status === 2 ? 1 : 0)) >= 2" class="preview-tabs">
+          <div v-if="availableVersionCount(previewGroup) >= 2" class="preview-tabs">
             <button v-if="previewGroup.director_status === 2" :class="['ptab', previewVersion === 'director' && 'ptab-active']" @click="previewVersion = 'director'">🎬 导演版</button>
             <button v-if="previewGroup.classic_status === 2" :class="['ptab', previewVersion === 'classic' && 'ptab-active']" @click="previewVersion = 'classic'">📹 经典版</button>
             <button v-if="previewGroup.creative_status === 2" :class="['ptab', previewVersion === 'creative' && 'ptab-active']" @click="previewVersion = 'creative'">✍️ 自编版</button>
+            <button v-if="previewGroup.qianchuan_status === 2" :class="['ptab', previewVersion === 'qianchuan' && 'ptab-active']" @click="previewVersion = 'qianchuan'">📣 千川投流</button>
           </div>
           <button class="preview-close" @click="previewGroup = null">✕</button>
         </div>
@@ -550,7 +561,7 @@ const matchedProduct = ref(null)
 const metaSchemes = ref([])
 const selectedScheme = ref('')
 const previewGroup = ref(null)   // group being previewed in video modal
-const previewVersion = ref('director')  // 'director' | 'classic'
+const previewVersion = ref('director')  // 'director' | 'classic' | 'creative' | 'qianchuan'
 const reclipModal = ref(null)    // {group, feedback, saving, submitted}
 const selectedPublishVersion = ref('both')
 const apiBase = import.meta.env.VITE_API_BASE || ''
@@ -782,10 +793,36 @@ function formatGroupId(id) {
 function formatTaskId(task) {
   const vp = task.video_path || ''
   let modePrefix
-  if (vp.includes('director')) modePrefix = '1X'
+  if (vp.includes('qianchuan')) modePrefix = '4X'
+  else if (vp.includes('director')) modePrefix = '1X'
   else if (vp.includes('creative')) modePrefix = '3X'
   else modePrefix = '2X'
   return 'DT' + modePrefix + String(task.group_id).padStart(7, '0')
+}
+
+
+function availableVersionCount(group) {
+  if (!group) return 0
+  return (group.classic_status === 2 ? 1 : 0)
+    + (group.director_status === 2 ? 1 : 0)
+    + (group.creative_status === 2 ? 1 : 0)
+    + (group.qianchuan_status === 2 ? 1 : 0)
+}
+
+function isPublishableGroup(group) {
+  if (!group) return false
+  return (
+    group.merge_status === 2 ||
+    group.classic_status === 2 ||
+    group.director_status === 2 ||
+    group.creative_status === 2 ||
+    group.qianchuan_status === 2
+  ) && (
+    group.merged_filename ||
+    group.director_final_video ||
+    group.creative_final_video ||
+    group.qianchuan_final_video
+  )
 }
 
 function statusLabel(s) {
@@ -850,7 +887,7 @@ async function refreshGroups() {
   groupsRefreshing.value = true
   try {
     const [groups, prods] = await Promise.all([getGroups(), getProducts()])
-    mergedGroups.value = groups.filter(g => (g.merge_status === 2 || g.classic_status === 2 || g.director_status === 2 || g.creative_status === 2) && (g.merged_filename || g.director_final_video || g.creative_final_video))
+    mergedGroups.value = groups.filter(isPublishableGroup)
     products.value = prods.filter(p => p.enabled)
   } finally {
     groupsRefreshing.value = false
@@ -1031,12 +1068,13 @@ const previewVideoUrl = computed(() => {
   if (previewVersion.value === 'classic') return `${BASE_URL}/api/groups/${previewGroup.value.id}/download`
   if (previewVersion.value === 'director') return `${BASE_URL}/api/groups/${previewGroup.value.id}/director-download`
   if (previewVersion.value === 'creative') return `${BASE_URL}/api/groups/${previewGroup.value.id}/creative-download`
+  if (previewVersion.value === 'qianchuan') return `${BASE_URL}/api/groups/${previewGroup.value.id}/qianchuan-download`
   return `${BASE_URL}/api/groups/${previewGroup.value.id}/download`
 })
 
 watch(previewGroup, (g) => {
   if (!g) return
-  previewVersion.value = g.director_status === 2 ? 'director' : g.creative_status === 2 ? 'creative' : 'classic'
+  previewVersion.value = g.qianchuan_status === 2 ? 'qianchuan' : g.director_status === 2 ? 'director' : g.creative_status === 2 ? 'creative' : 'classic'
 })
 
 function groupVideoUrl(groupId) {
@@ -1234,7 +1272,7 @@ async function loginAccount(id) {
 onMounted(async () => {
   await loadTasks()
   const [groups, roomList] = await Promise.all([getGroups(), getRooms()])
-  mergedGroups.value = groups.filter(g => (g.merge_status === 2 || g.classic_status === 2 || g.director_status === 2 || g.creative_status === 2) && (g.merged_filename || g.director_final_video || g.creative_final_video))
+  mergedGroups.value = groups.filter(isPublishableGroup)
   rooms.value = roomList
   accounts.value = await getPublishAccounts()
   const defaultAccount = accounts.value.find(a => a.account_name === '颜遇生活')
@@ -1388,6 +1426,7 @@ label { display: block; font-size: 12px; color: #888; margin: 12px 0 4px; }
 .vbadge-director { color: #a78bfa; }
 .vbadge-classic { color: #34d399; }
 .vbadge-creative { color: #f59e0b; }
+.vbadge-qianchuan { color: #fb7185; }
 
 .version-switcher { display: flex; gap: 8px; margin-bottom: 4px; }
 .vsw-option { flex: 1; display: flex; align-items: center; justify-content: space-between; background: #111; border: 1px solid #333; border-radius: 8px; padding: 8px 12px; cursor: pointer; transition: all 0.15s; }
@@ -1480,6 +1519,8 @@ label { display: block; font-size: 12px; color: #888; margin: 12px 0 4px; }
 .dl-director:hover { background: rgba(167,139,250,0.2); }
 .dl-creative { background: rgba(251,191,36,0.12); border: 1px solid rgba(251,191,36,0.3); color: #fbbf24; }
 .dl-creative:hover { background: rgba(251,191,36,0.2); }
+.dl-qianchuan { background: rgba(251,113,133,0.12); border: 1px solid rgba(251,113,133,0.3); color: #fb7185; }
+.dl-qianchuan:hover { background: rgba(251,113,133,0.2); }
 
 /* Manual publish section */
 .manual-publish-section { margin-top: 12px; padding-top: 12px; border-top: 1px solid #2a2a2a; }

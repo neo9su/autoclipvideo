@@ -243,6 +243,11 @@ async def init_db():
             "UPDATE clip_groups SET director_status = 2 "
             "WHERE director_status = 0 AND director_final_video IS NOT NULL"
         )
+        # Backfill qianchuan_status for existing qianchuan videos
+        await db.execute(
+            "UPDATE clip_groups SET qianchuan_status = 2 "
+            "WHERE qianchuan_status = 0 AND qianchuan_final_video IS NOT NULL"
+        )
         await db.commit()
 
         # Indexes (idempotent — CREATE INDEX IF NOT EXISTS)
