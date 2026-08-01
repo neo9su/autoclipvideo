@@ -202,7 +202,13 @@ async def generate_qianchuan(request: QianchuanGenerateRequest):
             await db.commit()
         return QianchuanGenerateResponse(success=False, group_id=request.group_id, status=-3, script=script, metadata=metadata, review=policy, error="投放规则校验失败")
 
+    from pipeline_state import claim_pipeline_start
     async with aiosqlite.connect(DB_PATH) as db:
+        if not request.dry_run and request.generate_video:
+            if not await claim_pipeline_start(db, "qianchuan_status", request.group_id):
+                async with db.execute("SELECT qianchuan_status FROM clip_groups WHERE id = ?", (request.group_id,)) as cur:
+                    current = await cur.fetchone()
+                return QianchuanGenerateResponse(success=True, started=False, group_id=request.group_id, status=current[0] if current else 0, script=script, score=match.get("score"), review=match)
         await db.execute(
             """UPDATE clip_groups SET qianchuan_status = ?, qianchuan_error = NULL,
                qianchuan_script = ?, qianchuan_score = ?, qianchuan_review = ? WHERE id = ?""",
@@ -282,6 +288,34 @@ async def _set_qianchuan_error(group_id: int, status: int, error: str, review: O
             (status, (error or "")[:500], json.dumps(review, ensure_ascii=False) if review else None, group_id),
         )
         await db.commit()
+
+
+async def _run_qianchuan_pipeline(group_id: int) -> None:
+    """Auto-start Qianchuan once, while allowing failed attempts to retry."""
+    import aiosqlite
+    from db import DB_PATH, aio_connect
+    from pipeline_state import claim_pipeline_start
+    async with aio_connect() as db:
+        if not await claim_pipeline_start(db, "qianchuan_status", group_id):
+            logger.info(f"Qianchuan pipeline group {group_id} already running/completed — skipping")
+            return
+        await db.commit()
+    try:
+        context = await load_group_context(DB_PATH, group_id)
+        if not context:
+            raise RuntimeError("group not found")
+        group = context["group"]
+        match = score_product_match(context, keywords=[group.get("label"), group.get("wig_model"), group.get("wig_color")], threshold=0.0)
+        script = generate_qianchuan_script(group, product_context=match.get("product") or {}, selling_points=[])
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("UPDATE clip_groups SET qianchuan_script=?, qianchuan_score=?, qianchuan_review=? WHERE id=?", (json.dumps(script, ensure_ascii=False), match.get("score"), json.dumps(match, ensure_ascii=False), group_id))
+            await db.commit()
+        await _qianchuan_generate_bg(group_id, script)
+    except Exception as exc:
+        logger.error(f"Qianchuan pipeline {group_id} failed: {exc}")
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("UPDATE clip_groups SET qianchuan_status=-1, qianchuan_error=? WHERE id=?", (str(exc)[:400], group_id))
+            await db.commit()
 
 
 async def _qianchuan_generate_bg(group_id: int, script: Dict) -> None:
