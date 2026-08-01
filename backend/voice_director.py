@@ -477,8 +477,11 @@ class VoiceDirector:
                 logger.warning("GPU TTS failed after 3 retries, falling back to Tencent")
                 return 0.0
 
-            # 轮询（最多 1800 秒 — CosyVoice2 首次推理需加载模型，可能需要数分钟）
-            deadline = time.time() + 1800
+            # Poll with a bounded per-scene deadline. The outer director pipeline has its
+            # own voiceover-stage timeout; keeping this shorter makes failures actionable
+            # instead of surfacing as a vague 30 minute pipeline timeout.
+            gpu_tts_timeout = int(os.environ.get("GPU_TTS_JOB_TIMEOUT_SECONDS", "300"))
+            deadline = time.time() + gpu_tts_timeout
             while time.time() < deadline:
                 await asyncio.sleep(2)
                 async with aiohttp.ClientSession() as session:
@@ -495,7 +498,7 @@ class VoiceDirector:
                     logger.warning(f"GPU TTS error: {r_body.get('error')}")
                     return 0.0
             else:
-                logger.warning("GPU TTS timed out after 600 s")
+                logger.warning(f"GPU TTS timed out after {gpu_tts_timeout}s for job {job_id}")
                 return 0.0
 
             # 下载音频

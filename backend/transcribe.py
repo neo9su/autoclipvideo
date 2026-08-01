@@ -1005,6 +1005,29 @@ async def _check_group_recordings_exist(group_id: int) -> tuple[bool, list]:
     return len(missing) == 0, missing
 
 
+class DirectorPipelineStageTimeout(TimeoutError):
+    """Raised when one director pipeline stage exceeds its own deadline."""
+
+    def __init__(self, stage: str, seconds: int):
+        self.stage = stage
+        self.seconds = seconds
+        super().__init__(f"director {stage} timeout ({seconds}s exceeded)")
+
+
+async def _director_stage(group_id: int, stage: str, awaitable, timeout_seconds: int):
+    started = time.monotonic()
+    logger.info(f"Director pipeline group {group_id}: {stage} started (timeout={timeout_seconds}s)")
+    try:
+        result = await asyncio.wait_for(awaitable, timeout=timeout_seconds)
+    except asyncio.TimeoutError as exc:
+        elapsed = time.monotonic() - started
+        logger.error(f"Director pipeline group {group_id}: {stage} timed out after {elapsed:.1f}s")
+        raise DirectorPipelineStageTimeout(stage, timeout_seconds) from exc
+    elapsed = time.monotonic() - started
+    logger.info(f"Director pipeline group {group_id}: {stage} finished in {elapsed:.1f}s")
+    return result
+
+
 async def _run_director_pipeline(group_id: int):
     """
     Full director pipeline: generate script → match segments → voiceover → compose video.
@@ -1028,13 +1051,24 @@ async def _run_director_pipeline(group_id: int):
     async with _DIRECTOR_SEM:
         try:
             await asyncio.wait_for(_run_director_pipeline_inner(group_id), timeout=1800)  # 30 min timeout
+        except DirectorPipelineStageTimeout as e:
+            logger.error(f"Director pipeline group {group_id} timed out in stage {e.stage} after {e.seconds}s")
+            try:
+                async with aio_connect() as db:
+                    await db.execute(
+                        "UPDATE clip_groups SET director_status = -1, director_error = ? WHERE id = ?",
+                        (f"{e.stage} timeout ({e.seconds}s exceeded)", group_id),
+                    )
+                    await db.commit()
+            except Exception:
+                pass
         except asyncio.TimeoutError:
             logger.error(f"Director pipeline group {group_id} timed out after 30min")
             try:
                 async with aio_connect() as db:
                     await db.execute(
                         "UPDATE clip_groups SET director_status = -1, director_error = ? WHERE id = ?",
-                        ("pipeline timeout (30min exceeded)", group_id),
+                        ("pipeline timeout (30min exceeded; last step unknown)", group_id),
                     )
                     await db.commit()
             except Exception:
@@ -1137,11 +1171,16 @@ async def _run_director_pipeline_inner(group_id: int):
 
         # 3. Generate script
         script_gen = DirectorScriptGenerator()
-        result = await script_gen.generate_script(
-            srt_content=srt_content,
-            wig_model=grp["wig_model"] or "",
-            wig_color=grp["wig_color"] or "",
-            room_name=grp["room_name"] or "",
+        result = await _director_stage(
+            group_id,
+            "script generation",
+            script_gen.generate_script(
+                srt_content=srt_content,
+                wig_model=grp["wig_model"] or "",
+                wig_color=grp["wig_color"] or "",
+                room_name=grp["room_name"] or "",
+            ),
+            180,
         )
         if not result.get("success"):
             # Fallback: use existing director_script from DB if generation fails
@@ -1177,13 +1216,23 @@ async def _run_director_pipeline_inner(group_id: int):
         # 4. Match segments to recordings
         matcher = DirectorMatcher(DB_PATH)
         script_segments = script.get("scenes") or script.get("segments") or []
-        matched_segments = await matcher.match_segments_to_recordings(script_segments, group_id)
+        matched_segments = await _director_stage(
+            group_id,
+            "segment matching",
+            matcher.match_segments_to_recordings(script_segments, group_id),
+            300,
+        )
         if not matched_segments:
             return await _fail("segment matching returned empty")
 
         # 5. Voiceover
         voice_dir = VoiceDirector()
-        vo_result = await voice_dir.generate_voiceover(script=script, group_id=group_id, reference_audio_path=None)
+        vo_result = await _director_stage(
+            group_id,
+            "voiceover",
+            voice_dir.generate_voiceover(script=script, group_id=group_id, reference_audio_path=None),
+            900,
+        )
         if not vo_result.get("success"):
             return await _fail(f"voiceover: {vo_result.get('error', 'unknown')}")
         async with aio_connect() as db:
@@ -1205,8 +1254,13 @@ async def _run_director_pipeline_inner(group_id: int):
             "wig_color": grp["wig_color"] or "",
         }
         video_dir = DirectorVideoComposer(RECORDINGS_DIR)
-        out_path = await video_dir.compose_final_video(
-            matched_segments, audio_path, config, tts_audio_segments=tts_audio_segments
+        out_path = await _director_stage(
+            group_id,
+            "video composition",
+            video_dir.compose_final_video(
+                matched_segments, audio_path, config, tts_audio_segments=tts_audio_segments
+            ),
+            1200,
         )
         if not out_path:
             return await _fail("video composition returned no output")
@@ -1231,7 +1285,12 @@ async def _run_director_pipeline_inner(group_id: int):
                     pass
                 return await _fail(f"导演版视频时长 {_dur:.1f}s < {MIN_FINAL_VIDEO_DURATION:.0f}s 最低要求")
 
-        processed_path = await postprocess_final_video(out_path)
+        processed_path = await _director_stage(
+            group_id,
+            "final video postprocess",
+            postprocess_final_video(out_path),
+            900,
+        )
         if not processed_path:
             return await _fail("导演版4K/50fps背景补齐后处理失败")
         out_path = processed_path
