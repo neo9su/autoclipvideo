@@ -8,6 +8,7 @@ from typing import Dict, Optional
 from recorder import RoomRecorder, get_stream_url
 from sync import sync_file
 from db import DB_PATH, aio_connect
+from gpu_execution import reject_local_media
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,8 @@ class MonitorManager:
         self._broadcast = broadcast_fn  # WebSocket broadcast callback
 
     async def start_all(self):
-        """Load enabled rooms from DB and start monitoring."""
+        """Disabled on the control plane; recording workers run remotely."""
+        reject_local_media("local room monitoring/recording")
         async with aio_connect() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute("SELECT * FROM rooms WHERE enabled = 1") as cursor:
@@ -35,6 +37,7 @@ class MonitorManager:
             await self.add_room(room["id"], room["name"], room["url"])
 
     async def add_room(self, room_id: int, name: str, url: str):
+        reject_local_media("local room monitoring/recording")
         if room_id in self._tasks:
             return
         logger.info(f"Starting monitor for room: {name} ({room_id})")
