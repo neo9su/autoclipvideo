@@ -5,6 +5,10 @@ Run on GPU server: uvicorn main:app --host 0.0.0.0 --port 8877
 # Set HuggingFace offline flags BEFORE any imports so huggingface_hub.constants
 # reads them at import time and never attempts network access.
 import os
+import platform
+
+if platform.system() == "Darwin":
+    raise SystemExit("gpu_service is remote-only; local worker startup is forbidden")
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("HUGGINGFACE_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
