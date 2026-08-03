@@ -2016,6 +2016,8 @@ async def gpu_status():
     result = {
         "reachable": False, "health": {}, "jobs": [],
         "gpu_online": gpu_is_online(),
+        "online": False,
+        "gpu_service_url": GPU_SERVICE_URL,
         "gpu_offline_seconds": offline_sec,
         "comfyui": {"reachable": False, "vram_total": 0, "vram_free": 0, "ram_total": 0, "ram_free": 0, "queue_running": 0, "queue_pending": 0},
     }
@@ -2039,15 +2041,19 @@ async def gpu_status():
             _aio_get(f"{COMFYUI_URL}/queue") if not gpu_is_maint() else _skip(),
             return_exceptions=True,
         )
-        # Only probe GPU service if watcher thinks it may be online
-        if not skip_gpu_probe:
-            try:
-                _st, _body = await _aio_get(f"{GPU_SERVICE_URL}/health")
-                if _st == 200:
-                    result["reachable"] = True
-                    result["health"] = _body
-            except Exception:
-                pass
+        # Probe the worker directly so this endpoint reflects port 8877 even
+        # during the watcher's startup/hysteresis window. A failed probe only
+        # reports offline; it never enables local processing.
+        try:
+            _st, _body = await _aio_get(f"{GPU_SERVICE_URL}/health")
+            if _st == 200:
+                result["reachable"] = True
+                result["online"] = True
+                result["gpu_online"] = True
+                result["health"] = _body if isinstance(_body, dict) else {}
+        except Exception:
+            pass
+
         # Unpack aio_get tuples
         comfy_status, comfy_body = comfy_r if isinstance(comfy_r, tuple) else (None, None)
         queue_status, queue_body = queue_r if isinstance(queue_r, tuple) else (None, None)
@@ -3841,15 +3847,18 @@ if os.path.exists(frontend_dist):
     if os.path.exists(assets_dir):
         app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
 
-    # SPA catch-all: serve index.html for every unmatched path so Vue Router works
+    # Serve the compiled SPA under an explicit, stable frontend URL as well as
+    # the root navigation page. StaticFiles handles /frontend/assets/* safely.
+    app.mount("/frontend", StaticFiles(directory=frontend_dist, html=True), name="frontend")
+
+    # SPA fallback for other non-API paths.
     _spa_index = os.path.join(frontend_dist, "index.html")
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def serve_spa(full_path: str):
         # Exclude API and WS paths from SPA catch-all
-        if full_path.startswith("api/") or full_path.startswith("ws/"):
+        if full_path.startswith("api/") or full_path.startswith("ws/") or full_path.startswith("frontend/"):
             raise HTTPException(status_code=404, detail="Not found")
-        # Serve any file that actually exists in dist (e.g. favicon.ico)
         candidate = os.path.join(frontend_dist, full_path)
         if os.path.isfile(candidate):
             return FileResponse(candidate)
