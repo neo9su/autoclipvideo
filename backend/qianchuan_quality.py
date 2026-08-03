@@ -62,8 +62,6 @@ async def decode_smoke(path: str) -> Dict:
 
 
 async def check_qianchuan_video_quality(path: str, min_duration: float = 18.0, max_duration: float = 35.5) -> Dict:
-    """Return a pending marker; the GPU service owns all media inspection."""
+    """Remote GPU quality report is required; local probes are disabled."""
     require_remote_gpu("remote quality check")
-    if not path:
-        return {"path": path, "ok": False, "status": "waiting_for_remote_quality_report", "errors": ["GPU quality report required"], "warnings": []}
     return {"path": path, "ok": False, "status": "waiting_for_remote_quality_report", "errors": ["GPU quality report required"], "warnings": []}

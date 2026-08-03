@@ -393,7 +393,8 @@ class VoiceDirector:
         优先使用 room_id（自动选用该直播间最新声音克隆），
         其次 voice_ref_job_id（旧版 clip-based ref）。
         """
-        require_remote_gpu("remote TTS")
+        record = require_remote_gpu("remote TTS")
+        logger.info("TTS execution node: %s", record.node)
         # creative vibe 用快速节奏；普通导演模式 KUKU公主额外+10%
         if is_creative:
             _base_speed = 1.35 if room_id == 2 else 1.25

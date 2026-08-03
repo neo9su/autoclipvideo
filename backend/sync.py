@@ -1,4 +1,4 @@
-"""Control-plane to remote GPU transfer client."""
+"""Remote GPU transfer client with bounded, content-addressed uploads."""
 from __future__ import annotations
 
 import asyncio
