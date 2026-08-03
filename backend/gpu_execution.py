@@ -88,9 +88,9 @@ def reject_local_media(operation: str) -> None:
     raise RemoteGpuRequiredError(f"local media execution is disabled: {operation}")
 
 
-def require_gpu_available(operation: str, online: bool) -> ExecutionRecord:
-    """Return the remote execution record or make the caller wait/requeue."""
-    record = require_remote_gpu(operation)
-    if not online:
-        raise GpuUnavailableError(f"{operation} is queued until remote GPU is online")
-    return record
+def media_execution_node(operation: str) -> str:
+    """Return the validated remote execution node for job metadata."""
+    return require_remote_gpu(operation).node
+
+
+
