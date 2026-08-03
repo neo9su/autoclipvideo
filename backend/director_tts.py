@@ -1,3 +1,4 @@
+from gpu_execution import reject_local_media
 """
 导演模式TTS配音模块
 

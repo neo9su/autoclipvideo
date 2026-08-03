@@ -1,21 +1,28 @@
-"""Compatibility boundary for disabled local media processing."""
+"""Fail-closed compatibility guard for the retired local media pipeline."""
 from __future__ import annotations
 
-from gpu_execution import reject_local_media
+from contextlib import asynccontextmanager, contextmanager
+
+from gpu_execution import RemoteGpuRequiredError
 
 
-class _DisabledLocalMediaSlot:
-    async def __aenter__(self):
-        reject_local_media("local media slot")
-
-    async def __aexit__(self, exc_type, exc, traceback):
-        return False
+def _disabled(operation: str) -> RemoteGpuRequiredError:
+    return RemoteGpuRequiredError(
+        f"local media execution is disabled; submit {operation} to the remote GPU"
+    )
 
 
-def local_media_slot(desc: str = "local media job"):
-    """Retain the old import surface while making local work unreachable."""
-    return _DisabledLocalMediaSlot()
+async def wait_for_memory_headroom(desc: str = "local media job") -> None:
+    raise _disabled(desc)
 
 
+@asynccontextmanager
+async def local_media_slot(desc: str = "local media job"):
+    raise _disabled(desc)
+    yield  # pragma: no cover
+
+
+@contextmanager
 def local_media_slot_sync(desc: str = "local media job"):
-    reject_local_media(desc)
+    raise _disabled(desc)
+    yield  # pragma: no cover

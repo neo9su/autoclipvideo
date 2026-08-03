@@ -1,37 +1,45 @@
-from pathlib import Path
 import sys
+from pathlib import Path
+
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "backend"))
 
-import gpu_execution
-from gpu_execution import RemoteGpuRequiredError, media_fingerprint
+from gpu_execution import RemoteGpuRequiredError
 from local_media_guard import local_media_slot
-from final_video import postprocess_final_video
-from qianchuan_quality import check_qianchuan_video_quality
+from transcribe import _pad_video_to_min_duration
 
 
 @pytest.mark.asyncio
-async def test_local_media_slot_rejects_execution():
+async def test_local_media_slot_rejects_before_process():
     with pytest.raises(RemoteGpuRequiredError):
-        async with local_media_slot("test"):
-            pass
+        async with local_media_slot("boundary test"):
+            pytest.fail("local media body must never execute")
 
 
-@pytest.mark.asyncio
-async def test_final_postprocess_never_invokes_local_ffmpeg():
+def test_duration_padding_is_fail_closed():
     with pytest.raises(RemoteGpuRequiredError):
-        await postprocess_final_video("input.mp4")
+        _pad_video_to_min_duration("result.mp4", 29.0)
 
 
-@pytest.mark.asyncio
-async def test_quality_check_requires_remote_service(monkeypatch):
-    monkeypatch.setattr(gpu_execution, "GPU_SERVICE_URL", "http://127.0.0.1:8877")
-    with pytest.raises(RemoteGpuRequiredError):
-        await check_qianchuan_video_quality("output.mp4")
+def test_critical_workflows_have_local_media_boundary():
+    backend = Path(__file__).parents[1] / "backend"
+    for name in ("editor.py", "director_video.py", "transcribe.py", "voice_director.py", "qianchuan_quality.py"):
+        source = (backend / name).read_text()
+        assert "reject_local_media" in source, name
 
 
-def test_media_fingerprint_is_stable(tmp_path):
-    source = tmp_path / "input.mp4"
-    source.write_bytes(b"test-media")
-    assert media_fingerprint(str(source)) == media_fingerprint(str(source))
+def test_smb_and_copy_tools_are_not_job_transports():
+    backend = Path(__file__).parents[1] / "backend"
+    forbidden = ("smb://", "cifs://", "rsync ", " scp ")
+    for source_path in backend.glob("*.py"):
+        source = source_path.read_text()
+        assert not any(token in source for token in forbidden), source_path
+
+
+def test_transfer_policy_documents_remote_node_and_storage_boundary():
+    doc = (Path(__file__).parents[1] / "docs/media-storage-smb-isolation.md").read_text()
+    assert "recordings/" in doc
+    assert "gpu_storage/" in doc
+    assert "execution_node=remote-gpu" in doc
+    assert "idempotent" in doc

@@ -163,6 +163,10 @@ async def init_db():
         for migration in [
             "ALTER TABLE recordings ADD COLUMN transcribed INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE recordings ADD COLUMN gpu_job_id TEXT",
+            "ALTER TABLE recordings ADD COLUMN execution_node TEXT",
+            "ALTER TABLE recordings ADD COLUMN upload_bytes INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE recordings ADD COLUMN download_bytes INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE recordings ADD COLUMN temp_file_count INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE recordings ADD COLUMN clipped INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE recordings ADD COLUMN clip_filename TEXT",
             "ALTER TABLE recordings ADD COLUMN analyzed INTEGER NOT NULL DEFAULT 0",
@@ -194,6 +198,13 @@ async def init_db():
             "ALTER TABLE clip_groups ADD COLUMN director_final_video TEXT",
             "ALTER TABLE clip_groups ADD COLUMN director_error TEXT",
             "ALTER TABLE recordings ADD COLUMN preferred_editing_mode TEXT DEFAULT 'classic'",
+            # Remote execution and transfer accounting; all are idempotent migrations.
+            "ALTER TABLE recordings ADD COLUMN execution_node TEXT DEFAULT 'remote-gpu'",
+            "ALTER TABLE recordings ADD COLUMN upload_bytes INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE recordings ADD COLUMN download_bytes INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE recordings ADD COLUMN transfer_attempts INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE recordings ADD COLUMN temp_file_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE recordings ADD COLUMN gpu_waiting INTEGER NOT NULL DEFAULT 0",
             # GPU offload tracking
             "ALTER TABLE recording_clips ADD COLUMN gpu_clip_job_id TEXT",
             # VibeVoice

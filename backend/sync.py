@@ -1,87 +1,68 @@
-"""Idempotent control-plane transfer to the remote GPU service."""
+"""Remote GPU transfer client with bounded, content-addressed uploads."""
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
+import time
 from typing import Optional
 
 import aiohttp
-import aiosqlite
 
-from db import DB_PATH
-from gpu_execution import media_fingerprint, require_remote_gpu
+from gpu_execution import require_remote_gpu
 
 logger = logging.getLogger(__name__)
 GPU_SERVICE_URL = os.environ.get("GPU_SERVICE_URL", "http://10.190.0.203:8877").rstrip("/")
-_MAX_UPLOAD_ATTEMPTS = 2
+_TRANSFER_SEMAPHORE = asyncio.Semaphore(1)
+_TRANSFER_CACHE: dict[tuple[str, int, int], str] = {}
+_TRANSFER_BYTES_UPLOADED = 0
 
 
-async def _existing_job(file_key: str) -> Optional[str]:
-    """Return a previously submitted job for this exact artifact, if known."""
-    try:
-        async with aiosqlite.connect(DB_PATH) as db:
-            async with db.execute(
-                "SELECT gpu_job_id FROM gpu_transfers WHERE idempotency_key = ? LIMIT 1",
-                (file_key,),
-            ) as cursor:
-                row = await cursor.fetchone()
-                return row[0] if row else None
-    except Exception:
-        return None
+def transfer_stats() -> dict:
+    return {"uploads": len(_TRANSFER_CACHE), "bytes_uploaded": _TRANSFER_BYTES_UPLOADED, "in_flight_limit": 1}
+
+
+def _transfer_key(local_path: str) -> tuple[str, int, int]:
+    stat = os.stat(local_path)
+    return (os.path.abspath(local_path), stat.st_size, stat.st_mtime_ns)
 
 
 async def sync_file(local_path: str, room_id: int) -> Optional[str]:
-    """Upload one artifact once, with bounded retry and an idempotency key."""
-    require_remote_gpu("media upload")
-    if not os.path.isfile(local_path):
+    """Upload one source once; never process or retry-copy it locally."""
+    global _TRANSFER_BYTES_UPLOADED
+    require_remote_gpu("source upload")
+    if not local_path or not os.path.isfile(local_path):
         raise FileNotFoundError(local_path)
+    key = _transfer_key(local_path)
+    if key in _TRANSFER_CACHE:
+        logger.info("GPU transfer reuse: node=remote-gpu file=%s", os.path.basename(local_path))
+        return _TRANSFER_CACHE[key]
     filename = os.path.basename(local_path)
-    file_key = media_fingerprint(local_path)
-    known_job = await _existing_job(file_key)
-    if known_job:
-        logger.info("Skipping duplicate GPU upload for %s", filename)
-        return known_job
-
-    url = f"{GPU_SERVICE_URL}/jobs"
-    file_size = os.path.getsize(local_path)
-    for attempt in range(1, _MAX_UPLOAD_ATTEMPTS + 1):
-        try:
-            with open(local_path, "rb") as source:
-                form = aiohttp.FormData()
-                form.add_field("room_id", str(room_id))
-                form.add_field("idempotency_key", file_key)
-                form.add_field("execution_node", "remote-gpu")
-                form.add_field("file", source, filename=filename, content_type="video/mp4")
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        url, data=form,
-                        headers={"X-Idempotency-Key": file_key},
-                        timeout=aiohttp.ClientTimeout(total=300),
-                    ) as response:
-                        body = await response.json() if response.status in (200, 201) else None
-                        text = "" if body is not None else (await response.text())[:200]
-            if response.status == 201 and body and body.get("job_id"):
-                job_id = body["job_id"]
-                async with aiosqlite.connect(DB_PATH) as db:
-                    await db.execute(
-                        """INSERT OR REPLACE INTO gpu_transfers
-                           (idempotency_key, filename, room_id, input_bytes, gpu_job_id,
-                            execution_node, uploaded_bytes)
-                           VALUES (?, ?, ?, ?, ?, 'remote-gpu', ?)""",
-                        (file_key, filename, room_id, file_size, job_id, file_size),
-                    )
-                    await db.commit()
-                logger.info("GPU upload complete: file=%s bytes=%d node=remote-gpu", filename, file_size)
-                return job_id
-            if response.status >= 500 and attempt < _MAX_UPLOAD_ATTEMPTS:
-                await asyncio.sleep(2 ** attempt)
-                continue
-            logger.error("GPU upload rejected: file=%s status=%s detail=%s", filename, response.status, text)
-            return None
-        except (aiohttp.ClientError, asyncio.TimeoutError) as error:
-            if attempt == _MAX_UPLOAD_ATTEMPTS:
-                logger.error("GPU upload unavailable: file=%s attempts=%d error=%s", filename, attempt, error)
-                return None
-            await asyncio.sleep(2 ** attempt)
-    return None
+    digest = hashlib.sha256()
+    async with _TRANSFER_SEMAPHORE:
+        if key in _TRANSFER_CACHE:
+            return _TRANSFER_CACHE[key]
+        with open(local_path, "rb") as source:
+            file_data = source.read()
+        digest.update(file_data)
+        form = aiohttp.FormData()
+        form.add_field("room_id", str(room_id))
+        digest_hex = digest.hexdigest()
+        form.add_field("sha256", digest_hex)
+        form.add_field("idempotency_key", f"recording:{room_id}:{digest_hex}")
+        form.add_field("file", file_data, filename=filename, content_type="video/mp4")
+        async with aiohttp.ClientSession() as session:
+            async with session.post(f"{GPU_SERVICE_URL}/jobs", data=form,
+                                    timeout=aiohttp.ClientTimeout(total=300)) as response:
+                if response.status not in (200, 201):
+                    body = (await response.text())[:200]
+                    raise RuntimeError(f"GPU upload failed ({response.status}): {body}")
+                payload = await response.json()
+        job_id = payload.get("job_id")
+        if not job_id:
+            raise RuntimeError("GPU upload response did not contain job_id")
+        _TRANSFER_CACHE[key] = str(job_id)
+        _TRANSFER_BYTES_UPLOADED += len(file_data)
+        logger.info("GPU transfer complete: node=remote-gpu bytes=%d job_id=%s", len(file_data), job_id)
+        return str(job_id)

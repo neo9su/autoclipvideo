@@ -1,3 +1,4 @@
+from gpu_execution import reject_local_media
 """
 Segment merger: merge small recording segments before transcription.
 
@@ -139,6 +140,7 @@ def _consecutive_group_for(segments: list, target_id: int) -> list:
 
 
 async def _ffprobe_duration(filepath: str) -> Optional[float]:
+    reject_local_media("local segment duration probe")
     """Return video duration in seconds using ffprobe, or None on failure."""
     cmd = [
         "ffprobe", "-v", "quiet", "-print_format", "json",
@@ -170,6 +172,7 @@ async def _ffmpeg_split_file(
     chunk, which reuses the original path slot), or None on failure.
     The caller is responsible for updating the DB and deleting the original file.
     """
+    reject_local_media("local segment split")
     duration = await _ffprobe_duration(filepath)
     if not duration or duration <= 0:
         logger.warning(f"Could not determine duration for {filepath}, skipping split")
@@ -288,6 +291,7 @@ async def _split_and_register(
 
 
 async def _ffmpeg_concat(file_paths: list[str], output_path: str) -> bool:
+    reject_local_media("local segment concat")
     """Concatenate MP4 files with ffmpeg concat demuxer (stream copy, lossless)."""
     list_file = output_path + ".concat.txt"
     try:

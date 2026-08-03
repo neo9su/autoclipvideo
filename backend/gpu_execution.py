@@ -7,7 +7,7 @@ provider.  Keep this module dependency-free so every worker boundary can use it.
 from __future__ import annotations
 
 import os
-import hashlib
+import platform
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
@@ -42,15 +42,11 @@ def require_remote_gpu(operation: str) -> ExecutionRecord:
     return record
 
 
+def media_execution_node(operation: str) -> str:
+    """Return the configured remote node marker for a media operation."""
+    return require_remote_gpu(operation).node
+
+
 def reject_local_media(operation: str) -> None:
     """Explicitly fail any attempted local media execution."""
     raise RemoteGpuRequiredError(f"local media execution is disabled: {operation}")
-
-
-def media_fingerprint(path: str) -> str:
-    """Return a stable identity for an input artifact for idempotent uploads."""
-    digest = hashlib.sha256()
-    with open(path, "rb") as source:
-        while chunk := source.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()

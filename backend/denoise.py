@@ -1,3 +1,4 @@
+from gpu_execution import reject_local_media
 """
 Voice isolation via spectral noise reduction (noisereduce).
 Falls back to ffmpeg-only filtering if noisereduce unavailable.

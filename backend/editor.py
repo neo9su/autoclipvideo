@@ -2819,7 +2819,7 @@ async def _edit_via_gpu(
         return None
 
     size_mb = os.path.getsize(out_path) / 1024 / 1024
-    logger.info(f"GPU clip downloaded: {out_path} ({size_mb:.1f} MB, node=remote-gpu)")
+    logger.info(f"GPU clip downloaded: {out_path} ({size_mb:.1f} MB)")
     _clip_job_id_cache[out_path] = job_id  # store for GPU-side concat later
     return out_path
 
@@ -2833,8 +2833,12 @@ async def _fast_local_clip(
     out: str,
     on_progress=None,
 ) -> bool:
-    # Local encoder remains as a compatibility symbol, but is unreachable.
     reject_local_media("local clip encoder")
+    """
+    Fast local fallback when GPU is unavailable.
+    Stream-copy segment extraction + concat + single re-encode pass.
+    Skips all transitions and pre-processing.  ~10-30s vs 30+ minutes.
+    """
     ass_content = build_ass(selected, segs)
     has_subs = "Dialogue:" in ass_content
 
@@ -2953,6 +2957,7 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
     clip_engine='v2'     uses hairstyle-boundary detection — picks the best single wig intro window.
     Returns local path to the output _clip.mp4, or None on failure.
     """
+    reject_local_media("classic clip analysis and encoding")
     if not os.path.exists(mp4_path):
         logger.error(f"MP4 not found: {mp4_path}")
         return None
@@ -3121,6 +3126,7 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
                 raise
 
     reject_local_media("clip generation")
+    raise AssertionError("unreachable: remote GPU clip path must return or raise")
 
 
 async def edit_recording_multi(
@@ -3139,6 +3145,7 @@ async def edit_recording_multi(
     Produce `count` distinct highlight clips from the same recording.
     Returns list of successfully generated output paths.
     """
+    reject_local_media("multi-variant clip analysis and encoding")
     if not os.path.exists(mp4_path):
         logger.error(f"MP4 not found: {mp4_path}")
         return []
@@ -3290,27 +3297,6 @@ async def edit_recording_multi(
             continue
 
         reject_local_media(f"clip variant {k+1}")
-
-        # ── Local fallback pipeline is unreachable and forbidden ─────────────
-        logger.info(f"Using fast local fallback for variant {k+1} of {os.path.basename(mp4_path)}")
-        if on_progress:
-            await on_progress("build", k, count)
-        if await _fast_local_clip(mp4_path, selected, segs, out_path, on_progress=on_progress):
-            try:
-                if on_progress:
-                    await on_progress("thumbnail", k, count)
-                from thumbnail import generate_thumbnail
-                best_seg = max(selected, key=lambda s: s.score) if any(s.score > 0 for s in selected) \
-                           else selected[max(0, len(selected) // 4)]
-                thumb = await generate_thumbnail(mp4_path, offset=best_seg.start + 1.0)
-                if thumb:
-                    await _prepend_thumbnail(out_path, thumb)
-            except Exception as e:
-                logger.warning(f"Thumbnail prepend skipped (variant {k+1}): {e}")
-            size_mb = os.path.getsize(out_path) / 1024 / 1024
-            logger.info(f"Variant {k+1} ready (fast-local): {out_path} ({size_mb:.1f} MB)")
-            results.append(out_path)
-        else:
-            logger.error(f"Variant {k+1} build failed")
+        raise AssertionError("unreachable: remote GPU clip path must return or raise")
 
     return results
