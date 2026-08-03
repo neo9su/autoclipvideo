@@ -2,8 +2,11 @@
 
 The Mac application is a control plane. `recordings/` contains upload staging and
 control-plane result copies; `gpu_storage/` is a remote GPU-service data root and
-must not be exposed by the Mac SMB server. Video processing, ffmpeg, ASR, TTS,
-analysis, and quality checks run on the remote GPU node only.
+must not be exposed by the Mac SMB server. They are not a processing share:
+`recordings/` is read only for control-plane upload/download, while the actual
+media work and GPU-side temporary files live under the remote node's
+`gpu_storage/`. Video processing, ffmpeg, ASR, TTS, analysis, and quality checks
+run on the remote GPU node only.
 
 ## Recommended macOS isolation
 
@@ -16,6 +19,10 @@ analysis, and quality checks run on the remote GPU node only.
 - Verify the File Sharing list after deployment and remove stale share points.
 - Prefer the GPU service HTTP API for job upload/download; do not use SMB, rsync,
   or scp as part of a job.
+- Keep result downloads bounded and idempotent: download a completed artifact
+  once, record its byte count, and reuse the existing local result on retries.
+- If a job cannot reach the GPU, leave it queued with `execution_node=remote-gpu`
+  and `gpu_waiting=1`; never start a local worker to drain the queue.
 
 The application cannot disable macOS SMB shares safely from code because that is a
 host-level administrative setting. This document is the deployment boundary and

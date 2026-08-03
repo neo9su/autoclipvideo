@@ -951,6 +951,7 @@ def _pad_video_to_min_duration(out_path: str, current_duration: float, min_durat
     Returns the usable output path, or None if padding failed or the clip is
     too short to rescue safely.
     """
+    reject_local_media("local duration padding")
     if current_duration >= target_duration:
         return out_path
     if current_duration < min_duration:

@@ -48,7 +48,9 @@ async def sync_file(local_path: str, room_id: int) -> Optional[str]:
         digest.update(file_data)
         form = aiohttp.FormData()
         form.add_field("room_id", str(room_id))
-        form.add_field("sha256", digest.hexdigest())
+        digest_hex = digest.hexdigest()
+        form.add_field("sha256", digest_hex)
+        form.add_field("idempotency_key", f"recording:{room_id}:{digest_hex}")
         form.add_field("file", file_data, filename=filename, content_type="video/mp4")
         async with aiohttp.ClientSession() as session:
             async with session.post(f"{GPU_SERVICE_URL}/jobs", data=form,
