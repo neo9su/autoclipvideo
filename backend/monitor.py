@@ -155,10 +155,12 @@ class MonitorManager:
 
         job_id = await sync_file(upload_path, room_id)
         if job_id:
+            upload_bytes = os.path.getsize(upload_path)
             async with aio_connect() as db:
                 await db.execute(
-                    "UPDATE recordings SET synced=1, transcribed=1, gpu_job_id=? WHERE id=?",
-                    (job_id, primary_id),
+                    """UPDATE recordings SET synced=1, transcribed=1, gpu_job_id=?,
+                       transfer_node=?, upload_bytes=? WHERE id=?""",
+                    (job_id, "remote-gpu", upload_bytes, primary_id),
                 )
                 await db.commit()
 

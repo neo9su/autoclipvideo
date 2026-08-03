@@ -1,9 +1,9 @@
+from gpu_execution import reject_local_media
 """Final publish-video post-processing.
 
-统一成片出口的最后一道工序：
-- 竖屏 4K 画布：2160x3840
-- 输出帧率：50fps
-- 非 9:16 画面使用模糊背景补齐，主体等比居中
+The control plane does not own the final render. The remote GPU compositor is
+responsible for 4K/50fps/background-fill processing; this legacy entry point
+fails closed so it cannot start local ffmpeg.
 """
 
 import asyncio
@@ -25,12 +25,8 @@ async def postprocess_final_video(
     height: int = FINAL_VIDEO_HEIGHT,
     fps: int = FINAL_VIDEO_FPS,
 ) -> Optional[str]:
-    """Render a finished short video to 4K/50fps with blurred background fill.
-
-    Returns the processed file path on success. If ffmpeg fails, returns None and
-    leaves the original file in place so callers can mark the job failed instead
-    of silently publishing a non-conforming asset.
-    """
+    """Reject local final rendering; callers must use the GPU compositor."""
+    reject_local_media("final video post-processing")
     src = Path(video_path)
     if not src.exists() or src.stat().st_size <= 0:
         logger.warning("Final postprocess skipped: missing video %s", video_path)

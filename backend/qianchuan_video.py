@@ -5,10 +5,7 @@
 """
 from __future__ import annotations
 
-import asyncio
-import math
 import os
-import wave
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -36,25 +33,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 
 def ensure_prompt_sfx(path: Optional[str] = None) -> str:
-    """Create a short, soft click/beep wav if no asset exists."""
-    out = Path(path or Path(__file__).parent / "assets" / "audio" / "qianchuan_click.wav")
-    out.parent.mkdir(parents=True, exist_ok=True)
-    if out.exists() and out.stat().st_size > 1000:
-        return str(out)
-    sample_rate = 44100
-    duration = 0.055
-    freq = 1200.0
-    frames = int(sample_rate * duration)
-    with wave.open(str(out), "w") as wav:
-        wav.setnchannels(1)
-        wav.setsampwidth(2)
-        wav.setframerate(sample_rate)
-        for i in range(frames):
-            # quick fade in/out, low amplitude to avoid harshness
-            env = min(1.0, i / (sample_rate * 0.008), (frames - i) / (sample_rate * 0.018))
-            val = int(0.22 * env * 32767 * math.sin(2 * math.pi * freq * i / sample_rate))
-            wav.writeframesraw(val.to_bytes(2, byteorder="little", signed=True))
-    return str(out)
+    """Return a remote asset identifier; never synthesize media on the control plane."""
+    return path or "remote://qianchuan_click.wav"
 
 
 def _sec_to_ass(s: float) -> str:

@@ -18,7 +18,6 @@ import httpx
 
 from gpu_execution import reject_local_media, require_remote_gpu
 
-from local_media_guard import local_media_slot
 
 logger = logging.getLogger(__name__)
 
@@ -265,14 +264,18 @@ class VoiceDirector:
         if room_id_for_tts:
             logger.info(f"TTS will use room_id={room_id_for_tts} voice clone (v3) for group {group_id}")
         else:
-            logger.info(f"No room_id for group {group_id}; remote GPU voice selection is required")
-
+            logger.error("GPU-only TTS requires a room_id; job remains pending")
+            return {"success": False, "status": "waiting_for_gpu", "error": "no remote execution room"}
 
         scenes: List[Dict] = script.get("scenes", [])
         is_creative = script.get("vibe") == "creative"
         is_qianchuan = script.get("mode") == "qianchuan"
         if not scenes:
             return await self._synthesize_full_text(script, group_id, room_id_for_tts)
+
+        # The control plane cannot concatenate audio.  Ask the remote GPU for one
+        # complete artifact; this also makes retries idempotent at job granularity.
+        return await self._synthesize_full_text(script, group_id, room_id_for_tts)
 
         audio_segments: List[Dict] = []
         total_duration = 0.0
@@ -314,14 +317,7 @@ class VoiceDirector:
                     pass
             return {"success": False, "error": "音频合并失败"}
 
-        # ── 时长保底：自编/导演模式合成音频 < 30s 时自动降速拉长 ──────────────
-        _MIN_AUDIO_DUR = 30.0
-        actual_merged_dur = await self._probe_duration(merged)
-        if (not is_qianchuan) and actual_merged_dur > 0 and actual_merged_dur < _MIN_AUDIO_DUR:
-            logger.warning("Remote GPU must stretch short audio; local audio processing is disabled")
-            reject_local_media("local voice audio stretch")
 
-        # ─────────────────────────────────────────────────────────────────────
 
         return {
             "success":             True,
@@ -397,7 +393,8 @@ class VoiceDirector:
         优先使用 room_id（自动选用该直播间最新声音克隆），
         其次 voice_ref_job_id（旧版 clip-based ref）。
         """
-        require_remote_gpu("remote TTS")
+        record = require_remote_gpu("remote TTS")
+        logger.info("TTS execution node: %s", record.node)
         # creative vibe 用快速节奏；普通导演模式 KUKU公主额外+10%
         if is_creative:
             _base_speed = 1.35 if room_id == 2 else 1.25
@@ -480,9 +477,11 @@ class VoiceDirector:
                 f.write(audio_data)
             if os.path.getsize(output_path) == 0:
                 return 0.0
-            actual_dur = await self._probe_duration(output_path)
-            # Speed correction must be performed by the remote GPU service.
-            return actual_dur
+            remote_duration = float(r_body.get("duration") or r_body.get("duration_s") or 0.0)
+            if remote_duration <= 0:
+                logger.warning("GPU TTS response did not include remote duration")
+                return 0.0
+            return remote_duration
 
         except Exception as e:
             logger.warning(f"GPU TTS exception: {e}")
@@ -647,64 +646,10 @@ class VoiceDirector:
     # ── 音频工具 ───────────────────────────────────────────────────────────────
 
     async def _probe_duration(self, path: str) -> float:
-        """ffprobe 获取音频时长（秒）。"""
-        try:
-            async with local_media_slot(f"voice director ffprobe {os.path.basename(path)}"):
-                proc = await asyncio.create_subprocess_exec(
-                    "ffprobe", "-v", "error",
-                    "-show_entries", "format=duration",
-                    "-of", "default=noprint_wrappers=1:nokey=1",
-                    path,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.DEVNULL,
-                )
-                stdout, _ = await proc.communicate()
-            return float(stdout.decode().strip())
-        except Exception:
-            return 0.0
+        reject_local_media("voice audio processing")
 
     async def _merge_audio_segments(self, segments: List[Dict], group_id: int) -> Optional[str]:
-        """顺序拼合所有音频片段。"""
-        if len(segments) == 1:
-            return segments[0]["audio_path"]
-
-        merged_path = os.path.join(
-            self._output_dir, f"group{group_id}_merged_{int(time.time())}.wav"
-        )
-        list_file = merged_path + ".txt"
-        try:
-            with open(list_file, "w", encoding="utf-8") as f:
-                for seg in segments:
-                    f.write(f"file '{seg['audio_path']}'\n")
-            async with local_media_slot(f"voice director audio concat group {group_id}"):
-                proc = await asyncio.create_subprocess_exec(
-                    "ffmpeg", "-y",
-                    "-f", "concat", "-safe", "0",
-                    "-i", list_file,
-                    "-c", "copy",
-                    merged_path,
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
-                )
-                await proc.communicate()
-            if not os.path.exists(merged_path) or os.path.getsize(merged_path) == 0:
-                logger.error("Audio merge produced empty output")
-                return None
-            # Clean up individual segment files now that merge succeeded
-            for seg in segments:
-                try:
-                    os.remove(seg["audio_path"])
-                except Exception:
-                    pass
-            return merged_path
-        except Exception as e:
-            logger.error(f"Audio merge failed: {e}")
-            return None
-        finally:
-            try:
-                os.remove(list_file)
-            except Exception:
-                pass
+        reject_local_media("voice audio processing")
 
     async def _synthesize_full_text(
         self,

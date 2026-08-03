@@ -2824,7 +2824,7 @@ async def _edit_via_gpu(
     return out_path
 
 
-# ── Disabled local encoder compatibility stub ────────────────────────────────
+# ── Fast local fallback (stream-copy + single encode) ─────────────────────────
 
 async def _fast_local_clip(
     mp4: str,
@@ -2833,10 +2833,13 @@ async def _fast_local_clip(
     out: str,
     on_progress=None,
 ) -> bool:
-    """Disabled compatibility path; all encoding is remote GPU-only."""
     reject_local_media("local clip encoder")
-
-    # Legacy implementation is deliberately unreachable.
+    """
+    Fast local fallback when GPU is unavailable.
+    Stream-copy segment extraction + concat + single re-encode pass.
+    Skips all transitions and pre-processing.  ~10-30s vs 30+ minutes.
+    """
+    ass_content = build_ass(selected, segs)
     has_subs = "Dialogue:" in ass_content
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -3093,7 +3096,7 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
                 logger.info("GPU back online, proceeding with GPU clip")
             except asyncio.TimeoutError:
                 reject_local_media("clip generation while GPU is offline")
-        if room_id is not None:
+        if _gpu_is_online():
             try:
                 mp4_filename = os.path.basename(mp4_path)
                 gpu_result = await _edit_via_gpu(
@@ -3101,18 +3104,6 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
                     mp4_path=mp4_path,
                 )
                 if gpu_result:
-                    # GPU succeeded — generate thumbnail locally from original mp4
-                    try:
-                        if on_progress:
-                            await on_progress("thumbnail", 0, 1)
-                        from thumbnail import generate_thumbnail
-                        best_seg = max(selected, key=lambda s: s.score) if any(s.score > 0 for s in selected) \
-                                   else selected[max(0, len(selected) // 4)]
-                        thumb = await generate_thumbnail(mp4_path, offset=best_seg.start + 1.0)
-                        if thumb:
-                            await _prepend_thumbnail(out_path, thumb)
-                    except Exception as e:
-                        logger.warning(f"Thumbnail prepend skipped (GPU path): {e}")
                     size_mb = os.path.getsize(out_path) / 1024 / 1024
                     logger.info(f"Clip ready (GPU): {out_path} ({size_mb:.1f} MB, {total_dur:.1f}s)")
                     return out_path
@@ -3120,24 +3111,10 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
             except Exception as e:
                 logger.error(f"GPU path error; local execution is forbidden: {e}")
                 raise
+        raise RuntimeError("GPU unavailable; clip job remains pending")
 
-    reject_local_media("clip generation")
-    if await _fast_local_clip(mp4_path, selected, segs, out_path, on_progress=on_progress):
-        try:
-            if on_progress:
-                await on_progress("thumbnail", 0, 1)
-            from thumbnail import generate_thumbnail
-            best_seg = max(selected, key=lambda s: s.score) if any(s.score > 0 for s in selected) \
-                       else selected[max(0, len(selected) // 4)]
-            thumb = await generate_thumbnail(mp4_path, offset=best_seg.start + 1.0)
-            if thumb:
-                await _prepend_thumbnail(out_path, thumb)
-        except Exception as e:
-            logger.warning(f"Thumbnail prepend skipped: {e}")
-        size_mb = os.path.getsize(out_path) / 1024 / 1024
-        logger.info(f"Clip ready (fast-local): {out_path} ({size_mb:.1f} MB, {total_dur:.1f}s)")
-        return out_path
-    return None
+    # A failed remote job must remain pending for retry by the GPU worker.
+    raise RuntimeError("remote GPU clip job returned no output")
 
 
 async def edit_recording_multi(
@@ -3269,64 +3246,35 @@ async def edit_recording_multi(
 
         # ── Try GPU NVENC path first ──────────────────────────────────────────
         gpu_used = False
-        _room_id_v = room_id  # local copy so we can disable GPU for this variant only
-        if _room_id_v is not None:
-            from gpu_state import is_online as _gpu_is_online, wait_until_online as _gpu_wait
-            if not _gpu_is_online():
-                logger.info(f"GPU offline — waiting up to {_GPU_WAIT_TIMEOUT:.0f}s (variant {k+1})...")
-                try:
-                    await asyncio.wait_for(_gpu_wait(), timeout=_GPU_WAIT_TIMEOUT)
-                except asyncio.TimeoutError:
-                    reject_local_media(f"clip variant {k+1} while GPU is offline")
-        if _room_id_v is not None:
+        _room_id_v = room_id
+        require_remote_gpu(f"clip variant {k+1}")
+        if _room_id_v is None:
+            raise RuntimeError(f"clip variant {k+1} requires a remote GPU room")
+        from gpu_state import is_online as _gpu_is_online, wait_until_online as _gpu_wait
+        if not _gpu_is_online():
+            logger.info(f"GPU offline — waiting up to {_GPU_WAIT_TIMEOUT:.0f}s (variant {k+1})...")
             try:
-                mp4_filename = os.path.basename(mp4_path)
-                gpu_result = await _edit_via_gpu(
-                    mp4_filename, _room_id_v, selected, segs, out_path, on_progress,
-                    mp4_path=mp4_path,
-                )
-                if gpu_result:
-                    try:
-                        best_seg = max(selected, key=lambda s: s.score) if any(s.score > 0 for s in selected) \
-                                   else selected[max(0, len(selected) // 4)]
-                        from thumbnail import generate_thumbnail
-                        thumb = await generate_thumbnail(mp4_path, offset=best_seg.start + 1.0)
-                        if thumb:
-                            await _prepend_thumbnail(out_path, thumb)
-                    except Exception as te:
-                        logger.warning(f"Thumbnail prepend skipped (GPU variant {k+1}): {te}")
-                    size_mb = os.path.getsize(out_path) / 1024 / 1024
-                    logger.info(f"Variant {k+1} ready (NVENC): {out_path} ({size_mb:.1f} MB)")
-                    results.append(out_path)
-                    gpu_used = True
-            except Exception as e:
-                logger.error(f"GPU path error for variant {k+1}; local execution is forbidden: {e}")
-                raise
+                await asyncio.wait_for(_gpu_wait(), timeout=_GPU_WAIT_TIMEOUT)
+            except asyncio.TimeoutError:
+                raise RuntimeError(f"GPU unavailable; clip variant {k+1} job remains pending")
+        try:
+            mp4_filename = os.path.basename(mp4_path)
+            gpu_result = await _edit_via_gpu(
+                mp4_filename, _room_id_v, selected, segs, out_path, on_progress,
+                mp4_path=mp4_path,
+            )
+            if gpu_result:
+                size_mb = os.path.getsize(out_path) / 1024 / 1024
+                logger.info(f"Variant {k+1} ready (NVENC): {out_path} ({size_mb:.1f} MB)")
+                results.append(out_path)
+                gpu_used = True
+        except Exception as e:
+            logger.error(f"GPU path error for variant {k+1}; local execution is forbidden: {e}")
+            raise
 
         if gpu_used:
             continue
 
-        # No local fallback: GPU outages remain queued for remote recovery.
-        reject_local_media(f"clip variant {k+1} while GPU output is unavailable")
-
-        if on_progress:
-            await on_progress("build", k, count)
-        if await _fast_local_clip(mp4_path, selected, segs, out_path, on_progress=on_progress):
-            try:
-                if on_progress:
-                    await on_progress("thumbnail", k, count)
-                from thumbnail import generate_thumbnail
-                best_seg = max(selected, key=lambda s: s.score) if any(s.score > 0 for s in selected) \
-                           else selected[max(0, len(selected) // 4)]
-                thumb = await generate_thumbnail(mp4_path, offset=best_seg.start + 1.0)
-                if thumb:
-                    await _prepend_thumbnail(out_path, thumb)
-            except Exception as e:
-                logger.warning(f"Thumbnail prepend skipped (variant {k+1}): {e}")
-            size_mb = os.path.getsize(out_path) / 1024 / 1024
-            logger.info(f"Variant {k+1} ready (fast-local): {out_path} ({size_mb:.1f} MB)")
-            results.append(out_path)
-        else:
-            logger.error(f"Variant {k+1} build failed")
+        raise RuntimeError(f"GPU unavailable; clip variant {k+1} job remains pending")
 
     return results

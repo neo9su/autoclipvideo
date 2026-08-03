@@ -31,23 +31,27 @@ import httpx
 
 from gpu_execution import reject_local_media, require_remote_gpu
 
+logger = logging.getLogger(__name__)
 
 _GPU_SERVICE_URL = os.environ.get("GPU_SERVICE_URL", "http://10.190.0.203:8877")
 
 # GPU can handle multiple concurrent frame-extract requests (video already there).
 _SEM_GPU_FRAME = asyncio.Semaphore(4)
 
-# Max concurrent volumedetect processes (audio-only decode, CPU-light).
-_SEM_AUDIO = asyncio.Semaphore(1)
-
-# Local ffmpeg fallback — kept at 1 to avoid CPU saturation on M2 8GB.
-_SEM_FRAME = asyncio.Semaphore(1)
+# Audio analysis is also a remote GPU operation; no local ffmpeg semaphore exists.
 
 
 async def _volumedetect(mp4: str, start: float, end: float) -> dict:
-    """Audio scoring is performed by the remote GPU job, never by local ffmpeg."""
-    reject_local_media("local audio scoring")
-    return {}
+    """
+    Run ffmpeg volumedetect on [start, end] of mp4.
+    Returns {"mean_db": float, "max_db": float} or {} on failure.
+
+    ffmpeg volumedetect output example (stderr):
+      [Parsed_volumedetect_0 @ ...] mean_volume: -20.3 dB
+      [Parsed_volumedetect_0 @ ...] max_volume: -6.2 dB
+    """
+    """Audio scoring is remote-only; the control plane never invokes ffmpeg."""
+    reject_local_media("local audio analysis")
 
 
 def _audio_bonus(mean_db: float, max_db: float) -> float:
@@ -188,7 +192,7 @@ async def _extract_frame_gpu(job_id: str, ts: float) -> Optional[str]:
 async def _extract_frame(mp4: str, ts: float) -> Optional[str]:
     """
     Extract a single frame at timestamp ts from mp4.
-    GPU frame extraction is required; local ffmpeg is never attempted.
+    Tries GPU server first (video already there); falls back to local ffmpeg.
     Returns path to a temp JPEG, or None on failure.
     Caller is responsible for deleting the file.
     """
