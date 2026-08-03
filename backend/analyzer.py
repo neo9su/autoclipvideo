@@ -452,6 +452,7 @@ async def _build_merged_srt(group_id: int, merged_filename: str) -> None:
 
 
 async def merge_group(group_id: int) -> Optional[str]:
+    reject_local_media("local group merge")
     """Concatenate all ready clips in a group into one MP4. Returns output filename."""
     import tempfile
     from collections import defaultdict

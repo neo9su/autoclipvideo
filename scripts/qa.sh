@@ -107,6 +107,18 @@ assert 'remote-gpu' in Path('backend/director_video.py').read_text()
 print('gpu-only policy smoke ok')
 PY
 
+
+run_gate gpu_only_audit python - <<'PY'
+from pathlib import Path
+for path in Path('backend').glob('*.py'):
+    text = path.read_text()
+    if any(token in text for token in ('smb://', 'cifs://', 'rsync ', ' scp ')):
+        raise AssertionError(f'shared-filesystem transport in job code: {path}')
+for path in [Path('backend/editor.py'), Path('backend/director_video.py'), Path('backend/transcribe.py'), Path('backend/voice_director.py'), Path('backend/qianchuan_quality.py'), Path('backend/analyzer.py')]:
+    assert 'reject_local_media' in path.read_text() or path.name == 'transcribe.py', path
+print('remote-only media audit ok')
+PY
+
 run_gate coverage python - <<'PY'
 from pathlib import Path
 files = [Path('backend/qianchuan_script.py'), Path('backend/qianchuan_matcher.py'), Path('backend/qianchuan_video.py'), Path('backend/qianchuan_quality.py')]

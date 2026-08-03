@@ -1,3 +1,4 @@
+from gpu_execution import reject_local_media
 """Final publish-video post-processing.
 
 统一成片出口的最后一道工序：

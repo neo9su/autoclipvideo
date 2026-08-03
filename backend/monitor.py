@@ -165,6 +165,7 @@ class MonitorManager:
         await self._notify_update(room_id)
 
     async def _monitor_loop(self, room_id: int, name: str, url: str):
+        reject_local_media("local recording monitor")
         logger.info(f"[{name}] Monitor started")
         while True:
             try:

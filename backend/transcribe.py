@@ -1,3 +1,4 @@
+from gpu_execution import reject_local_media
 import asyncio
 import heapq
 import logging
@@ -564,6 +565,7 @@ async def _fetch_srt(recording_id: int, job_id: str, filename: str, clip_count: 
 
 
 async def _run_editor(recording_id: int, mp4_path: str, srt_path: str, clip_duration: Optional[float] = None, clip_count: int = 1, broadcast_fn=None, feedback: Optional[str] = None):
+    reject_local_media("local transcription editor")
     """Enqueue a clip job into the priority queue and dispatch if a slot is free."""
     global _job_seq
 
@@ -649,6 +651,7 @@ async def _run_editor(recording_id: int, mp4_path: str, srt_path: str, clip_dura
 
 
 async def _do_edit(recording_id: int, mp4_path: str, srt_path: str, clip_duration: Optional[float], clip_count: int, broadcast_fn, feedback: Optional[str] = None):
+    reject_local_media("local editor dispatch")
     """Actual editing work, called after acquiring the concurrency semaphore."""
     # ── Progress tracking ────────────────────────────────────────────────────
     _PHASE_LABELS = {
