@@ -265,7 +265,8 @@ class VoiceDirector:
         if room_id_for_tts:
             logger.info(f"TTS will use room_id={room_id_for_tts} voice clone (v3) for group {group_id}")
         else:
-            logger.info(f"No room_id for group {group_id}, using Edge TTS fallback")
+            logger.info(f"No room_id for group {group_id}; remote GPU voice selection is required")
+
 
         scenes: List[Dict] = script.get("scenes", [])
         is_creative = script.get("vibe") == "creative"
@@ -317,27 +318,9 @@ class VoiceDirector:
         _MIN_AUDIO_DUR = 30.0
         actual_merged_dur = await self._probe_duration(merged)
         if (not is_qianchuan) and actual_merged_dur > 0 and actual_merged_dur < _MIN_AUDIO_DUR:
-            stretch_ratio = _MIN_AUDIO_DUR / actual_merged_dur  # e.g. 16s→30s = 1.875x 拉慢
-            stretch_ratio = min(stretch_ratio, 2.0)  # atempo 下限 0.5，即最多拉慢2倍
-            atempo_val = 1.0 / stretch_ratio          # atempo<1 = 降速
-            stretched_path = merged + "_stretched.wav"
-            logger.info(f"Creative audio too short ({actual_merged_dur:.1f}s < {_MIN_AUDIO_DUR}s), "
-                        f"stretching {stretch_ratio:.2f}x (atempo={atempo_val:.3f})")
-            async with local_media_slot("voice director audio stretch"):
-                proc = await asyncio.create_subprocess_exec(
-                    "ffmpeg", "-y", "-i", merged,
-                    "-filter:a", f"atempo={atempo_val:.3f}",
-                    stretched_path,
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
-                )
-                await proc.communicate()
-            if os.path.exists(stretched_path) and os.path.getsize(stretched_path) > 0:
-                os.replace(stretched_path, merged)
-                total_duration = await self._probe_duration(merged)
-                logger.info(f"Audio stretched to {total_duration:.1f}s")
-            else:
-                logger.warning("Audio stretch failed, keeping original (may be too short)")
+            logger.warning("Remote GPU must stretch short audio; local audio processing is disabled")
+            reject_local_media("local voice audio stretch")
+
         # ─────────────────────────────────────────────────────────────────────
 
         return {

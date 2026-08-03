@@ -31,7 +31,6 @@ import httpx
 
 from gpu_execution import reject_local_media, require_remote_gpu
 
-logger = logging.getLogger(__name__)
 
 _GPU_SERVICE_URL = os.environ.get("GPU_SERVICE_URL", "http://10.190.0.203:8877")
 
@@ -46,44 +45,9 @@ _SEM_FRAME = asyncio.Semaphore(1)
 
 
 async def _volumedetect(mp4: str, start: float, end: float) -> dict:
-    """
-    Run ffmpeg volumedetect on [start, end] of mp4.
-    Returns {"mean_db": float, "max_db": float} or {} on failure.
-
-    ffmpeg volumedetect output example (stderr):
-      [Parsed_volumedetect_0 @ ...] mean_volume: -20.3 dB
-      [Parsed_volumedetect_0 @ ...] max_volume: -6.2 dB
-    """
-    # -nostdin avoids ffmpeg waiting for stdin on some platforms
-    cmd = [
-        "ffmpeg", "-nostdin", "-y",
-        "-ss", f"{start:.3f}", "-to", f"{end:.3f}",
-        "-i", mp4,
-        "-af", "volumedetect",
-        "-f", "null", "-",
-    ]
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await proc.communicate()
-    except Exception as e:
-        logger.debug(f"volumedetect spawn failed: {e}")
-        return {}
-
-    text = stderr.decode("utf-8", errors="replace")
-    mean_m = re.search(r"mean_volume:\s*([-\d.]+)\s*dB", text)
-    max_m  = re.search(r"max_volume:\s*([-\d.]+)\s*dB", text)
-
-    if not mean_m:
-        return {}
-
-    return {
-        "mean_db": float(mean_m.group(1)),
-        "max_db":  float(max_m.group(1)) if max_m else float(mean_m.group(1)),
-    }
+    """Audio scoring is performed by the remote GPU job, never by local ffmpeg."""
+    reject_local_media("local audio scoring")
+    return {}
 
 
 def _audio_bonus(mean_db: float, max_db: float) -> float:
@@ -224,7 +188,7 @@ async def _extract_frame_gpu(job_id: str, ts: float) -> Optional[str]:
 async def _extract_frame(mp4: str, ts: float) -> Optional[str]:
     """
     Extract a single frame at timestamp ts from mp4.
-    Tries GPU server first (video already there); falls back to local ffmpeg.
+    GPU frame extraction is required; local ffmpeg is never attempted.
     Returns path to a temp JPEG, or None on failure.
     Caller is responsible for deleting the file.
     """

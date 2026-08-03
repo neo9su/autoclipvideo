@@ -2824,7 +2824,7 @@ async def _edit_via_gpu(
     return out_path
 
 
-# ── Fast local fallback (stream-copy + single encode) ─────────────────────────
+# ── Disabled local encoder compatibility stub ────────────────────────────────
 
 async def _fast_local_clip(
     mp4: str,
@@ -2833,13 +2833,10 @@ async def _fast_local_clip(
     out: str,
     on_progress=None,
 ) -> bool:
+    """Disabled compatibility path; all encoding is remote GPU-only."""
     reject_local_media("local clip encoder")
-    """
-    Fast local fallback when GPU is unavailable.
-    Stream-copy segment extraction + concat + single re-encode pass.
-    Skips all transitions and pre-processing.  ~10-30s vs 30+ minutes.
-    """
-    ass_content = build_ass(selected, segs)
+
+    # Legacy implementation is deliberately unreachable.
     has_subs = "Dialogue:" in ass_content
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -3309,10 +3306,9 @@ async def edit_recording_multi(
         if gpu_used:
             continue
 
-        reject_local_media(f"clip variant {k+1}")
+        # No local fallback: GPU outages remain queued for remote recovery.
+        reject_local_media(f"clip variant {k+1} while GPU output is unavailable")
 
-        # ── Local fallback pipeline is unreachable and forbidden ─────────────
-        logger.info(f"Using fast local fallback for variant {k+1} of {os.path.basename(mp4_path)}")
         if on_progress:
             await on_progress("build", k, count)
         if await _fast_local_clip(mp4_path, selected, segs, out_path, on_progress=on_progress):

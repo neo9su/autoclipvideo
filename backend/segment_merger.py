@@ -478,13 +478,9 @@ async def maybe_merge_before_upload(
         f"(~{total_dur:.0f}s, {total_sel_size // 1024 // 1024}MB) → {merged_filename}"
     )
 
-    ok = await _ffmpeg_concat(file_paths, merged_path)
-    if not ok:
-        # ffmpeg failed — fall back to uploading the original file
-        logger.warning(f"Room {room_id}: merge failed, falling back to original {rec['filename']}")
-        return (filepath, recording_id)
-
-    merged_size = os.path.getsize(merged_path)
+    """Disabled legacy merge path; source segments remain remote GPU artifacts."""
+    reject_local_media("local segment merge")
+    return (filepath, recording_id)
 
     # Update DB atomically:
     #   - First segment record gets the merged filename

@@ -10,6 +10,7 @@ import aiohttp
 import aiosqlite
 import httpx
 
+from gpu_execution import reject_local_media, require_remote_gpu
 from db import DB_PATH, aio_connect
 from editor import edit_recording, edit_recording_multi
 from analyzer import analyze_recording
@@ -27,35 +28,15 @@ TARGET_PUBLISH_DURATION = 30.5  # pad near-threshold clips above Douyin's 30s bo
 
 
 async def _get_video_duration(mp4_path: str) -> float:
-    """Return the video duration in seconds via ffprobe, or 0 on error."""
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "ffprobe", "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            mp4_path,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-        )
-        stdout, _ = await proc.communicate()
-        return float(stdout.strip())
-    except Exception:
-        return 0.0
+    """Return duration from remote GPU metadata; local probing is forbidden."""
+    reject_local_media("local video duration probe")
+    return 0.0
 
 
 async def _get_video_height(mp4_path: str) -> int:
-    """Return the video height via ffprobe, or 0 on error."""
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "ffprobe", "-v", "error", "-select_streams", "v:0",
-            "-show_entries", "stream=height",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            mp4_path,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-        )
-        stdout, _ = await proc.communicate()
-        return int(stdout.strip())
-    except Exception:
-        return 0
+    """Return height from remote GPU metadata; local probing is forbidden."""
+    reject_local_media("local video height probe")
+    return 0
 
 
 # In-memory clip job progress: {recording_id: {"phase": str, "step": int, "total": int, "pct": int, "msg": str}}
