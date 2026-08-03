@@ -2824,128 +2824,13 @@ async def _edit_via_gpu(
     return out_path
 
 
-# ── Fast local fallback (stream-copy + single encode) ─────────────────────────
+# ── Deprecated local fallback ────────────────────────────────────────────────
 
-async def _fast_local_clip(
-    mp4: str,
-    selected: List[Seg],
-    segs: List[Seg],
-    out: str,
-    on_progress=None,
-) -> bool:
+async def _fast_local_clip(*args, **kwargs) -> bool:
+    """Fail closed; all clip encoding belongs to the remote GPU service."""
+    del args, kwargs
     reject_local_media("local clip encoder")
-    """
-    Fast local fallback when GPU is unavailable.
-    Stream-copy segment extraction + concat + single re-encode pass.
-    Skips all transitions and pre-processing.  ~10-30s vs 30+ minutes.
-    """
-    ass_content = build_ass(selected, segs)
-    has_subs = "Dialogue:" in ass_content
-
-    with tempfile.TemporaryDirectory() as tmp:
-        ass_path = os.path.join(tmp, "subs.ass")
-        with open(ass_path, "w", encoding="utf-8") as f:
-            f.write(ass_content)
-
-        # Step 1: extract each segment via stream copy (no re-encode)
-        seg_files: List[str] = []
-        for i, seg in enumerate(selected):
-            seg_out = os.path.join(tmp, f"seg_{i:03d}.mp4")
-            pad_start = min(SEG_PAD, seg.start)
-            t_start = seg.start - pad_start
-            t_dur = seg.duration + pad_start + SEG_PAD
-            cmd = [
-                "ffmpeg", "-y",
-                "-ss", f"{t_start:.3f}",
-                "-t", f"{t_dur:.3f}",
-                "-i", mp4,
-                "-c", "copy",
-                "-reset_timestamps", "1",
-                "-avoid_negative_ts", "make_zero",
-                seg_out,
-            ]
-            proc = await asyncio.create_subprocess_exec(
-                *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
-            )
-            await proc.communicate()
-            if proc.returncode == 0 and os.path.exists(seg_out) and os.path.getsize(seg_out) > 0:
-                seg_files.append(seg_out)
-            else:
-                logger.warning(f"_fast_local_clip: segment {i} extract failed")
-                return False
-
-        # Step 2: concat all segments (stream copy)
-        list_path = os.path.join(tmp, "concat.txt")
-        with open(list_path, "w") as lf:
-            for sf in seg_files:
-                lf.write(f"file '{sf}'\n")
-        merged = os.path.join(tmp, "merged.mp4")
-        cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path, "-c", "copy", merged]
-        proc = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
-        )
-        await proc.communicate()
-        if proc.returncode != 0 or not os.path.exists(merged) or os.path.getsize(merged) == 0:
-            logger.error("_fast_local_clip: concat failed")
-            return False
-
-        # Step 3: single re-encode pass — scale to 1080×1920 + subtitles + music
-        music_path = _pick_music()
-        cmd = ["ffmpeg", "-y", "-i", merged]
-        filter_parts: List[str] = []
-        audio_map = "0:a"
-
-        if music_path:
-            cmd += ["-stream_loop", "-1", "-i", music_path]
-            filter_parts.append(
-                "[0:a]acompressor=threshold=-25dB:ratio=3:attack=5:release=100:makeup=4dB,"
-                "loudnorm=I=-16:TP=-1.5:LRA=11,"
-                "aformat=channel_layouts=stereo[voice];"
-                "[1:a]volume=0.40,aformat=channel_layouts=stereo[bgm];"
-                "[voice][bgm]amix=inputs=2:duration=first:normalize=0[aout]"
-            )
-            audio_map = "[aout]"
-        else:
-            filter_parts.append(
-                "[0:a]acompressor=threshold=-25dB:ratio=3:attack=5:release=100:makeup=4dB,"
-                "loudnorm=I=-16:TP=-1.5:LRA=11,"
-                "aformat=channel_layouts=stereo[aout]"
-            )
-            audio_map = "[aout]"
-
-        vf = (
-            "scale=1080:1920:force_original_aspect_ratio=decrease:flags=lanczos,"
-            "pad=1080:1920:(ow-iw)/2:(oh-ih)/2,"
-            "unsharp=5:5:0.8:5:5:0.4,"
-            "eq=contrast=1.1:brightness=0.05:saturation=1.2"
-        )
-        if has_subs:
-            escaped = ass_path.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
-            vf += f",ass={escaped}"
-        filter_parts.append(f"[0:v]{vf}[vout]")
-
-        cmd += ["-filter_complex", ";".join(filter_parts)]
-        cmd += [
-            "-map", "[vout]", "-map", audio_map,
-            "-pix_fmt", "yuv420p",
-            "-c:v", "h264_videotoolbox", "-b:v", "10M", "-allow_sw", "1",
-            "-ar", "44100", "-ac", "2",
-            "-c:a", "aac", "-b:a", "192k",
-            out,
-        ]
-        if on_progress:
-            await on_progress("final", 0, 1)
-        proc = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
-        )
-        _, stderr = await proc.communicate()
-        ok = proc.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 0
-        if not ok:
-            logger.error(
-                f"_fast_local_clip final encode failed rc={proc.returncode}: "
-                f"{stderr.decode(errors='replace')[-1000:]}"
-            )
-        return ok
+    return False
 
 
 # ── Main entry ────────────────────────────────────────────────────────────────

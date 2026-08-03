@@ -18,6 +18,7 @@ import httpx
 
 from gpu_execution import reject_local_media, require_remote_gpu
 
+from local_media_guard import local_media_slot
 
 logger = logging.getLogger(__name__)
 
@@ -264,18 +265,14 @@ class VoiceDirector:
         if room_id_for_tts:
             logger.info(f"TTS will use room_id={room_id_for_tts} voice clone (v3) for group {group_id}")
         else:
-            logger.error("GPU-only TTS requires a room_id; job remains pending")
-            return {"success": False, "status": "waiting_for_gpu", "error": "no remote execution room"}
+            logger.error("No room_id for group %s; GPU TTS requires a remote execution target", group_id)
+
 
         scenes: List[Dict] = script.get("scenes", [])
         is_creative = script.get("vibe") == "creative"
         is_qianchuan = script.get("mode") == "qianchuan"
         if not scenes:
             return await self._synthesize_full_text(script, group_id, room_id_for_tts)
-
-        # The control plane cannot concatenate audio.  Ask the remote GPU for one
-        # complete artifact; this also makes retries idempotent at job granularity.
-        return await self._synthesize_full_text(script, group_id, room_id_for_tts)
 
         audio_segments: List[Dict] = []
         total_duration = 0.0
@@ -317,7 +314,17 @@ class VoiceDirector:
                     pass
             return {"success": False, "error": "音频合并失败"}
 
+        # ── 时长保底：自编/导演模式合成音频 < 30s 时自动降速拉长 ──────────────
+        _MIN_AUDIO_DUR = 30.0
+        actual_merged_dur = await self._probe_duration(merged)
+        # Audio duration/stretching is a GPU operation. Never invoke local ffmpeg.
+        if (not is_qianchuan) and actual_merged_dur > 0 and actual_merged_dur < _MIN_AUDIO_DUR:
+            logger.warning(
+                "Creative audio is shorter than %.1fs; remote GPU stretch is required",
+                _MIN_AUDIO_DUR,
+            )
 
+        # ─────────────────────────────────────────────────────────────────────
 
         return {
             "success":             True,
@@ -338,10 +345,7 @@ class VoiceDirector:
         scene_type: str = "",
         is_creative: bool = False,
     ) -> float:
-        """合成单段文字 → WAV/MP3。返回时长秒数，失败返回 0。
-
-        优先级：GPU CosyVoice2 声音克隆（room_id，最高优先） → 腾讯云 TTS → MiniMax → Edge TTS
-        """
+        """Submit text to the remote GPU TTS service and return its duration."""
 
         # Remote GPU is the only permitted TTS provider, with or without a voice ref.
         dur = await self._tts_gpu(text, output_path, emotion, room_id=room_id,
@@ -393,8 +397,7 @@ class VoiceDirector:
         优先使用 room_id（自动选用该直播间最新声音克隆），
         其次 voice_ref_job_id（旧版 clip-based ref）。
         """
-        record = require_remote_gpu("remote TTS")
-        logger.info("TTS execution node: %s", record.node)
+        require_remote_gpu("remote TTS")
         # creative vibe 用快速节奏；普通导演模式 KUKU公主额外+10%
         if is_creative:
             _base_speed = 1.35 if room_id == 2 else 1.25
@@ -439,7 +442,7 @@ class VoiceDirector:
                     logger.warning(f"GPU TTS unexpected error, retry {_tts_retry+1}/3: {te}")
                     await asyncio.sleep(3 * (_tts_retry + 1))
             if job_id is None:
-                logger.warning("GPU TTS failed after 3 retries; job remains queued for GPU recovery")
+                logger.warning("GPU TTS unavailable after bounded retries; job remains pending")
                 return 0.0
 
             # Poll with a bounded per-scene deadline. The outer director pipeline has its
@@ -477,11 +480,9 @@ class VoiceDirector:
                 f.write(audio_data)
             if os.path.getsize(output_path) == 0:
                 return 0.0
-            remote_duration = float(r_body.get("duration") or r_body.get("duration_s") or 0.0)
-            if remote_duration <= 0:
-                logger.warning("GPU TTS response did not include remote duration")
-                return 0.0
-            return remote_duration
+            actual_dur = await self._probe_duration(output_path)
+            # Speed correction must be performed by the remote GPU service.
+            return actual_dur
 
         except Exception as e:
             logger.warning(f"GPU TTS exception: {e}")
@@ -646,10 +647,16 @@ class VoiceDirector:
     # ── 音频工具 ───────────────────────────────────────────────────────────────
 
     async def _probe_duration(self, path: str) -> float:
-        reject_local_media("voice audio processing")
+        """Reject local probing; the remote GPU must return duration metadata."""
+        del path
+        reject_local_media("voice director local ffprobe")
+        return 0.0
 
     async def _merge_audio_segments(self, segments: List[Dict], group_id: int) -> Optional[str]:
-        reject_local_media("voice audio processing")
+        """Reject local audio concatenation; the remote GPU owns this operation."""
+        del segments, group_id
+        reject_local_media("voice director local audio concat")
+        return None
 
     async def _synthesize_full_text(
         self,
