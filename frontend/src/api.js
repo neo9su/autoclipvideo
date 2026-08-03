@@ -1,4 +1,6 @@
-const BASE = (import.meta.env.VITE_API_BASE || 'http://10.190.0.203:8899').replace(/\/$/, '')
+import { REMOTE_API_BASE, REMOTE_WS_BASE } from './remoteApi.js'
+
+const BASE = REMOTE_API_BASE
 
 export async function getRooms() {
   const res = await fetch(`${BASE}/api/rooms`)
@@ -48,8 +50,7 @@ export async function getStatus() {
 }
 
 export function createWS(onMessage) {
-  const wsBase = (import.meta.env.VITE_WS_BASE || BASE.replace(/^http/, 'ws')).replace(/\/$/, '')
-  const ws = new WebSocket(`${wsBase}/ws/events`)
+  const ws = new WebSocket(`${REMOTE_WS_BASE}/ws/events`)
   ws.onmessage = (e) => onMessage(JSON.parse(e.data))
   ws.onclose = () => setTimeout(() => createWS(onMessage), 3000)
   return ws

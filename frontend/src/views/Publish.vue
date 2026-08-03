@@ -527,6 +527,7 @@
 </template>
 
 <script setup>
+import { REMOTE_API_BASE } from '../remoteApi.js'
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import {
   getRooms, getGroups, getGroup, getPublishTasks, createPublishTask, retryPublishTask, cancelPublishTask, bulkCancelPublishTasks,
@@ -564,7 +565,7 @@ const previewGroup = ref(null)   // group being previewed in video modal
 const previewVersion = ref('director')  // 'director' | 'classic' | 'creative' | 'qianchuan'
 const reclipModal = ref(null)    // {group, feedback, saving, submitted}
 const selectedPublishVersion = ref('both')
-const apiBase = import.meta.env.VITE_API_BASE || ''
+const apiBase = REMOTE_API_BASE
 const scheduleMode = ref('now')
 const progressLog = ref({})   // task_id → string[]
 let ws = null
