@@ -18,6 +18,7 @@ import httpx
 
 from gpu_execution import reject_local_media, require_remote_gpu
 
+from local_media_guard import local_media_slot
 
 logger = logging.getLogger(__name__)
 
@@ -264,7 +265,7 @@ class VoiceDirector:
         if room_id_for_tts:
             logger.info(f"TTS will use room_id={room_id_for_tts} voice clone (v3) for group {group_id}")
         else:
-            logger.info(f"No room_id for group {group_id}, waiting for remote GPU TTS")
+            logger.info(f"No room_id for group {group_id}, using Edge TTS fallback")
 
         scenes: List[Dict] = script.get("scenes", [])
         is_creative = script.get("vibe") == "creative"
@@ -322,7 +323,15 @@ class VoiceDirector:
             stretched_path = merged + "_stretched.wav"
             logger.info(f"Creative audio too short ({actual_merged_dur:.1f}s < {_MIN_AUDIO_DUR}s), "
                         f"stretching {stretch_ratio:.2f}x (atempo={atempo_val:.3f})")
-            reject_local_media("voice director audio stretch")
+            async with local_media_slot("voice director audio stretch"):
+                proc = await asyncio.create_subprocess_exec(
+                    "ffmpeg", "-y", "-i", merged,
+                    "-filter:a", f"atempo={atempo_val:.3f}",
+                    stretched_path,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await proc.communicate()
             if os.path.exists(stretched_path) and os.path.getsize(stretched_path) > 0:
                 os.replace(stretched_path, merged)
                 total_duration = await self._probe_duration(merged)
@@ -655,14 +664,64 @@ class VoiceDirector:
     # ── 音频工具 ───────────────────────────────────────────────────────────────
 
     async def _probe_duration(self, path: str) -> float:
-        """Remote GPU owns media probing; local ffprobe is forbidden."""
-        reject_local_media("voice director local ffprobe")
-        return 0.0
+        """ffprobe 获取音频时长（秒）。"""
+        try:
+            async with local_media_slot(f"voice director ffprobe {os.path.basename(path)}"):
+                proc = await asyncio.create_subprocess_exec(
+                    "ffprobe", "-v", "error",
+                    "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1",
+                    path,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                stdout, _ = await proc.communicate()
+            return float(stdout.decode().strip())
+        except Exception:
+            return 0.0
 
     async def _merge_audio_segments(self, segments: List[Dict], group_id: int) -> Optional[str]:
-        """Remote GPU owns audio concatenation; local ffmpeg is forbidden."""
-        reject_local_media("voice director local audio concat")
-        return None
+        """顺序拼合所有音频片段。"""
+        if len(segments) == 1:
+            return segments[0]["audio_path"]
+
+        merged_path = os.path.join(
+            self._output_dir, f"group{group_id}_merged_{int(time.time())}.wav"
+        )
+        list_file = merged_path + ".txt"
+        try:
+            with open(list_file, "w", encoding="utf-8") as f:
+                for seg in segments:
+                    f.write(f"file '{seg['audio_path']}'\n")
+            async with local_media_slot(f"voice director audio concat group {group_id}"):
+                proc = await asyncio.create_subprocess_exec(
+                    "ffmpeg", "-y",
+                    "-f", "concat", "-safe", "0",
+                    "-i", list_file,
+                    "-c", "copy",
+                    merged_path,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await proc.communicate()
+            if not os.path.exists(merged_path) or os.path.getsize(merged_path) == 0:
+                logger.error("Audio merge produced empty output")
+                return None
+            # Clean up individual segment files now that merge succeeded
+            for seg in segments:
+                try:
+                    os.remove(seg["audio_path"])
+                except Exception:
+                    pass
+            return merged_path
+        except Exception as e:
+            logger.error(f"Audio merge failed: {e}")
+            return None
+        finally:
+            try:
+                os.remove(list_file)
+            except Exception:
+                pass
 
     async def _synthesize_full_text(
         self,

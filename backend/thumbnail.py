@@ -513,8 +513,17 @@ async def generate_thumbnail(mp4_path: str, offset: Optional[float] = None,
                               title: str = "假发变美瞬间",
                               subtitle: str = "点击查看同款",
                               scheme_type: str = "种草") -> Optional[str]:
-    """Compatibility boundary; thumbnail extraction must run on remote GPU."""
-    reject_local_media("local thumbnail generation")
+    """
+    Generate an anime-style thumbnail for `mp4_path`.
+
+    Pipeline:
+      1. ffmpeg extracts a raw frame
+      2. ComfyUI converts it to anime illustration style (falls back to raw frame)
+      3. Pillow composites title/subtitle/sparkles overlays
+
+    Returns path to the output JPEG, or None on failure.
+    """
+    reject_local_media("thumbnail generation")
     # scheme_type overrides subtitle if subtitle is still the default
     if subtitle == "点击查看同款" and scheme_type in _SCHEME_SUBTITLES:
         subtitle = _SCHEME_SUBTITLES[scheme_type]
