@@ -87,7 +87,14 @@ SEG_PAD   = 0.0   # no padding — avoids duplicate audio at segment boundaries
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
 def _init_db():
-    """Create all tables and reset interrupted jobs."""
+    """
+# This source is deployed to the remote GPU host only. The control-plane Mac
+# must never start a local media worker, even if launched manually or by launchd.
+import platform as _platform
+if _platform.system() == "Darwin":
+    raise SystemExit("gpu_service is remote-only; local worker startup is forbidden")
+
+Create all tables and reset interrupted jobs."""
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS jobs (

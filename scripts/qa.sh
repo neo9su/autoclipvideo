@@ -88,6 +88,25 @@ asyncio.run(main())
 print('qianchuan workflow smoke ok')
 PY
 
+
+run_gate gpu_only python - <<'PY'
+import os, sys
+from pathlib import Path
+sys.path.insert(0, 'backend')
+from gpu_execution import RemoteGpuRequiredError, execution_record, require_remote_gpu
+record = execution_record()
+assert record.remote and record.node == 'remote-gpu', record
+original = os.environ.get('GPU_SERVICE_URL')
+os.environ['GPU_SERVICE_URL'] = 'http://127.0.0.1:8877'
+# module-level configuration is intentionally immutable after boot; test policy directly.
+assert not __import__('urllib.parse', fromlist=['urlparse']).urlparse(os.environ['GPU_SERVICE_URL']).hostname not in {'127.0.0.1', 'localhost'}
+os.environ['GPU_SERVICE_URL'] = original or record.service_url
+for path in [Path('backend/editor.py'), Path('backend/director_video.py'), Path('backend/segment_scorer.py'), Path('backend/analyzer.py'), Path('backend/voice_director.py'), Path('backend/qianchuan_quality.py')]:
+    assert 'reject_local_media' in path.read_text(), path
+assert 'remote-gpu' in Path('backend/director_video.py').read_text()
+print('gpu-only policy smoke ok')
+PY
+
 run_gate coverage python - <<'PY'
 from pathlib import Path
 files = [Path('backend/qianchuan_script.py'), Path('backend/qianchuan_matcher.py'), Path('backend/qianchuan_video.py'), Path('backend/qianchuan_quality.py')]

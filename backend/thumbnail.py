@@ -12,6 +12,8 @@ Pipeline:
 """
 import asyncio
 import logging
+
+from gpu_execution import reject_local_media
 import math
 import os
 import random
@@ -521,6 +523,7 @@ async def generate_thumbnail(mp4_path: str, offset: Optional[float] = None,
 
     Returns path to the output JPEG, or None on failure.
     """
+    reject_local_media("thumbnail generation")
     # scheme_type overrides subtitle if subtitle is still the default
     if subtitle == "点击查看同款" and scheme_type in _SCHEME_SUBTITLES:
         subtitle = _SCHEME_SUBTITLES[scheme_type]

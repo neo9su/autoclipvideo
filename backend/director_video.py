@@ -6,6 +6,7 @@
 
 import asyncio
 import logging
+from gpu_execution import reject_local_media, require_remote_gpu
 import json
 import time
 from pathlib import Path
@@ -435,6 +436,7 @@ class DirectorVideoComposer:
         """
         合成最终视频 — 提交到 GPU 服务器 (NVENC)，本地只负责调度。
         """
+        require_remote_gpu("director composition")
         logger.info(f"[DIRECTOR] compose_final_video START: matched_segments={len(matched_segments)}, audio_path={audio_path}, tts_segs={len(tts_audio_segments) if tts_audio_segments else 0}")
         if not matched_segments:
             logger.error("[DIRECTOR] compose_final_video: matched_segments is empty")
@@ -489,19 +491,10 @@ class DirectorVideoComposer:
             import base64 as _b64
             tts_b64 = ""
             try:
-                import subprocess as _sp
-                clean_wav = audio_path + "_clean.wav"
-                _sp.run(
-                    ["ffmpeg", "-y", "-i", audio_path, "-c:a", "pcm_s16le",
-                     "-ar", "44100", clean_wav],
-                    capture_output=True,
-                )
-                audio_source = clean_wav if Path(clean_wav).exists() and Path(clean_wav).stat().st_size > 0 else audio_path
+                audio_source = audio_path
                 logger.info(f"[DIRECTOR] compose_final_video: audio_source={audio_source} size={Path(audio_source).stat().st_size}")
                 with open(audio_source, "rb") as f:
                     raw = f.read()
-                if Path(clean_wav).exists() and Path(clean_wav).stat().st_size > 0:
-                    Path(clean_wav).unlink(missing_ok=True)
                 tts_b64 = _b64.b64encode(raw).decode()
                 logger.info(f"[DIRECTOR] compose_final_video: tts_b64 encoded, len={len(tts_b64)}")
             except Exception as ae:
@@ -529,6 +522,8 @@ class DirectorVideoComposer:
             total_tts_duration = sum(tts_dur_by_scene.values()) if tts_dur_by_scene else 0.0
 
             payload = {
+                "execution_node": "remote-gpu",
+                "execution_service": self._GPU_SERVICE_URL,
                 "clips": clips_payload,
                 "ass_content": ass_content,
                 "tts_audio_b64": tts_b64,
@@ -576,66 +571,31 @@ class DirectorVideoComposer:
                 logger.error(f"[DIRECTOR] compose_final_video: GPU job submit failed after 3 retries: status={_resp_status} text={_resp_text[:500]}")
                 return None
 
-            # 6. 轮询（最多 5 分钟，GPU 队列卡住时快速 fallback 到本地 ffmpeg）
-            deadline = time.time() + 300
-            stuck_count = 0  # consecutive polls still "queued"
-            consecutive_none = 0  # consecutive polls returning status=None (job disappeared)
-            poll_count = 0
+            # 6. Poll until the remote GPU job finishes. Never execute locally.
+            deadline = time.time() + 1800
             while time.time() < deadline:
                 await asyncio.sleep(6)
-                poll_count += 1
                 try:
                     async with _aio_dv.ClientSession() as session:
                         async with session.get(
                             f"{self._GPU_SERVICE_URL}/director-jobs/{job_id}",
                             timeout=_aio_dv.ClientTimeout(total=15),
-                        ) as r:
-                            if r.status == 404:
-                                # Job disappeared — GPU service likely restarted
-                                logger.warning(f"[DIRECTOR] compose_final_video job {job_id} disappeared (404) — falling back to local ffmpeg")
-                                return await self._compose_with_ffmpeg(
-                                    video_clips, audio_path, str(output_path), style_config, config
-                                )
-                            data = await r.json()
-                except Exception as pe:
-                    logger.warning(f"[DIRECTOR] compose_final_video poll error #{poll_count}: {pe}")
+                        ) as response:
+                            if response.status != 200:
+                                logger.warning(f"[DIRECTOR] remote job poll returned {response.status}; continuing wait")
+                                continue
+                            data = await response.json()
+                except Exception as poll_error:
+                    logger.warning(f"[DIRECTOR] remote job poll error: {poll_error}; continuing wait")
                     continue
                 status = data.get("status")
-                phase  = data.get("phase", "")
-                pct    = data.get("pct", 0)
-                if poll_count % 5 == 0 or status in ("error", "done"):
-                    logger.info(f"[DIRECTOR] compose_final_video job {job_id}: status={status} phase={phase} pct={pct}%")
+                logger.info(f"[DIRECTOR] remote job {job_id}: status={status} phase={data.get('phase', '')}")
                 if status == "done":
-                    logger.info(f"[DIRECTOR] compose_final_video job {job_id} DONE after {poll_count} polls")
                     break
                 if status == "error":
-                    logger.warning(f"[DIRECTOR] compose_final_video job {job_id} ERROR: {data.get('error')} — falling back to local ffmpeg")
-                    return await self._compose_with_ffmpeg(
-                        video_clips, audio_path, str(output_path), style_config, config
-                    )
-                # Detect job disappearance: status=None means GPU service restarted and lost the job
-                if status is None:
-                    consecutive_none += 1
-                    if consecutive_none >= 2:
-                        logger.warning(f"[DIRECTOR] compose_final_video job {job_id} vanished (status=None x{consecutive_none}) — GPU service restarted, falling back to local ffmpeg")
-                        return await self._compose_with_ffmpeg(
-                            video_clips, audio_path, str(output_path), style_config, config
-                        )
-                else:
-                    consecutive_none = 0  # reset counter on valid status
-                # 检测队列卡死：超过 3 分钟仍 queued → 主动 fallback
-                if status == "queued" and poll_count >= 10:
-                    stuck_count += 1
-                    if stuck_count >= 1:
-                        logger.warning(f"[DIRECTOR] compose_final_video job {job_id} stuck in queued for ~{poll_count*6:.0f}s — falling back to local ffmpeg")
-                        return await self._compose_with_ffmpeg(
-                            video_clips, audio_path, str(output_path), style_config, config
-                        )
+                    raise RuntimeError(f"remote director job failed: {data.get('error', 'unknown error')}")
             else:
-                logger.warning(f"[DIRECTOR] compose_final_video job {job_id} TIMED OUT — falling back to local ffmpeg")
-                return await self._compose_with_ffmpeg(
-                    video_clips, audio_path, str(output_path), style_config, config
-                )
+                raise TimeoutError(f"remote director job {job_id} did not finish before the wait deadline")
 
             # 7. 下载结果
             logger.info(f"[DIRECTOR] compose_final_video: downloading job {job_id} mp4")
@@ -646,19 +606,13 @@ class DirectorVideoComposer:
                 ) as r:
                     if r.status != 200:
                         err_text = await r.text()
-                        logger.warning(f"[DIRECTOR] compose_final_video download failed (status={r.status}) — falling back to local ffmpeg")
-                        return await self._compose_with_ffmpeg(
-                            video_clips, audio_path, str(output_path), style_config, config
-                        )
+                        raise RuntimeError(f"remote director output download failed with status {r.status}: {err_text[:200]}")
                     _content = await r.read()
                     logger.info(f"[DIRECTOR] compose_final_video: downloaded {len(_content)} bytes")
             with open(str(output_path), "wb") as f:
                 f.write(_content)
             if not output_path.exists() or output_path.stat().st_size == 0:
-                logger.warning(f"[DIRECTOR] compose_final_video: output empty — falling back to local ffmpeg")
-                return await self._compose_with_ffmpeg(
-                    video_clips, audio_path, str(output_path), style_config, config
-                )
+                raise RuntimeError("remote director output was empty")
             logger.info(f"[DIRECTOR] compose_final_video: output file size={output_path.stat().st_size}")
 
             logger.info(f"Director video composition complete (GPU): {output_path}")
@@ -992,10 +946,11 @@ class DirectorVideoComposer:
 
         return None
     
-    async def _compose_with_ffmpeg(self, video_clips: List[Dict], 
+    async def _compose_with_ffmpeg(self, video_clips: List[Dict],
                                  audio_path: str, output_path: str,
                                  style_config: Dict, config: Dict) -> Optional[str]:
-        """使用FFmpeg合成视频 — 返回输出路径或 None。"""
+        """Disabled: media execution is remote GPU-only."""
+        reject_local_media("director local ffmpeg compositor")
         try:
             # 创建临时目录
             with tempfile.TemporaryDirectory() as temp_dir:

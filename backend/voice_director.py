@@ -16,6 +16,8 @@ import aiohttp
 import aiosqlite
 import httpx
 
+from gpu_execution import reject_local_media, require_remote_gpu
+
 from local_media_guard import local_media_slot
 
 logger = logging.getLogger(__name__)
@@ -362,33 +364,15 @@ class VoiceDirector:
         优先级：GPU CosyVoice2 声音克隆（room_id，最高优先） → 腾讯云 TTS → MiniMax → Edge TTS
         """
 
-        # 1. GPU CosyVoice2（room_id 存在时始终优先——使用该直播间克隆音色 v3）
-        if room_id:
-            dur = await self._tts_gpu(text, output_path, emotion, room_id=room_id,
-                                      is_creative=is_creative)
-            if dur > 0:
-                return dur
-            logger.warning("GPU TTS (voice clone) failed, trying Tencent TTS")
+        # Remote GPU is the only permitted TTS provider, with or without a voice ref.
+        dur = await self._tts_gpu(text, output_path, emotion, room_id=room_id,
+                                  is_creative=is_creative)
+        if dur > 0:
+            return dur
 
-        # 2. 腾讯云 TTS（带情感，room_id 不可用时使用）
-        _tc_id  = os.environ.get("TENCENT_SECRET_ID",  _TENCENT_SECRET_ID)
-        _tc_key = os.environ.get("TENCENT_SECRET_KEY", _TENCENT_SECRET_KEY)
-        if _tc_id and _tc_key:
-            tencent_emotion = _TENCENT_EMOTION.get(scene_type, "")
-            dur = await self._tts_tencent(text, output_path, tencent_emotion, _tc_id, _tc_key)
-            if dur > 0:
-                return dur
-            logger.warning("Tencent TTS failed, trying MiniMax")
-
-        # 3. MiniMax 云端
-        if _MINIMAX_API_KEY and _MINIMAX_GROUP_ID:
-            dur = await self._tts_minimax(text, output_path)
-            if dur > 0:
-                return dur
-            logger.warning("MiniMax TTS failed, trying Edge TTS")
-
-        # 4. Edge TTS 兜底
-        return await self._tts_edge(text, output_path)
+        # Remote GPU is the only permitted TTS provider.
+        logger.error("GPU TTS unavailable; waiting/retry is required, no fallback is allowed")
+        return 0.0
 
     # ── GPU TTS (CosyVoice2) ───────────────────────────────────────────────────
 
@@ -430,6 +414,7 @@ class VoiceDirector:
         优先使用 room_id（自动选用该直播间最新声音克隆），
         其次 voice_ref_job_id（旧版 clip-based ref）。
         """
+        require_remote_gpu("remote TTS")
         # creative vibe 用快速节奏；普通导演模式 KUKU公主额外+10%
         if is_creative:
             _base_speed = 1.35 if room_id == 2 else 1.25
@@ -513,33 +498,7 @@ class VoiceDirector:
             if os.path.getsize(output_path) == 0:
                 return 0.0
             actual_dur = await self._probe_duration(output_path)
-            # 语速校正：中文正常语速约 5 字/秒，若实际时长 > 期望时长的 1.6 倍则加速
-            expected_dur = len(text) / 5.0
-            if expected_dur > 0 and actual_dur > expected_dur * 1.6:
-                speed = min(actual_dur / expected_dur, 4.0)  # 最多加速4倍
-                fixed_path = output_path + "_fixed.wav"
-                # atempo 范围 0.5-2.0，超过2倍需级联
-                if speed <= 2.0:
-                    atempo = f"atempo={speed:.3f}"
-                else:
-                    # 分两级：sqrt(speed) × sqrt(speed)
-                    half = speed ** 0.5
-                    atempo = f"atempo={half:.3f},atempo={half:.3f}"
-                async with local_media_slot("voice director audio speed correction"):
-                    proc = await asyncio.create_subprocess_exec(
-                        "ffmpeg", "-y", "-i", output_path,
-                        "-filter:a", atempo,
-                        fixed_path,
-                        stdout=asyncio.subprocess.DEVNULL,
-                        stderr=asyncio.subprocess.DEVNULL,
-                    )
-                    await proc.communicate()
-                if os.path.exists(fixed_path) and os.path.getsize(fixed_path) > 0:
-                    os.replace(fixed_path, output_path)
-                    actual_dur = await self._probe_duration(output_path)
-                    logger.info(f"GPU TTS speed corrected {speed:.1f}x → {actual_dur:.1f}s")
-                else:
-                    logger.warning("GPU TTS speed correction failed, keeping original")
+            # Speed correction must be performed by the remote GPU service.
             return actual_dur
 
         except Exception as e:

@@ -15,6 +15,8 @@ import random
 import re
 import tempfile
 import time
+
+from gpu_execution import reject_local_media, require_remote_gpu
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
@@ -2642,6 +2644,7 @@ async def _edit_via_gpu(
     on_progress=None,
     mp4_path: Optional[str] = None,   # local path; enables auto-upload on 404
 ) -> Optional[str]:
+    require_remote_gpu("clip generation")
     """
     Offload clip encoding to GPU server via NVENC.
     If the GPU returns 404 (file not found) and mp4_path is provided, the file is
@@ -2659,7 +2662,10 @@ async def _edit_via_gpu(
         raw = seg.transition.split(":")[0]
         return _TR_REMAP.get(raw, raw) if raw in _TR_REMAP else raw
 
+    require_remote_gpu("clip generation")
     payload = {
+        "execution_node": "remote-gpu",
+        "execution_service": _GPU_SERVICE_URL,
         "mp4_filename": mp4_filename,
         "room_id": room_id,
         "segments": [
@@ -2827,6 +2833,7 @@ async def _fast_local_clip(
     out: str,
     on_progress=None,
 ) -> bool:
+    reject_local_media("local clip encoder")
     """
     Fast local fallback when GPU is unavailable.
     Stream-copy segment extraction + concat + single re-encode pass.
@@ -3076,7 +3083,9 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
     seq       = len([f for f in os.listdir(out_dir) if f.endswith("_clip.mp4")]) + 1
     out_path  = os.path.join(out_dir, f"{safe_name}_{date_str}_{seq:03d}_clip.mp4")
 
-    # ── Try GPU path first ────────────────────────────────────────────────────
+    # ── GPU-only path ─────────────────────────────────────────────────────────
+    if room_id is None:
+        reject_local_media("clip generation without a remote room")
     if room_id is not None:
         # Wait for GPU to come back online before attempting (up to _GPU_WAIT_TIMEOUT)
         from gpu_state import is_online as _gpu_is_online, wait_until_online as _gpu_wait
@@ -3086,8 +3095,7 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
                 await asyncio.wait_for(_gpu_wait(), timeout=_GPU_WAIT_TIMEOUT)
                 logger.info("GPU back online, proceeding with GPU clip")
             except asyncio.TimeoutError:
-                logger.warning(f"GPU still offline after {_GPU_WAIT_TIMEOUT:.0f}s — using local fallback")
-                room_id = None   # skip GPU attempt
+                reject_local_media("clip generation while GPU is offline")
         if room_id is not None:
             try:
                 mp4_filename = os.path.basename(mp4_path)
@@ -3111,12 +3119,12 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
                     size_mb = os.path.getsize(out_path) / 1024 / 1024
                     logger.info(f"Clip ready (GPU): {out_path} ({size_mb:.1f} MB, {total_dur:.1f}s)")
                     return out_path
-                logger.info("GPU clip failed — falling back to local pipeline")
+                raise RuntimeError("remote GPU clip job returned no output")
             except Exception as e:
-                logger.warning(f"GPU path error, falling back to local: {e}")
+                logger.error(f"GPU path error; local execution is forbidden: {e}")
+                raise
 
-    # ── Local pipeline (fast fallback: stream-copy + single encode) ──────────
-    logger.info(f"Using fast local fallback for {os.path.basename(mp4_path)}")
+    reject_local_media("clip generation")
     if await _fast_local_clip(mp4_path, selected, segs, out_path, on_progress=on_progress):
         try:
             if on_progress:
@@ -3272,8 +3280,7 @@ async def edit_recording_multi(
                 try:
                     await asyncio.wait_for(_gpu_wait(), timeout=_GPU_WAIT_TIMEOUT)
                 except asyncio.TimeoutError:
-                    logger.warning(f"GPU still offline — using local fallback for variant {k+1}")
-                    _room_id_v = None
+                    reject_local_media(f"clip variant {k+1} while GPU is offline")
         if _room_id_v is not None:
             try:
                 mp4_filename = os.path.basename(mp4_path)
@@ -3296,12 +3303,15 @@ async def edit_recording_multi(
                     results.append(out_path)
                     gpu_used = True
             except Exception as e:
-                logger.warning(f"GPU path error for variant {k+1}, falling back: {e}")
+                logger.error(f"GPU path error for variant {k+1}; local execution is forbidden: {e}")
+                raise
 
         if gpu_used:
             continue
 
-        # ── Local fallback pipeline (fast: stream-copy + single encode) ─────
+        reject_local_media(f"clip variant {k+1}")
+
+        # ── Local fallback pipeline is unreachable and forbidden ─────────────
         logger.info(f"Using fast local fallback for variant {k+1} of {os.path.basename(mp4_path)}")
         if on_progress:
             await on_progress("build", k, count)

@@ -8,6 +8,8 @@ import asyncio
 import json
 import os
 import re
+
+from gpu_execution import reject_local_media, require_remote_gpu
 from typing import Dict, List, Optional
 
 
@@ -27,6 +29,7 @@ async def _run(*args: str, timeout: int = 60) -> tuple[int, str, str]:
 
 
 async def ffprobe_json(path: str) -> Dict:
+    reject_local_media("local ffprobe quality check")
     code, out, err = await _run(
         "ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", path, timeout=30
     )
@@ -36,6 +39,7 @@ async def ffprobe_json(path: str) -> Dict:
 
 
 async def volumedetect(path: str) -> Dict:
+    reject_local_media("local audio quality check")
     code, _out, err = await _run(
         "ffmpeg", "-hide_banner", "-nostats", "-i", path, "-af", "volumedetect", "-f", "null", "-", timeout=90
     )
@@ -50,6 +54,7 @@ async def volumedetect(path: str) -> Dict:
 
 
 async def decode_smoke(path: str) -> Dict:
+    reject_local_media("local decode quality check")
     code, _out, err = await _run(
         "ffmpeg", "-v", "error", "-i", path, "-f", "null", "-", timeout=120
     )
@@ -57,6 +62,7 @@ async def decode_smoke(path: str) -> Dict:
 
 
 async def check_qianchuan_video_quality(path: str, min_duration: float = 18.0, max_duration: float = 35.5) -> Dict:
+    require_remote_gpu("remote quality check")
     report: Dict = {"path": path, "ok": False, "errors": [], "warnings": []}
     if not path or not os.path.exists(path):
         report["errors"].append("output file missing")

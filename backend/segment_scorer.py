@@ -29,6 +29,8 @@ from typing import Optional
 
 import httpx
 
+from gpu_execution import reject_local_media, require_remote_gpu
+
 logger = logging.getLogger(__name__)
 
 _GPU_SERVICE_URL = os.environ.get("GPU_SERVICE_URL", "http://10.190.0.203:8877")
@@ -232,36 +234,7 @@ async def _extract_frame(mp4: str, ts: float) -> Optional[str]:
     if path:
         return path
 
-    # Local ffmpeg fallback
-    fd, path = tempfile.mkstemp(suffix=".jpg")
-    os.close(fd)
-    # Two-pass seek: coarse -ss before -i (fast), fine -ss after for accuracy
-    pre  = max(0.0, ts - 2.0)
-    fine = ts - pre
-    cmd = [
-        "ffmpeg", "-nostdin", "-y",
-        "-ss", f"{pre:.3f}", "-i", mp4,
-        "-ss", f"{fine:.3f}", "-frames:v", "1",
-        "-vf", "scale=540:960:force_original_aspect_ratio=decrease",
-        "-q:v", "4", path,
-    ]
-    try:
-        async with _SEM_FRAME:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            await proc.communicate()
-        if proc.returncode == 0 and os.path.exists(path) and os.path.getsize(path) > 0:
-            return path
-    except Exception as e:
-        logger.debug(f"Frame extract failed at {ts:.1f}s: {e}")
-    try:
-        os.remove(path)
-    except Exception:
-        pass
-    return None
+    reject_local_media("frame extraction")
 
 
 def _analyse_frame(frame_path: str) -> dict:
