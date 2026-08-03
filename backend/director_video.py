@@ -677,7 +677,7 @@ class DirectorVideoComposer:
 
     @staticmethod
     def _normalize_edit_actions(actions: List[Dict]) -> List[Dict]:
-        """Deduplicate safe edit-action dictionaries for GPU/local fallback."""
+        """Deduplicate safe edit-action dictionaries for the remote GPU."""
         normalized: List[Dict] = []
         seen = set()
         for action in actions or []:
@@ -697,7 +697,7 @@ class DirectorVideoComposer:
 
     @staticmethod
     def _camera_from_edit_actions(actions: List[Dict], fallback: str) -> str:
-        """Map Qianchuan edit_actions onto existing local ffmpeg camera directives."""
+        """Map Qianchuan edit_actions onto remote GPU camera directives."""
         action_types = [str(a.get("type") or "") for a in actions]
         if any(t in action_types for t in ("detail_zoom", "crop_zoom")):
             return "push_in_strong"

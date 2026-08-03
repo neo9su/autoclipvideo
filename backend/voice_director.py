@@ -439,7 +439,7 @@ class VoiceDirector:
                     logger.warning(f"GPU TTS unexpected error, retry {_tts_retry+1}/3: {te}")
                     await asyncio.sleep(3 * (_tts_retry + 1))
             if job_id is None:
-                logger.warning("GPU TTS failed after 3 retries, falling back to Tencent")
+                logger.warning("GPU TTS failed after 3 retries; job remains queued for GPU recovery")
                 return 0.0
 
             # Poll with a bounded per-scene deadline. The outer director pipeline has its

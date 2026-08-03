@@ -190,12 +190,7 @@ async def _extract_frame_gpu(job_id: str, ts: float) -> Optional[str]:
 
 
 async def _extract_frame(mp4: str, ts: float) -> Optional[str]:
-    """
-    Extract a single frame at timestamp ts from mp4.
-    Tries GPU server first (video already there); falls back to local ffmpeg.
-    Returns path to a temp JPEG, or None on failure.
-    Caller is responsible for deleting the file.
-    """
+    """Return a remote frame or fail closed; local ffmpeg is forbidden."""
     # GPU-first: derive job_id from mp4 filename (matches GPU storage key)
     job_id = os.path.splitext(os.path.basename(mp4))[0]
     path = await _extract_frame_gpu(job_id, ts)

@@ -1,38 +1,24 @@
-"""Control-plane media storage and SMB isolation guidance.
+"""Remote GPU execution policy for the control-plane process.
 
-Recordings are job inputs and GPU outputs, not a public share. Keep the
-recordings directory outside any macOS SMB export and expose only explicit
-result downloads through the application.
+The Mac process is a control plane only.  It may submit and download artifacts,
+but must never execute media work locally or silently downgrade to another
+provider.  Keep this module dependency-free so every worker boundary can use it.
 """
 from __future__ import annotations
 
 import os
+import platform
+import time
 from dataclasses import dataclass
-from pathlib import Path
 from urllib.parse import urlparse
 
 
-SHARED_STORAGE_MARKERS = ("smb", "cifs", "afp", "nfs")
-
-
-def is_isolated_media_path(path: str) -> bool:
-    """Return False for paths that look like mounted/shared storage."""
-    normalized = str(Path(path).resolve()).lower()
-    return not any(marker in normalized for marker in SHARED_STORAGE_MARKERS)
-
-
-def media_storage_policy(recordings_dir: str, gpu_storage_dir: str) -> dict:
-    """Describe the expected relationship between local inputs and GPU storage."""
-    return {
-        "recordings_dir": os.path.abspath(recordings_dir),
-        "gpu_storage_dir": os.path.abspath(gpu_storage_dir),
-        "recordings_isolated": is_isolated_media_path(recordings_dir),
-        "gpu_storage_isolated": is_isolated_media_path(gpu_storage_dir),
-        "recommendation": "Do not export recordings or gpu_storage via macOS SMB; use application downloads only.",
-    }
-
 class RemoteGpuRequiredError(RuntimeError):
     """Raised when a media operation would execute outside the remote GPU."""
+
+
+class GpuUnavailableError(RuntimeError):
+    """Raised when a job must wait instead of falling back to local media work."""
 
 
 @dataclass(frozen=True)
@@ -40,6 +26,42 @@ class ExecutionRecord:
     node: str
     service_url: str
     remote: bool
+
+
+@dataclass
+class TransferStats:
+    """Control-plane transfer accounting for one logical media operation."""
+
+    operation: str
+    node: str
+    input_bytes: int = 0
+    output_bytes: int = 0
+    upload_attempts: int = 0
+    download_attempts: int = 0
+    temporary_files: int = 0
+    idempotency_key: str = ""
+    started_at: float = 0.0
+
+    def __post_init__(self) -> None:
+        if not self.started_at:
+            self.started_at = time.time()
+
+    @property
+    def total_bytes(self) -> int:
+        return self.input_bytes + self.output_bytes
+
+    def as_dict(self) -> dict:
+        return {
+            "operation": self.operation,
+            "execution_node": self.node,
+            "input_bytes": self.input_bytes,
+            "output_bytes": self.output_bytes,
+            "upload_attempts": self.upload_attempts,
+            "download_attempts": self.download_attempts,
+            "temporary_files": self.temporary_files,
+            "idempotency_key": self.idempotency_key,
+            "total_bytes": self.total_bytes,
+        }
 
 
 GPU_SERVICE_URL = os.environ.get("GPU_SERVICE_URL", "http://10.190.0.203:8877").rstrip("/")
@@ -61,11 +83,14 @@ def require_remote_gpu(operation: str) -> ExecutionRecord:
     return record
 
 
-def media_execution_node(operation: str) -> str:
-    """Return the configured remote node marker for a media operation."""
-    return require_remote_gpu(operation).node
-
-
 def reject_local_media(operation: str) -> None:
     """Explicitly fail any attempted local media execution."""
     raise RemoteGpuRequiredError(f"local media execution is disabled: {operation}")
+
+
+def require_gpu_available(operation: str, online: bool) -> ExecutionRecord:
+    """Return the remote execution record or make the caller wait/requeue."""
+    record = require_remote_gpu(operation)
+    if not online:
+        raise GpuUnavailableError(f"{operation} is queued until remote GPU is online")
+    return record

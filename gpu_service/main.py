@@ -1066,16 +1066,25 @@ async def extract_frames(job_id: str, req: FrameExtractRequest):
 # ── Clip job endpoints ────────────────────────────────────────────────────────
 
 class ClipJobRequest(BaseModel):
-    mp4_filename: str   # filename only — file already at STORAGE_DIR/{room_id}/{mp4_filename}
+    mp4_filename: str
     room_id: int
-    segments: list      # [{start: float, end: float}, ...]
-    ass_content: str    # ASS subtitle content (empty string if none)
-    thumb_seek: float = 5.0  # timestamp in original mp4 for thumbnail frame
+    segments: list
+    ass_content: str
+    thumb_seek: float = 5.0
+    idempotency_key: str = ""
+    execution_node: str = "remote-gpu"
 
 
 @app.post("/clip-jobs", status_code=201)
 async def create_clip_job(req: ClipJobRequest):
     from urllib.parse import quote
+    if req.execution_node != "remote-gpu":
+        raise HTTPException(status_code=400, detail="media jobs must execute on remote-gpu")
+    if not req.idempotency_key:
+        req.idempotency_key = f"clip:{req.room_id}:{req.mp4_filename}:{len(req.segments)}"
+    existing = next((jid for jid, job in _clip_jobs.items() if job.get("idempotency_key") == req.idempotency_key), None)
+    if existing:
+        return {"job_id": existing, "status": _clip_jobs[existing].get("status", "queued"), "deduplicated": True}
     mp4_path = os.path.join(STORAGE_DIR, str(req.room_id), req.mp4_filename)
     if not os.path.exists(mp4_path):
         encoded_name = quote(req.mp4_filename, safe='.-_')
@@ -1091,6 +1100,7 @@ async def create_clip_job(req: ClipJobRequest):
     _clip_jobs[job_id] = {
         "status": "queued", "phase": "queued", "pct": 0,
         "error": None, "output_path": None, "thumb_path": None,
+        "idempotency_key": req.idempotency_key,
         "_created_at": time.time(),
     }
     _db_insert_clip_job(job_id)
