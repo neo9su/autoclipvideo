@@ -70,16 +70,10 @@ class DirectorTTS:
                 logger.info(f"GPU TTS successful: {output_path}")
                 return True
             
-            logger.warning("GPU TTS failed, falling back to local TTS")
-            
-            # 回退到本地TTS
-            if await self._generate_tts_local(script_text, output_path, voice_style):
-                logger.info(f"Local TTS successful: {output_path}")
-                return True
-            
-            logger.error("All TTS methods failed")
+            # GPU-only policy: a failed remote request is a waiting state, never a
+            # local TTS downgrade.
+            logger.warning("GPU TTS unavailable; local TTS is disabled")
             return False
-            
         except Exception as e:
             logger.error(f"TTS generation failed: {e}")
             return False

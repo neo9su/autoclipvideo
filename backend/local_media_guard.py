@@ -1,28 +1,28 @@
-"""Fail-closed compatibility guard for the retired local media pipeline."""
+"""Compatibility guard for the control-plane process.
+
+The Mac is not a media worker. These APIs remain import-compatible for older
+callers, but every attempted local media slot fails immediately instead of
+serialising or starting a hidden ffmpeg fallback.
+"""
+
 from __future__ import annotations
 
 from contextlib import asynccontextmanager, contextmanager
 
-from gpu_execution import RemoteGpuRequiredError
 
-
-def _disabled(operation: str) -> RemoteGpuRequiredError:
-    return RemoteGpuRequiredError(
-        f"local media execution is disabled; submit {operation} to the remote GPU"
-    )
-
-
-async def wait_for_memory_headroom(desc: str = "local media job") -> None:
-    raise _disabled(desc)
+class LocalMediaDisabledError(RuntimeError):
+    """Raised when a control-plane path attempts local media processing."""
 
 
 @asynccontextmanager
 async def local_media_slot(desc: str = "local media job"):
-    raise _disabled(desc)
-    yield  # pragma: no cover
+    """Reject local media work; callers must submit a remote GPU job."""
+    raise LocalMediaDisabledError(f"local media execution is disabled: {desc}")
+    yield
 
 
 @contextmanager
 def local_media_slot_sync(desc: str = "local media job"):
-    raise _disabled(desc)
-    yield  # pragma: no cover
+    """Synchronous compatibility API that rejects local media work."""
+    raise LocalMediaDisabledError(f"local media execution is disabled: {desc}")
+    yield

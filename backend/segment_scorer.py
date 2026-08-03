@@ -38,11 +38,7 @@ _GPU_SERVICE_URL = os.environ.get("GPU_SERVICE_URL", "http://10.190.0.203:8877")
 # GPU can handle multiple concurrent frame-extract requests (video already there).
 _SEM_GPU_FRAME = asyncio.Semaphore(4)
 
-# Max concurrent volumedetect processes (audio-only decode, CPU-light).
-_SEM_AUDIO = asyncio.Semaphore(1)
-
-# Local ffmpeg fallback — kept at 1 to avoid CPU saturation on M2 8GB.
-_SEM_FRAME = asyncio.Semaphore(1)
+# Audio analysis is also a remote GPU operation; no local ffmpeg semaphore exists.
 
 
 async def _volumedetect(mp4: str, start: float, end: float) -> dict:
@@ -54,36 +50,8 @@ async def _volumedetect(mp4: str, start: float, end: float) -> dict:
       [Parsed_volumedetect_0 @ ...] mean_volume: -20.3 dB
       [Parsed_volumedetect_0 @ ...] max_volume: -6.2 dB
     """
-    # -nostdin avoids ffmpeg waiting for stdin on some platforms
-    cmd = [
-        "ffmpeg", "-nostdin", "-y",
-        "-ss", f"{start:.3f}", "-to", f"{end:.3f}",
-        "-i", mp4,
-        "-af", "volumedetect",
-        "-f", "null", "-",
-    ]
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await proc.communicate()
-    except Exception as e:
-        logger.debug(f"volumedetect spawn failed: {e}")
-        return {}
-
-    text = stderr.decode("utf-8", errors="replace")
-    mean_m = re.search(r"mean_volume:\s*([-\d.]+)\s*dB", text)
-    max_m  = re.search(r"max_volume:\s*([-\d.]+)\s*dB", text)
-
-    if not mean_m:
-        return {}
-
-    return {
-        "mean_db": float(mean_m.group(1)),
-        "max_db":  float(max_m.group(1)) if max_m else float(mean_m.group(1)),
-    }
+    """Audio scoring is remote-only; the control plane never invokes ffmpeg."""
+    reject_local_media("local audio analysis")
 
 
 def _audio_bonus(mean_db: float, max_db: float) -> float:

@@ -154,23 +154,19 @@ class MonitorManager:
         await free_vram()
 
         job_id = await sync_file(upload_path, room_id)
-        async with aio_connect() as db:
-            if job_id:
+        if job_id:
+            upload_bytes = os.path.getsize(upload_path)
+            async with aio_connect() as db:
                 await db.execute(
-                    "UPDATE recordings SET synced=1, transcribed=1, gpu_job_id=?, execution_node='remote-gpu', upload_bytes=?, transfer_attempts=transfer_attempts+1, gpu_waiting=0 WHERE id=?",
-                    (job_id, os.path.getsize(upload_path), primary_id),
+                    """UPDATE recordings SET synced=1, transcribed=1, gpu_job_id=?,
+                       transfer_node=?, upload_bytes=? WHERE id=?""",
+                    (job_id, "remote-gpu", upload_bytes, primary_id),
                 )
-            else:
-                await db.execute(
-                    "UPDATE recordings SET execution_node='remote-gpu', transfer_attempts=transfer_attempts+1, gpu_waiting=1 WHERE id=?",
-                    (primary_id,),
-                )
-            await db.commit()
+                await db.commit()
 
         await self._notify_update(room_id)
 
     async def _monitor_loop(self, room_id: int, name: str, url: str):
-        reject_local_media("local recording monitor")
         logger.info(f"[{name}] Monitor started")
         while True:
             try:
