@@ -18,6 +18,7 @@ from qianchuan_script import generate_qianchuan_script
 from qianchuan_matcher import QianchuanMatcher, load_group_context, score_product_match
 from qianchuan_video import QianchuanVideoComposer
 from qianchuan_quality import check_qianchuan_video_quality
+from qianchuan_policy import build_qianchuan_metadata, validate_qianchuan_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,18 @@ class QianchuanGenerateRequest(BaseModel):
     match_threshold: float = Field(default=0.58, ge=0.0, le=1.0)
     dry_run: bool = False
     generate_video: bool = True
+    target_audience: Optional[str] = None
+    excluded_audiences: List[str] = Field(default_factory=list, max_length=10)
+    bid_coefficient: Optional[float] = Field(default=None, gt=0, le=10)
+    template_type: Optional[str] = None
+    dedup_actions: List[str] = Field(default_factory=list, max_length=6)
+    authenticity_check: Dict[str, Any] = Field(default_factory=dict)
+    copy_versions: Dict[str, str] = Field(default_factory=dict)
+    trust_proof: Optional[str] = None
+    stability_evidence: List[str] = Field(default_factory=list, max_length=10)
+    ai_usage: List[str] = Field(default_factory=list, max_length=10)
+    ai_generated_human_wig_scene: bool = False
+    execution_node: str = "remote-gpu"
 
 class QianchuanGenerateResponse(BaseModel):
     success: bool
@@ -93,6 +106,7 @@ class QianchuanGenerateResponse(BaseModel):
     script: Optional[Dict] = None
     output_path: Optional[str] = None
     score: Optional[float] = None
+    metadata: Optional[Dict] = None
     review: Optional[Dict] = None
     error: Optional[str] = None
 
@@ -161,6 +175,32 @@ async def generate_qianchuan(request: QianchuanGenerateRequest):
         target_duration=request.target_duration,
         selling_points=product_keywords,
     )
+    metadata = build_qianchuan_metadata(
+        target_audience=request.target_audience,
+        excluded_audiences=request.excluded_audiences,
+        bid_coefficient=request.bid_coefficient,
+        template_type=request.template_type,
+        dedup_actions=request.dedup_actions,
+        authenticity_check=request.authenticity_check,
+        copy_versions=request.copy_versions,
+        trust_proof=request.trust_proof,
+        stability_evidence=request.stability_evidence,
+        ai_usage=request.ai_usage,
+        ai_generated_human_wig_scene=request.ai_generated_human_wig_scene,
+        execution_node=request.execution_node,
+    )
+    policy = validate_qianchuan_metadata(metadata)
+    script["campaign_metadata"] = metadata
+    script["policy_check"] = policy
+    if not policy["eligible_for_delivery"]:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE clip_groups SET qianchuan_status = -3, qianchuan_error = ?, qianchuan_script = ?, qianchuan_review = ? WHERE id = ?",
+                ("; ".join(policy["errors"]), json.dumps(script, ensure_ascii=False), json.dumps(policy, ensure_ascii=False), request.group_id),
+            )
+            await db.commit()
+        return QianchuanGenerateResponse(success=False, group_id=request.group_id, status=-3, script=script, metadata=metadata, review=policy, error="投放规则校验失败")
+
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             """UPDATE clip_groups SET qianchuan_status = ?, qianchuan_error = NULL,
@@ -178,13 +218,13 @@ async def generate_qianchuan(request: QianchuanGenerateRequest):
     if request.dry_run or not request.generate_video:
         return QianchuanGenerateResponse(
             success=True, started=False, group_id=request.group_id, status=0,
-            script=script, score=match.get("score"), review=match,
+            script=script, score=match.get("score"), metadata=metadata, review=policy,
         )
 
     asyncio.create_task(_qianchuan_generate_bg(request.group_id, script))
     return QianchuanGenerateResponse(
         success=True, started=True, group_id=request.group_id, status=1,
-        script=script, score=match.get("score"), review=match,
+        script=script, score=match.get("score"), metadata=metadata, review=policy,
     )
 
 
