@@ -2019,8 +2019,9 @@ async def gpu_status():
         "gpu_offline_seconds": offline_sec,
         "comfyui": {"reachable": False, "vram_total": 0, "vram_free": 0, "ram_total": 0, "ram_free": 0, "queue_running": 0, "queue_pending": 0},
     }
-    # Skip ALL live probing in maintenance mode — server may be fully offline
-    skip_gpu_probe = not gpu_is_online() or gpu_is_maint()
+    # Probe the remote service on every request; watcher hysteresis is for
+    # scheduling, not for presenting stale status to operators.
+    skip_gpu_probe = gpu_is_maint()
     try:
         import aiohttp as _aio_status
         _to = _aio_status.ClientTimeout(total=5)

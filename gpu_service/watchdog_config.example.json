@@ -1,0 +1,22 @@
+{
+  "port": 8878,
+  "monitor_interval": 30,
+  "restart_cooldown": 120,
+  "state_file": "watchdog_state.json",
+  "services": {
+    "gpu": {
+      "name": "GPU transcription service",
+      "cmd": ["C:\\Python313\\python.exe", "main.py"],
+      "cwd": "C:\\Users\\neo\\douyin_processor\\gpu_service",
+      "health_url": "http://127.0.0.1:8877/health",
+      "enabled": true
+    },
+    "comfyui": {
+      "name": "ComfyUI",
+      "cmd": ["C:\\Python313\\python.exe", "main.py", "--listen", "0.0.0.0", "--port", "8188"],
+      "cwd": "C:\\ComfyUI",
+      "health_url": "http://127.0.0.1:8188/system_stats",
+      "enabled": true
+    }
+  }
+}
