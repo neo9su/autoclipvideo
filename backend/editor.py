@@ -2628,7 +2628,7 @@ def _apply_hints(segs: List[Seg], hints: dict) -> None:
 # ── GPU offload path ──────────────────────────────────────────────────────────
 
 _GPU_SERVICE_URL  = os.environ.get("GPU_SERVICE_URL",  "http://10.190.0.203:8877")
-_GPU_WAIT_TIMEOUT = float(os.environ.get("GPU_WAIT_TIMEOUT", "600"))  # seconds to wait for GPU before local fallback
+_GPU_WAIT_TIMEOUT = float(os.environ.get("GPU_WAIT_TIMEOUT", "600"))
 
 # Maps local clip output path → GPU clip job_id; populated by _gpu_clip_variant
 # Used by transcribe.py to persist job_ids in DB for later GPU-side concat
@@ -2824,11 +2824,16 @@ async def _edit_via_gpu(
     return out_path
 
 
-# ── Deprecated local fallback ────────────────────────────────────────────────
+# ── Local media policy boundary ───────────────────────────────────────────────
 
-async def _fast_local_clip(*args, **kwargs) -> bool:
-    """Fail closed; all clip encoding belongs to the remote GPU service."""
-    del args, kwargs
+async def _fast_local_clip(
+    mp4: str,
+    selected: List[Seg],
+    segs: List[Seg],
+    out: str,
+    on_progress=None,
+) -> bool:
+    """Compatibility shim: local clip encoding is intentionally forbidden."""
     reject_local_media("local clip encoder")
     return False
 
@@ -2845,6 +2850,14 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
     if not os.path.exists(mp4_path):
         logger.error(f"MP4 not found: {mp4_path}")
         return None
+    require_remote_gpu("clip analysis")
+    from gpu_state import is_online as _gpu_is_online, wait_until_online as _gpu_wait
+    if not _gpu_is_online():
+        logger.info("GPU offline; clip remains queued without local media processing")
+        try:
+            await asyncio.wait_for(_gpu_wait(), timeout=_GPU_WAIT_TIMEOUT)
+        except asyncio.TimeoutError:
+            reject_local_media("clip analysis while GPU is offline")
     if not os.path.exists(srt_path):
         logger.error(f"SRT not found: {srt_path}")
         return None
@@ -3013,7 +3026,6 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
     return None
 
 
-
 async def edit_recording_multi(
     mp4_path: str,
     srt_path: str,
@@ -3033,6 +3045,14 @@ async def edit_recording_multi(
     if not os.path.exists(mp4_path):
         logger.error(f"MP4 not found: {mp4_path}")
         return []
+    require_remote_gpu("clip variant analysis")
+    from gpu_state import is_online as _gpu_is_online, wait_until_online as _gpu_wait
+    if not _gpu_is_online():
+        logger.info("GPU offline; clip variants remain queued without local media processing")
+        try:
+            await asyncio.wait_for(_gpu_wait(), timeout=_GPU_WAIT_TIMEOUT)
+        except asyncio.TimeoutError:
+            reject_local_media("clip variant analysis while GPU is offline")
     if not os.path.exists(srt_path):
         logger.error(f"SRT not found: {srt_path}")
         return []
@@ -3181,6 +3201,3 @@ async def edit_recording_multi(
             continue
 
         reject_local_media(f"clip variant {k+1}")
-        continue
-
-    return results

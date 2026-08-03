@@ -1,7 +1,7 @@
 """千川投流版视频合成包装层。
 
 复用 DirectorVideoComposer 的 GPU/NVENC 路径，同时为每个 segment 补充 qianchuan edit_actions；
-提供本地 ASS 高亮字幕和提示音资源生成，便于 GPU 服务或 ffmpeg fallback 消费。
+提供 GPU 服务消费的 ASS 高亮字幕和提示音元数据；本机不执行媒体处理。
 """
 from __future__ import annotations
 
@@ -79,7 +79,7 @@ def build_qianchuan_ass(script: Dict, audio_segments: Optional[List[Dict]] = Non
 
 
 def build_sound_cues(script: Dict, audio_segments: Optional[List[Dict]] = None, sfx_path: Optional[str] = None) -> List[Dict]:
-    """Return metadata for subtle keyword cues. GPU/fallback may mix this WAV at given timestamps."""
+    """Return metadata for subtle keyword cues. GPU service may mix this WAV at given timestamps."""
     sfx = ensure_prompt_sfx(sfx_path)
     cues: List[Dict] = []
     cursor = 0.0

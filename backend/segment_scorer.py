@@ -46,49 +46,9 @@ _SEM_FRAME = asyncio.Semaphore(1)
 
 
 async def _volumedetect(mp4: str, start: float, end: float) -> dict:
-    """
-    Run ffmpeg volumedetect on [start, end] of mp4.
-    Returns {"mean_db": float, "max_db": float} or {} on failure.
-
-    ffmpeg volumedetect output example (stderr):
-      [Parsed_volumedetect_0 @ ...] mean_volume: -20.3 dB
-      [Parsed_volumedetect_0 @ ...] max_volume: -6.2 dB
-    """
-    reject_local_media("audio scoring")
+    """Audio scoring is performed by the remote GPU service only."""
+    reject_local_media("local audio scoring")
     return {}
-
-
-def _audio_bonus(mean_db: float, max_db: float) -> float:
-    """
-    Translate raw audio stats into a score addend.
-
-    mean_db : RMS average level (dBFS). Higher = louder / more energetic.
-              Live-stream anchor speech typically ranges -28 to -18 dBFS.
-    max_db  : Peak level. (max_db - mean_db) = dynamic range.
-
-    Rationale:
-      - Loud/excited delivery (+energy): better hook material, keeps viewers.
-      - High dynamic range (punchy emphasis, "秒变！"): emotional peak moments.
-      - Very quiet / near-silent: likely transition noise or dead air; penalise.
-
-    Return range: approximately [-6, +7.5].
-    """
-    bonus = 0.0
-
-    # ── Loudness (mean RMS) ───────────────────────────────────────────────────
-    if mean_db > -18:       bonus += 5.0   # excited/shouting — high energy hook
-    elif mean_db > -22:     bonus += 3.5   # energetic delivery
-    elif mean_db > -28:     bonus += 1.5   # normal speech
-    elif mean_db > -35:     bonus += 0.0   # quiet (still valid)
-    else:                   bonus -= 4.0   # near-silent; may have slipped past silence filter
-
-    # ── Dynamic range (peak − mean) ──────────────────────────────────────────
-    dynamic = max_db - mean_db
-    if dynamic > 20:        bonus += 2.5   # very dynamic — shouts, emphasis
-    elif dynamic > 14:      bonus += 1.5   # moderate dynamic
-    elif dynamic > 8:       bonus += 0.5   # mildly dynamic
-
-    return bonus
 
 
 async def enrich_audio_scores(mp4: str, segs: list) -> None:

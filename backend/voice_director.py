@@ -18,7 +18,6 @@ import httpx
 
 from gpu_execution import reject_local_media, require_remote_gpu
 
-from local_media_guard import local_media_slot
 
 logger = logging.getLogger(__name__)
 
@@ -265,8 +264,7 @@ class VoiceDirector:
         if room_id_for_tts:
             logger.info(f"TTS will use room_id={room_id_for_tts} voice clone (v3) for group {group_id}")
         else:
-            logger.error("No room_id for group %s; GPU TTS requires a remote execution target", group_id)
-
+            logger.info(f"No room_id for group {group_id}, waiting for remote GPU TTS")
 
         scenes: List[Dict] = script.get("scenes", [])
         is_creative = script.get("vibe") == "creative"
@@ -317,13 +315,20 @@ class VoiceDirector:
         # ── 时长保底：自编/导演模式合成音频 < 30s 时自动降速拉长 ──────────────
         _MIN_AUDIO_DUR = 30.0
         actual_merged_dur = await self._probe_duration(merged)
-        # Audio duration/stretching is a GPU operation. Never invoke local ffmpeg.
         if (not is_qianchuan) and actual_merged_dur > 0 and actual_merged_dur < _MIN_AUDIO_DUR:
-            logger.warning(
-                "Creative audio is shorter than %.1fs; remote GPU stretch is required",
-                _MIN_AUDIO_DUR,
-            )
-
+            stretch_ratio = _MIN_AUDIO_DUR / actual_merged_dur  # e.g. 16s→30s = 1.875x 拉慢
+            stretch_ratio = min(stretch_ratio, 2.0)  # atempo 下限 0.5，即最多拉慢2倍
+            atempo_val = 1.0 / stretch_ratio          # atempo<1 = 降速
+            stretched_path = merged + "_stretched.wav"
+            logger.info(f"Creative audio too short ({actual_merged_dur:.1f}s < {_MIN_AUDIO_DUR}s), "
+                        f"stretching {stretch_ratio:.2f}x (atempo={atempo_val:.3f})")
+            reject_local_media("voice director audio stretch")
+            if os.path.exists(stretched_path) and os.path.getsize(stretched_path) > 0:
+                os.replace(stretched_path, merged)
+                total_duration = await self._probe_duration(merged)
+                logger.info(f"Audio stretched to {total_duration:.1f}s")
+            else:
+                logger.warning("Audio stretch failed, keeping original (may be too short)")
         # ─────────────────────────────────────────────────────────────────────
 
         return {
@@ -345,7 +350,10 @@ class VoiceDirector:
         scene_type: str = "",
         is_creative: bool = False,
     ) -> float:
-        """Submit text to the remote GPU TTS service and return its duration."""
+        """合成单段文字 → WAV/MP3。返回时长秒数，失败返回 0。
+
+        优先级：GPU CosyVoice2 声音克隆（room_id，最高优先） → 腾讯云 TTS → MiniMax → Edge TTS
+        """
 
         # Remote GPU is the only permitted TTS provider, with or without a voice ref.
         dur = await self._tts_gpu(text, output_path, emotion, room_id=room_id,
@@ -442,7 +450,7 @@ class VoiceDirector:
                     logger.warning(f"GPU TTS unexpected error, retry {_tts_retry+1}/3: {te}")
                     await asyncio.sleep(3 * (_tts_retry + 1))
             if job_id is None:
-                logger.warning("GPU TTS unavailable after bounded retries; job remains pending")
+                logger.warning("GPU TTS failed after 3 retries, falling back to Tencent")
                 return 0.0
 
             # Poll with a bounded per-scene deadline. The outer director pipeline has its
@@ -647,14 +655,12 @@ class VoiceDirector:
     # ── 音频工具 ───────────────────────────────────────────────────────────────
 
     async def _probe_duration(self, path: str) -> float:
-        """Reject local probing; the remote GPU must return duration metadata."""
-        del path
+        """Remote GPU owns media probing; local ffprobe is forbidden."""
         reject_local_media("voice director local ffprobe")
         return 0.0
 
     async def _merge_audio_segments(self, segments: List[Dict], group_id: int) -> Optional[str]:
-        """Reject local audio concatenation; the remote GPU owns this operation."""
-        del segments, group_id
+        """Remote GPU owns audio concatenation; local ffmpeg is forbidden."""
         reject_local_media("voice director local audio concat")
         return None
 

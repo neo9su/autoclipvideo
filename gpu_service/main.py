@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 import aiofiles
 import torchaudio
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 import shutil as _shutil
@@ -955,12 +955,18 @@ async def health():
 
 @app.post("/jobs", status_code=201)
 async def create_job(
+    request: Request,
     file: UploadFile = File(...),
     room_id: int = Form(...),
 ):
     """Receive MP4 file and start transcription."""
     from urllib.parse import unquote
     _raw_filename = unquote(file.filename)  # decode %E5%B0%8F... → 中文
+    idempotency_key = request.headers.get("X-Idempotency-Key") if request else None
+    if idempotency_key:
+        existing = _jobs.get(idempotency_key)
+        if existing and existing.get("job_id"):
+            return {"job_id": existing["job_id"], "status": existing["status"], "deduplicated": True}
     job_id = os.path.splitext(_raw_filename)[0]
     room_dir = os.path.join(STORAGE_DIR, str(room_id))
     # exist_ok=True doesn't suppress WinError 183 on Windows when the path is a junction/symlink;
@@ -977,7 +983,9 @@ async def create_job(
         while chunk := await file.read(1024 * 1024):
             await f.write(chunk)
 
-    _jobs[job_id] = {"status": "processing", "mp4_path": mp4_path, "srt_path": srt_path, "error": None}
+    _jobs[job_id] = {"job_id": job_id, "status": "processing", "mp4_path": mp4_path, "srt_path": srt_path, "error": None}
+    if idempotency_key:
+        _jobs[idempotency_key] = _jobs[job_id]
     _db_insert_job(job_id, mp4_path, srt_path)
     asyncio.create_task(_run_with_lock(job_id))
     return {"job_id": job_id, "status": "processing"}
