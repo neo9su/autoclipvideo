@@ -686,7 +686,7 @@ const rooms = ref([])
 const openId = ref(null)
 const detail = ref(null)
 const detailLoading = ref(false)
-const apiBase = import.meta.env.DEV ? 'http://localhost:8899' : ''
+const apiBase = import.meta.env.VITE_API_BASE || 'http://10.190.0.203:8899'
 let ws = null
 
 const { show } = useToast()

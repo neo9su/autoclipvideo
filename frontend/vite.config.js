@@ -6,8 +6,8 @@ export default defineConfig({
   plugins: [vue()],
   server: {
     proxy: {
-      '/api': 'http://localhost:8899',
-      '/ws': { target: 'ws://localhost:8899', ws: true },
+      '/api': process.env.VITE_API_BASE || 'http://10.190.0.203:8899',
+      '/ws': { target: (process.env.VITE_WS_BASE || 'ws://10.190.0.203:8899'), ws: true },
     },
   },
 })

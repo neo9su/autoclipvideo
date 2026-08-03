@@ -15,6 +15,8 @@ import aiohttp
 import aiosqlite
 import httpx
 
+from gpu_execution import reject_local_media
+
 from db import DB_PATH, aio_connect
 from llm_client import llm_post, LLM_MODEL as BEDROCK_MODEL, _LLM_BASE_URL, _LLM_API_KEY
 from final_video import postprocess_final_video
@@ -164,6 +166,7 @@ class _ShortDurationError(RuntimeError):
 
 
 async def _probe_duration(path: str) -> float:
+    reject_local_media("local video duration probe")
     proc = await asyncio.create_subprocess_exec(
         "ffprobe", "-v", "error", "-show_entries", "format=duration",
         "-of", "default=noprint_wrappers=1:nokey=1", path,
@@ -536,7 +539,7 @@ async def merge_group(group_id: int) -> Optional[str]:
                 await db.commit()
             return None
         except Exception as e:
-            logger.warning(f"GPU classic-concat failed for group {group_id}: {e} — trying stream-copy fallback")
+            logger.warning(f"GPU classic-concat failed for group {group_id}: {e} — retrying remote GPU path")
 
     # ── Path 2: GPU stream-copy concat (requires in-memory clip job IDs) ─────────
     can_gpu = all(clip_job_map.get(rid) for rid in recording_ids)
@@ -560,53 +563,7 @@ async def merge_group(group_id: int) -> Optional[str]:
                 await db.commit()
             return None
         except Exception as e:
-            logger.warning(f"GPU stream-copy concat failed for group {group_id}: {e} — falling back to local")
+            logger.warning(f"GPU stream-copy concat failed for group {group_id}: {e} — refusing local execution")
 
-    # ── Path 3: local ffmpeg stream-copy concat (last resort) ────────────────────
-    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as f:
-        for p in parts:
-            f.write(f"file '{p}'\n")
-        list_file = f.name
-
-    cmd = [
-        "ffmpeg", "-y",
-        "-f", "concat", "-safe", "0",
-        "-i", list_file,
-        "-c", "copy",
-        out_path,
-    ]
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _, stderr = await proc.communicate()
-    os.unlink(list_file)
-
-    if proc.returncode == 0 and os.path.exists(out_path):
-        dur = await _probe_duration(out_path)
-        if dur < _MIN_DURATION_SEC:
-            os.remove(out_path)
-            err_msg = f"合并视频时长 {dur:.1f}s < {_MIN_DURATION_SEC}s 最低要求"
-            logger.error(f"Group {group_id} merge rejected: {err_msg}")
-            async with aio_connect() as db:
-                await db.execute(
-                    "UPDATE clip_groups SET classic_status = -2, merge_error = ? WHERE id = ?",
-                    (err_msg, group_id),
-                )
-                await db.commit()
-            return None
-        size_mb = os.path.getsize(out_path) / 1024 / 1024
-        logger.info(f"Group {group_id} merged (local fallback): {out_filename} ({size_mb:.1f} MB)")
-        return await _finalize_classic_merge(out_path, out_filename, group_id)
-
-    else:
-        err_msg = stderr.decode(errors="replace")[-400:].strip()
-        logger.error(f"Merge failed for group {group_id}: {err_msg}")
-        async with aio_connect() as db:
-            await db.execute(
-                "UPDATE clip_groups SET classic_status = -1, merge_error = ? WHERE id = ?",
-                (err_msg or "未知错误", group_id),
-            )
-            await db.commit()
-        return None
+    # Local concat is forbidden by the GPU-only execution contract.
+    reject_local_media("classic group merge")

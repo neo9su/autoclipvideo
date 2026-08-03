@@ -41,7 +41,7 @@ _CONSECUTIVE_OFFLINE_THRESHOLD = 3      # require N consecutive failures to flip
 _CONSECUTIVE_ONLINE_THRESHOLD = 2       # require N consecutive successes to flip back online
 _consecutive_successes: int = 0         # probe success counter for hysteresis
 
-# Maintenance mode: when True, all GPU pipeline calls are skipped / fallback to local
+# Maintenance mode: when True, all GPU pipeline calls remain queued / wait.
 _maintenance: bool = False
 
 # Watchdog agent state (updated by the watcher loop)
@@ -72,7 +72,7 @@ def set_maintenance(value: bool) -> None:
     if value:
         # Treat as offline so callers skip GPU immediately
         _event.clear()
-        logger.info("GPU maintenance mode ENABLED — all GPU pipelines will skip/fallback")
+        logger.info("GPU maintenance mode ENABLED — all media pipelines will wait")
     else:
         # Restore event state based on actual connectivity
         if _online:

@@ -32,6 +32,7 @@ from monitor import MonitorManager
 from transcribe import poll_transcriptions, _run_editor, _clip_progress, get_clip_queue, update_job_priority, cancel_clip_job, pause_clip_job, resume_clip_job, _job_submit_times, _job_durations, _poll_state, flush_poll, POLL_INTERVAL, RECORDINGS_DIR, backfill_auto_merge
 from analyzer import merge_group
 from sync import sync_file
+from gpu_execution import require_remote_gpu
 from thumbnail import generate_thumbnail
 from meta_generator import generate_meta, match_product
 from publish_scheduler import poll_publish_tasks
@@ -469,21 +470,26 @@ async def _periodic_cleanup():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if os.environ.get("DEPLOYMENT_ROLE") != "gpu-backend":
+        raise RuntimeError("backend must run as the remote GPU backend; use the control-plane frontend locally")
+    require_remote_gpu("backend startup")
     await init_db()
     await _reset_stuck_clip_tasks()
     try:
-        await _startup_trigger_pipelines()
+        # Control-plane startup must never start local capture/worker loops.
+        # Rooms and media jobs are resumed by the remote GPU orchestration path.
+        logger.info("Control-plane mode: skipping local room monitors and startup media dispatch")
     except Exception as e:
         logger.error(f"Startup pipeline trigger failed: {e}")
     # Load human-approved keyword score overrides into the scoring table
     from editor import load_rule_overrides
     await load_rule_overrides()
-    await monitor.start_all()
+    # Do not start RoomRecorder/ffmpeg loops on the control-plane host.
     asyncio.create_task(backfill_auto_merge())
     from gpu_state import watch_gpu_service, register_online_callback
     register_online_callback(_on_gpu_online)
     gpu_watcher_task = asyncio.create_task(watch_gpu_service(broadcast_fn=broadcast))
-    transcribe_task = asyncio.create_task(poll_transcriptions(broadcast_fn=broadcast))
+    transcribe_task = None
     scheduler_task = asyncio.create_task(poll_publish_tasks(broadcast_fn=broadcast))
     memory_task = asyncio.create_task(_memory_monitor(broadcast_fn=broadcast))
     enhance_worker_task = asyncio.create_task(_enhance_worker())
@@ -492,7 +498,8 @@ async def lifespan(app: FastAPI):
     director_dispatch_task = asyncio.create_task(_periodic_director_dispatch())
     yield
     gpu_watcher_task.cancel()
-    transcribe_task.cancel()
+    if transcribe_task:
+        transcribe_task.cancel()
     scheduler_task.cancel()
     memory_task.cancel()
     enhance_worker_task.cancel()
@@ -500,6 +507,8 @@ async def lifespan(app: FastAPI):
     creative_dispatch_task.cancel()
     director_dispatch_task.cancel()
     for t in [gpu_watcher_task, transcribe_task, scheduler_task, memory_task, enhance_worker_task, cleanup_task, creative_dispatch_task, director_dispatch_task]:
+        if t is None:
+            continue
         try:
             await t
         except asyncio.CancelledError:
