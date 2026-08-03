@@ -32,6 +32,7 @@ from monitor import MonitorManager
 from transcribe import poll_transcriptions, _run_editor, _clip_progress, get_clip_queue, update_job_priority, cancel_clip_job, pause_clip_job, resume_clip_job, _job_submit_times, _job_durations, _poll_state, flush_poll, POLL_INTERVAL, RECORDINGS_DIR, backfill_auto_merge
 from analyzer import merge_group
 from sync import sync_file
+from gpu_execution import require_remote_gpu
 from thumbnail import generate_thumbnail
 from meta_generator import generate_meta, match_product
 from publish_scheduler import poll_publish_tasks
@@ -469,6 +470,9 @@ async def _periodic_cleanup():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if os.environ.get("DEPLOYMENT_ROLE") != "gpu-backend":
+        raise RuntimeError("backend must run as the remote GPU backend; use the control-plane frontend locally")
+    require_remote_gpu("backend startup")
     await init_db()
     await _reset_stuck_clip_tasks()
     try:

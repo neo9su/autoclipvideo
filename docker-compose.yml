@@ -1,18 +1,20 @@
 services:
   app:
+    profiles: ["gpu-backend"]
     build: .
     container_name: autoclipvideo
     ports:
-      - "8899:8899"
-      - "5173:5173"
+      - "${BACKEND_BIND_ADDRESS:-0.0.0.0}:8899:8899"
     volumes:
       - ./data:/app/data
       - ./recordings:/app/recordings
       - ./voice_output:/app/voice_output
     environment:
-      - GPU_SERVICE_URL=${GPU_SERVICE_URL:-http://host.docker.internal:8877}
-      - COMFYUI_URL=${COMFYUI_URL:-http://host.docker.internal:8188}
-      - WATCHDOG_URL=${WATCHDOG_URL:-http://host.docker.internal:8878}
+      - GPU_SERVICE_URL=${GPU_SERVICE_URL:?GPU_SERVICE_URL must point to the GPU worker}
+      - COMFYUI_URL=${COMFYUI_URL:?COMFYUI_URL must point to the GPU vision service}
+      - WATCHDOG_URL=${WATCHDOG_URL:?WATCHDOG_URL must point to the remote watchdog}
+      - GPU_EXECUTION_NODE=${GPU_EXECUTION_NODE:-remote-gpu}
+      - DEPLOYMENT_ROLE=gpu-backend
       - AWS_BEARER_TOKEN_BEDROCK=${AWS_BEARER_TOKEN_BEDROCK:-}
       - AWS_REGION=${AWS_REGION:-us-east-1}
       - MAX_CONCURRENT_CLIPS=${MAX_CONCURRENT_CLIPS:-1}
@@ -25,5 +27,5 @@ services:
       timeout: 5s
       retries: 3
 
-  # GPU service runs natively on Windows (not in Docker)
-  # Configure GPU_SERVICE_URL to point to your GPU server
+  # This profile is for the GPU server only. The control-plane host must not run it.
+  # GPU service runs natively on the GPU server (not in this container).

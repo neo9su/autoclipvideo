@@ -1,0 +1,30 @@
+services:
+  douyin-backend:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: douyin-recorder-backend
+    restart: unless-stopped
+    ports:
+      - "${BACKEND_BIND_ADDRESS:-0.0.0.0}:8899:8899"
+    volumes:
+      - ${BACKEND_DATA_DIR:-./data}:/app/data
+      - ${BACKEND_RECORDINGS_DIR:-./recordings}:/app/recordings
+      - ${BACKEND_VOICE_DIR:-./voice_output}:/app/voice_output
+    environment:
+      GPU_SERVICE_URL: ${GPU_SERVICE_URL:?GPU_SERVICE_URL must point to the GPU worker}
+      COMFYUI_URL: ${COMFYUI_URL:?COMFYUI_URL must point to the GPU vision service}
+      WATCHDOG_URL: ${WATCHDOG_URL:?WATCHDOG_URL must point to the remote watchdog}
+      GPU_EXECUTION_NODE: ${GPU_EXECUTION_NODE:-remote-gpu}
+      DEPLOYMENT_ROLE: gpu-backend
+      MAX_CONCURRENT_CLIPS: ${MAX_CONCURRENT_CLIPS:-1}
+      MEM_WARN_GB: ${MEM_WARN_GB:-5}
+      AWS_BEARER_TOKEN_BEDROCK: ${AWS_BEARER_TOKEN_BEDROCK:?AWS_BEARER_TOKEN_BEDROCK must be supplied at deploy time}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      COSYVOICE_URL: ${COSYVOICE_URL:-}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8899/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s

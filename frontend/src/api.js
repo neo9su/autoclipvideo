@@ -1,4 +1,4 @@
-const BASE = import.meta.env.DEV ? 'http://localhost:8899' : ''
+const BASE = (import.meta.env.VITE_API_BASE || 'http://10.190.0.203:8899').replace(/\/$/, '')
 
 export async function getRooms() {
   const res = await fetch(`${BASE}/api/rooms`)
@@ -48,7 +48,7 @@ export async function getStatus() {
 }
 
 export function createWS(onMessage) {
-  const wsBase = import.meta.env.DEV ? 'ws://localhost:8899' : `ws://${location.host}`
+  const wsBase = (import.meta.env.VITE_WS_BASE || BASE.replace(/^http/, 'ws')).replace(/\/$/, '')
   const ws = new WebSocket(`${wsBase}/ws/events`)
   ws.onmessage = (e) => onMessage(JSON.parse(e.data))
   ws.onclose = () => setTimeout(() => createWS(onMessage), 3000)
