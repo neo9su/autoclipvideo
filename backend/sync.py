@@ -1,61 +1,71 @@
 import asyncio
-import hashlib
 import logging
 import os
-from pathlib import Path
 from typing import Optional
 
 import aiohttp
 import httpx
-
-from gpu_execution import TransferStats, require_remote_gpu
+from gpu_execution import require_remote_gpu
 
 logger = logging.getLogger(__name__)
 
 GPU_SERVICE_URL = os.environ.get("GPU_SERVICE_URL", "http://10.190.0.203:8877")
 
 
-async def sync_file(local_path: str, room_id: int, stats: Optional[TransferStats] = None) -> Optional[str]:
-    """Upload one MP4 once, with a stable idempotency key for safe retries."""
-    path = Path(local_path)
-    if not path.is_file():
-        raise FileNotFoundError(local_path)
+async def sync_file(local_path: str, room_id: int) -> Optional[str]:
+    """Upload MP4 to GPU transcription service. Returns job_id on success, None on failure.
+    Retries up to 3 times with exponential backoff on transient errors."""
     record = require_remote_gpu("media upload")
-    file_size = path.stat().st_size
-    key = hashlib.sha256(f"{room_id}:{path.name}:{file_size}:{path.stat().st_mtime_ns}".encode()).hexdigest()
-    transfer = stats or TransferStats("upload", record.node)
-    headers = {"X-Idempotency-Key": key, "X-Execution-Node": record.node}
-    transfer.input_bytes = file_size
-    transfer.idempotency_key = key
-    url = f"{GPU_SERVICE_URL.rstrip('/')}/jobs"
+    if not os.path.isfile(local_path):
+        logger.error("Upload source does not exist: %s", os.path.basename(local_path))
+        return None
+    filename = os.path.basename(local_path)
+    url = f"{GPU_SERVICE_URL}/jobs"
+
+    # The filename is the stable remote job key; do not upload the same large
+    # recording again when a prior attempt already registered it.
+    async with httpx.AsyncClient(timeout=15) as probe_client:
+        try:
+            probe = await probe_client.get(f"{GPU_SERVICE_URL}/jobs/{os.path.splitext(filename)[0]}")
+            if probe.status_code == 200:
+                remote_job = probe.json()
+                if remote_job.get("status") in {"processing", "done"}:
+                    logger.info("Upload already registered for %s on %s", filename, record.node)
+                    return remote_job.get("job_id") or os.path.splitext(filename)[0]
+        except httpx.HTTPError:
+            pass
+
+    file_size = os.path.getsize(local_path)
 
     for attempt in range(1, 4):
-        transfer.upload_attempts = attempt
         try:
-            logger.info("Uploading %s to GPU service (attempt %s/3, bytes=%s)", path.name, attempt, file_size)
-            form = aiohttp.FormData()
-            form.add_field("room_id", str(room_id))
-            with path.open("rb") as media_file:
-                form.add_field("file", media_file, filename=path.name, content_type="video/mp4")
+            logger.info(f"Uploading {filename} to GPU service (attempt {attempt}/3)...")
+            with open(local_path, "rb") as media_file:
+                form = aiohttp.FormData()
+                form.add_field("room_id", str(room_id))
+                form.add_field("file", media_file, filename=filename, content_type="video/mp4")
                 async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        url,
-                        data=form,
-                        headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=300),
-                    ) as resp:
-                        status = resp.status
-                        body = await resp.json() if status in (200, 201) else None
-                        text = "" if body is not None else await resp.text()
-            if status in (200, 201) and body and body.get("job_id"):
-                logger.info("GPU upload accepted %s as job %s", path.name, body["job_id"])
-                return body["job_id"]
-            if status < 500:
-                logger.error("Upload failed for %s: %s %s", path.name, status, text[:200])
+                    async with session.post(url, data=form,
+                                            timeout=aiohttp.ClientTimeout(total=300)) as resp:
+                        _up_status = resp.status
+                        _up_body = await resp.json() if _up_status in (200, 201) else None
+                        _up_text = await resp.text() if _up_body is None else ""
+            if _up_status == 201:
+                job_id = _up_body["job_id"]
+                logger.info("Uploaded %s (%d bytes) to %s, job_id=%s", filename, file_size, record.node, job_id)
+                return job_id
+            elif _up_status >= 500 and attempt < 3:
+                logger.warning(f"Upload {filename}: server error {_up_status}, retrying...")
+            else:
+                logger.error(f"Upload failed for {filename}: {_up_status} {_up_text[:200]}")
                 return None
-            logger.warning("Upload %s: server error %s, retrying", path.name, status)
-        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
-            logger.warning("Upload %s transient error (%s), retrying", path.name, type(exc).__name__)
-        await asyncio.sleep(2 ** attempt)
-    logger.error("Upload error for %s after 3 attempts", path.name)
+        except Exception as e:
+            if attempt < 3:
+                logger.warning(f"Upload {filename}: transient error ({e}), retrying...")
+            else:
+                logger.error(f"Upload error for {filename} after 3 attempts: {e}")
+                return None
+
+        await asyncio.sleep(2 ** attempt)  # 2s, 4s backoff
+
     return None

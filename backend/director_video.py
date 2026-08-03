@@ -954,73 +954,8 @@ class DirectorVideoComposer:
                                  style_config: Dict, config: Dict) -> Optional[str]:
         """Disabled: media execution is remote GPU-only."""
         reject_local_media("director local ffmpeg compositor")
-        try:
-            # 创建临时目录
-            with tempfile.TemporaryDirectory() as temp_dir:
-                temp_path = Path(temp_dir)
-                
-                # 第一步：并行处理每个视频片段（VideoToolbox 支持多路并发编码）
-                _enc_sem = asyncio.Semaphore(2)  # 最多2路并发，避免VideoToolbox超限
+        return None
 
-                async def _process_with_sem(clip):
-                    async with _enc_sem:
-                        return await self._process_single_clip(clip, temp_path, style_config, config)
-
-                results = await asyncio.gather(*[_process_with_sem(c) for c in video_clips])
-                # Preserve order; filter out failed clips
-                processed_clips = [r for r in results if r is not None]
-
-                if not processed_clips:
-                    logger.error("No clips were successfully processed")
-                    return None
-                
-                # 第二步：转场合并
-                tr_type = style_config.get('transition_type', 'slideleft')
-                tr_dur  = style_config.get('transition_duration', 0.4)
-
-                if tr_type == 'cut' or len(processed_clips) == 1:
-                    # Hard-cut: stream-copy concat
-                    concat_file = temp_path / "concat_list.txt"
-                    await self._create_concat_file(processed_clips, concat_file)
-                    merged_video = await self._concat_clips(str(concat_file), temp_path)
-                elif tr_type == 'phone_zoom':
-                    # 手机放大转场（逐对合并）
-                    merged_video = await self._phone_zoom_merge_all(processed_clips, temp_path)
-                else:
-                    # FFmpeg xfade 转场链（支持 slideleft/slideright/fade/dissolve 等）
-                    clip_durs = [await self._get_audio_duration(f) for f in processed_clips]
-                    logger.info(f"Clip durations: {list(zip([Path(f).name for f in processed_clips], clip_durs))}")
-                    # 探测失败（0.0）时用实际时长估算，避免偏移计算错误
-                    if any(d <= 0 for d in clip_durs):
-                        logger.warning("Some clip durations failed to probe — falling back to concat")
-                        concat_file = temp_path / "concat_fallback.txt"
-                        await self._create_concat_file(processed_clips, concat_file)
-                        merged_video = await self._concat_clips(str(concat_file), temp_path)
-                    else:
-                        merged_video = await self._xfade_merge(
-                            processed_clips, clip_durs, tr_type, tr_dur, temp_path
-                        )
-                        if not merged_video:
-                            # xfade 失败时 fallback 到 concat
-                            logger.warning("xfade failed — falling back to concat")
-                            concat_file = temp_path / "concat_fallback.txt"
-                            await self._create_concat_file(processed_clips, concat_file)
-                            merged_video = await self._concat_clips(str(concat_file), temp_path)
-
-                if not merged_video or not Path(merged_video).exists():
-                    logger.error("Clip merge failed")
-                    return None
-
-                # 第三步：合并音频
-                ok = await self._final_composition(
-                    merged_video, audio_path, output_path, style_config, config
-                )
-                return output_path if ok else None
-        
-        except Exception as e:
-            logger.error(f"FFmpeg composition failed: {e}")
-            return None
-    
     async def _process_single_clip(self, clip: Dict, temp_dir: Path,
                                  style_config: Dict, config: Dict) -> Optional[str]:
         """处理单个视频片段，含字幕叠加（PNG overlay，上紫下绿渐变描边）"""

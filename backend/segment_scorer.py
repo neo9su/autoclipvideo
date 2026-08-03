@@ -38,7 +38,11 @@ _GPU_SERVICE_URL = os.environ.get("GPU_SERVICE_URL", "http://10.190.0.203:8877")
 # GPU can handle multiple concurrent frame-extract requests (video already there).
 _SEM_GPU_FRAME = asyncio.Semaphore(4)
 
-# Audio analysis is also a remote GPU operation; no local ffmpeg semaphore exists.
+# Max concurrent volumedetect processes (audio-only decode, CPU-light).
+_SEM_AUDIO = asyncio.Semaphore(1)
+
+# Local ffmpeg fallback — kept at 1 to avoid CPU saturation on M2 8GB.
+_SEM_FRAME = asyncio.Semaphore(1)
 
 
 async def _volumedetect(mp4: str, start: float, end: float) -> dict:
@@ -50,8 +54,8 @@ async def _volumedetect(mp4: str, start: float, end: float) -> dict:
       [Parsed_volumedetect_0 @ ...] mean_volume: -20.3 dB
       [Parsed_volumedetect_0 @ ...] max_volume: -6.2 dB
     """
-    """Audio scoring is remote-only; the control plane never invokes ffmpeg."""
-    reject_local_media("local audio analysis")
+    reject_local_media("audio scoring")
+    return {}
 
 
 def _audio_bonus(mean_db: float, max_db: float) -> float:
@@ -190,7 +194,12 @@ async def _extract_frame_gpu(job_id: str, ts: float) -> Optional[str]:
 
 
 async def _extract_frame(mp4: str, ts: float) -> Optional[str]:
-    """Return a remote frame or fail closed; local ffmpeg is forbidden."""
+    """
+    Extract a single frame at timestamp ts from mp4.
+    Tries GPU server first (video already there); falls back to local ffmpeg.
+    Returns path to a temp JPEG, or None on failure.
+    Caller is responsible for deleting the file.
+    """
     # GPU-first: derive job_id from mp4 filename (matches GPU storage key)
     job_id = os.path.splitext(os.path.basename(mp4))[0]
     path = await _extract_frame_gpu(job_id, ts)
