@@ -23,7 +23,7 @@ from datetime import datetime
 from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from db import init_db, DB_PATH, aio_connect
@@ -527,6 +527,21 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.get("/", include_in_schema=False)
+async def service_entrypoint():
+    """Provide a useful navigation page at the remote backend's canonical URL."""
+    return HTMLResponse(
+        """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>抖音直播录制系统</title>
+<style>body{font:16px system-ui,sans-serif;max-width:680px;margin:12vh auto;padding:24px;color:#1f2937}h1{font-size:28px}li{line-height:2.2}a{color:#2563eb}#status{font-family:monospace;background:#f3f4f6;padding:12px;border-radius:8px;white-space:pre-wrap}</style></head>
+<body><h1>抖音直播录制系统</h1><p>远端 GPU 后端已启动。请选择服务入口：</p>
+<ul><li><a href="/docs">Swagger API 文档</a></li><li><a href="/api/status">API 状态 JSON</a></li><li><a href="/api/gpu/status">GPU 状态 JSON</a></li><li><a href="/frontend/">前端入口</a></li></ul>
+<p id="status">正在读取 GPU 状态…</p><script>fetch('/api/gpu/status').then(r=>r.json()).then(s=>{document.querySelector('#status').textContent='API 状态：正常\\nGPU 执行节点：remote-gpu\\nGPU 服务：'+(s.online?'在线':'离线')}).catch(()=>{document.querySelector('#status').textContent='API 暂不可用，请检查远端 GPU 服务'})</script></body></html>""",
+        status_code=200,
+    )
+
 
 # 集成导演模式API路由
 try:
