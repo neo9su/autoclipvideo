@@ -144,6 +144,19 @@ async def init_db():
                 FOREIGN KEY (recording_id) REFERENCES recordings(id)
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS gpu_transfers (
+                idempotency_key TEXT PRIMARY KEY,
+                filename TEXT NOT NULL,
+                room_id INTEGER NOT NULL,
+                input_bytes INTEGER NOT NULL,
+                gpu_job_id TEXT NOT NULL,
+                execution_node TEXT NOT NULL DEFAULT 'remote-gpu',
+                uploaded_bytes INTEGER NOT NULL,
+                downloaded_bytes INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
         await db.commit()
 
         # Migrations

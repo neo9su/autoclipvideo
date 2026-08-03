@@ -264,8 +264,8 @@ class VoiceDirector:
 
         if room_id_for_tts:
             logger.info(f"TTS will use room_id={room_id_for_tts} voice clone (v3) for group {group_id}")
-        else:
-            logger.info(f"No room_id for group {group_id}, using Edge TTS fallback")
+        if room_id_for_tts is None:
+            raise RuntimeError("远端 GPU TTS 需要有效的直播间节点")
 
         scenes: List[Dict] = script.get("scenes", [])
         is_creative = script.get("vibe") == "creative"
@@ -323,21 +323,8 @@ class VoiceDirector:
             stretched_path = merged + "_stretched.wav"
             logger.info(f"Creative audio too short ({actual_merged_dur:.1f}s < {_MIN_AUDIO_DUR}s), "
                         f"stretching {stretch_ratio:.2f}x (atempo={atempo_val:.3f})")
-            async with local_media_slot("voice director audio stretch"):
-                proc = await asyncio.create_subprocess_exec(
-                    "ffmpeg", "-y", "-i", merged,
-                    "-filter:a", f"atempo={atempo_val:.3f}",
-                    stretched_path,
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
-                )
-                await proc.communicate()
-            if os.path.exists(stretched_path) and os.path.getsize(stretched_path) > 0:
-                os.replace(stretched_path, merged)
-                total_duration = await self._probe_duration(merged)
-                logger.info(f"Audio stretched to {total_duration:.1f}s")
-            else:
-                logger.warning("Audio stretch failed, keeping original (may be too short)")
+            raise RuntimeError("远端 GPU TTS 输出过短；拒绝在本机拉伸音频")
+
         # ─────────────────────────────────────────────────────────────────────
 
         return {

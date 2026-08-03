@@ -62,8 +62,9 @@ async def decode_smoke(path: str) -> Dict:
 
 
 async def check_qianchuan_video_quality(path: str, min_duration: float = 18.0, max_duration: float = 35.5) -> Dict:
+    """Remote quality validation is required; local ffmpeg is forbidden."""
     require_remote_gpu("remote quality check")
-    report: Dict = {"path": path, "ok": False, "errors": [], "warnings": []}
+    reject_local_media("quality check must run on remote GPU")
     if not path or not os.path.exists(path):
         report["errors"].append("output file missing")
         return report

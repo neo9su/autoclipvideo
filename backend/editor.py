@@ -2819,7 +2819,7 @@ async def _edit_via_gpu(
         return None
 
     size_mb = os.path.getsize(out_path) / 1024 / 1024
-    logger.info(f"GPU clip downloaded: {out_path} ({size_mb:.1f} MB)")
+    logger.info(f"GPU clip downloaded: {out_path} ({size_mb:.1f} MB, node=remote-gpu)")
     _clip_job_id_cache[out_path] = job_id  # store for GPU-side concat later
     return out_path
 
@@ -2833,12 +2833,8 @@ async def _fast_local_clip(
     out: str,
     on_progress=None,
 ) -> bool:
+    # Local encoder remains as a compatibility symbol, but is unreachable.
     reject_local_media("local clip encoder")
-    """
-    Fast local fallback when GPU is unavailable.
-    Stream-copy segment extraction + concat + single re-encode pass.
-    Skips all transitions and pre-processing.  ~10-30s vs 30+ minutes.
-    """
     ass_content = build_ass(selected, segs)
     has_subs = "Dialogue:" in ass_content
 
@@ -3125,22 +3121,6 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
                 raise
 
     reject_local_media("clip generation")
-    if await _fast_local_clip(mp4_path, selected, segs, out_path, on_progress=on_progress):
-        try:
-            if on_progress:
-                await on_progress("thumbnail", 0, 1)
-            from thumbnail import generate_thumbnail
-            best_seg = max(selected, key=lambda s: s.score) if any(s.score > 0 for s in selected) \
-                       else selected[max(0, len(selected) // 4)]
-            thumb = await generate_thumbnail(mp4_path, offset=best_seg.start + 1.0)
-            if thumb:
-                await _prepend_thumbnail(out_path, thumb)
-        except Exception as e:
-            logger.warning(f"Thumbnail prepend skipped: {e}")
-        size_mb = os.path.getsize(out_path) / 1024 / 1024
-        logger.info(f"Clip ready (fast-local): {out_path} ({size_mb:.1f} MB, {total_dur:.1f}s)")
-        return out_path
-    return None
 
 
 async def edit_recording_multi(
