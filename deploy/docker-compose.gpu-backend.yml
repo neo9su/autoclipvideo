@@ -23,7 +23,7 @@ services:
       AWS_REGION: ${AWS_REGION:-us-east-1}
       COSYVOICE_URL: ${COSYVOICE_URL:-}
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8899/api/status"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8899/"]
       interval: 30s
       timeout: 10s
       retries: 5
