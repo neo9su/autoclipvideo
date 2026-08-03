@@ -150,6 +150,10 @@ async def init_db():
         for migration in [
             "ALTER TABLE recordings ADD COLUMN transcribed INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE recordings ADD COLUMN gpu_job_id TEXT",
+            "ALTER TABLE recordings ADD COLUMN execution_node TEXT",
+            "ALTER TABLE recordings ADD COLUMN upload_bytes INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE recordings ADD COLUMN download_bytes INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE recordings ADD COLUMN temp_file_count INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE recordings ADD COLUMN clipped INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE recordings ADD COLUMN clip_filename TEXT",
             "ALTER TABLE recordings ADD COLUMN analyzed INTEGER NOT NULL DEFAULT 0",

@@ -14,6 +14,8 @@ from typing import Dict, List, Optional
 import tempfile
 import subprocess
 
+from gpu_execution import media_execution_node
+
 logger = logging.getLogger(__name__)
 
 # ── 字幕关键词高亮（与 editor.py 同步）─────────────────────────────────────────
@@ -521,8 +523,9 @@ class DirectorVideoComposer:
             # 计算总 TTS 时长，传给 GPU 用 -t 精确控制输出时长（替代 -shortest）
             total_tts_duration = sum(tts_dur_by_scene.values()) if tts_dur_by_scene else 0.0
 
+            # The execution marker is intentionally remote-gpu and is validated before submission.
             payload = {
-                "execution_node": "remote-gpu",
+                "execution_node": media_execution_node("director composition"),
                 "execution_service": self._GPU_SERVICE_URL,
                 "clips": clips_payload,
                 "ass_content": ass_content,

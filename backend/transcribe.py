@@ -442,8 +442,8 @@ async def poll_transcriptions(broadcast_fn=None):
                         _poll_state["active_job_id"] = job_id
                         async with aio_connect() as db:
                             await db.execute(
-                                "UPDATE recordings SET synced = 1, transcribed = 1, gpu_job_id = ? WHERE id = ?",
-                                (job_id, primary_id),
+                                "UPDATE recordings SET synced = 1, transcribed = 1, gpu_job_id = ?, execution_node = ?, upload_bytes = ? WHERE id = ?",
+                                (job_id, "remote-gpu", os.path.getsize(upload_path), primary_id),
                             )
                             await db.commit()
                 _poll_state["blocked_count"] = blocked

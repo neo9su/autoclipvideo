@@ -3126,22 +3126,7 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
                 raise
 
     reject_local_media("clip generation")
-    if await _fast_local_clip(mp4_path, selected, segs, out_path, on_progress=on_progress):
-        try:
-            if on_progress:
-                await on_progress("thumbnail", 0, 1)
-            from thumbnail import generate_thumbnail
-            best_seg = max(selected, key=lambda s: s.score) if any(s.score > 0 for s in selected) \
-                       else selected[max(0, len(selected) // 4)]
-            thumb = await generate_thumbnail(mp4_path, offset=best_seg.start + 1.0)
-            if thumb:
-                await _prepend_thumbnail(out_path, thumb)
-        except Exception as e:
-            logger.warning(f"Thumbnail prepend skipped: {e}")
-        size_mb = os.path.getsize(out_path) / 1024 / 1024
-        logger.info(f"Clip ready (fast-local): {out_path} ({size_mb:.1f} MB, {total_dur:.1f}s)")
-        return out_path
-    return None
+    raise AssertionError("unreachable: remote GPU clip path must return or raise")
 
 
 async def edit_recording_multi(
@@ -3312,27 +3297,6 @@ async def edit_recording_multi(
             continue
 
         reject_local_media(f"clip variant {k+1}")
-
-        # ── Local fallback pipeline is unreachable and forbidden ─────────────
-        logger.info(f"Using fast local fallback for variant {k+1} of {os.path.basename(mp4_path)}")
-        if on_progress:
-            await on_progress("build", k, count)
-        if await _fast_local_clip(mp4_path, selected, segs, out_path, on_progress=on_progress):
-            try:
-                if on_progress:
-                    await on_progress("thumbnail", k, count)
-                from thumbnail import generate_thumbnail
-                best_seg = max(selected, key=lambda s: s.score) if any(s.score > 0 for s in selected) \
-                           else selected[max(0, len(selected) // 4)]
-                thumb = await generate_thumbnail(mp4_path, offset=best_seg.start + 1.0)
-                if thumb:
-                    await _prepend_thumbnail(out_path, thumb)
-            except Exception as e:
-                logger.warning(f"Thumbnail prepend skipped (variant {k+1}): {e}")
-            size_mb = os.path.getsize(out_path) / 1024 / 1024
-            logger.info(f"Variant {k+1} ready (fast-local): {out_path} ({size_mb:.1f} MB)")
-            results.append(out_path)
-        else:
-            logger.error(f"Variant {k+1} build failed")
+        raise AssertionError("unreachable: remote GPU clip path must return or raise")
 
     return results

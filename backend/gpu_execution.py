@@ -42,6 +42,11 @@ def require_remote_gpu(operation: str) -> ExecutionRecord:
     return record
 
 
+def media_execution_node(operation: str) -> str:
+    """Return the configured remote node marker for a media operation."""
+    return require_remote_gpu(operation).node
+
+
 def reject_local_media(operation: str) -> None:
     """Explicitly fail any attempted local media execution."""
     raise RemoteGpuRequiredError(f"local media execution is disabled: {operation}")
