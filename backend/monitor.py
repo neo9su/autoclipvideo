@@ -154,13 +154,18 @@ class MonitorManager:
         await free_vram()
 
         job_id = await sync_file(upload_path, room_id)
-        if job_id:
-            async with aio_connect() as db:
+        async with aio_connect() as db:
+            if job_id:
                 await db.execute(
-                    "UPDATE recordings SET synced=1, transcribed=1, gpu_job_id=? WHERE id=?",
-                    (job_id, primary_id),
+                    "UPDATE recordings SET synced=1, transcribed=1, gpu_job_id=?, execution_node='remote-gpu', upload_bytes=?, transfer_attempts=transfer_attempts+1, gpu_waiting=0 WHERE id=?",
+                    (job_id, os.path.getsize(upload_path), primary_id),
                 )
-                await db.commit()
+            else:
+                await db.execute(
+                    "UPDATE recordings SET execution_node='remote-gpu', transfer_attempts=transfer_attempts+1, gpu_waiting=1 WHERE id=?",
+                    (primary_id,),
+                )
+            await db.commit()
 
         await self._notify_update(room_id)
 

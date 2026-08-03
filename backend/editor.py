@@ -2957,6 +2957,7 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
     clip_engine='v2'     uses hairstyle-boundary detection — picks the best single wig intro window.
     Returns local path to the output _clip.mp4, or None on failure.
     """
+    reject_local_media("classic clip analysis and encoding")
     if not os.path.exists(mp4_path):
         logger.error(f"MP4 not found: {mp4_path}")
         return None
@@ -3159,6 +3160,7 @@ async def edit_recording_multi(
     Produce `count` distinct highlight clips from the same recording.
     Returns list of successfully generated output paths.
     """
+    reject_local_media("multi-variant clip analysis and encoding")
     if not os.path.exists(mp4_path):
         logger.error(f"MP4 not found: {mp4_path}")
         return []

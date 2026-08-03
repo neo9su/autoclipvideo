@@ -16,6 +16,7 @@ from editor import edit_recording, edit_recording_multi
 from analyzer import analyze_recording
 from thumbnail import generate_thumbnail
 from final_video import postprocess_final_video
+from gpu_execution import reject_local_media
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,8 @@ TARGET_PUBLISH_DURATION = 30.5  # pad near-threshold clips above Douyin's 30s bo
 
 
 async def _get_video_duration(mp4_path: str) -> float:
-    """Return the video duration in seconds via ffprobe, or 0 on error."""
+    """Remote GPU must provide media metadata; local probing is forbidden."""
+    reject_local_media("local video duration probe")
     try:
         proc = await asyncio.create_subprocess_exec(
             "ffprobe", "-v", "error",
@@ -44,7 +46,8 @@ async def _get_video_duration(mp4_path: str) -> float:
 
 
 async def _get_video_height(mp4_path: str) -> int:
-    """Return the video height via ffprobe, or 0 on error."""
+    """Remote GPU must provide media metadata; local probing is forbidden."""
+    reject_local_media("local video height probe")
     try:
         proc = await asyncio.create_subprocess_exec(
             "ffprobe", "-v", "error", "-select_streams", "v:0",
@@ -253,7 +256,8 @@ async def resume_clip_job(recording_id: int) -> bool:
 
 
 async def _validate_mp4(filepath: str) -> tuple[bool, str]:
-    """Quick MP4 validity check via ffprobe (≤3 s). Returns (ok, error_msg)."""
+    """Validate media on the remote GPU; never invoke local ffprobe."""
+    reject_local_media("local MP4 validation")
     cmd = [
         "ffprobe", "-v", "error",
         "-show_entries", "format=duration",

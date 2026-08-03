@@ -62,66 +62,8 @@ async def decode_smoke(path: str) -> Dict:
 
 
 async def check_qianchuan_video_quality(path: str, min_duration: float = 18.0, max_duration: float = 35.5) -> Dict:
+    """Return a pending marker; the GPU service owns all media inspection."""
     require_remote_gpu("remote quality check")
-    report: Dict = {"path": path, "ok": False, "errors": [], "warnings": []}
-    if not path or not os.path.exists(path):
-        report["errors"].append("output file missing")
-        return report
-
-    try:
-        probe = await ffprobe_json(path)
-    except Exception as exc:
-        report["errors"].append(str(exc))
-        return report
-
-    streams: List[Dict] = probe.get("streams") or []
-    fmt = probe.get("format") or {}
-    videos = [s for s in streams if s.get("codec_type") == "video"]
-    audios = [s for s in streams if s.get("codec_type") == "audio"]
-    if not videos:
-        report["errors"].append("no video stream")
-    if not audios:
-        report["errors"].append("no audio stream")
-
-    duration = float(fmt.get("duration") or videos[0].get("duration") or 0) if videos else 0.0
-    report["duration"] = duration
-    if duration < min_duration or duration > max_duration:
-        report["errors"].append(f"duration {duration:.2f}s outside {min_duration:.0f}-{max_duration:.0f}s")
-
-    if videos:
-        v = videos[0]
-        width, height = int(v.get("width") or 0), int(v.get("height") or 0)
-        report.update({"width": width, "height": height, "video_codec": v.get("codec_name"), "pix_fmt": v.get("pix_fmt")})
-        if (width, height) not in {(1080, 1920), (1440, 2560)}:
-            report["errors"].append(f"resolution {width}x{height} is not 1080x1920 or 1440x2560")
-        if v.get("codec_name") != "h264":
-            report["errors"].append(f"video codec {v.get('codec_name')} is not h264")
-        fps_expr = v.get("avg_frame_rate") or "0/1"
-        try:
-            num, den = fps_expr.split("/")
-            fps = float(num) / max(1.0, float(den))
-        except Exception:
-            fps = 0.0
-        report["fps"] = round(fps, 3)
-        if abs(fps - 30.0) > 1.0:
-            report["warnings"].append(f"fps {fps:.2f} is not near 30")
-
-    if audios:
-        a = audios[0]
-        report.update({"audio_codec": a.get("codec_name"), "sample_rate": a.get("sample_rate")})
-        if a.get("codec_name") != "aac":
-            report["errors"].append(f"audio codec {a.get('codec_name')} is not aac")
-        vol = await volumedetect(path)
-        report["volume"] = vol
-        if not vol.get("ok"):
-            report["errors"].append("volumedetect failed")
-        elif vol.get("max_volume_db") is None or vol.get("max_volume_db") < -45:
-            report["errors"].append("audio appears silent")
-
-    dec = await decode_smoke(path)
-    report["decode"] = dec
-    if not dec["ok"]:
-        report["errors"].append("decode smoke test failed")
-
-    report["ok"] = not report["errors"]
-    return report
+    if not path:
+        return {"path": path, "ok": False, "status": "waiting_for_remote_quality_report", "errors": ["GPU quality report required"], "warnings": []}
+    return {"path": path, "ok": False, "status": "waiting_for_remote_quality_report", "errors": ["GPU quality report required"], "warnings": []}

@@ -104,6 +104,8 @@ os.environ['GPU_SERVICE_URL'] = original or record.service_url
 for path in [Path('backend/editor.py'), Path('backend/director_video.py'), Path('backend/segment_scorer.py'), Path('backend/analyzer.py'), Path('backend/voice_director.py'), Path('backend/qianchuan_quality.py')]:
     assert 'reject_local_media' in path.read_text(), path
 assert 'remote-gpu' in Path('backend/director_video.py').read_text()
+assert 'reject_local_media("classic clip analysis and encoding")' in Path('backend/editor.py').read_text()
+assert 'GPU quality report required' in Path('backend/qianchuan_quality.py').read_text()
 print('gpu-only policy smoke ok')
 PY
 
