@@ -46,6 +46,7 @@ import subprocess
 import sys
 import time
 from contextlib import asynccontextmanager
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -54,12 +55,16 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
+LOG_FILE = Path(__file__).with_name("watchdog.log")
+LOG_MAX_BYTES = 20 * 1024 * 1024
+LOG_BACKUP_COUNT = 5
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s watchdog: %(message)s",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("watchdog.log", encoding="utf-8"),
+        RotatingFileHandler(LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT, encoding="utf-8"),
     ],
 )
 logger = logging.getLogger(__name__)
@@ -117,8 +122,10 @@ RESTART_COOLDOWN: int  = config.get("restart_cooldown", 120)
 # ── Process registry ──────────────────────────────────────────────────────────
 
 _procs: Dict[str, subprocess.Popen] = {}   # service_name → Popen
-_start_times: Dict[str, float] = {}        # service_name → monotonic start time
-_restart_counts: Dict[str, int] = {}       # service_name → auto-restart count
+_start_times: Dict[str, float] = {}        # monotonic start time
+_start_wall_times: Dict[str, str] = {}    # ISO-8601 process start time
+_restart_counts: Dict[str, int] = {}       # auto-restart count
+_last_exit_codes: Dict[str, Optional[int]] = {}  # last observed process exit code
 _last_restart: Dict[str, float] = {}       # service_name → monotonic time of last restart
 
 
@@ -129,8 +136,10 @@ def _is_running(name: str) -> tuple[bool, Optional[int]]:
         return False, None
     if proc.poll() is None:          # still running
         return True, proc.pid
+    _last_exit_codes[name] = proc.returncode
     del _procs[name]                 # process exited
     _start_times.pop(name, None)
+    _start_wall_times.pop(name, None)
     return False, None
 
 
@@ -163,6 +172,7 @@ def _start(name: str) -> dict:
         )
         _procs[name] = proc
         _start_times[name] = time.monotonic()
+        _start_wall_times[name] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         logger.info(f"Started {svc['name']} (pid={proc.pid}) cmd={cmd} cwd={cwd}")
         return {"ok": True, "status": "started", "pid": proc.pid}
     except Exception as e:
@@ -188,7 +198,8 @@ def _stop(name: str) -> dict:
             proc.kill()
         del _procs[name]
         _start_times.pop(name, None)
-        logger.info(f"Stopped {svc['name']} (pid={pid})")
+        _start_wall_times.pop(name, None)
+        _last_exit_codes[name] = proc.returncode
         return {"ok": True, "status": "stopped", "pid": pid}
     except Exception as e:
         logger.error(f"Failed to stop {name}: {e}")
@@ -319,6 +330,8 @@ async def status():
             "healthy": healthy,
             "pid": pid,
             "uptime_s": uptime,
+            "started_at": _start_wall_times.get(name),
+            "last_exit_code": _last_exit_codes.get(name),
             "enabled": svc.get("enabled", True),
             "restart_count": _restart_counts.get(name, 0),
             "last_restart_ago": int(time.monotonic() - last_r) if last_r else None,

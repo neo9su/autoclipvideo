@@ -2016,6 +2016,8 @@ async def gpu_status():
     result = {
         "reachable": False, "health": {}, "jobs": [],
         "gpu_online": gpu_is_online(),
+        "online": False,
+        "gpu_service_url": GPU_SERVICE_URL,
         "gpu_offline_seconds": offline_sec,
         "comfyui": {"reachable": False, "vram_total": 0, "vram_free": 0, "ram_total": 0, "ram_free": 0, "queue_running": 0, "queue_pending": 0},
     }
@@ -2039,15 +2041,19 @@ async def gpu_status():
             _aio_get(f"{COMFYUI_URL}/queue") if not gpu_is_maint() else _skip(),
             return_exceptions=True,
         )
-        # Only probe GPU service if watcher thinks it may be online
-        if not skip_gpu_probe:
-            try:
-                _st, _body = await _aio_get(f"{GPU_SERVICE_URL}/health")
-                if _st == 200:
-                    result["reachable"] = True
-                    result["health"] = _body
-            except Exception:
-                pass
+        # Probe 8877 on every request so status is not stale during watcher
+        # hysteresis or after a watchdog restart. This only observes the remote
+        # worker; it never starts local processing or enables fallback.
+        try:
+            _st, _body = await _aio_get(f"{GPU_SERVICE_URL}/health")
+            if _st == 200:
+                result["reachable"] = True
+                result["online"] = True
+                result["gpu_online"] = True
+                result["health"] = _body if isinstance(_body, dict) else {}
+        except Exception:
+            pass
+
         # Unpack aio_get tuples
         comfy_status, comfy_body = comfy_r if isinstance(comfy_r, tuple) else (None, None)
         queue_status, queue_body = queue_r if isinstance(queue_r, tuple) else (None, None)
