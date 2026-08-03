@@ -28,7 +28,12 @@ import uuid
 from contextlib import asynccontextmanager
 from io import StringIO as _StringIO
 
-logger = logging.getLogger(__name__)
+try:
+    from logging_setup import configure_rotating_logging
+except ImportError:
+    from .logging_setup import configure_rotating_logging
+
+logger = configure_rotating_logging("gpu_service", "gpu_service.log", default_directory=str(Path(__file__).parent))
 
 import aiofiles
 import torchaudio

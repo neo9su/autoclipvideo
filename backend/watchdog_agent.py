@@ -119,9 +119,17 @@ _restart_counts: Dict[str, int] = {}       # service_name → auto-restart count
 _last_restart: Dict[str, float] = {}       # service_name → monotonic time of last restart
 _last_exit_codes: Dict[str, int | None] = {}
 _last_health: Dict[str, bool] = {}
+_last_health_at: Dict[str, str] = {}
+_last_health_details: Dict[str, dict] = {}
 
 def _persist_state() -> None:
-    payload = {"restart_counts": _restart_counts, "last_exit_codes": _last_exit_codes, "last_health": _last_health}
+    payload = {
+        "restart_counts": _restart_counts,
+        "last_exit_codes": _last_exit_codes,
+        "last_health": _last_health,
+        "last_health_at": _last_health_at,
+        "last_health_details": _last_health_details,
+    }
     try:
         STATE_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     except OSError as exc:
@@ -131,6 +139,9 @@ try:
     _saved_state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
     _restart_counts.update({k: int(v) for k, v in _saved_state.get("restart_counts", {}).items()})
     _last_exit_codes.update(_saved_state.get("last_exit_codes", {}))
+    _last_health.update(_saved_state.get("last_health", {}))
+    _last_health_at.update(_saved_state.get("last_health_at", {}))
+    _last_health_details.update(_saved_state.get("last_health_details", {}))
 except (OSError, ValueError, TypeError):
     pass
 
@@ -216,13 +227,22 @@ def _stop(name: str) -> dict:
 
 # ── Health probe ──────────────────────────────────────────────────────────────
 
-async def _probe_health(health_url: str) -> bool:
+async def _probe_health(health_url: str) -> tuple[bool, dict | None]:
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             r = await client.get(health_url)
-            return r.status_code == 200
+            body = r.json() if r.headers.get("content-type", "").startswith("application/json") else None
+            return r.status_code == 200, body if isinstance(body, dict) else None
     except Exception:
-        return False
+        return False, None
+
+
+def _record_health(name: str, healthy: bool, details: dict | None) -> None:
+    _last_health[name] = healthy
+    _last_health_at[name] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    if details is not None:
+        _last_health_details[name] = details
+    _persist_state()
 
 
 # ── Auto-monitor ─────────────────────────────────────────────────────────────
@@ -239,7 +259,12 @@ async def _ensure_service(name: str) -> None:
     # It may have been started externally (e.g. by the user or a bat script).
     if not running:
         health_url = svc.get("health_url")
-        if health_url and await _probe_health(health_url):
+        if health_url:
+            healthy, details = await _probe_health(health_url)
+            _record_health(name, healthy, details)
+        else:
+            healthy = False
+        if health_url and healthy:
             return   # alive externally — leave it alone
         now = time.monotonic()
         if now - _last_restart.get(name, 0) >= RESTART_COOLDOWN:
@@ -254,9 +279,8 @@ async def _ensure_service(name: str) -> None:
     health_url = svc.get("health_url")
     if not health_url:
         return
-    healthy = await _probe_health(health_url)
-    _last_health[name] = healthy
-    _persist_state()
+    healthy, details = await _probe_health(health_url)
+    _record_health(name, healthy, details)
     if healthy:
         return
 
@@ -331,10 +355,11 @@ async def status():
         healthy = False
         health_url = svc.get("health_url")
         if health_url:
-            healthy = await _probe_health(health_url)
-            _last_health[name] = healthy
+            healthy, details = await _probe_health(health_url)
+            _record_health(name, healthy, details)
             if healthy and not running:
                 running = True   # alive externally
+                pid = details.get("pid") if details else None
         last_r = _last_restart.get(name)
         result[name] = {
             "name": svc["name"],
@@ -346,6 +371,8 @@ async def status():
             "restart_count": _restart_counts.get(name, 0),
             "last_exit_code": _last_exit_codes.get(name),
             "last_health_check": _last_health.get(name, healthy),
+            "last_health_at": _last_health_at.get(name),
+            "health_details": _last_health_details.get(name, {}),
             "health_url": health_url,
             "last_restart_ago": int(time.monotonic() - last_r) if last_r else None,
         }

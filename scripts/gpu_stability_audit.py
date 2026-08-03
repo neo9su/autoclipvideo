@@ -7,22 +7,43 @@ import re
 from pathlib import Path
 
 def tail_bytes(path: Path, limit: int = 256 * 1024) -> str:
+    """Return only the final bounded bytes from a log file."""
+    if limit <= 0:
+        raise ValueError("limit must be positive")
+    if not path.is_file():
+        return ""
     with path.open("rb") as stream:
         stream.seek(0, os.SEEK_END)
         stream.seek(max(0, stream.tell() - limit))
         return stream.read(limit).decode("utf-8", errors="replace")
 
+
 def summarize_log(path: Path, limit: int = 256 * 1024) -> dict:
+    """Summarize bounded log evidence without loading the full file."""
     text = tail_bytes(path, limit)
-    patterns = {"tracebacks": r"Traceback \(most recent call last\)", "out_of_memory": r"out of memory|CUDA out of memory|OutOfMemoryError", "exceptions": r"\b(?:ERROR|CRITICAL|Exception|Error)\b", "exit_codes": r"(?:exit|return)\s*(?:code|status)?\s*[=:]\s*(-?\d+)"}
+    patterns = {
+        "tracebacks": r"Traceback \(most recent call last\)",
+        "out_of_memory": r"out of memory|CUDA out of memory|OutOfMemoryError",
+        "exceptions": r"\b(?:ERROR|CRITICAL|Exception|Error)\b",
+        "exit_codes": r"(?:exit|return)\s*(?:code|status)?\s*[=:]\s*(-?\d+)",
+    }
     summary = {name: len(re.findall(pattern, text, re.IGNORECASE)) for name, pattern in patterns.items()}
-    summary["bytes_read"] = len(text.encode("utf-8")); summary["path"] = str(path)
+    summary.update({"bytes_read": len(text.encode("utf-8")), "path": str(path), "exists": path.is_file()})
     return summary
 
+
 def audit_whisper_process(process_rows: list[dict], pid: int) -> dict:
+    """Classify a Whisper process from supplied evidence; never terminate it."""
     row = next((item for item in process_rows if int(item.get("pid", -1)) == pid), None)
-    if row is None: return {"pid": pid, "conclusion": "not_found", "action": "none"}
-    return {"pid": pid, "conclusion": "needs_job_correlation", "action": "do_not_kill", "process": row}
+    if row is None:
+        return {"pid": pid, "conclusion": "not_found", "action": "observe"}
+    has_job_evidence = bool(row.get("job_id") or row.get("input_path") or row.get("queue_entry"))
+    return {
+        "pid": pid,
+        "conclusion": "job_evidence_found" if has_job_evidence else "needs_job_correlation",
+        "action": "retain" if has_job_evidence else "manual_review",
+        "process": row,
+    }
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
