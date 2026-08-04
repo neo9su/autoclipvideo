@@ -2,9 +2,40 @@ import { REMOTE_API_BASE, REMOTE_WS_BASE } from './remoteApi.js'
 
 const BASE = REMOTE_API_BASE
 
+async function readErrorMessage(response, fallback = '请求失败') {
+  const contentType = response.headers.get('content-type') || ''
+  if (contentType.includes('application/json')) {
+    try {
+      const payload = await response.json()
+      if (typeof payload === 'string') return payload
+      if (payload?.detail) return Array.isArray(payload.detail) ? payload.detail.map(item => item.msg || item).join('; ') : String(payload.detail)
+      if (payload?.error) return String(payload.error)
+      if (payload?.message) return String(payload.message)
+    } catch {
+      // Fall through to the text response for malformed JSON.
+    }
+  }
+  try {
+    const text = (await response.text()).trim()
+    if (text) return text.slice(0, 500)
+  } catch {
+    // Use the fallback when the response body cannot be read.
+  }
+  return fallback
+}
+
+async function requestJson(url, options, fallback = '请求失败') {
+  const response = await fetch(url, options)
+  if (!response.ok) throw new Error(await readErrorMessage(response, fallback))
+  try {
+    return await response.json()
+  } catch {
+    throw new Error('服务器返回了无效数据')
+  }
+}
+
 export async function getRooms() {
-  const res = await fetch(`${BASE}/api/rooms`)
-  return res.json()
+  return requestJson(`${BASE}/api/rooms`, undefined, '直播间加载失败')
 }
 
 export async function addRoom(name, url) {
@@ -57,13 +88,11 @@ export function createWS(onMessage) {
 }
 
 export async function getGroups() {
-  const res = await fetch(`${BASE}/api/groups`)
-  return res.json()
+  return requestJson(`${BASE}/api/groups`, undefined, '分组加载失败')
 }
 
 export async function getGroup(id) {
-  const res = await fetch(`${BASE}/api/groups/${id}`)
-  return res.json()
+  return requestJson(`${BASE}/api/groups/${id}`, undefined, '分组详情加载失败')
 }
 
 export async function mergeGroup(id) {
@@ -436,38 +465,29 @@ export async function getGpuStatus() {
 }
 
 export async function reclipRecording(id, feedback) {
-  const res = await fetch(`${BASE}/api/recordings/${id}/reclip`, {
+  return requestJson(`${BASE}/api/recordings/${id}/reclip`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ feedback: feedback || '' }),
-  })
-  if (!res.ok) throw new Error((await res.json()).detail || '重新剪辑失败')
-  return res.json()
+  }, '重新剪辑失败')
 }
 
 export async function reclipGroupAll(groupId) {
-  const res = await fetch(`${BASE}/api/groups/${groupId}/reclip-all`, { method: 'POST' })
-  if (!res.ok) throw new Error((await res.json()).detail || '全部重剪失败')
-  return res.json()
+  return requestJson(`${BASE}/api/groups/${groupId}/reclip-all`, { method: 'POST' }, '全部重剪失败')
 }
 
 // ── Qianchuan ────────────────────────────────────────────────────────────────
 
 export async function generateQianchuanGroup(groupId) {
-  const res = await fetch(`${BASE}/api/v2/qianchuan/generate`, {
+  return requestJson(`${BASE}/api/v2/qianchuan/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ group_id: groupId, generate_video: true }),
-  })
-  const payload = await res.json().catch(() => ({}))
-  if (!res.ok) throw new Error(payload.detail || '千川投流版生成失败')
-  return payload
+  }, '千川投流版生成失败')
 }
 
 export async function getQianchuanGroupResult(groupId) {
-  const res = await fetch(`${BASE}/api/v2/qianchuan/group/${groupId}/result`)
-  if (!res.ok) throw new Error((await res.json()).detail || '千川投流版结果加载失败')
-  return res.json()
+  return requestJson(`${BASE}/api/v2/qianchuan/group/${groupId}/result`, undefined, '千川投流版结果加载失败')
 }
 
 // ── 画质增强 ──────────────────────────────────────────────────────────────────
