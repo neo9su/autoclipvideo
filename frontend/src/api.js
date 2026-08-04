@@ -1,6 +1,4 @@
-import { REMOTE_API_BASE, REMOTE_WS_BASE } from './remoteApi.js'
-
-const BASE = REMOTE_API_BASE
+const BASE = (import.meta.env.VITE_API_BASE || 'http://10.190.0.203:8899').replace(/\/$/, '')
 
 async function readErrorMessage(response, fallback = '请求失败') {
   const contentType = response.headers.get('content-type') || ''
@@ -81,7 +79,8 @@ export async function getStatus() {
 }
 
 export function createWS(onMessage) {
-  const ws = new WebSocket(`${REMOTE_WS_BASE}/ws/events`)
+  const wsBase = (import.meta.env.VITE_WS_BASE || BASE.replace(/^http/, 'ws')).replace(/\/$/, '')
+  const ws = new WebSocket(`${wsBase}/ws/events`)
   ws.onmessage = (e) => onMessage(JSON.parse(e.data))
   ws.onclose = () => setTimeout(() => createWS(onMessage), 3000)
   return ws

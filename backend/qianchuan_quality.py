@@ -1,6 +1,6 @@
 """千川投流版质量检测。
 
-用 ffprobe/ffmpeg 做轻量本地检查：音轨、非静音、分辨率、时长、解码错误风险、编码格式。
+通过远端 GPU 服务完成质量检查；控制面不执行本机 ffprobe/ffmpeg。
 """
 from __future__ import annotations
 
