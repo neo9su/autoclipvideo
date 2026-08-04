@@ -14,6 +14,14 @@ from typing import Dict, List, Optional
 import tempfile
 import subprocess
 
+from gpu_execution import media_execution_node
+from video_editing_skills import (
+    build_edit_sound_cues,
+    build_pip_filter,
+    normalize_transition_name,
+    should_enable_pip,
+)
+
 logger = logging.getLogger(__name__)
 
 # ── 字幕关键词高亮（与 editor.py 同步）─────────────────────────────────────────
@@ -486,6 +494,13 @@ class DirectorVideoComposer:
             # 3. 构建 ASS 字幕（本地生成，含关键词高亮）
             # video clip duration 已对齐 TTS，字幕用同一个 tts_dur_by_scene 保证同步
             ass_content = config.get("qianchuan_ass_content") or _build_director_ass(video_clips, tr_dur, tts_dur_by_scene)
+            config = dict(config)
+            config["qianchuan_sound_cues"] = build_edit_sound_cues(
+                video_clips,
+                transition_duration=tr_dur,
+                existing_cues=config.get("qianchuan_sound_cues", []),
+                sfx_overrides=config.get("sfx_assets"),
+            )
 
             # 4. 读取 TTS 音频 → base64
             import base64 as _b64
@@ -511,7 +526,7 @@ class DirectorVideoComposer:
                     "duration":  c["duration"],
                     "scene_type": c.get("scene_type", ""),
                     "camera_direction": c.get("camera_direction", "static"),
-                    "transition_type": c.get("transition_type", "xfade"),
+                    "transition_type": normalize_transition_name(c.get("transition_type", "xfade")),
                     "shot_index": c.get("shot_index", 0),
                     "shot_count": c.get("shot_count", 1),
                     "edit_actions": c.get("edit_actions", []),
@@ -521,8 +536,9 @@ class DirectorVideoComposer:
             # 计算总 TTS 时长，传给 GPU 用 -t 精确控制输出时长（替代 -shortest）
             total_tts_duration = sum(tts_dur_by_scene.values()) if tts_dur_by_scene else 0.0
 
+            # The execution marker is intentionally remote-gpu and is validated before submission.
             payload = {
-                "execution_node": "remote-gpu",
+                "execution_node": media_execution_node("director composition"),
                 "execution_service": self._GPU_SERVICE_URL,
                 "clips": clips_payload,
                 "ass_content": ass_content,
@@ -658,12 +674,15 @@ class DirectorVideoComposer:
         transition = (enriched.get('transition_type') or '').strip()
         if not transition or transition in ('xfade', 'cut'):
             transition = self._scene_transition_defaults.get(scene_type, transition or 'xfade')
+        transition = normalize_transition_name(transition)
 
         enriched['scene_type'] = scene_type
         enriched['camera_direction'] = camera
         enriched['transition_type'] = transition
         enriched['shot_index'] = shot_index
         enriched['edit_actions'] = self._normalize_edit_actions(enriched.get('edit_actions') or [])
+        if should_enable_pip(scene_type, enriched['edit_actions']):
+            enriched['pip_detail'] = True
 
         # 千川脚本会把高级动作落在 edit_actions 中。GPU 直接消费 edit_actions；
         # 本地 fallback 同步把这些动作降级成已有 camera_direction/scene_type 语义，
@@ -674,7 +693,7 @@ class DirectorVideoComposer:
 
     @staticmethod
     def _normalize_edit_actions(actions: List[Dict]) -> List[Dict]:
-        """Deduplicate safe edit-action dictionaries for GPU/local fallback."""
+        """Deduplicate safe edit-action dictionaries for the remote GPU."""
         normalized: List[Dict] = []
         seen = set()
         for action in actions or []:
@@ -694,7 +713,7 @@ class DirectorVideoComposer:
 
     @staticmethod
     def _camera_from_edit_actions(actions: List[Dict], fallback: str) -> str:
-        """Map Qianchuan edit_actions onto existing local ffmpeg camera directives."""
+        """Map Qianchuan edit_actions onto remote GPU camera directives."""
         action_types = [str(a.get("type") or "") for a in actions]
         if any(t in action_types for t in ("detail_zoom", "crop_zoom")):
             return "push_in_strong"
@@ -951,73 +970,8 @@ class DirectorVideoComposer:
                                  style_config: Dict, config: Dict) -> Optional[str]:
         """Disabled: media execution is remote GPU-only."""
         reject_local_media("director local ffmpeg compositor")
-        try:
-            # 创建临时目录
-            with tempfile.TemporaryDirectory() as temp_dir:
-                temp_path = Path(temp_dir)
-                
-                # 第一步：并行处理每个视频片段（VideoToolbox 支持多路并发编码）
-                _enc_sem = asyncio.Semaphore(2)  # 最多2路并发，避免VideoToolbox超限
+        return None
 
-                async def _process_with_sem(clip):
-                    async with _enc_sem:
-                        return await self._process_single_clip(clip, temp_path, style_config, config)
-
-                results = await asyncio.gather(*[_process_with_sem(c) for c in video_clips])
-                # Preserve order; filter out failed clips
-                processed_clips = [r for r in results if r is not None]
-
-                if not processed_clips:
-                    logger.error("No clips were successfully processed")
-                    return None
-                
-                # 第二步：转场合并
-                tr_type = style_config.get('transition_type', 'slideleft')
-                tr_dur  = style_config.get('transition_duration', 0.4)
-
-                if tr_type == 'cut' or len(processed_clips) == 1:
-                    # Hard-cut: stream-copy concat
-                    concat_file = temp_path / "concat_list.txt"
-                    await self._create_concat_file(processed_clips, concat_file)
-                    merged_video = await self._concat_clips(str(concat_file), temp_path)
-                elif tr_type == 'phone_zoom':
-                    # 手机放大转场（逐对合并）
-                    merged_video = await self._phone_zoom_merge_all(processed_clips, temp_path)
-                else:
-                    # FFmpeg xfade 转场链（支持 slideleft/slideright/fade/dissolve 等）
-                    clip_durs = [await self._get_audio_duration(f) for f in processed_clips]
-                    logger.info(f"Clip durations: {list(zip([Path(f).name for f in processed_clips], clip_durs))}")
-                    # 探测失败（0.0）时用实际时长估算，避免偏移计算错误
-                    if any(d <= 0 for d in clip_durs):
-                        logger.warning("Some clip durations failed to probe — falling back to concat")
-                        concat_file = temp_path / "concat_fallback.txt"
-                        await self._create_concat_file(processed_clips, concat_file)
-                        merged_video = await self._concat_clips(str(concat_file), temp_path)
-                    else:
-                        merged_video = await self._xfade_merge(
-                            processed_clips, clip_durs, tr_type, tr_dur, temp_path
-                        )
-                        if not merged_video:
-                            # xfade 失败时 fallback 到 concat
-                            logger.warning("xfade failed — falling back to concat")
-                            concat_file = temp_path / "concat_fallback.txt"
-                            await self._create_concat_file(processed_clips, concat_file)
-                            merged_video = await self._concat_clips(str(concat_file), temp_path)
-
-                if not merged_video or not Path(merged_video).exists():
-                    logger.error("Clip merge failed")
-                    return None
-
-                # 第三步：合并音频
-                ok = await self._final_composition(
-                    merged_video, audio_path, output_path, style_config, config
-                )
-                return output_path if ok else None
-        
-        except Exception as e:
-            logger.error(f"FFmpeg composition failed: {e}")
-            return None
-    
     async def _process_single_clip(self, clip: Dict, temp_dir: Path,
                                  style_config: Dict, config: Dict) -> Optional[str]:
         """处理单个视频片段，含字幕叠加（PNG overlay，上紫下绿渐变描边）"""
@@ -1040,6 +994,7 @@ class DirectorVideoComposer:
                 style_config, config,
                 scene_type=clip.get('scene_type'),
                 camera_direction=clip.get('camera_direction'),
+                pip_detail=bool(clip.get('pip_detail')),
             )
 
             subtitle_text = (clip.get('script_text', '') or '').strip() if style_config.get('text_overlay', False) else ''
@@ -1304,7 +1259,8 @@ class DirectorVideoComposer:
 
     def _build_clip_filter(self, style_config: Dict, config: Dict, 
                            scene_type: Optional[str] = None,
-                           camera_direction: Optional[str] = None) -> str:
+                           camera_direction: Optional[str] = None,
+                           pip_detail: bool = False) -> str:
         """构建单片段视频滤镜，支持 scene_type 和 camera_direction 差异化处理。
         
         场景视觉区分：
@@ -1428,7 +1384,10 @@ class DirectorVideoComposer:
         filters.append(f"fps={self.output_settings['fps']}")
         filters.append("format=yuv420p")
 
-        return ','.join(filters)
+        base_filter = ','.join(filters)
+        if pip_detail:
+            return base_filter + build_pip_filter(self.output_settings['width'], self.output_settings['height'])
+        return base_filter
 
     def _build_zoompan(self, direction: str, w: int, h: int) -> Optional[str]:
         """根据 camera_direction 构建 zoompan 滤镜字符串。
@@ -1731,7 +1690,7 @@ class DirectorVideoComposer:
             offset = max(0.0, cumulative + clip_durs[i - 1] - tr_dur)
             cumulative = offset  # next offset reference = this clip's effective end
             fc_parts.append(
-                f"{in_label}[{i}:v]xfade=transition={tr_type}"
+                f"{in_label}[{i}:v]xfade=transition={normalize_transition_name(tr_type)}"
                 f":duration={tr_dur:.3f}:offset={offset:.3f}{out_label}"
             )
 

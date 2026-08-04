@@ -15,9 +15,11 @@ from voice_director import VoiceDirector
 from director_matcher import SemanticMatcher, get_matcher
 from director_video import DirectorVideoComposer
 from qianchuan_script import generate_qianchuan_script
-from qianchuan_matcher import QianchuanMatcher, load_group_context, score_product_match
+from qianchuan_matcher import (QianchuanMatcher, audit_qianchuan_segments,
+                                load_group_context, score_product_match)
 from qianchuan_video import QianchuanVideoComposer
 from qianchuan_quality import check_qianchuan_video_quality
+from qianchuan_policy import build_qianchuan_metadata, validate_qianchuan_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +86,18 @@ class QianchuanGenerateRequest(BaseModel):
     match_threshold: float = Field(default=0.58, ge=0.0, le=1.0)
     dry_run: bool = False
     generate_video: bool = True
+    target_audience: Optional[str] = None
+    excluded_audiences: List[str] = Field(default_factory=list, max_length=10)
+    bid_coefficient: Optional[float] = Field(default=None, gt=0, le=10)
+    template_type: Optional[str] = None
+    dedup_actions: List[str] = Field(default_factory=list, max_length=6)
+    authenticity_check: Dict[str, Any] = Field(default_factory=dict)
+    copy_versions: Dict[str, str] = Field(default_factory=dict)
+    trust_proof: Optional[str] = None
+    stability_evidence: List[str] = Field(default_factory=list, max_length=10)
+    ai_usage: List[str] = Field(default_factory=list, max_length=10)
+    ai_generated_human_wig_scene: bool = False
+    execution_node: str = "remote-gpu"
 
 class QianchuanGenerateResponse(BaseModel):
     success: bool
@@ -93,6 +107,7 @@ class QianchuanGenerateResponse(BaseModel):
     script: Optional[Dict] = None
     output_path: Optional[str] = None
     score: Optional[float] = None
+    metadata: Optional[Dict] = None
     review: Optional[Dict] = None
     error: Optional[str] = None
 
@@ -161,7 +176,39 @@ async def generate_qianchuan(request: QianchuanGenerateRequest):
         target_duration=request.target_duration,
         selling_points=product_keywords,
     )
+    metadata = build_qianchuan_metadata(
+        target_audience=request.target_audience,
+        excluded_audiences=request.excluded_audiences,
+        bid_coefficient=request.bid_coefficient,
+        template_type=request.template_type,
+        dedup_actions=request.dedup_actions,
+        authenticity_check=request.authenticity_check,
+        copy_versions=request.copy_versions,
+        trust_proof=request.trust_proof,
+        stability_evidence=request.stability_evidence,
+        ai_usage=request.ai_usage,
+        ai_generated_human_wig_scene=request.ai_generated_human_wig_scene,
+        execution_node=request.execution_node,
+    )
+    policy = validate_qianchuan_metadata(metadata)
+    script["campaign_metadata"] = metadata
+    script["policy_check"] = policy
+    if not policy["eligible_for_delivery"]:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "UPDATE clip_groups SET qianchuan_status = -3, qianchuan_error = ?, qianchuan_script = ?, qianchuan_review = ? WHERE id = ?",
+                ("; ".join(policy["errors"]), json.dumps(script, ensure_ascii=False), json.dumps(policy, ensure_ascii=False), request.group_id),
+            )
+            await db.commit()
+        return QianchuanGenerateResponse(success=False, group_id=request.group_id, status=-3, script=script, metadata=metadata, review=policy, error="投放规则校验失败")
+
+    from pipeline_state import claim_pipeline_start
     async with aiosqlite.connect(DB_PATH) as db:
+        if not request.dry_run and request.generate_video:
+            if not await claim_pipeline_start(db, "qianchuan_status", request.group_id):
+                async with db.execute("SELECT qianchuan_status FROM clip_groups WHERE id = ?", (request.group_id,)) as cur:
+                    current = await cur.fetchone()
+                return QianchuanGenerateResponse(success=True, started=False, group_id=request.group_id, status=current[0] if current else 0, script=script, score=match.get("score"), review=match)
         await db.execute(
             """UPDATE clip_groups SET qianchuan_status = ?, qianchuan_error = NULL,
                qianchuan_script = ?, qianchuan_score = ?, qianchuan_review = ? WHERE id = ?""",
@@ -178,13 +225,13 @@ async def generate_qianchuan(request: QianchuanGenerateRequest):
     if request.dry_run or not request.generate_video:
         return QianchuanGenerateResponse(
             success=True, started=False, group_id=request.group_id, status=0,
-            script=script, score=match.get("score"), review=match,
+            script=script, score=match.get("score"), metadata=metadata, review=policy,
         )
 
     asyncio.create_task(_qianchuan_generate_bg(request.group_id, script))
     return QianchuanGenerateResponse(
         success=True, started=True, group_id=request.group_id, status=1,
-        script=script, score=match.get("score"), review=match,
+        script=script, score=match.get("score"), metadata=metadata, review=policy,
     )
 
 
@@ -243,6 +290,34 @@ async def _set_qianchuan_error(group_id: int, status: int, error: str, review: O
         await db.commit()
 
 
+async def _run_qianchuan_pipeline(group_id: int) -> None:
+    """Auto-start Qianchuan once, while allowing failed attempts to retry."""
+    import aiosqlite
+    from db import DB_PATH, aio_connect
+    from pipeline_state import claim_pipeline_start
+    async with aio_connect() as db:
+        if not await claim_pipeline_start(db, "qianchuan_status", group_id):
+            logger.info(f"Qianchuan pipeline group {group_id} already running/completed — skipping")
+            return
+        await db.commit()
+    try:
+        context = await load_group_context(DB_PATH, group_id)
+        if not context:
+            raise RuntimeError("group not found")
+        group = context["group"]
+        match = score_product_match(context, keywords=[group.get("label"), group.get("wig_model"), group.get("wig_color")], threshold=0.0)
+        script = generate_qianchuan_script(group, product_context=match.get("product") or {}, selling_points=[])
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("UPDATE clip_groups SET qianchuan_script=?, qianchuan_score=?, qianchuan_review=? WHERE id=?", (json.dumps(script, ensure_ascii=False), match.get("score"), json.dumps(match, ensure_ascii=False), group_id))
+            await db.commit()
+        await _qianchuan_generate_bg(group_id, script)
+    except Exception as exc:
+        logger.error(f"Qianchuan pipeline {group_id} failed: {exc}")
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("UPDATE clip_groups SET qianchuan_status=-1, qianchuan_error=? WHERE id=?", (str(exc)[:400], group_id))
+            await db.commit()
+
+
 async def _qianchuan_generate_bg(group_id: int, script: Dict) -> None:
     import aiosqlite
     import os
@@ -278,13 +353,21 @@ async def _qianchuan_generate_bg(group_id: int, script: Dict) -> None:
                 for s in script.get("scenes", [])
             ]
             matched = await matcher.match_qianchuan_segments(script_segments, group_id)
+            audit = audit_qianchuan_segments(matched, audio_segments)
+            review_payload = {"matching": matched, "relevance_audit": audit}
             if len(matched) < max(3, len(script_segments) - 1):
                 raise RuntimeError("千川镜头匹配不足，拒绝生成")
+            if not audit.get("ok"):
+                await _set_qianchuan_error(
+                    group_id, -2, "千川文案-画面相关性不足，拒绝无关素材: "
+                    + "; ".join(audit.get("rejection_reasons", []))[:450], review_payload)
+                await _broadcast({"type": "qianchuan_relevance_rejected", "group_id": group_id, "review": review_payload})
+                return
 
             async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute(
                     "UPDATE clip_groups SET qianchuan_segments = ? WHERE id = ?",
-                    (json.dumps({"audio_segments": audio_segments, "matched_segments": matched}, ensure_ascii=False), group_id),
+                    (json.dumps({"audio_segments": audio_segments, "matched_segments": matched, "relevance_audit": audit}, ensure_ascii=False), group_id),
                 )
                 await db.commit()
 

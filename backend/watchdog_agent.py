@@ -49,20 +49,14 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Dict, Optional
 
+from logging_setup import configure_rotating_logging
+
 import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s watchdog: %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("watchdog.log", encoding="utf-8"),
-    ],
-)
-logger = logging.getLogger(__name__)
+logger = configure_rotating_logging("watchdog", "watchdog.log", default_directory=str(Path(__file__).parent))
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -75,8 +69,8 @@ DEFAULT_CONFIG = {
     "services": {
         "gpu": {
             "name": "GPU转录服务",
-            "cmd": ["python", "server.py"],
-            "cwd": "C:\\gpu-service",
+            "cmd": [sys.executable, "main.py"],
+            "cwd": str(Path(__file__).parent),
             "health_url": "http://localhost:8877/health",
             "enabled": True,
         },
@@ -113,6 +107,9 @@ SERVICES: dict = config.get("services", DEFAULT_CONFIG["services"])
 PORT: int = config.get("port", 8878)
 MONITOR_INTERVAL: int = config.get("monitor_interval", 30)
 RESTART_COOLDOWN: int  = config.get("restart_cooldown", 120)
+STATE_FILE = Path(config.get("state_file", Path(__file__).parent / "watchdog_state.json"))
+if not STATE_FILE.is_absolute():
+    STATE_FILE = Path(__file__).parent / STATE_FILE
 
 # ── Process registry ──────────────────────────────────────────────────────────
 
@@ -120,6 +117,33 @@ _procs: Dict[str, subprocess.Popen] = {}   # service_name → Popen
 _start_times: Dict[str, float] = {}        # service_name → monotonic start time
 _restart_counts: Dict[str, int] = {}       # service_name → auto-restart count
 _last_restart: Dict[str, float] = {}       # service_name → monotonic time of last restart
+_last_exit_codes: Dict[str, int | None] = {}
+_last_health: Dict[str, bool] = {}
+_last_health_at: Dict[str, str] = {}
+_last_health_details: Dict[str, dict] = {}
+
+def _persist_state() -> None:
+    payload = {
+        "restart_counts": _restart_counts,
+        "last_exit_codes": _last_exit_codes,
+        "last_health": _last_health,
+        "last_health_at": _last_health_at,
+        "last_health_details": _last_health_details,
+    }
+    try:
+        STATE_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except OSError as exc:
+        logger.warning("Unable to persist watchdog state: %s", exc)
+
+try:
+    _saved_state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    _restart_counts.update({k: int(v) for k, v in _saved_state.get("restart_counts", {}).items()})
+    _last_exit_codes.update(_saved_state.get("last_exit_codes", {}))
+    _last_health.update(_saved_state.get("last_health", {}))
+    _last_health_at.update(_saved_state.get("last_health_at", {}))
+    _last_health_details.update(_saved_state.get("last_health_details", {}))
+except (OSError, ValueError, TypeError):
+    pass
 
 
 def _is_running(name: str) -> tuple[bool, Optional[int]]:
@@ -129,6 +153,8 @@ def _is_running(name: str) -> tuple[bool, Optional[int]]:
         return False, None
     if proc.poll() is None:          # still running
         return True, proc.pid
+    _last_exit_codes[name] = proc.returncode
+    _persist_state()
     del _procs[name]                 # process exited
     _start_times.pop(name, None)
     return False, None
@@ -163,6 +189,7 @@ def _start(name: str) -> dict:
         )
         _procs[name] = proc
         _start_times[name] = time.monotonic()
+        _persist_state()
         logger.info(f"Started {svc['name']} (pid={proc.pid}) cmd={cmd} cwd={cwd}")
         return {"ok": True, "status": "started", "pid": proc.pid}
     except Exception as e:
@@ -186,8 +213,11 @@ def _stop(name: str) -> dict:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
+            proc.wait(timeout=5)
+        _last_exit_codes[name] = proc.returncode
         del _procs[name]
         _start_times.pop(name, None)
+        _persist_state()
         logger.info(f"Stopped {svc['name']} (pid={pid})")
         return {"ok": True, "status": "stopped", "pid": pid}
     except Exception as e:
@@ -197,13 +227,22 @@ def _stop(name: str) -> dict:
 
 # ── Health probe ──────────────────────────────────────────────────────────────
 
-async def _probe_health(health_url: str) -> bool:
+async def _probe_health(health_url: str) -> tuple[bool, dict | None]:
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             r = await client.get(health_url)
-            return r.status_code == 200
+            body = r.json() if r.headers.get("content-type", "").startswith("application/json") else None
+            return r.status_code == 200, body if isinstance(body, dict) else None
     except Exception:
-        return False
+        return False, None
+
+
+def _record_health(name: str, healthy: bool, details: dict | None) -> None:
+    _last_health[name] = healthy
+    _last_health_at[name] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    if details is not None:
+        _last_health_details[name] = details
+    _persist_state()
 
 
 # ── Auto-monitor ─────────────────────────────────────────────────────────────
@@ -220,7 +259,12 @@ async def _ensure_service(name: str) -> None:
     # It may have been started externally (e.g. by the user or a bat script).
     if not running:
         health_url = svc.get("health_url")
-        if health_url and await _probe_health(health_url):
+        if health_url:
+            healthy, details = await _probe_health(health_url)
+            _record_health(name, healthy, details)
+        else:
+            healthy = False
+        if health_url and healthy:
             return   # alive externally — leave it alone
         now = time.monotonic()
         if now - _last_restart.get(name, 0) >= RESTART_COOLDOWN:
@@ -235,7 +279,9 @@ async def _ensure_service(name: str) -> None:
     health_url = svc.get("health_url")
     if not health_url:
         return
-    if await _probe_health(health_url):
+    healthy, details = await _probe_health(health_url)
+    _record_health(name, healthy, details)
+    if healthy:
         return
 
     now = time.monotonic()
@@ -309,9 +355,11 @@ async def status():
         healthy = False
         health_url = svc.get("health_url")
         if health_url:
-            healthy = await _probe_health(health_url)
+            healthy, details = await _probe_health(health_url)
+            _record_health(name, healthy, details)
             if healthy and not running:
                 running = True   # alive externally
+                pid = details.get("pid") if details else None
         last_r = _last_restart.get(name)
         result[name] = {
             "name": svc["name"],
@@ -321,6 +369,11 @@ async def status():
             "uptime_s": uptime,
             "enabled": svc.get("enabled", True),
             "restart_count": _restart_counts.get(name, 0),
+            "last_exit_code": _last_exit_codes.get(name),
+            "last_health_check": _last_health.get(name, healthy),
+            "last_health_at": _last_health_at.get(name),
+            "health_details": _last_health_details.get(name, {}),
+            "health_url": health_url,
             "last_restart_ago": int(time.monotonic() - last_r) if last_r else None,
         }
     return result

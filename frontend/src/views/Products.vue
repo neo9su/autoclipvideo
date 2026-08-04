@@ -171,11 +171,12 @@
 </template>
 
 <script setup>
+import { REMOTE_API_BASE } from '../remoteApi.js'
 import { ref, computed, onMounted } from 'vue'
 import { getRooms, getProducts, createProduct, bulkCreateProducts, updateProduct, deleteProduct as apiDelete } from '../api.js'
 import { useToast } from '../composables/toast.js'
 
-const BASE = import.meta.env.VITE_API_BASE || ''
+const BASE = REMOTE_API_BASE
 const apiBase = BASE
 
 const { showToast } = useToast()

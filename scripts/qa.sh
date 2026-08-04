@@ -18,7 +18,7 @@ run_gate() {
 run_gate lint python -m py_compile \
   backend/api_v2.py backend/db.py backend/main.py backend/voice_director.py backend/director_video.py \
   backend/qianchuan_script.py backend/qianchuan_matcher.py backend/qianchuan_video.py backend/qianchuan_quality.py \
-  backend/local_media_guard.py
+  backend/local_media_guard.py backend/test_transcribe_queue.py backend/video_editing_skills.py backend/pipeline_state.py
 
 run_gate types python - <<'PY'
 from pathlib import Path
@@ -44,10 +44,15 @@ sys.path.insert(0, 'backend')
 import db as dbmod
 from db import init_db
 from qianchuan_script import generate_qianchuan_script
-from qianchuan_matcher import load_group_context, score_product_match
+from qianchuan_matcher import (load_group_context, score_product_match,
+                               assess_segment_relevance, audit_qianchuan_segments)
 from qianchuan_video import build_qianchuan_ass, build_sound_cues
+from test_transcribe_queue import main_test as transcribe_queue_test
+from director_video import DirectorVideoComposer
+from video_editing_skills import build_edit_sound_cues, normalize_transition_name, should_enable_pip
 
 async def main():
+    await transcribe_queue_test()
     fd, db_path = tempfile.mkstemp(suffix='.db')
     os.close(fd)
     os.unlink(db_path)
@@ -66,11 +71,40 @@ async def main():
     assert good['ok'], good
     bad = score_product_match(ctx, product_id='sku-other', keywords=['不存在商品'], threshold=0.99)
     assert not bad['ok'] and '商品强匹配不足' in bad['reason'], bad
+    relevant = assess_segment_relevance(
+        {'voiceover_text': '蜜茶橘棕发缝自然', 'visual_keywords': ['发缝自然']},
+        '近景展示蜜茶橘棕，发缝自然，颜色细节清晰', 0.82)
+    assert relevant['ok'], relevant
+    irrelevant = assess_segment_relevance(
+        {'voiceover_text': '发缝自然', 'visual_keywords': ['发缝自然']},
+        '直播间低头手遮脸，错色不是这个颜色', 0.18)
+    assert not irrelevant['ok'] and irrelevant['reasons'], irrelevant
+    audit = audit_qianchuan_segments([
+        {'script_segment': {'scene_id': 1, 'scene_type': 'product_proof', 'duration': 4},
+         'matched_duration': 4, 'matched_recording_id': 1, 'matched_start_time': 3,
+         'confidence_score': 0.82, 'matched_source_text': '发缝自然颜色细节'},
+    ], [{'scene_id': 1, 'duration': 4}])
+    assert audit['ok'] and audit['accepted_count'] == 1, audit
     script = generate_qianchuan_script(ctx['group'], good['product'], target_duration=22, selling_points=['蜜茶橘棕','羊毛卷'])
     assert script['mode'] == 'qianchuan' and len(script['scenes']) == 5
     ass = build_qianchuan_ass(script)
     cues = build_sound_cues(script)
-    assert 'Dialogue:' in ass and cues
+    assert 'Dialogue:' in ass and r'\an9' in ass and cues
+    assert normalize_transition_name('phone_zoom') == 'zoomin'
+    assert normalize_transition_name('flash') == 'fadewhite'
+    skill_cues = build_edit_sound_cues(
+        [
+            {'duration': 2.4, 'scene_type': 'hook', 'script_text': '显白'},
+            {'duration': 3.2, 'scene_type': 'detail', 'script_text': '发缝自然'},
+        ],
+        transition_duration=0.4,
+    )
+    assert any(c.get('reason') == 'transition' for c in skill_cues), skill_cues
+    assert any(c.get('reason') == 'keyword_emphasis' for c in skill_cues), skill_cues
+    assert should_enable_pip('detail', [])
+    composer = DirectorVideoComposer('.')
+    vf = composer._build_clip_filter(composer.video_configs['dynamic'], {}, scene_type='detail', camera_direction='push_in', pip_detail=True)
+    assert 'overlay=x=W-w-' in vf and 'crop=iw*0.42' in vf, vf
     con = sqlite3.connect(db_path)
     con.execute("UPDATE clip_groups SET qianchuan_status=?, qianchuan_script=?, qianchuan_score=?, qianchuan_review=? WHERE id=1", (0, json.dumps(script, ensure_ascii=False), good['score'], json.dumps(good, ensure_ascii=False)))
     row = con.execute('SELECT qianchuan_status,qianchuan_script,qianchuan_score FROM clip_groups WHERE id=1').fetchone()
@@ -109,7 +143,7 @@ PY
 
 run_gate coverage python - <<'PY'
 from pathlib import Path
-files = [Path('backend/qianchuan_script.py'), Path('backend/qianchuan_matcher.py'), Path('backend/qianchuan_video.py'), Path('backend/qianchuan_quality.py')]
+files = [Path('backend/qianchuan_script.py'), Path('backend/qianchuan_matcher.py'), Path('backend/qianchuan_video.py'), Path('backend/qianchuan_quality.py'), Path('backend/video_editing_skills.py')]
 for path in files:
     assert path.exists() and path.stat().st_size > 1000, path
 print('coverage smoke: qianchuan critical modules exercised by tests gate')

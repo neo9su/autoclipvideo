@@ -195,6 +195,7 @@
 </template>
 
 <script setup>
+import { remoteFetch } from '../remoteApi.js'
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useToast } from '../composables/toast.js'
 
@@ -217,9 +218,9 @@ async function load() {
   loading.value = true
   try {
     const [clipRes, transcribeRes, failedRes] = await Promise.all([
-      fetch('/api/clip-queue'),
-      fetch('/api/transcribe-queue'),
-      fetch('/api/recordings?status=clip_failed&limit=50'),
+      remoteFetch('/api/clip-queue'),
+      remoteFetch('/api/transcribe-queue'),
+      remoteFetch('/api/recordings?status=clip_failed&limit=50'),
     ])
     if (clipRes.ok) {
       const data = await clipRes.json()
@@ -249,7 +250,7 @@ async function load() {
 async function setPriority(recordingId, rawValue) {
   const priority = Math.max(1, Math.min(99, parseInt(rawValue) || 50))
   try {
-    const r = await fetch(`/api/clip-queue/${recordingId}/priority?priority=${priority}`, { method: 'POST' })
+    const r = await remoteFetch(`/api/clip-queue/${recordingId}/priority?priority=${priority}`, { method: 'POST' })
     if (r.ok) {
       showToast(`已更新优先级 → ${priority}`, 'success')
       await load()
@@ -264,7 +265,7 @@ async function setPriority(recordingId, rawValue) {
 
 async function startJob(recordingId) {
   try {
-    const r = await fetch(`/api/clip-queue/${recordingId}/start`, { method: 'POST' })
+    const r = await remoteFetch(`/api/clip-queue/${recordingId}/start`, { method: 'POST' })
     if (r.ok) { showToast('已移至队首', 'success'); await load() }
     else { const e = await r.json().catch(() => ({})); showToast(e.detail || '操作失败', 'error') }
   } catch { showToast('请求失败', 'error') }
@@ -272,7 +273,7 @@ async function startJob(recordingId) {
 
 async function pauseJob(recordingId) {
   try {
-    const r = await fetch(`/api/clip-queue/${recordingId}/pause`, { method: 'POST' })
+    const r = await remoteFetch(`/api/clip-queue/${recordingId}/pause`, { method: 'POST' })
     if (r.ok) { showToast('已暂停', 'success'); await load() }
     else { const e = await r.json().catch(() => ({})); showToast(e.detail || '操作失败', 'error') }
   } catch { showToast('请求失败', 'error') }
@@ -280,7 +281,7 @@ async function pauseJob(recordingId) {
 
 async function cancelJob(recordingId) {
   try {
-    const r = await fetch(`/api/clip-queue/${recordingId}/cancel`, { method: 'POST' })
+    const r = await remoteFetch(`/api/clip-queue/${recordingId}/cancel`, { method: 'POST' })
     if (r.ok) { showToast('已从队列移除', 'success'); await load() }
     else { const e = await r.json().catch(() => ({})); showToast(e.detail || '操作失败', 'error') }
   } catch { showToast('请求失败', 'error') }
@@ -288,7 +289,7 @@ async function cancelJob(recordingId) {
 
 async function retryJob(recordingId) {
   try {
-    const r = await fetch(`/api/clip-queue/${recordingId}/retry`, { method: 'POST' })
+    const r = await remoteFetch(`/api/clip-queue/${recordingId}/retry`, { method: 'POST' })
     if (r.ok) { showToast('已重新入队', 'success'); await load() }
     else { const e = await r.json().catch(() => ({})); showToast(e.detail || '重试失败', 'error') }
   } catch { showToast('请求失败', 'error') }
@@ -296,7 +297,7 @@ async function retryJob(recordingId) {
 
 async function dismissJob(recordingId) {
   try {
-    const r = await fetch(`/api/clip-queue/${recordingId}/dismiss`, { method: 'POST' })
+    const r = await remoteFetch(`/api/clip-queue/${recordingId}/dismiss`, { method: 'POST' })
     if (r.ok) { showToast('已清除', 'success'); await load() }
     else { const e = await r.json().catch(() => ({})); showToast(e.detail || '操作失败', 'error') }
   } catch { showToast('请求失败', 'error') }

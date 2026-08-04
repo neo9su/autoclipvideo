@@ -5,6 +5,10 @@ Run on GPU server: uvicorn main:app --host 0.0.0.0 --port 8877
 # Set HuggingFace offline flags BEFORE any imports so huggingface_hub.constants
 # reads them at import time and never attempts network access.
 import os
+import platform
+
+if platform.system() == "Darwin":
+    raise SystemExit("gpu_service is remote-only; local worker startup is forbidden")
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("HUGGINGFACE_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
@@ -22,12 +26,19 @@ import sys as _sys
 import time
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-logger = logging.getLogger(__name__)
+try:
+    from logging_setup import configure_rotating_logging
+except ImportError:
+    from .logging_setup import configure_rotating_logging
+
+logger = configure_rotating_logging("gpu_service", "gpu_service.log", default_directory=str(Path(__file__).parent))
+_SERVICE_STARTED_AT = time.time()
 
 import aiofiles
 import torchaudio
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 import shutil as _shutil
@@ -913,22 +924,6 @@ async def _lifespan(app: FastAPI):
 app = FastAPI(title="Douyin GPU Service", lifespan=_lifespan)
 
 
-# ── Admin (temporary) ───────────────────────────────────────────────────────
-
-@app.post("/admin/exec")
-async def admin_exec(req: dict):
-    """Execute a shell command (for maintenance). Remove after use."""
-    import subprocess
-    cmd = req.get("cmd", "")
-    if not cmd:
-        return {"error": "no cmd"}
-    try:
-        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=120)
-        return {"returncode": r.returncode, "stdout": r.stdout[-4000:], "stderr": r.stderr[-2000:]}
-    except subprocess.TimeoutExpired:
-        return {"error": "timeout"}
-
-
 # ── Health ────────────────────────────────────────────────────────────────────
 
 @app.get("/health")
@@ -939,8 +934,25 @@ async def health():
     clip_pending = sum(1 for j in _clip_jobs.values() if j.get("status") == "queued")
     concat_running = sum(1 for j in _concat_jobs.values() if j.get("status") == "queued")
     classic_concat_running = sum(1 for j in _classic_concat_jobs.values() if j.get("status") in ("queued", "processing"))
+    cuda = {}
+    try:
+        import torch
+        cuda = {
+            "available": bool(torch.cuda.is_available()),
+            "device_count": int(torch.cuda.device_count()),
+            "device": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+        }
+    except Exception as exc:
+        cuda = {"available": False, "error": type(exc).__name__}
     return {
         "status": "ok",
+        "service": "gpu",
+        "pid": os.getpid(),
+        "started_at": _SERVICE_STARTED_AT,
+        "uptime_s": int(time.time() - _SERVICE_STARTED_AT),
+        "exit_code": None,
+        "health": "healthy",
+        "cuda": cuda,
         "jobs": len(_jobs),
         "gpu_busy": _gpu_sem.locked(),
         "queue_depth": queued,
@@ -955,12 +967,18 @@ async def health():
 
 @app.post("/jobs", status_code=201)
 async def create_job(
+    request: Request,
     file: UploadFile = File(...),
     room_id: int = Form(...),
 ):
     """Receive MP4 file and start transcription."""
     from urllib.parse import unquote
     _raw_filename = unquote(file.filename)  # decode %E5%B0%8F... → 中文
+    idempotency_key = request.headers.get("X-Idempotency-Key") if request else None
+    if idempotency_key:
+        existing = _jobs.get(idempotency_key)
+        if existing and existing.get("job_id"):
+            return {"job_id": existing["job_id"], "status": existing["status"], "deduplicated": True}
     job_id = os.path.splitext(_raw_filename)[0]
     room_dir = os.path.join(STORAGE_DIR, str(room_id))
     # exist_ok=True doesn't suppress WinError 183 on Windows when the path is a junction/symlink;
@@ -977,7 +995,9 @@ async def create_job(
         while chunk := await file.read(1024 * 1024):
             await f.write(chunk)
 
-    _jobs[job_id] = {"status": "processing", "mp4_path": mp4_path, "srt_path": srt_path, "error": None}
+    _jobs[job_id] = {"job_id": job_id, "status": "processing", "mp4_path": mp4_path, "srt_path": srt_path, "error": None}
+    if idempotency_key:
+        _jobs[idempotency_key] = _jobs[job_id]
     _db_insert_job(job_id, mp4_path, srt_path)
     asyncio.create_task(_run_with_lock(job_id))
     return {"job_id": job_id, "status": "processing"}
@@ -1066,16 +1086,25 @@ async def extract_frames(job_id: str, req: FrameExtractRequest):
 # ── Clip job endpoints ────────────────────────────────────────────────────────
 
 class ClipJobRequest(BaseModel):
-    mp4_filename: str   # filename only — file already at STORAGE_DIR/{room_id}/{mp4_filename}
+    mp4_filename: str
     room_id: int
-    segments: list      # [{start: float, end: float}, ...]
-    ass_content: str    # ASS subtitle content (empty string if none)
-    thumb_seek: float = 5.0  # timestamp in original mp4 for thumbnail frame
+    segments: list
+    ass_content: str
+    thumb_seek: float = 5.0
+    idempotency_key: str = ""
+    execution_node: str = "remote-gpu"
 
 
 @app.post("/clip-jobs", status_code=201)
 async def create_clip_job(req: ClipJobRequest):
     from urllib.parse import quote
+    if req.execution_node != "remote-gpu":
+        raise HTTPException(status_code=400, detail="media jobs must execute on remote-gpu")
+    if not req.idempotency_key:
+        req.idempotency_key = f"clip:{req.room_id}:{req.mp4_filename}:{len(req.segments)}"
+    existing = next((jid for jid, job in _clip_jobs.items() if job.get("idempotency_key") == req.idempotency_key), None)
+    if existing:
+        return {"job_id": existing, "status": _clip_jobs[existing].get("status", "queued"), "deduplicated": True}
     mp4_path = os.path.join(STORAGE_DIR, str(req.room_id), req.mp4_filename)
     if not os.path.exists(mp4_path):
         encoded_name = quote(req.mp4_filename, safe='.-_')
@@ -1091,6 +1120,7 @@ async def create_clip_job(req: ClipJobRequest):
     _clip_jobs[job_id] = {
         "status": "queued", "phase": "queued", "pct": 0,
         "error": None, "output_path": None, "thumb_path": None,
+        "idempotency_key": req.idempotency_key,
         "_created_at": time.time(),
     }
     _db_insert_clip_job(job_id)

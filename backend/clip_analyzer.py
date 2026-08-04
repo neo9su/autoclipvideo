@@ -1,3 +1,4 @@
+from gpu_execution import reject_local_media
 """
 clip_analyzer.py — 智能视频分析，用 Claude Vision (Bedrock) 全面解析短视频构成。
 
@@ -351,6 +352,7 @@ async def analyze_clip(
     """
     主入口：智能采帧 + 音频分析 → Claude Vision → 返回完整分析 dict。
     """
+    reject_local_media("local clip analysis")
     if not BEDROCK_TOKEN:
         logger.error("AWS_BEARER_TOKEN_BEDROCK not set")
         return None

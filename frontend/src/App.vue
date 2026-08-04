@@ -83,6 +83,7 @@ import Publish from './views/Publish.vue'
 import ClipQueue from './views/ClipQueue.vue'
 import GpuBanner from './components/GpuBanner.vue'
 import { useToast } from './composables/toast.js'
+import { remoteFetch } from './remoteApi.js'
 
 const page = ref('dashboard')
 const { toasts } = useToast()
@@ -101,7 +102,7 @@ const loginStatusTitle = computed(() => {
 
 async function fetchLoginStatus() {
   try {
-    const r = await fetch('/api/stream-login/status')
+    const r = await remoteFetch('/api/stream-login/status')
     if (r.ok) loginStatus.value = await r.json()
   } catch {}
 }
@@ -109,7 +110,7 @@ async function fetchLoginStatus() {
 async function doLogin() {
   loginRefreshing.value = true
   try {
-    const r = await fetch('/api/stream-login/refresh', { method: 'POST' })
+    const r = await remoteFetch('/api/stream-login/refresh', { method: 'POST' })
     const d = await r.json()
     if (d.ok) {
       // Poll until refreshing is done or cookies appear

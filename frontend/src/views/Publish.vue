@@ -131,13 +131,13 @@
         <div v-if="selectedTask" class="video-download-section">
           <div class="video-download-title">📥 下载视频（自行发布）</div>
           <div class="video-download-links">
-            <a :href="`${apiBase}/api/groups/${selectedTask.group_id}/download`" class="dl-btn dl-classic" target="_blank" title="经典版（合并版）">
+            <a :href="`${apiBase}/api/groups/${selectedTask.group_id}/download`" class="dl-btn dl-classic" target="_blank" title="经典版（合并版）" download>
               📹 经典版
             </a>
-            <a v-if="selectedTask.video_path && selectedTask.video_path.includes('director')" :href="`${apiBase}/api/groups/${selectedTask.group_id}/director-download`" class="dl-btn dl-director" target="_blank" title="导演版">
+            <a v-if="selectedTask.video_path && selectedTask.video_path.includes('director')" :href="`${apiBase}/api/groups/${selectedTask.group_id}/director-download`" class="dl-btn dl-director" target="_blank" title="导演版" download>
               🎬 导演版
             </a>
-            <a v-if="selectedTask.video_path && selectedTask.video_path.includes('creative')" :href="`${apiBase}/api/groups/${selectedTask.group_id}/creative-download`" class="dl-btn dl-creative" target="_blank" title="自编版">
+            <a v-if="selectedTask.video_path && selectedTask.video_path.includes('creative')" :href="`${apiBase}/api/groups/${selectedTask.group_id}/creative-download`" class="dl-btn dl-creative" target="_blank" title="自编版" download>
               ✍️ 自编版
             </a>
             <a v-if="selectedTask.video_path && selectedTask.video_path.includes('qianchuan')" :href="`${apiBase}/api/groups/${selectedTask.group_id}/qianchuan-download`" class="dl-btn dl-qianchuan" target="_blank" title="千川投流">
@@ -527,6 +527,7 @@
 </template>
 
 <script setup>
+import { REMOTE_API_BASE } from '../remoteApi.js'
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import {
   getRooms, getGroups, getGroup, getPublishTasks, createPublishTask, retryPublishTask, cancelPublishTask, bulkCancelPublishTasks,
@@ -564,7 +565,7 @@ const previewGroup = ref(null)   // group being previewed in video modal
 const previewVersion = ref('director')  // 'director' | 'classic' | 'creative' | 'qianchuan'
 const reclipModal = ref(null)    // {group, feedback, saving, submitted}
 const selectedPublishVersion = ref('both')
-const apiBase = import.meta.env.VITE_API_BASE || ''
+const apiBase = REMOTE_API_BASE
 const scheduleMode = ref('now')
 const progressLog = ref({})   // task_id → string[]
 let ws = null

@@ -1,3 +1,4 @@
+from gpu_execution import reject_local_media
 """
 Background music library generator.
 Synthesises multiple looping tracks (~60s each) using numpy.

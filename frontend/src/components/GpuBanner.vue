@@ -142,6 +142,7 @@
 </template>
 
 <script setup>
+import { remoteFetch } from '../remoteApi.js'
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 
 const status = ref({ reachable: false, health: {}, comfyui: { reachable: false }, pending_transcribe: 0 })
@@ -203,7 +204,7 @@ function fmtAgo(s) {
 
 async function doFlush() {
   flushing.value = true
-  try { await fetch('/api/transcribe/flush', { method: 'POST' }) } catch {}
+  try { await remoteFetch('/api/transcribe/flush', { method: 'POST' }) } catch {}
   setTimeout(() => { flushing.value = false; fetchStatus() }, 2000)
 }
 
@@ -212,7 +213,7 @@ async function toggleMaintenance() {
   try {
     const enabling = !status.value.maintenance
     const method = enabling ? 'POST' : 'DELETE'
-    await fetch('/api/gpu/maintenance', { method })
+    await remoteFetch('/api/gpu/maintenance', { method })
     await fetchStatus()
   } catch (e) {
     console.error('maintenance toggle failed', e)
@@ -223,17 +224,17 @@ async function toggleMaintenance() {
 
 async function wdStart(svc) {
   wdBusy.value[svc] = true
-  try { await fetch(`/api/watchdog/start/${svc}`, { method: 'POST' }) } catch {}
+  try { await remoteFetch(`/api/watchdog/start/${svc}`, { method: 'POST' }) } catch {}
   setTimeout(() => { wdBusy.value[svc] = false; fetchStatus() }, 3000)
 }
 async function wdStop(svc) {
   wdBusy.value[svc] = true
-  try { await fetch(`/api/watchdog/stop/${svc}`, { method: 'POST' }) } catch {}
+  try { await remoteFetch(`/api/watchdog/stop/${svc}`, { method: 'POST' }) } catch {}
   setTimeout(() => { wdBusy.value[svc] = false; fetchStatus() }, 3000)
 }
 async function wdRestart(svc) {
   wdBusy.value[svc] = true
-  try { await fetch(`/api/watchdog/restart/${svc}`, { method: 'POST' }) } catch {}
+  try { await remoteFetch(`/api/watchdog/restart/${svc}`, { method: 'POST' }) } catch {}
   setTimeout(() => { wdBusy.value[svc] = false; fetchStatus() }, 5000)
 }
 
@@ -255,7 +256,7 @@ const marqueeSpeed = computed(() => Math.max(8, logs.value.slice(0, 2).reduce((a
 
 async function fetchStatus() {
   try {
-    const r = await fetch('/api/gpu/status')
+    const r = await remoteFetch('/api/gpu/status')
     if (r.ok) status.value = await r.json()
   } catch {}
 }
@@ -268,7 +269,7 @@ async function loadLogs() {
 
 async function fetchLogs() {
   try {
-    const r = await fetch('/api/gpu/logs')
+    const r = await remoteFetch('/api/gpu/logs')
     if (r.ok) logs.value = await r.json()
   } catch {}
 }
@@ -283,7 +284,7 @@ onMounted(async () => {
   pollTimer = setInterval(fetchStatus, 8000)
   nowTimer = setInterval(() => { now.value = Date.now() }, 5000)
   try {
-    const r = await fetch('/api/version')
+    const r = await remoteFetch('/api/version')
     if (r.ok) { const d = await r.json(); appVersion.value = d.version || '' }
   } catch {}
 })

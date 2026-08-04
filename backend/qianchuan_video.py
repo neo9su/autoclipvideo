@@ -1,18 +1,16 @@
 """千川投流版视频合成包装层。
 
 复用 DirectorVideoComposer 的 GPU/NVENC 路径，同时为每个 segment 补充 qianchuan edit_actions；
-提供本地 ASS 高亮字幕和提示音资源生成，便于 GPU 服务或 ffmpeg fallback 消费。
+提供 GPU 服务消费的 ASS 高亮字幕和提示音元数据；本机不执行媒体处理。
 """
 from __future__ import annotations
 
-import asyncio
-import math
 import os
-import wave
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from director_video import DirectorVideoComposer
+from video_editing_skills import ensure_sfx_asset
 
 QIANCHUAN_KEYWORDS = [
     "不用戴发网", "免发网", "蜜茶橘棕", "羊毛卷", "显白", "发缝自然", "稳固", "小黄车",
@@ -28,7 +26,7 @@ PlayResY: 1920
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: QCMain,Arial,92,&H00FFFFFF,&H000000FF,&H90202020,&H60000000,1,0,0,0,100,100,1,0,1,4,1,2,72,72,260,1
-Style: QCKW,Arial,126,&H0000CCFF,&H000000FF,&H90101010,&H60000000,1,0,0,0,100,100,0,0,1,6,2,8,72,72,180,1
+Style: QCKW,Arial,118,&H0000CCFF,&H000000FF,&H90101010,&H60000000,1,0,0,0,100,100,0,0,1,6,3,9,72,72,150,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -36,25 +34,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 
 def ensure_prompt_sfx(path: Optional[str] = None) -> str:
-    """Create a short, soft click/beep wav if no asset exists."""
-    out = Path(path or Path(__file__).parent / "assets" / "audio" / "qianchuan_click.wav")
-    out.parent.mkdir(parents=True, exist_ok=True)
-    if out.exists() and out.stat().st_size > 1000:
-        return str(out)
-    sample_rate = 44100
-    duration = 0.055
-    freq = 1200.0
-    frames = int(sample_rate * duration)
-    with wave.open(str(out), "w") as wav:
-        wav.setnchannels(1)
-        wav.setsampwidth(2)
-        wav.setframerate(sample_rate)
-        for i in range(frames):
-            # quick fade in/out, low amplitude to avoid harshness
-            env = min(1.0, i / (sample_rate * 0.008), (frames - i) / (sample_rate * 0.018))
-            val = int(0.22 * env * 32767 * math.sin(2 * math.pi * freq * i / sample_rate))
-            wav.writeframesraw(val.to_bytes(2, byteorder="little", signed=True))
-    return str(out)
+    """Return a remote asset identifier; never synthesize media on the control plane."""
+    return path or "remote://qianchuan_click.wav"
 
 
 def _sec_to_ass(s: float) -> str:
@@ -88,18 +69,18 @@ def build_qianchuan_ass(script: Dict, audio_segments: Optional[List[Dict]] = Non
         text = _highlight(scene.get("voiceover_text") or scene.get("description") or "")
         anim = r"{\fad(80,80)\t(0,220,\fscx108\fscy108)\t(220,420,\fscx100\fscy100)}"
         events.append(f"Dialogue: 0,{_sec_to_ass(start)},{_sec_to_ass(end)},QCMain,,0,0,0,,{anim}{text}")
-        # Pop only the first keyword in upper safe area.
+        # Pop only the first keyword in the upper-right safe area.
         for kw in QIANCHUAN_KEYWORDS:
             if kw in (scene.get("voiceover_text") or ""):
                 pop_end = min(end, start + 1.2)
-                events.append(f"Dialogue: 1,{_sec_to_ass(start + 0.15)},{_sec_to_ass(pop_end)},QCKW,,0,0,0,,{{\\an8\\fad(0,180)\\t(0,160,\\fscx125\\fscy125)}}{kw}")
+                events.append(f"Dialogue: 1,{_sec_to_ass(start + 0.15)},{_sec_to_ass(pop_end)},QCKW,,0,0,0,,{{\\an9\\fad(0,180)\\t(0,160,\\fscx125\\fscy125)}}{kw}")
                 break
         cursor = end
     return ASS_HEADER + "\n".join(events) + "\n"
 
 
 def build_sound_cues(script: Dict, audio_segments: Optional[List[Dict]] = None, sfx_path: Optional[str] = None) -> List[Dict]:
-    """Return metadata for subtle keyword cues. GPU/fallback may mix this WAV at given timestamps."""
+    """Return metadata for subtle keyword cues. GPU service may mix this WAV at given timestamps."""
     sfx = ensure_prompt_sfx(sfx_path)
     cues: List[Dict] = []
     cursor = 0.0
@@ -140,6 +121,11 @@ class QianchuanVideoComposer(DirectorVideoComposer):
             seg.setdefault("mode", "qianchuan")
             seg.setdefault("edit_actions", clone.get("edit_actions") or [])
             clone["script_segment"] = seg
+            if seg.get("scene_type") in {"detail", "product", "product_proof"}:
+                actions = list(seg.get("edit_actions") or [])
+                if not any(a.get("type") in {"detail_zoom", "pip_detail"} for a in actions if isinstance(a, dict)):
+                    actions.append({"type": "pip_detail", "region": "upper_right", "intensity": 0.7})
+                seg["edit_actions"] = actions
             clone.setdefault("edit_actions", seg["edit_actions"])
             enriched.append(clone)
 

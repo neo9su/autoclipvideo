@@ -1,3 +1,4 @@
+from gpu_execution import reject_local_media
 import asyncio
 import heapq
 import logging
@@ -15,6 +16,7 @@ from editor import edit_recording, edit_recording_multi
 from analyzer import analyze_recording
 from thumbnail import generate_thumbnail
 from final_video import postprocess_final_video
+from gpu_execution import reject_local_media
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +29,8 @@ TARGET_PUBLISH_DURATION = 30.5  # pad near-threshold clips above Douyin's 30s bo
 
 
 async def _get_video_duration(mp4_path: str) -> float:
-    """Return the video duration in seconds via ffprobe, or 0 on error."""
+    """Remote GPU must provide media metadata; local probing is forbidden."""
+    reject_local_media("local video duration probe")
     try:
         proc = await asyncio.create_subprocess_exec(
             "ffprobe", "-v", "error",
@@ -43,7 +46,8 @@ async def _get_video_duration(mp4_path: str) -> float:
 
 
 async def _get_video_height(mp4_path: str) -> int:
-    """Return the video height via ffprobe, or 0 on error."""
+    """Remote GPU must provide media metadata; local probing is forbidden."""
+    reject_local_media("local video height probe")
     try:
         proc = await asyncio.create_subprocess_exec(
             "ffprobe", "-v", "error", "-select_streams", "v:0",
@@ -252,7 +256,8 @@ async def resume_clip_job(recording_id: int) -> bool:
 
 
 async def _validate_mp4(filepath: str) -> tuple[bool, str]:
-    """Quick MP4 validity check via ffprobe (≤3 s). Returns (ok, error_msg)."""
+    """Validate media on the remote GPU; never invoke local ffprobe."""
+    reject_local_media("local MP4 validation")
     cmd = [
         "ffprobe", "-v", "error",
         "-show_entries", "format=duration",
@@ -437,8 +442,8 @@ async def poll_transcriptions(broadcast_fn=None):
                         _poll_state["active_job_id"] = job_id
                         async with aio_connect() as db:
                             await db.execute(
-                                "UPDATE recordings SET synced = 1, transcribed = 1, gpu_job_id = ? WHERE id = ?",
-                                (job_id, primary_id),
+                                "UPDATE recordings SET synced = 1, transcribed = 1, gpu_job_id = ?, execution_node = ?, upload_bytes = ? WHERE id = ?",
+                                (job_id, "remote-gpu", os.path.getsize(upload_path), primary_id),
                             )
                             await db.commit()
                 _poll_state["blocked_count"] = blocked
@@ -564,6 +569,7 @@ async def _fetch_srt(recording_id: int, job_id: str, filename: str, clip_count: 
 
 
 async def _run_editor(recording_id: int, mp4_path: str, srt_path: str, clip_duration: Optional[float] = None, clip_count: int = 1, broadcast_fn=None, feedback: Optional[str] = None):
+    reject_local_media("local transcription editor")
     """Enqueue a clip job into the priority queue and dispatch if a slot is free."""
     global _job_seq
 
@@ -649,6 +655,7 @@ async def _run_editor(recording_id: int, mp4_path: str, srt_path: str, clip_dura
 
 
 async def _do_edit(recording_id: int, mp4_path: str, srt_path: str, clip_duration: Optional[float], clip_count: int, broadcast_fn, feedback: Optional[str] = None):
+    reject_local_media("local editor dispatch")
     """Actual editing work, called after acquiring the concurrency semaphore."""
     # ── Progress tracking ────────────────────────────────────────────────────
     _PHASE_LABELS = {
@@ -867,7 +874,7 @@ async def _auto_merge_group(db, group_id: int) -> bool:
 
     # Check per-pipeline statuses (0=not started, 1=running, 2=done, -1=failed)
     async with db.execute(
-        "SELECT classic_status, director_status, creative_status FROM clip_groups WHERE id = ?", (group_id,)
+        "SELECT classic_status, director_status, creative_status, qianchuan_status FROM clip_groups WHERE id = ?", (group_id,)
     ) as cur:
         grp = await cur.fetchone()
     if not grp:
@@ -878,13 +885,18 @@ async def _auto_merge_group(db, group_id: int) -> bool:
         logger.info(f"Auto-triggering classic merge for group {group_id}")
         asyncio.create_task(_merge_group(group_id))
         triggered = True
-    if grp["director_status"] == 0:
+    if grp["director_status"] in (0, -1, -3):
         logger.info(f"Auto-triggering director pipeline for group {group_id}")
         asyncio.create_task(_run_director_pipeline(group_id))
         triggered = True
     if (grp["creative_status"] or 0) == 0:
         logger.info(f"Auto-triggering creative pipeline for group {group_id}")
         asyncio.create_task(_run_creative_pipeline(group_id))
+        triggered = True
+    if (grp["qianchuan_status"] or 0) in (0, -1, -3, -4):
+        logger.info(f"Auto-triggering qianchuan pipeline for group {group_id}")
+        from api_v2 import _run_qianchuan_pipeline
+        asyncio.create_task(_run_qianchuan_pipeline(group_id))
         triggered = True
     return triggered
 
@@ -944,6 +956,7 @@ def _pad_video_to_min_duration(out_path: str, current_duration: float, min_durat
     Returns the usable output path, or None if padding failed or the clip is
     too short to rescue safely.
     """
+    reject_local_media("local duration padding")
     if current_duration >= target_duration:
         return out_path
     if current_duration < min_duration:
@@ -1035,6 +1048,12 @@ async def _run_director_pipeline(group_id: int):
     At most _DIRECTOR_SEM concurrent pipelines to avoid flooding GPU TTS queue.
     """
     try:
+        async with aio_connect() as db:
+            from pipeline_state import claim_pipeline_start
+            if not await claim_pipeline_start(db, "director_status", group_id):
+                logger.info(f"Director pipeline group {group_id} already running/completed — skipping")
+                return
+            await db.commit()
         # Skip if already completed (e.g. triggered again on restart)
         async with aio_connect() as db:
             async with db.execute(
@@ -1142,12 +1161,9 @@ async def _run_director_pipeline_inner(group_id: int):
             )
             await db.commit()
 
-    # Mark as in-progress
+    # The wrapper atomically claimed status=1.
     async with aio_connect() as db:
-        await db.execute(
-            "UPDATE clip_groups SET director_status = 1, director_error = NULL WHERE id = ?",
-            (group_id,)
-        )
+        await db.execute("UPDATE clip_groups SET director_error = NULL WHERE id = ?", (group_id,))
         await db.commit()
 
     try:

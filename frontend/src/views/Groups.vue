@@ -65,14 +65,14 @@
             <!-- 经典版结果 -->
             <template v-if="g.classic_status === 2">
               <button class="btn-action teal" style="margin-right:2px" @click="openClassicPreview(g)">▶ 经典版</button>
-              <a :href="`${apiBase}/api/groups/${g.id}/download`" class="btn-action teal" title="经典版下载">↓</a>
+              <a :href="`${apiBase}/api/groups/${g.id}/download`" class="btn-action teal" title="经典版下载" download>↓</a>
             </template>
             <span v-else-if="g.classic_status === 1" class="badge yellow">经典版处理中…</span>
             <span v-else-if="g.classic_status === -1" class="badge red">经典版失败</span>
             <!-- 自编版结果 -->
             <template v-if="g.creative_status === 2">
               <button class="btn-action green" style="margin-right:2px" @click="openCreativePreview(g)">▶ 自编版</button>
-              <a :href="`${apiBase}/api/groups/${g.id}/creative-download`" class="btn-action green" title="自编版下载">↓</a>
+              <a :href="`${apiBase}/api/groups/${g.id}/creative-download`" class="btn-action green" title="自编版下载" download>↓</a>
             </template>
             <span v-else-if="(g.creative_status || 0) === 1" class="badge yellow">自编版处理中…</span>
             <span v-else-if="g.creative_status === -1" class="badge red">自编版失败</span>
@@ -138,7 +138,7 @@
               </button>
               <span v-if="g.director_final_video" class="step-done">✓ 视频已生成</span>
               <button v-if="g.director_final_video" class="btn-action purple" style="margin-left:8px" @click="openDirectorPreview(g)">▶ 预览</button>
-              <a v-if="g.director_final_video" :href="`${apiBase}/api/groups/${g.id}/director-download`" class="btn-action purple" style="margin-left:4px">↓ 下载</a>
+              <a v-if="g.director_final_video" :href="`${apiBase}/api/groups/${g.id}/director-download`" class="btn-action purple" style="margin-left:4px" download>↓ 下载</a>
             </div>
           </div>
           <div v-if="g.director_error" class="director-error">⚠ {{ g.director_error }}</div>
@@ -678,6 +678,7 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { REMOTE_API_BASE } from '../remoteApi.js'
 import { getGroups, getGroup, getRooms, mergeGroup, retryModes, createGroup, updateGroup, reassignRecording, importGroupVideos, createWS, getThumbnailUrl, createCustomGroup, uploadCustomGroupVideo, deleteGroup, getProcessingProgress, reclipRecording, reclipGroupAll, generateQianchuanGroup } from '../api.js'
 import { useToast } from '../composables/toast.js'
 
@@ -686,10 +687,29 @@ const rooms = ref([])
 const openId = ref(null)
 const detail = ref(null)
 const detailLoading = ref(false)
-const apiBase = import.meta.env.VITE_API_BASE || 'http://10.190.0.203:8899'
+const apiBase = REMOTE_API_BASE
 let ws = null
 
-const { show } = useToast()
+async function readResponseError(response, fallback) {
+  const contentType = response.headers.get('content-type') || ''
+  if (contentType.includes('application/json')) {
+    try {
+      const payload = await response.json()
+      if (payload?.detail) return Array.isArray(payload.detail) ? payload.detail.map(item => item.msg || item).join('; ') : String(payload.detail)
+      if (payload?.error) return String(payload.error)
+      if (payload?.message) return String(payload.message)
+    } catch {
+      // Fall through to text for malformed JSON responses.
+    }
+  }
+  try {
+    const text = (await response.text()).trim()
+    if (text) return text.slice(0, 500)
+  } catch {
+    // Keep the user-facing fallback when the response body is unavailable.
+  }
+  return fallback
+}
 
 // Group create/edit modal: { mode: 'create'|'edit', id?, room_id, label, wig_model, wig_color, importPaths }
 const groupModal = ref(null)
@@ -750,11 +770,12 @@ async function saveReviewedScript() {
     const g = scriptReviewGroup.value
     const script = typeof g.director_script === 'string' ? JSON.parse(g.director_script) : { ...g.director_script }
     script.scenes = reviewScenes.value
-    await fetch(`${apiBase}/api/v2/director/update-script`, {
+    const response = await fetch(`${apiBase}/api/v2/director/update-script`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ group_id: g.id, script }),
     })
+    if (!response.ok) throw new Error(await readResponseError(response, '文案保存失败'))
     g.director_script = JSON.stringify(script)
     g.director_audio_path = null
     g.director_final_video = null
@@ -887,12 +908,9 @@ async function generateCovers(g) {
   coverGenerating.value[g.id] = true
   try {
     const resp = await fetch(`${apiBase}/api/groups/${g.id}/generate-covers`, { method: 'POST' })
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}))
-      throw new Error(err.detail || '封面生成失败')
-    }
+    if (!resp.ok) throw new Error(await readResponseError(resp, '封面生成失败'))
     const result = await resp.json()
-    coverBust.value[g.id] = Date.now()
+    if (!Array.isArray(result.covers)) throw new Error('服务器返回的封面数据无效')
     show(`已生成 ${result.covers.length} 张封面候选`, 'success')
     await load()
   } catch (e) {
@@ -909,8 +927,7 @@ async function selectCover(g, coverPath) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ cover: coverPath }),
     })
-    if (!resp.ok) throw new Error('选择失败')
-    g.selected_cover = coverPath
+    if (!resp.ok) throw new Error(await readResponseError(resp, '操作失败'))
     show('封面已选定', 'success')
   } catch (e) {
     show(e.message || '封面选择失败', 'error')
@@ -954,9 +971,11 @@ const importPreviewCount = computed(() => {
 })
 
 async function load() {
-  ;[groups.value, rooms.value] = await Promise.all([getGroups(), getRooms()])
-  if (openId.value) {
-    detail.value = await getGroup(openId.value)
+  try {
+    ;[groups.value, rooms.value] = await Promise.all([getGroups(), getRooms()])
+    if (openId.value) detail.value = await getGroup(openId.value)
+  } catch (error) {
+    show(error.message || '分组加载失败', 'error')
   }
 }
 
@@ -970,8 +989,14 @@ async function toggleDetail(id) {
   openId.value = id
   detailLoading.value = true
   detail.value = null
-  detail.value = await getGroup(id)
-  detailLoading.value = false
+  try {
+    detail.value = await getGroup(id)
+  } catch (error) {
+    show(error.message || '分组详情加载失败', 'error')
+    openId.value = null
+  } finally {
+    detailLoading.value = false
+  }
   startProgressPolling()
 }
 
@@ -1383,7 +1408,7 @@ async function submitReview() {
         user_segments_full: userSegsFull,
       })
     })
-    if (!res.ok) throw new Error((await res.json()).detail || '提交失败')
+    if (!res.ok) throw new Error(await readResponseError(res, '提交失败'))
     show('审核已提交，系统正在学习', 'success')
     reviewModal.value = null
     // Refresh suggestions after submit
@@ -1407,22 +1432,12 @@ async function loadSuggestions() {
 async function acceptSuggestion(id) {
   try {
     const res = await fetch(`${apiBase}/api/rule-suggestions/${id}/accept`, { method: 'POST' })
-    if (!res.ok) throw new Error((await res.json()).detail || '操作失败')
-    show('规则已接受并生效', 'success')
-    await loadSuggestions()
-  } catch (e) { show(e.message || '操作失败', 'error') }
-}
-
-async function rejectSuggestion(id) {
+    if (!res.ok) throw new Error(await readResponseError(res, '操作失败'))
+    show('规则已接受并生效', 'success')(id) {
   try {
     const res = await fetch(`${apiBase}/api/rule-suggestions/${id}/reject`, { method: 'POST' })
-    if (!res.ok) throw new Error((await res.json()).detail || '操作失败')
+    if (!res.ok) throw new Error(await readResponseError(res, '操作失败'))
     show('建议已忽略', 'info')
-    await loadSuggestions()
-  } catch (e) { show(e.message || '操作失败', 'error') }
-}
-
-onUnmounted(() => { ws?.close(); stopProgressPolling() })
 </script>
 
 <style scoped>

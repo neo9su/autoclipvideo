@@ -635,3 +635,17 @@
 - `python3 -m py_compile backend/main.py` ✅
 - `npm run build`（frontend）✅
 - `git diff --check` ✅
+
+## 2026-07-11 12:26 — 下载按钮真实下载 + 抖音发布上传入口诊断/兼容
+
+- 修复分组管理与发布页视频下载按钮：经典版 / 导演版 / 自编版下载链接补齐 `download` 属性，保留独立「▶ 预览」按钮使用原视频 URL 预览。
+- 后端分组视频下载响应调整：普通点击下载时返回 `Content-Disposition: attachment`；浏览器 `<video>` 预览发起 Range 请求时仍返回 `inline`，避免破坏预览/拖动。
+- 抖音发布自动化上传入口增强：不再只依赖 `input[type="file"].first`，优先匹配 video/mp4 accept 的 file input，并尝试「发布视频 / 上传视频 / 点击上传 / 选择视频」等按钮、role/text 与 upload/drag/drop 区域；点击后重新查找 input，也支持 Playwright file chooser。
+- 上传入口失败时新增安全 diagnostics：记录 current URL、title、可见按钮/上传元素文本、页面关键文本片段与截图路径，保存到 `logs/publisher_diagnostics/`；不记录 cookie 内容。
+- 本次未批量恢复 scheduled：外部抖音发布会打开真实创作者中心并可能真实发布，当前仅做代码级/受控验证；需先对单个任务人工确认成功后再恢复积压任务。
+
+### 验证
+- `npm run build`（frontend）✅
+- `python3 -m py_compile backend/main.py backend/publisher_douyin.py backend/publish_scheduler.py` ✅
+- `git diff --check` ✅
+- 下载响应头验证：通过脚本对可用分组下载接口校验非 Range 为 attachment、Range 预览为 inline（若本机 DB 中存在可用样本）✅
