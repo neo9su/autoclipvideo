@@ -39,9 +39,11 @@
                   {{ loginStatus.file_age_hours }} 小时前
                 </span>
               </div>
-              <div class="info-row" v-if="!loginStatus.logged_in">
-                <span class="info-label">说明</span>
-                <span class="info-value bad">未登录导致录像画质为 422p，点击下方按钮重新登录</span>
+              <div class="info-row" v-if="loginStatus.msg || loginStatus.detail">
+                <span class="info-label">状态</span>
+                <span class="info-value" :class="loginStatus.launch_status === 'failed' ? 'bad' : ''">
+                  {{ loginStatus.msg || loginStatus.detail }}
+                </span>
               </div>
             </div>
             <div class="login-popup-actions">
@@ -89,7 +91,7 @@ const page = ref('dashboard')
 const { toasts } = useToast()
 
 // Stream login status
-const loginStatus = ref({ logged_in: false, quality: 'LD1', file_age_hours: null, refreshing: false })
+const loginStatus = ref({ logged_in: false, quality: 'LD1', file_age_hours: null, refreshing: false, launch_status: 'idle', msg: '', detail: '', diagnostics: null })
 const showLoginPopup = ref(false)
 const loginRefreshing = ref(false)
 
@@ -104,7 +106,15 @@ async function fetchLoginStatus() {
   try {
     const r = await remoteFetch('/api/stream-login/status')
     if (r.ok) loginStatus.value = await r.json()
-  } catch {}
+  } catch (e) {
+    loginStatus.value = { ...loginStatus.value, msg: '无法读取登录状态', detail: e?.message || '网络请求失败', launch_status: 'failed' }
+  }
+}
+
+function loginErrorMessage(data, fallback = '登录浏览器启动失败') {
+  const detail = data?.detail
+  if (typeof detail === 'object') return [detail.msg, detail.detail].filter(Boolean).join('：') || fallback
+  return [data?.msg, detail].filter(Boolean).join('：') || fallback
 }
 
 async function doLogin() {
@@ -112,21 +122,29 @@ async function doLogin() {
   try {
     const r = await remoteFetch('/api/stream-login/refresh', { method: 'POST' })
     const d = await r.json()
-    if (d.ok) {
-      // Poll until refreshing is done or cookies appear
-      const poll = setInterval(async () => {
-        await fetchLoginStatus()
-        if (!loginStatus.value.refreshing && loginStatus.value.logged_in) {
-          clearInterval(poll)
-          loginRefreshing.value = false
-        }
-      }, 3000)
-      setTimeout(() => { clearInterval(poll); loginRefreshing.value = false }, 310000)
-    } else {
-      alert(d.msg)
+    if (!r.ok || !d.ok) {
+      const message = loginErrorMessage(d)
+      loginStatus.value = { ...loginStatus.value, msg: message, detail: d.detail?.diagnostics ? JSON.stringify(d.detail.diagnostics) : '', launch_status: 'failed', refreshing: false }
+      alert(message)
       loginRefreshing.value = false
+      return
     }
-  } catch { loginRefreshing.value = false }
+    await fetchLoginStatus()
+    const poll = setInterval(async () => {
+      await fetchLoginStatus()
+      if (!loginStatus.value.refreshing) {
+        clearInterval(poll)
+        loginRefreshing.value = false
+        if (loginStatus.value.launch_status === 'failed' || loginStatus.value.launch_status === 'timed_out') {
+          alert(loginStatus.value.msg || loginStatus.value.detail || '登录未完成')
+        }
+      }
+    }, 3000)
+    setTimeout(() => { clearInterval(poll); loginRefreshing.value = false }, 310000)
+  } catch (e) {
+    loginRefreshing.value = false
+    alert(`登录请求失败：${e?.message || '网络错误'}`)
+  }
 }
 
 let loginTimer
