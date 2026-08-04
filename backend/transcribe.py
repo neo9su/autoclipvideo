@@ -1803,6 +1803,37 @@ async def backfill_auto_merge():
         else:
             logger.info("Backfill: all groups already have director/creative results or in progress")
 
+        # Phase 2e: queue Qianchuan for groups that finished before this
+        # pipeline existed. The worker's atomic claim makes this restart-safe.
+        pending_qianchuan = []
+        try:
+            async with aio_connect() as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute(
+                    """SELECT id FROM clip_groups
+                       WHERE classic_status = 2
+                         AND qianchuan_status IN (0, -1, -3, -4)
+                         AND EXISTS (
+                           SELECT 1 FROM recordings
+                           WHERE recordings.group_id = clip_groups.id
+                             AND recordings.local_deleted = 0
+                             AND recordings.clipped = 2
+                         )
+                       ORDER BY id DESC"""
+                ) as cur:
+                    pending_qianchuan = [row["id"] for row in await cur.fetchall()]
+        except Exception as e:
+            logger.error(f"Backfill Phase 2e Qianchuan scan failed: {e}")
+
+        if gpu_is_online() and pending_qianchuan:
+            from api_v2 import _run_qianchuan_pipeline
+            logger.info(f"Backfill Phase 2e: queuing {len(pending_qianchuan)} Qianchuan groups")
+            for gid in pending_qianchuan:
+                asyncio.create_task(_run_qianchuan_pipeline(gid))
+                await asyncio.sleep(0.1)
+        elif pending_qianchuan:
+            logger.info(f"Backfill Phase 2e: GPU offline — skipping {len(pending_qianchuan)} Qianchuan groups")
+
         # Phase 4.5: Handle orphaned -3 status groups (never triggered)
         # These are groups that were created with editing_mode=director but never had their
         # pipeline triggered (likely from an old code path or manual intervention).
