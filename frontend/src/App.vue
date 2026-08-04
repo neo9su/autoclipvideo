@@ -126,6 +126,7 @@ async function doLogin() {
       const message = loginErrorMessage(d)
       loginStatus.value = { ...loginStatus.value, msg: message, detail: d.detail?.diagnostics ? JSON.stringify(d.detail.diagnostics) : '', launch_status: 'failed', refreshing: false }
       alert(message)
+      loginRefreshing.value = false
       return
     }
     await fetchLoginStatus()
