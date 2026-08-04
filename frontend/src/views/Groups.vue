@@ -1432,12 +1432,24 @@ async function loadSuggestions() {
 async function acceptSuggestion(id) {
   try {
     const res = await fetch(`${apiBase}/api/rule-suggestions/${id}/accept`, { method: 'POST' })
-    if (!res.ok) throw new Error(await readResponseError(res, '操作失败'))
-    show('规则已接受并生效', 'success')(id) {
+    if (!res.ok) throw new Error('操作失败')
+    show('规则已接受并生效', 'success')
+    await loadSuggestions()
+  } catch (e) {
+    show(e.message || '操作失败', 'error')
+  }
+}
+
+async function rejectSuggestion(id) {
   try {
     const res = await fetch(`${apiBase}/api/rule-suggestions/${id}/reject`, { method: 'POST' })
-    if (!res.ok) throw new Error(await readResponseError(res, '操作失败'))
+    if (!res.ok) throw new Error('操作失败')
     show('建议已忽略', 'info')
+    await loadSuggestions()
+  } catch (e) {
+    show(e.message || '操作失败', 'error')
+  }
+}
 </script>
 
 <style scoped>
