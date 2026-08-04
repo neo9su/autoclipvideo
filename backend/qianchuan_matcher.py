@@ -28,6 +28,74 @@ NEGATIVE_SHOT_KEYWORDS = {
     "杂乱": -0.8, "错色": -2.0, "不是这个颜色": -2.0, "别拍": -1.0,
 }
 
+# Qianchuan uses stricter, isolated thresholds. Director matching is unchanged.
+MIN_QIANCHUAN_RELEVANCE = 0.42
+MIN_QIANCHUAN_SEMANTIC_SCORE = 0.30
+
+
+def _normalise_text(value: object) -> str:
+    return re.sub(r"[\s\u3000\u3002，。！？、；：,.!?;:/|]+", "", str(value or "").lower())
+
+
+def assess_segment_relevance(segment: Dict, source_text: str, confidence_score: float) -> Dict:
+    """Conservatively assess script-to-source relevance with auditable reasons."""
+    source = _normalise_text(source_text)
+    voiceover = segment.get("voiceover_text") or segment.get("text") or ""
+    requirements = _tokens(segment.get("visual_keywords"), segment.get("priority_shots"))
+    required_hits = [term for term in requirements if _normalise_text(term) in source]
+    script_tokens = _tokens(voiceover)
+    script_hits = [token for token in script_tokens if _normalise_text(token) in source]
+    clean_voiceover = _normalise_text(voiceover)
+    voice_grams = {clean_voiceover[index:index + 2] for index in range(max(0, len(clean_voiceover) - 1))}
+    source_grams = {source[index:index + 2] for index in range(max(0, len(source) - 1))}
+    gram_score = len(voice_grams & source_grams) / max(1, len(voice_grams))
+    contradiction_terms = [term for term in NEGATIVE_SHOT_KEYWORDS if _normalise_text(term) in source]
+    requirement_score = len(required_hits) / max(1, len(requirements))
+    text_score = max(min(1.0, len(script_hits) / max(2, len(script_tokens))), gram_score)
+    confidence = max(0.0, min(1.0, float(confidence_score or 0.0)))
+    score = max(0.0, min(1.0, confidence * 0.55 + text_score * 0.25 + requirement_score * 0.20))
+    reasons = []
+    if not source_text.strip():
+        reasons.append("missing_source_transcript")
+    if contradiction_terms:
+        reasons.append("contradictory_evidence:" + ",".join(contradiction_terms[:4]))
+    if confidence < MIN_QIANCHUAN_SEMANTIC_SCORE:
+        reasons.append(f"semantic_score_below_{MIN_QIANCHUAN_SEMANTIC_SCORE:.2f}")
+    if score < MIN_QIANCHUAN_RELEVANCE:
+        reasons.append(f"relevance_below_{MIN_QIANCHUAN_RELEVANCE:.2f}")
+    return {"ok": not reasons, "score": round(score, 3),
+            "confidence_score": round(confidence, 3), "text_score": round(text_score, 3),
+            "requirement_score": round(requirement_score, 3),
+            "required_terms": requirements, "required_hits": required_hits,
+            "source_text": source_text[:500], "reasons": reasons,
+            "evidence_type": "srt_transcript_proxy"}
+
+
+def audit_qianchuan_segments(matched_segments: List[Dict], audio_segments: Optional[List[Dict]] = None) -> Dict:
+    """Audit every segment, including audio duration alignment and rejection reasons."""
+    audio_by_scene = {item.get("scene_id"): item for item in (audio_segments or [])}
+    records = []
+    for item in matched_segments:
+        segment = item.get("script_segment") or {}
+        relevance = item.get("relevance") or assess_segment_relevance(
+            segment, item.get("matched_source_text") or "", item.get("confidence_score", 0.0))
+        audio = audio_by_scene.get(segment.get("scene_id"), {})
+        expected = float(audio.get("duration") or segment.get("duration") or 0)
+        actual = float(item.get("matched_duration") or 0)
+        timeline_ok = actual >= max(1.0, expected * 0.85) if expected else actual > 0
+        if not timeline_ok:
+            relevance = {**relevance, "ok": False,
+                         "reasons": [*relevance["reasons"], "matched_clip_shorter_than_audio"]}
+        records.append({"scene_id": segment.get("scene_id"),
+                        "scene_type": segment.get("scene_type"),
+                        "matched_recording_id": item.get("matched_recording_id"),
+                        "start": item.get("matched_start_time"), "duration": actual,
+                        "timeline_ok": timeline_ok, "relevance": relevance})
+    rejected = [record for record in records if not record["relevance"]["ok"]]
+    return {"ok": bool(records) and not rejected, "segments": records,
+            "accepted_count": len(records) - len(rejected), "rejected_count": len(rejected),
+            "rejection_reasons": [reason for record in rejected for reason in record["relevance"]["reasons"]]}
+
 
 def _tokens(*values: object) -> List[str]:
     out: List[str] = []
@@ -205,6 +273,8 @@ class QianchuanMatcher(SemanticMatcher):
             bias = self._qianchuan_bias(seg, text)
             item["qianchuan_shot_score"] = round(max(0.0, item.get("confidence_score", 0.0) + bias), 3)
             item["edit_actions"] = _edit_actions_for_scene(seg.get("scene_type", ""), seg)
+            item["relevance"] = assess_segment_relevance(
+                seg, item.get("matched_source_text") or "", item.get("confidence_score", 0.0))
         return matched
 
 

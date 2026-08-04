@@ -44,7 +44,8 @@ sys.path.insert(0, 'backend')
 import db as dbmod
 from db import init_db
 from qianchuan_script import generate_qianchuan_script
-from qianchuan_matcher import load_group_context, score_product_match
+from qianchuan_matcher import (load_group_context, score_product_match,
+                               assess_segment_relevance, audit_qianchuan_segments)
 from qianchuan_video import build_qianchuan_ass, build_sound_cues
 
 async def main():
@@ -66,6 +67,20 @@ async def main():
     assert good['ok'], good
     bad = score_product_match(ctx, product_id='sku-other', keywords=['不存在商品'], threshold=0.99)
     assert not bad['ok'] and '商品强匹配不足' in bad['reason'], bad
+    relevant = assess_segment_relevance(
+        {'voiceover_text': '蜜茶橘棕发缝自然', 'visual_keywords': ['发缝自然']},
+        '近景展示蜜茶橘棕，发缝自然，颜色细节清晰', 0.82)
+    assert relevant['ok'], relevant
+    irrelevant = assess_segment_relevance(
+        {'voiceover_text': '发缝自然', 'visual_keywords': ['发缝自然']},
+        '直播间低头手遮脸，错色不是这个颜色', 0.18)
+    assert not irrelevant['ok'] and irrelevant['reasons'], irrelevant
+    audit = audit_qianchuan_segments([
+        {'script_segment': {'scene_id': 1, 'scene_type': 'product_proof', 'duration': 4},
+         'matched_duration': 4, 'matched_recording_id': 1, 'matched_start_time': 3,
+         'confidence_score': 0.82, 'matched_source_text': '发缝自然颜色细节'},
+    ], [{'scene_id': 1, 'duration': 4}])
+    assert audit['ok'] and audit['accepted_count'] == 1, audit
     script = generate_qianchuan_script(ctx['group'], good['product'], target_duration=22, selling_points=['蜜茶橘棕','羊毛卷'])
     assert script['mode'] == 'qianchuan' and len(script['scenes']) == 5
     ass = build_qianchuan_ass(script)

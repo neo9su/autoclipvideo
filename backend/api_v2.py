@@ -15,7 +15,8 @@ from voice_director import VoiceDirector
 from director_matcher import SemanticMatcher, get_matcher
 from director_video import DirectorVideoComposer
 from qianchuan_script import generate_qianchuan_script
-from qianchuan_matcher import QianchuanMatcher, load_group_context, score_product_match
+from qianchuan_matcher import (QianchuanMatcher, audit_qianchuan_segments,
+                                load_group_context, score_product_match)
 from qianchuan_video import QianchuanVideoComposer
 from qianchuan_quality import check_qianchuan_video_quality
 from qianchuan_policy import build_qianchuan_metadata, validate_qianchuan_metadata
@@ -318,13 +319,21 @@ async def _qianchuan_generate_bg(group_id: int, script: Dict) -> None:
                 for s in script.get("scenes", [])
             ]
             matched = await matcher.match_qianchuan_segments(script_segments, group_id)
+            audit = audit_qianchuan_segments(matched, audio_segments)
+            review_payload = {"matching": matched, "relevance_audit": audit}
             if len(matched) < max(3, len(script_segments) - 1):
                 raise RuntimeError("千川镜头匹配不足，拒绝生成")
+            if not audit.get("ok"):
+                await _set_qianchuan_error(
+                    group_id, -2, "千川文案-画面相关性不足，拒绝无关素材: "
+                    + "; ".join(audit.get("rejection_reasons", []))[:450], review_payload)
+                await _broadcast({"type": "qianchuan_relevance_rejected", "group_id": group_id, "review": review_payload})
+                return
 
             async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute(
                     "UPDATE clip_groups SET qianchuan_segments = ? WHERE id = ?",
-                    (json.dumps({"audio_segments": audio_segments, "matched_segments": matched}, ensure_ascii=False), group_id),
+                    (json.dumps({"audio_segments": audio_segments, "matched_segments": matched, "relevance_audit": audit}, ensure_ascii=False), group_id),
                 )
                 await db.commit()
 

@@ -163,6 +163,7 @@ class SemanticMatcher:
                         'matched_rec_duration': rec_dur_val,
                         'confidence_score': best_match['score'],
                         'match_reason': best_match['reason'],
+                        'matched_source_text': best_match.get('source_text', ''),
                     })
                     logger.info(
                         f"  → rec {rec_id}, t={best_match['start_time']:.1f}s-"
@@ -264,6 +265,7 @@ class SemanticMatcher:
                         'score': adjusted_score,
                         'reason': f"srt_match={result['score']:.2f} time_pen={time_penalty:.2f}",
                         'used_indices': result['used_indices'],
+                        'source_text': result.get('source_text', ''),
                     }
 
         return best_result
@@ -378,6 +380,7 @@ class SemanticMatcher:
                         'used_indices': list(indices),
                         'window_size': window_size,
                         'match_type': 'keyword_f1',
+                        'source_text': window_text,
                     })
 
         # ── Phase 2: 语义相似度回退 ──────────────────────────────────────
@@ -427,6 +430,7 @@ class SemanticMatcher:
                                 'used_indices': list(indices),
                                 'window_size': window_size,
                                 'match_type': 'semantic',
+                                'source_text': window_text,
                             })
 
         if not candidates:
@@ -703,6 +707,7 @@ class SemanticMatcher:
             'matched_rec_duration': rec_dur,
             'confidence_score': best_score,
             'match_reason': 'fallback_dispersed',
+            'matched_source_text': '',
         }
 
     def _calculate_semantic_similarity(self, text1: str, text2: str) -> float:
