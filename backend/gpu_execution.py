@@ -91,6 +91,3 @@ def reject_local_media(operation: str) -> None:
 def media_execution_node(operation: str) -> str:
     """Return the validated remote execution node for job metadata."""
     return require_remote_gpu(operation).node
-
-
-
