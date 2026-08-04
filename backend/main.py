@@ -3871,17 +3871,63 @@ def _stream_login_diagnostics() -> dict:
         detail["process_user"] = getpass.getuser()
     except Exception:
         detail["process_user"] = None
-    detail["session_id"] = os.environ.get("SESSIONNAME") or os.environ.get("XDG_SESSION_ID")
+    detail["session_name"] = os.environ.get("SESSIONNAME") or os.environ.get("XDG_SESSION_ID")
+    detail["session_id"] = None
+    if os.name == "nt":
+        try:
+            import ctypes
+            session_id = ctypes.c_ulong()
+            if ctypes.windll.kernel32.ProcessIdToSessionId(os.getpid(), ctypes.byref(session_id)):
+                detail["session_id"] = session_id.value
+        except Exception as exc:
+            detail["session_id_error"] = str(exc)
     detail["interactive_sessions"] = []
     if os.name == "nt":
         try:
             result = __import__("subprocess").run(
                 ["quser"], capture_output=True, text=True, timeout=3, creationflags=0x08000000
             )
-            detail["interactive_sessions"] = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+            # Keep the raw lines as well as parsed fields: quser formatting varies
+            # slightly between Windows versions and RDP/console sessions.
+            detail["interactive_sessions_raw"] = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+            for line in detail["interactive_sessions_raw"][1:]:
+                fields = line.lstrip("> ").split()
+                if len(fields) < 4 or not fields[2].isdigit():
+                    continue
+                detail["interactive_sessions"].append({
+                    "user": fields[0], "session_name": fields[1],
+                    "session_id": int(fields[2]), "state": fields[3],
+                })
+            if result.returncode:
+                detail["interactive_sessions_error"] = result.stderr.strip() or f"quser exited {result.returncode}"
         except Exception as exc:
             detail["interactive_sessions_error"] = str(exc)
     return detail
+
+
+def _stream_login_interactive_session_guard() -> Optional[dict]:
+    """Reject headed browser launches from services/non-visible Windows sessions."""
+    if os.name != "nt":
+        return None
+    diagnostics = _stream_login_diagnostics()
+    process_session_id = diagnostics.get("session_id")
+    process_user = (diagnostics.get("process_user") or "").casefold()
+    active_sessions = [
+        session for session in diagnostics.get("interactive_sessions", [])
+        if str(session.get("state", "")).casefold() in {"active", "运行中"}
+    ]
+    matching = [
+        session for session in active_sessions
+        if session.get("session_id") == process_session_id
+        and str(session.get("user", "")).casefold() == process_user
+    ]
+    if process_session_id is not None and matching:
+        return None
+    return {
+        "msg": "无法打开登录浏览器：后端不在当前可见的 Windows 交互会话中",
+        "detail": "请在与 RDP/桌面登录用户相同的 Windows 会话中运行后端；不会跨会话启动浏览器",
+        "diagnostics": diagnostics,
+    }
 
 
 @app.get("/api/stream-login/status")
@@ -3922,6 +3968,10 @@ async def stream_login_refresh():
     global _stream_login_task, _stream_login_state
     if _stream_login_task and not _stream_login_task.done():
         return {"ok": False, "msg": "登录浏览器已打开，请在浏览器中完成登录", "detail": _stream_login_diagnostics()}
+    session_error = _stream_login_interactive_session_guard()
+    if session_error:
+        _stream_login_state = {"status": "failed", "msg": session_error["msg"], "detail": session_error["detail"]}
+        raise HTTPException(status_code=409, detail=session_error)
     try:
         from playwright.async_api import async_playwright
     except ImportError as exc:
