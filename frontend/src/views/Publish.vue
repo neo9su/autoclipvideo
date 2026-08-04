@@ -131,13 +131,13 @@
         <div v-if="selectedTask" class="video-download-section">
           <div class="video-download-title">📥 下载视频（自行发布）</div>
           <div class="video-download-links">
-            <a :href="`${apiBase}/api/groups/${selectedTask.group_id}/download`" class="dl-btn dl-classic" target="_blank" title="经典版（合并版）">
+            <a :href="`${apiBase}/api/groups/${selectedTask.group_id}/download`" class="dl-btn dl-classic" target="_blank" title="经典版（合并版）" download>
               📹 经典版
             </a>
-            <a v-if="selectedTask.video_path && selectedTask.video_path.includes('director')" :href="`${apiBase}/api/groups/${selectedTask.group_id}/director-download`" class="dl-btn dl-director" target="_blank" title="导演版">
+            <a v-if="selectedTask.video_path && selectedTask.video_path.includes('director')" :href="`${apiBase}/api/groups/${selectedTask.group_id}/director-download`" class="dl-btn dl-director" target="_blank" title="导演版" download>
               🎬 导演版
             </a>
-            <a v-if="selectedTask.video_path && selectedTask.video_path.includes('creative')" :href="`${apiBase}/api/groups/${selectedTask.group_id}/creative-download`" class="dl-btn dl-creative" target="_blank" title="自编版">
+            <a v-if="selectedTask.video_path && selectedTask.video_path.includes('creative')" :href="`${apiBase}/api/groups/${selectedTask.group_id}/creative-download`" class="dl-btn dl-creative" target="_blank" title="自编版" download>
               ✍️ 自编版
             </a>
             <a v-if="selectedTask.video_path && selectedTask.video_path.includes('qianchuan')" :href="`${apiBase}/api/groups/${selectedTask.group_id}/qianchuan-download`" class="dl-btn dl-qianchuan" target="_blank" title="千川投流">

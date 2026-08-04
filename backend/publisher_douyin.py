@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import time
 from typing import Optional
 
 from publisher_base import BasePublisher
@@ -16,6 +17,7 @@ logger = logging.getLogger(__name__)
 UPLOAD_URL = "https://creator.douyin.com/creator-micro/content/upload"
 LOGIN_URL = "https://creator.douyin.com"
 COOKIES_DIR = os.path.expanduser("~/.douyin-publisher/cookies")
+DIAGNOSTICS_DIR = os.path.join(os.path.dirname(__file__), "..", "logs", "publisher_diagnostics")
 
 
 class DouyinPublisher(BasePublisher):
@@ -192,25 +194,7 @@ class DouyinPublisher(BasePublisher):
                 await progress("正在上传视频文件...")
                 file_size_mb = os.path.getsize(video_path) / 1024 / 1024
                 await _show_banner(page, f"正在上传视频文件（{file_size_mb:.0f} MB），请勿操作浏览器…", "system")
-                # Try to find file input; on new Douyin UI it may need a click trigger first
-                file_input = page.locator('input[type="file"]').first
-                try:
-                    await file_input.wait_for(state="attached", timeout=30000)
-                except Exception:
-                    # Fallback: click the upload area to trigger dynamic input creation
-                    logger.info("input[type=file] not found directly, trying click trigger...")
-                    upload_area = page.locator(
-                        '[class*="upload-area"], [class*="upload-btn"], [class*="drag"], '
-                        '[class*="Upload"], .upload-inner, [data-e2e*="upload"]'
-                    ).first
-                    try:
-                        await upload_area.wait_for(state="visible", timeout=10000)
-                        await upload_area.click()
-                        await asyncio.sleep(1)
-                    except Exception:
-                        logger.warning("upload area not found either, proceeding anyway")
-                    await file_input.wait_for(state="attached", timeout=60000)
-                await file_input.set_input_files(video_path)
+                await _set_video_file_for_upload(page, video_path, task_id)
                 logger.info(f"Video file set: {video_path} ({file_size_mb:.1f} MB)")
 
                 # 3. Wait for upload/processing to complete
@@ -637,6 +621,163 @@ async def _check_login_qr(page) -> bool:
         ).first.is_visible(timeout=2000)
     except Exception:
         return False
+
+
+async def _set_video_file_for_upload(page, video_path: str, task_id) -> None:
+    """Find Douyin's upload input across old/new creator-center UIs and set the file."""
+    selectors = [
+        'input[type="file"][accept*="video"]',
+        'input[type="file"][accept*="mp4"]',
+        'input[type="file"][accept*="quicktime"]',
+        'input[type="file"]',
+    ]
+
+    for selector in selectors:
+        locator = page.locator(selector).first
+        try:
+            await locator.wait_for(state="attached", timeout=5000)
+            await locator.set_input_files(video_path)
+            logger.info(f"[task {task_id}] Upload input matched directly: {selector}")
+            return
+        except Exception:
+            pass
+
+    logger.info(f"[task {task_id}] File input not attached directly; trying upload entry clicks")
+    await _dismiss_tooltips(page)
+    await _dismiss_overlays(page)
+
+    trigger_selectors = [
+        'button:has-text("发布视频")',
+        'a:has-text("发布视频")',
+        '[role="button"]:has-text("发布视频")',
+        'button:has-text("上传视频")',
+        '[role="button"]:has-text("上传视频")',
+        'button:has-text("点击上传")',
+        '[role="button"]:has-text("点击上传")',
+        ':text("发布视频")',
+        ':text("上传视频")',
+        ':text("点击上传")',
+        ':text("选择视频")',
+        '[class*="upload-area"], [class*="uploadArea"], [class*="upload-area"] *',
+        '[class*="upload-btn"], [class*="uploadBtn"], [class*="upload-button"]',
+        '[class*="drag"], [class*="Drag"], [class*="drop"], [class*="Drop"]',
+        '[class*="Upload"], [class*="upload"], .upload-inner, [data-e2e*="upload"]',
+    ]
+    trigger_texts = ["发布视频", "上传视频", "点击上传", "选择视频", "上传", "添加视频", "本地上传"]
+
+    async def _try_inputs_after_click(label: str) -> bool:
+        for selector in selectors:
+            locator = page.locator(selector).first
+            try:
+                await locator.wait_for(state="attached", timeout=8000)
+                await locator.set_input_files(video_path)
+                logger.info(f"[task {task_id}] Upload input matched after {label}: {selector}")
+                return True
+            except Exception:
+                pass
+        return False
+
+    for selector in trigger_selectors:
+        try:
+            loc = page.locator(selector).first
+            await loc.wait_for(state="visible", timeout=3500)
+            await loc.scroll_into_view_if_needed()
+            async with page.expect_file_chooser(timeout=3000) as chooser_info:
+                await loc.click(force=True)
+            chooser = await chooser_info.value
+            await chooser.set_files(video_path)
+            logger.info(f"[task {task_id}] Upload file chooser opened by selector: {selector}")
+            return
+        except Exception:
+            try:
+                loc = page.locator(selector).first
+                if await loc.count():
+                    await loc.click(force=True, timeout=2000)
+                    await asyncio.sleep(1)
+                    if await _try_inputs_after_click(f"click {selector}"):
+                        return
+            except Exception:
+                pass
+
+    for text in trigger_texts:
+        try:
+            loc = page.get_by_text(text, exact=False).first
+            await loc.wait_for(state="visible", timeout=2500)
+            await loc.scroll_into_view_if_needed()
+            async with page.expect_file_chooser(timeout=3000) as chooser_info:
+                await loc.click(force=True)
+            chooser = await chooser_info.value
+            await chooser.set_files(video_path)
+            logger.info(f"[task {task_id}] Upload file chooser opened by text: {text}")
+            return
+        except Exception:
+            try:
+                loc = page.get_by_text(text, exact=False).first
+                if await loc.count():
+                    await loc.click(force=True, timeout=2000)
+                    await asyncio.sleep(1)
+                    if await _try_inputs_after_click(f"text {text}"):
+                        return
+            except Exception:
+                pass
+
+    diag_path = await _capture_upload_diagnostics(page, task_id, "upload_input_not_found")
+    raise RuntimeError(f"Upload input not found on Douyin creator page; diagnostics saved to {diag_path}")
+
+
+async def _capture_upload_diagnostics(page, task_id, reason: str) -> str:
+    """Save cookie-safe page diagnostics for upload-entry failures."""
+    os.makedirs(DIAGNOSTICS_DIR, exist_ok=True)
+    safe_task = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(task_id))[:80]
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    base = os.path.join(DIAGNOSTICS_DIR, f"task_{safe_task}_{reason}_{stamp}")
+    screenshot_path = base + ".png"
+    json_path = base + ".json"
+
+    data = {"task_id": task_id, "reason": reason, "screenshot": screenshot_path}
+    try:
+        data["url"] = page.url
+    except Exception as e:
+        data["url_error"] = str(e)
+    try:
+        data["title"] = await page.title()
+    except Exception as e:
+        data["title_error"] = str(e)
+    try:
+        data["visible_texts"] = await page.evaluate("""() => {
+            const nodes = [...document.querySelectorAll('button,a,[role="button"],input,textarea,[class*="upload"],[class*="Upload"]')];
+            return nodes.map(el => {
+                const rect = el.getBoundingClientRect();
+                const visible = rect.width > 0 && rect.height > 0;
+                if (!visible) return null;
+                const tag = el.tagName.toLowerCase();
+                const role = el.getAttribute('role') || '';
+                const type = el.getAttribute('type') || '';
+                const accept = el.getAttribute('accept') || '';
+                const text = (el.innerText || el.textContent || el.getAttribute('aria-label') || el.getAttribute('placeholder') || '').trim();
+                return {tag, role, type, accept, text: text.slice(0, 120)};
+            }).filter(Boolean).slice(0, 80);
+        }""")
+    except Exception as e:
+        data["visible_texts_error"] = str(e)
+    try:
+        data["html_snippet"] = await page.evaluate("""() => {
+            const txt = document.body ? document.body.innerText : '';
+            return txt.replace(/[\t ]+/g, ' ').slice(0, 4000);
+        }""")
+    except Exception as e:
+        data["html_snippet_error"] = str(e)
+    try:
+        await page.screenshot(path=screenshot_path, full_page=True)
+    except Exception as e:
+        data["screenshot_error"] = str(e)
+
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    logger.error(
+        f"[task {task_id}] Upload diagnostics saved: {json_path}; url={data.get('url')}; title={data.get('title')}"
+    )
+    return json_path
 
 
 async def _relogin_in_browser(

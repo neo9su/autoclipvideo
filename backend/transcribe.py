@@ -874,7 +874,7 @@ async def _auto_merge_group(db, group_id: int) -> bool:
 
     # Check per-pipeline statuses (0=not started, 1=running, 2=done, -1=failed)
     async with db.execute(
-        "SELECT classic_status, director_status, creative_status FROM clip_groups WHERE id = ?", (group_id,)
+        "SELECT classic_status, director_status, creative_status, qianchuan_status FROM clip_groups WHERE id = ?", (group_id,)
     ) as cur:
         grp = await cur.fetchone()
     if not grp:
@@ -885,13 +885,18 @@ async def _auto_merge_group(db, group_id: int) -> bool:
         logger.info(f"Auto-triggering classic merge for group {group_id}")
         asyncio.create_task(_merge_group(group_id))
         triggered = True
-    if grp["director_status"] == 0:
+    if grp["director_status"] in (0, -1, -3):
         logger.info(f"Auto-triggering director pipeline for group {group_id}")
         asyncio.create_task(_run_director_pipeline(group_id))
         triggered = True
     if (grp["creative_status"] or 0) == 0:
         logger.info(f"Auto-triggering creative pipeline for group {group_id}")
         asyncio.create_task(_run_creative_pipeline(group_id))
+        triggered = True
+    if (grp["qianchuan_status"] or 0) in (0, -1, -3, -4):
+        logger.info(f"Auto-triggering qianchuan pipeline for group {group_id}")
+        from api_v2 import _run_qianchuan_pipeline
+        asyncio.create_task(_run_qianchuan_pipeline(group_id))
         triggered = True
     return triggered
 
@@ -1043,6 +1048,12 @@ async def _run_director_pipeline(group_id: int):
     At most _DIRECTOR_SEM concurrent pipelines to avoid flooding GPU TTS queue.
     """
     try:
+        async with aio_connect() as db:
+            from pipeline_state import claim_pipeline_start
+            if not await claim_pipeline_start(db, "director_status", group_id):
+                logger.info(f"Director pipeline group {group_id} already running/completed — skipping")
+                return
+            await db.commit()
         # Skip if already completed (e.g. triggered again on restart)
         async with aio_connect() as db:
             async with db.execute(
@@ -1150,12 +1161,9 @@ async def _run_director_pipeline_inner(group_id: int):
             )
             await db.commit()
 
-    # Mark as in-progress
+    # The wrapper atomically claimed status=1.
     async with aio_connect() as db:
-        await db.execute(
-            "UPDATE clip_groups SET director_status = 1, director_error = NULL WHERE id = ?",
-            (group_id,)
-        )
+        await db.execute("UPDATE clip_groups SET director_error = NULL WHERE id = ?", (group_id,))
         await db.commit()
 
     try:
