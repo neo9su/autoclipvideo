@@ -3914,7 +3914,7 @@ def _stream_login_interactive_session_guard() -> Optional[dict]:
     process_user = (diagnostics.get("process_user") or "").casefold()
     active_sessions = [
         session for session in diagnostics.get("interactive_sessions", [])
-        if str(session.get("state", "")).casefold() == "active"
+        if str(session.get("state", "")).casefold() in {"active", "运行中"}
     ]
     matching = [
         session for session in active_sessions
