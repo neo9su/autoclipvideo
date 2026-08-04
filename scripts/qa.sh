@@ -18,7 +18,7 @@ run_gate() {
 run_gate lint python -m py_compile \
   backend/api_v2.py backend/db.py backend/main.py backend/voice_director.py backend/director_video.py \
   backend/qianchuan_script.py backend/qianchuan_matcher.py backend/qianchuan_video.py backend/qianchuan_quality.py \
-  backend/local_media_guard.py
+  backend/local_media_guard.py backend/test_transcribe_queue.py
 
 run_gate types python - <<'PY'
 from pathlib import Path
@@ -47,8 +47,10 @@ from qianchuan_script import generate_qianchuan_script
 from qianchuan_matcher import (load_group_context, score_product_match,
                                assess_segment_relevance, audit_qianchuan_segments)
 from qianchuan_video import build_qianchuan_ass, build_sound_cues
+from test_transcribe_queue import main_test as transcribe_queue_test
 
 async def main():
+    await transcribe_queue_test()
     fd, db_path = tempfile.mkstemp(suffix='.db')
     os.close(fd)
     os.unlink(db_path)
