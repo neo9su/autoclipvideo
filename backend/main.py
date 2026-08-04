@@ -3860,86 +3860,123 @@ _STREAM_AUTH_KEYS  = {"sessionid", "uid_tt", "sid_guard"}
 
 # Track ongoing refresh so we don't launch two browsers
 _stream_login_task: Optional[asyncio.Task] = None
+_stream_login_state = {"status": "idle", "msg": None, "detail": None}
+
+
+def _stream_login_diagnostics() -> dict:
+    """Best-effort process/session diagnostics, especially useful on Windows RDP."""
+    detail = {"pid": os.getpid(), "platform": os.name}
+    try:
+        import getpass
+        detail["process_user"] = getpass.getuser()
+    except Exception:
+        detail["process_user"] = None
+    detail["session_id"] = os.environ.get("SESSIONNAME") or os.environ.get("XDG_SESSION_ID")
+    detail["interactive_sessions"] = []
+    if os.name == "nt":
+        try:
+            result = __import__("subprocess").run(
+                ["quser"], capture_output=True, text=True, timeout=3, creationflags=0x08000000
+            )
+            detail["interactive_sessions"] = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        except Exception as exc:
+            detail["interactive_sessions_error"] = str(exc)
+    return detail
 
 
 @app.get("/api/stream-login/status")
 async def stream_login_status():
-    """Return auth-cookie status used for high-quality stream recording."""
+    """Return auth-cookie status and launch diagnostics used for high-quality stream recording."""
     files = sorted(_glob.glob(os.path.join(_STREAM_COOKIE_DIR, "douyin_*.json")))
+    refreshing = _stream_login_task is not None and not _stream_login_task.done()
+    result = {
+        "logged_in": False, "quality": "LD1", "file_age_hours": None,
+        "refreshing": refreshing, "diagnostics": _stream_login_diagnostics(),
+        "launch_status": _stream_login_state["status"],
+    }
+    if _stream_login_state["msg"]:
+        result["msg"] = _stream_login_state["msg"]
+    if _stream_login_state["detail"]:
+        result["detail"] = _stream_login_state["detail"]
     if not files:
-        return {"logged_in": False, "quality": "LD1", "reason": "未找到 Cookie 文件", "file_age_hours": None}
+        result["reason"] = "未找到 Cookie 文件"
+        return result
 
     cookie_file = files[0]
-    file_age_hours = round((_time.time() - os.path.getmtime(cookie_file)) / 3600, 1)
-
+    result["cookie_file"] = os.path.basename(cookie_file)
+    result["file_age_hours"] = round((_time.time() - os.path.getmtime(cookie_file)) / 3600, 1)
     try:
         with open(cookie_file, encoding="utf-8") as f:
             cookies = json.load(f)
         names = {c["name"] for c in cookies if "name" in c}
-        has_auth = bool(names & _STREAM_AUTH_KEYS)
-    except Exception:
-        has_auth = False
-
-    refreshing = _stream_login_task is not None and not _stream_login_task.done()
-    return {
-        "logged_in": has_auth,
-        "quality": "ORIGIN" if has_auth else "LD1",
-        "cookie_file": os.path.basename(cookie_file),
-        "file_age_hours": file_age_hours,
-        "refreshing": refreshing,
-    }
+        result["logged_in"] = bool(names & _STREAM_AUTH_KEYS)
+    except Exception as exc:
+        result["detail"] = f"Cookie 文件读取失败: {exc}"
+    result["quality"] = "ORIGIN" if result["logged_in"] else "LD1"
+    return result
 
 
 @app.post("/api/stream-login/refresh")
 async def stream_login_refresh():
-    """Launch a Playwright browser to renew Douyin live stream auth cookies."""
-    global _stream_login_task
+    """Launch a headed Playwright browser and only report success after it starts."""
+    global _stream_login_task, _stream_login_state
     if _stream_login_task and not _stream_login_task.done():
-        return {"ok": False, "msg": "登录浏览器已打开，请在浏览器中完成登录"}
+        return {"ok": False, "msg": "登录浏览器已打开，请在浏览器中完成登录", "detail": _stream_login_diagnostics()}
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError as exc:
+        _stream_login_state = {"status": "failed", "msg": "后端未安装 Playwright，无法打开登录浏览器", "detail": "请在运行 8899 后端的 Python 环境执行: pip install playwright && playwright install chromium"}
+        logger.error("[stream-login] playwright not installed")
+        raise HTTPException(status_code=503, detail={"msg": _stream_login_state["msg"], "detail": _stream_login_state["detail"], "diagnostics": _stream_login_diagnostics()}) from exc
+
+    ready = asyncio.get_running_loop().create_future()
+    _stream_login_state = {"status": "starting", "msg": None, "detail": None}
 
     async def _do_browser_login():
+        global _stream_login_state
+        browser = None
         try:
-            from playwright.async_api import async_playwright
-        except ImportError:
-            logger.error("playwright not installed")
-            return
-
-        os.makedirs(_STREAM_COOKIE_DIR, exist_ok=True)
-        cookie_file = os.path.join(_STREAM_COOKIE_DIR, "douyin_stream.json")
-
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=False)
-            try:
+            os.makedirs(_STREAM_COOKIE_DIR, exist_ok=True)
+            cookie_file = os.path.join(_STREAM_COOKIE_DIR, "douyin_stream.json")
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=False)
                 ctx = await browser.new_context()
                 page = await ctx.new_page()
                 await page.goto("https://live.douyin.com/", timeout=30000, wait_until="domcontentloaded")
-                logger.info("[stream-login] Browser opened — waiting for user to log in (max 5 min)…")
-
+                _stream_login_state = {"status": "running", "msg": "登录浏览器已启动，请在可见窗口中完成登录", "detail": _stream_login_diagnostics()}
+                if not ready.done():
+                    ready.set_result(True)
+                logger.info("[stream-login] Browser started; waiting for user to log in (max 5 min)…")
                 deadline = _time.time() + 300
                 while _time.time() < deadline:
                     cookies = await ctx.cookies("https://live.douyin.com")
-                    names = {c["name"] for c in cookies}
-                    if names & _STREAM_AUTH_KEYS:
-                        logger.info("[stream-login] Auth cookies detected, saving…")
+                    if {c["name"] for c in cookies if "name" in c} & _STREAM_AUTH_KEYS:
                         with open(cookie_file, "w", encoding="utf-8") as f:
                             json.dump(cookies, f, ensure_ascii=False, indent=2)
-                        # Reset douyin_live cache so next recording picks up new cookies
                         import douyin_live as _dl
                         _dl._auth_cookies_loaded = False
                         _dl._auth_cookies = {}
-                        logger.info(f"[stream-login] Cookies saved to {cookie_file}")
-                        await page.close()
+                        _stream_login_state = {"status": "completed", "msg": "登录成功，Cookie 已保存", "detail": _stream_login_diagnostics()}
                         break
                     await asyncio.sleep(2)
                 else:
-                    logger.warning("[stream-login] Login timed out")
-            except Exception as e:
-                logger.error(f"[stream-login] Browser error: {e}")
-            finally:
+                    _stream_login_state = {"status": "timed_out", "msg": "登录超时，未检测到抖音登录 Cookie", "detail": _stream_login_diagnostics()}
+                await page.close()
+        except Exception as exc:
+            _stream_login_state = {"status": "failed", "msg": "登录浏览器启动失败", "detail": str(exc), "diagnostics": _stream_login_diagnostics()}
+            logger.exception("[stream-login] Browser error")
+            if not ready.done():
+                ready.set_exception(exc)
+        finally:
+            if browser is not None:
                 await browser.close()
 
     _stream_login_task = asyncio.create_task(_do_browser_login())
-    return {"ok": True, "msg": "已打开登录浏览器，请在弹出的 Chrome 窗口中登录抖音直播间"}
+    try:
+        await asyncio.wait_for(asyncio.shield(ready), timeout=35)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail={"msg": _stream_login_state["msg"] or "登录浏览器启动失败", "detail": _stream_login_state["detail"] or str(exc), "diagnostics": _stream_login_diagnostics()}) from exc
+    return {"ok": True, "msg": _stream_login_state["msg"], "detail": _stream_login_state["detail"]}
 
 
 # ── Static frontend ───────────────────────────────────────────────────────────
