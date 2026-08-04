@@ -6,7 +6,13 @@
 
 import asyncio
 import logging
-from gpu_execution import reject_local_media, require_remote_gpu
+from gpu_execution import media_execution_node, reject_local_media, require_remote_gpu
+from video_editing_skills import (
+    build_edit_sound_cues,
+    build_pip_filter,
+    normalize_transition_name,
+    should_enable_pip,
+)
 import json
 import time
 from pathlib import Path
@@ -487,7 +493,16 @@ class DirectorVideoComposer:
             # video clip duration 已对齐 TTS，字幕用同一个 tts_dur_by_scene 保证同步
             ass_content = config.get("qianchuan_ass_content") or _build_director_ass(video_clips, tr_dur, tts_dur_by_scene)
 
+            config = dict(config)
+            config["qianchuan_sound_cues"] = build_edit_sound_cues(
+                video_clips,
+                transition_duration=tr_dur,
+                existing_cues=config.get("qianchuan_sound_cues", []),
+                sfx_overrides=config.get("sfx_assets"),
+            )
+
             # 4. 读取 TTS 音频 → base64
+
             import base64 as _b64
             tts_b64 = ""
             try:
@@ -511,7 +526,7 @@ class DirectorVideoComposer:
                     "duration":  c["duration"],
                     "scene_type": c.get("scene_type", ""),
                     "camera_direction": c.get("camera_direction", "static"),
-                    "transition_type": c.get("transition_type", "xfade"),
+                    "transition_type": normalize_transition_name(c.get("transition_type", "xfade")),
                     "shot_index": c.get("shot_index", 0),
                     "shot_count": c.get("shot_count", 1),
                     "edit_actions": c.get("edit_actions", []),
@@ -521,8 +536,9 @@ class DirectorVideoComposer:
             # 计算总 TTS 时长，传给 GPU 用 -t 精确控制输出时长（替代 -shortest）
             total_tts_duration = sum(tts_dur_by_scene.values()) if tts_dur_by_scene else 0.0
 
+            # Contract value is intentionally remote-gpu; media_execution_node validates the configured target.
             payload = {
-                "execution_node": "remote-gpu",
+                "execution_node": media_execution_node("director composition"),
                 "execution_service": self._GPU_SERVICE_URL,
                 "clips": clips_payload,
                 "ass_content": ass_content,
@@ -659,12 +675,15 @@ class DirectorVideoComposer:
         if not transition or transition in ('xfade', 'cut'):
             transition = self._scene_transition_defaults.get(scene_type, transition or 'xfade')
 
+        transition = normalize_transition_name(transition)
+
         enriched['scene_type'] = scene_type
         enriched['camera_direction'] = camera
         enriched['transition_type'] = transition
         enriched['shot_index'] = shot_index
         enriched['edit_actions'] = self._normalize_edit_actions(enriched.get('edit_actions') or [])
-
+        if should_enable_pip(scene_type, enriched['edit_actions']):
+            enriched['pip_detail'] = True
         # 千川脚本会把高级动作落在 edit_actions 中。GPU 直接消费 edit_actions；
         # 本地 fallback 同步把这些动作降级成已有 camera_direction/scene_type 语义，
         # 避免 GPU 不可用时丢失重点运镜。
@@ -1304,7 +1323,8 @@ class DirectorVideoComposer:
 
     def _build_clip_filter(self, style_config: Dict, config: Dict, 
                            scene_type: Optional[str] = None,
-                           camera_direction: Optional[str] = None) -> str:
+                           camera_direction: Optional[str] = None,
+                           pip_detail: bool = False) -> str:
         """构建单片段视频滤镜，支持 scene_type 和 camera_direction 差异化处理。
         
         场景视觉区分：
@@ -1428,7 +1448,10 @@ class DirectorVideoComposer:
         filters.append(f"fps={self.output_settings['fps']}")
         filters.append("format=yuv420p")
 
-        return ','.join(filters)
+        base_filter = ','.join(filters)
+        if pip_detail:
+            return base_filter + build_pip_filter(self.output_settings['width'], self.output_settings['height'])
+        return base_filter
 
     def _build_zoompan(self, direction: str, w: int, h: int) -> Optional[str]:
         """根据 camera_direction 构建 zoompan 滤镜字符串。
@@ -1731,7 +1754,7 @@ class DirectorVideoComposer:
             offset = max(0.0, cumulative + clip_durs[i - 1] - tr_dur)
             cumulative = offset  # next offset reference = this clip's effective end
             fc_parts.append(
-                f"{in_label}[{i}:v]xfade=transition={tr_type}"
+                f"{in_label}[{i}:v]xfade=transition={normalize_transition_name(tr_type)}"
                 f":duration={tr_dur:.3f}:offset={offset:.3f}{out_label}"
             )
 
