@@ -17,3 +17,21 @@ export function remoteUrl(path) {
 export function remoteFetch(path, options) {
   return fetch(remoteUrl(path), options)
 }
+
+
+export async function readApiResponse(response, fallback = '请求失败') {
+  const text = await response.text()
+  let payload = null
+  try {
+    payload = text ? JSON.parse(text) : null
+  } catch {
+    payload = text
+  }
+  if (!response.ok) {
+    const message = payload && typeof payload === 'object'
+      ? payload.detail || payload.error || payload.message
+      : typeof payload === 'string' ? payload.trim() : ''
+    throw new Error(message || fallback)
+  }
+  return payload
+}

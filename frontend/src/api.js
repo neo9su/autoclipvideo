@@ -2,36 +2,28 @@ import { REMOTE_API_BASE, REMOTE_WS_BASE } from './remoteApi.js'
 
 const BASE = REMOTE_API_BASE
 
-async function readErrorMessage(response, fallback = '请求失败') {
-  const contentType = response.headers.get('content-type') || ''
-  if (contentType.includes('application/json')) {
-    try {
-      const payload = await response.json()
-      if (typeof payload === 'string') return payload
-      if (payload?.detail) return Array.isArray(payload.detail) ? payload.detail.map(item => item.msg || item).join('; ') : String(payload.detail)
-      if (payload?.error) return String(payload.error)
-      if (payload?.message) return String(payload.message)
-    } catch {
-      // Fall through to the text response for malformed JSON.
-    }
-  }
+async function parseResponse(res) {
+  const text = await res.text()
+  if (!text) return null
   try {
-    const text = (await response.text()).trim()
-    if (text) return text.slice(0, 500)
+    return JSON.parse(text)
   } catch {
-    // Use the fallback when the response body cannot be read.
+    return text
   }
-  return fallback
+}
+
+function responseError(payload, fallback) {
+  if (payload && typeof payload === 'object') {
+    return payload.detail || payload.error || payload.message || fallback
+  }
+  return typeof payload === 'string' && payload.trim() ? payload.trim() : fallback
 }
 
 async function requestJson(url, options, fallback = '请求失败') {
-  const response = await fetch(url, options)
-  if (!response.ok) throw new Error(await readErrorMessage(response, fallback))
-  try {
-    return await response.json()
-  } catch {
-    throw new Error('服务器返回了无效数据')
-  }
+  const res = await fetch(url, options)
+  const payload = await parseResponse(res)
+  if (!res.ok) throw new Error(responseError(payload, fallback))
+  return payload
 }
 
 export async function getRooms() {
@@ -448,9 +440,11 @@ export async function getStats() {
 }
 
 export async function getProcessingProgress() {
-  const res = await fetch(`${BASE}/api/recordings/processing-progress`)
-  if (!res.ok) return {}
-  return res.json()
+  try {
+    return await requestJson(`${BASE}/api/recordings/processing-progress`, undefined, '处理进度加载失败')
+  } catch {
+    return {}
+  }
 }
 
 export async function getClipJobs() {
