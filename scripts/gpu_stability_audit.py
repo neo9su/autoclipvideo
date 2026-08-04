@@ -1,60 +1,60 @@
-"""Bounded Windows GPU service audit helpers.
-
-The commands in this module are intended to run on the GPU host and use tail
-reads only. They never kill a process without an explicit evidence review.
-"""
+"""Safe GPU host audit helpers using bounded tail reads; never kills processes."""
 from __future__ import annotations
-
+import argparse
 import json
+import os
+import re
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
 
-
-def tail_lines(path: Path, line_count: int = 200) -> List[str]:
-    """Read only the final bounded number of lines without loading a huge log."""
-    if line_count <= 0:
-        raise ValueError("line_count must be positive")
-    if not path.exists():
-        return []
+def tail_bytes(path: Path, limit: int = 256 * 1024) -> str:
+    """Return only the final bounded bytes from a log file."""
+    if limit <= 0:
+        raise ValueError("limit must be positive")
+    if not path.is_file():
+        return ""
     with path.open("rb") as stream:
-        stream.seek(0, 2)
-        position = stream.tell()
-        chunks: List[bytes] = []
-        newline_count = 0
-        while position > 0 and newline_count <= line_count:
-            read_size = min(64 * 1024, position)
-            position -= read_size
-            stream.seek(position)
-            chunk = stream.read(read_size)
-            chunks.append(chunk)
-            newline_count += chunk.count(b"\n")
-    return b"".join(reversed(chunks)).decode("utf-8", errors="replace").splitlines()[-line_count:]
+        stream.seek(0, os.SEEK_END)
+        stream.seek(max(0, stream.tell() - limit))
+        return stream.read(limit).decode("utf-8", errors="replace")
 
 
-def audit_whisper_process(processes: Iterable[Dict[str, Any]], pid: int) -> Dict[str, Any]:
+def summarize_log(path: Path, limit: int = 256 * 1024) -> dict:
+    """Summarize bounded log evidence without loading the full file."""
+    text = tail_bytes(path, limit)
+    patterns = {
+        "tracebacks": r"Traceback \(most recent call last\)",
+        "out_of_memory": r"out of memory|CUDA out of memory|OutOfMemoryError",
+        "exceptions": r"\b(?:ERROR|CRITICAL|Exception|Error)\b",
+        "exit_codes": r"(?:exit|return)\s*(?:code|status)?\s*[=:]\s*(-?\d+)",
+    }
+    summary = {name: len(re.findall(pattern, text, re.IGNORECASE)) for name, pattern in patterns.items()}
+    summary.update({"bytes_read": len(text.encode("utf-8")), "path": str(path), "exists": path.is_file()})
+    return summary
+
+
+def audit_whisper_process(process_rows: list[dict], pid: int) -> dict:
     """Classify a Whisper process from supplied evidence; never terminate it."""
-    matches = [item for item in processes if int(item.get("pid", -1)) == pid]
-    if not matches:
-        return {"pid": pid, "found": False, "action": "observe"}
-    process = matches[0]
-    has_job_marker = bool(process.get("job_id") or process.get("input_path") or process.get("queue_entry"))
+    row = next((item for item in process_rows if int(item.get("pid", -1)) == pid), None)
+    if row is None:
+        return {"pid": pid, "conclusion": "not_found", "action": "observe"}
+    has_job_evidence = bool(row.get("job_id") or row.get("input_path") or row.get("queue_entry"))
     return {
         "pid": pid,
-        "found": True,
-        "action": "retain" if has_job_marker else "manual_review",
-        "has_job_evidence": has_job_marker,
-        "evidence": {key: process.get(key) for key in ("command", "job_id", "input_path", "cpu_time") if process.get(key)},
+        "conclusion": "job_evidence_found" if has_job_evidence else "needs_job_correlation",
+        "action": "retain" if has_job_evidence else "manual_review",
+        "process": row,
     }
 
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--log", action="append", type=Path, default=[])
+    parser.add_argument("--whisper-pid", type=int)
+    parser.add_argument("--process-json", type=Path)
+    args = parser.parse_args()
+    report = {"logs": [summarize_log(path) for path in args.log if path.is_file()]}
+    if args.whisper_pid is not None:
+        rows = json.loads(args.process_json.read_text(encoding="utf-8")) if args.process_json else []
+        report["whisper"] = audit_whisper_process(rows, args.whisper_pid)
+    print(json.dumps(report, ensure_ascii=False, indent=2)); return 0
 
-def render_service_report(status: Dict[str, Any], log_paths: Iterable[Path]) -> str:
-    """Render an auditable status report from watchdog data and bounded logs."""
-    lines = ["# GPU service stability audit", "", "## Service status"]
-    for name, details in status.items():
-        lines.append(f"- {name}: {json.dumps(details, ensure_ascii=False, sort_keys=True)}")
-    lines.append("\n## Log tails")
-    for path in log_paths:
-        lines.append(f"\n### {path.name}")
-        lines.extend(f"    {line}" for line in tail_lines(path))
-    lines.append("\n## Policy\n- Do not kill Whisper without job evidence.\n- GPU failures wait for remote recovery; no macOS fallback.")
-    return "\n".join(lines) + "\n"
+if __name__ == "__main__": raise SystemExit(main())

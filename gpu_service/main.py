@@ -5,6 +5,10 @@ Run on GPU server: uvicorn main:app --host 0.0.0.0 --port 8877
 # Set HuggingFace offline flags BEFORE any imports so huggingface_hub.constants
 # reads them at import time and never attempts network access.
 import os
+import platform
+
+if platform.system() == "Darwin":
+    raise SystemExit("gpu_service is remote-only; local worker startup is forbidden")
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("HUGGINGFACE_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
@@ -22,8 +26,15 @@ import sys as _sys
 import time
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-logger = logging.getLogger(__name__)
+try:
+    from logging_setup import configure_rotating_logging
+except ImportError:
+    from .logging_setup import configure_rotating_logging
+
+logger = configure_rotating_logging("gpu_service", "gpu_service.log", default_directory=str(Path(__file__).parent))
+_SERVICE_STARTED_AT = time.time()
 
 import aiofiles
 import torchaudio
@@ -913,22 +924,6 @@ async def _lifespan(app: FastAPI):
 app = FastAPI(title="Douyin GPU Service", lifespan=_lifespan)
 
 
-# ── Admin (temporary) ───────────────────────────────────────────────────────
-
-@app.post("/admin/exec")
-async def admin_exec(req: dict):
-    """Execute a shell command (for maintenance). Remove after use."""
-    import subprocess
-    cmd = req.get("cmd", "")
-    if not cmd:
-        return {"error": "no cmd"}
-    try:
-        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=120)
-        return {"returncode": r.returncode, "stdout": r.stdout[-4000:], "stderr": r.stderr[-2000:]}
-    except subprocess.TimeoutExpired:
-        return {"error": "timeout"}
-
-
 # ── Health ────────────────────────────────────────────────────────────────────
 
 @app.get("/health")
@@ -939,8 +934,25 @@ async def health():
     clip_pending = sum(1 for j in _clip_jobs.values() if j.get("status") == "queued")
     concat_running = sum(1 for j in _concat_jobs.values() if j.get("status") == "queued")
     classic_concat_running = sum(1 for j in _classic_concat_jobs.values() if j.get("status") in ("queued", "processing"))
+    cuda = {}
+    try:
+        import torch
+        cuda = {
+            "available": bool(torch.cuda.is_available()),
+            "device_count": int(torch.cuda.device_count()),
+            "device": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+        }
+    except Exception as exc:
+        cuda = {"available": False, "error": type(exc).__name__}
     return {
         "status": "ok",
+        "service": "gpu",
+        "pid": os.getpid(),
+        "started_at": _SERVICE_STARTED_AT,
+        "uptime_s": int(time.time() - _SERVICE_STARTED_AT),
+        "exit_code": None,
+        "health": "healthy",
+        "cuda": cuda,
         "jobs": len(_jobs),
         "gpu_busy": _gpu_sem.locked(),
         "queue_depth": queued,

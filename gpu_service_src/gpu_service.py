@@ -5,6 +5,10 @@ Run on GPU server: uvicorn main:app --host 0.0.0.0 --port 8877
 # Set HuggingFace offline flags BEFORE any imports so huggingface_hub.constants
 # reads them at import time and never attempts network access.
 import os
+import platform
+
+if platform.system() == "Darwin":
+    raise SystemExit("gpu_service is remote-only; local worker startup is forbidden")
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("HUGGINGFACE_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
@@ -24,7 +28,12 @@ import uuid
 from contextlib import asynccontextmanager
 from io import StringIO as _StringIO
 
-logger = logging.getLogger(__name__)
+try:
+    from logging_setup import configure_rotating_logging
+except ImportError:
+    from .logging_setup import configure_rotating_logging
+
+logger = configure_rotating_logging("gpu_service", "gpu_service.log", default_directory=str(Path(__file__).parent))
 
 import aiofiles
 import torchaudio
