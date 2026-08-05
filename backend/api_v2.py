@@ -98,6 +98,7 @@ class QianchuanGenerateRequest(BaseModel):
     ai_usage: List[str] = Field(default_factory=list, max_length=10)
     ai_generated_human_wig_scene: bool = False
     execution_node: str = "remote-gpu"
+    preview_mode: bool = False  # Explicit sample mode; never used for delivery eligibility
 
 class QianchuanGenerateResponse(BaseModel):
     success: bool
@@ -176,6 +177,7 @@ async def generate_qianchuan(request: QianchuanGenerateRequest):
         target_duration=request.target_duration,
         selling_points=product_keywords,
     )
+    script["preview_mode"] = request.preview_mode
     metadata = build_qianchuan_metadata(
         target_audience=request.target_audience,
         excluded_audiences=request.excluded_audiences,
@@ -306,7 +308,10 @@ async def _run_qianchuan_pipeline(group_id: int) -> None:
             raise RuntimeError("group not found")
         group = context["group"]
         match = score_product_match(context, keywords=[group.get("label"), group.get("wig_model"), group.get("wig_color")], threshold=0.0)
-        script = generate_qianchuan_script(group, product_context=match.get("product") or {}, selling_points=[])
+        script = generate_qianchuan_script(
+            group, product_context=match.get("product") or {}, selling_points=[]
+        )
+        script["preview_mode"] = False
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("UPDATE clip_groups SET qianchuan_script=?, qianchuan_score=?, qianchuan_review=? WHERE id=?", (json.dumps(script, ensure_ascii=False), match.get("score"), json.dumps(match, ensure_ascii=False), group_id))
             await db.commit()
@@ -355,14 +360,28 @@ async def _qianchuan_generate_bg(group_id: int, script: Dict) -> None:
             matched = await matcher.match_qianchuan_segments(script_segments, group_id)
             audit = audit_qianchuan_segments(matched, audio_segments)
             review_payload = {"matching": matched, "relevance_audit": audit}
-            if len(matched) < max(3, len(script_segments) - 1):
-                raise RuntimeError("千川镜头匹配不足，拒绝生成")
-            if not audit.get("ok"):
+            minimum_matches = max(3, len(script_segments) - 1)
+            if len(matched) < minimum_matches and not script.get("preview_mode"):
+                detail = {
+                    "matched_count": len(matched), "required_count": minimum_matches,
+                    "matched_scene_ids": [item.get("script_segment", {}).get("scene_id") for item in matched],
+                    "reason": "recordings unavailable or no usable SRT match",
+                }
+                logger.error("Qianchuan shot matching insufficient for group %s: %s", group_id, detail)
+                await _set_qianchuan_error(group_id, -2, "千川镜头匹配不足: " + json.dumps(detail, ensure_ascii=False), review_payload)
+                await _broadcast({"type": "qianchuan_error", "group_id": group_id, "error": detail, "review": review_payload})
+                return
+            if not audit.get("ok") and not script.get("preview_mode"):
                 await _set_qianchuan_error(
                     group_id, -2, "千川文案-画面相关性不足，拒绝无关素材: "
                     + "; ".join(audit.get("rejection_reasons", []))[:450], review_payload)
                 await _broadcast({"type": "qianchuan_relevance_rejected", "group_id": group_id, "review": review_payload})
                 return
+
+            if script.get("preview_mode"):
+                review_payload["preview_mode"] = True
+                review_payload["delivery_eligible"] = False
+                logger.warning("Generating explicit Qianchuan preview for group %s despite strict audit", group_id)
 
             async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute(
