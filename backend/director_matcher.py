@@ -566,7 +566,7 @@ class SemanticMatcher:
             async with aiosqlite.connect(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
                 async with db.execute(
-                    "SELECT id, filename, start_time, end_time FROM recordings"
+                    "SELECT id, filename, clip_filename, start_time, end_time FROM recordings"
                     " WHERE group_id = ? AND clipped = 2 AND local_deleted = 0"
                     " ORDER BY start_time",
                     (group_id,),
@@ -575,7 +575,10 @@ class SemanticMatcher:
 
             for row in rows:
                 # 计算实际文件时长（用 ffprobe，而非数据库的 start/end time）
-                filepath = os.path.join(recordings_dir, row["filename"])
+                source_filename = row["filename"]
+                clip_filename = row["clip_filename"]
+                media_filename = clip_filename if clip_filename and os.path.exists(os.path.join(recordings_dir, clip_filename)) else source_filename
+                filepath = os.path.join(recordings_dir, media_filename)
                 duration = 30.0
                 if os.path.exists(filepath):
                     try:
@@ -600,7 +603,7 @@ class SemanticMatcher:
 
                 srt_path = os.path.join(
                     recordings_dir,
-                    os.path.splitext(row["filename"])[0] + ".srt",
+                    os.path.splitext(source_filename)[0] + ".srt",
                 )
                 
                 # 解析 SRT 为结构化段落（保留时间戳）
@@ -610,7 +613,8 @@ class SemanticMatcher:
 
                 recordings.append({
                     "recording_id": row["id"],
-                    "filename": row["filename"],
+                    "filename": media_filename,
+                    "source_filename": source_filename,
                     "transcript_text": transcript_text,
                     "srt_entries": srt_entries,
                     "duration": duration,
