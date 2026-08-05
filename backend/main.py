@@ -3223,6 +3223,10 @@ async def create_publish_task(body: PublishTaskCreate):
         video_path = os.path.join(
             os.path.dirname(__file__), "..", "recordings", group["merged_filename"]
         )
+    from video_path_resolver import resolve_video_path, describe_missing
+    video_path, path_reason = resolve_video_path(video_path, dict(group))
+    if not video_path:
+        raise HTTPException(status_code=409, detail=describe_missing(body.group_id, path_reason))
 
     status = "scheduled" if body.scheduled_at else "pending"
     product_ids_str = ",".join(str(i) for i in body.product_ids) if body.product_ids else None
@@ -3280,10 +3284,18 @@ async def get_unscheduled_groups(platform: str = "douyin", room_id: Optional[int
         if room_id:
             sql += " AND g.room_id = ?"
             params.append(room_id)
-        sql += " ORDER BY g.created_at ASC"
         async with db.execute(sql, params) as cur:
             rows = await cur.fetchall()
-    return [dict(r) for r in rows]
+    from video_path_resolver import resolve_video_path
+    available_rows = []
+    for row in rows:
+        resolved, reason = resolve_video_path(None, dict(row))
+        item = dict(row)
+        item["video_available"] = bool(resolved)
+        item["missing_reason"] = None if resolved else reason
+        if resolved:
+            available_rows.append(item)
+    return available_rows
 
 
 @app.post("/api/publish-tasks/batch-schedule", status_code=201)
@@ -3420,6 +3432,12 @@ async def batch_schedule_tasks(body: BatchScheduleCreate):
                 video_path = os.path.join(video_base, group["merged_filename"])
             else:
                 continue  # no video available, skip
+
+            resolved_path, path_reason = resolve_video_path(video_path, dict(group))
+            if not resolved_path:
+                logger.warning("Skipping batch group %s: %s", group["id"], path_reason)
+                continue
+            video_path = resolved_path
 
             cur = await db.execute(
                 """INSERT INTO publish_tasks

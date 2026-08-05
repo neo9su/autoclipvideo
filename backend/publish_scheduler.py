@@ -13,6 +13,7 @@ import aiosqlite
 
 from db import DB_PATH, aio_connect
 from notifier import notify
+from video_path_resolver import resolve_video_path, describe_missing
 
 logger = logging.getLogger(__name__)
 
@@ -126,12 +127,25 @@ async def _execute_task(task: dict, broadcast_fn: Optional[Callable] = None):
 
         publisher = _get_publisher(platform)
 
-        # Resolve video path
-        video_path = task.get("video_path")
-        if not video_path and task.get("merged_filename"):
-            video_path = os.path.join(RECORDINGS_DIR, task["merged_filename"])
-        if not video_path or not os.path.exists(video_path):
-            raise RuntimeError(f"Video file not found: {video_path}")
+        # Resolve current group artifacts and migrated paths before publishing.
+        group_id = task.get("group_id")
+        group = None
+        if group_id:
+            async with aio_connect() as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute(
+                    "SELECT merged_filename, qianchuan_final_video, creative_final_video, director_final_video FROM clip_groups WHERE id = ?",
+                    (group_id,),
+                ) as cur:
+                    group = await cur.fetchone()
+        video_path, path_reason = resolve_video_path(task.get("video_path"), dict(group) if group else None)
+        if not video_path:
+            raise RuntimeError(describe_missing(task.get("video_path"), path_reason))
+        if video_path != task.get("video_path"):
+            logger.info("Task %s recovered video path: %s (%s)", task_id, video_path, path_reason)
+            async with aio_connect() as db:
+                await db.execute("UPDATE publish_tasks SET video_path = ? WHERE id = ?", (video_path, task_id))
+                await db.commit()
 
         # Quality gate: resolution, fps, duration
         passed, quality_reason = await check_video_quality(video_path)
