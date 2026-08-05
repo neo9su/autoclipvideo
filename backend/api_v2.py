@@ -395,7 +395,7 @@ async def _qianchuan_generate_bg(group_id: int, script: Dict) -> None:
             composer = QianchuanVideoComposer(recordings_dir)
             output_path = await composer.compose_qianchuan_video(matched, audio_path, script, audio_segments)
             if not output_path:
-                raise RuntimeError("千川视频合成失败")
+                raise RuntimeError("千川视频合成失败: composer returned no output; check director/GPU logs")
 
             # 4) Quality gate. Keep statuses separate: -3 quality failure, -4 probe/encode failure.
             try:

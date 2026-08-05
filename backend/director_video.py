@@ -646,7 +646,7 @@ class DirectorVideoComposer:
 
         except Exception as e:
             logger.error(f"[DIRECTOR] compose_final_video UNHANDLED ERROR: {e}", exc_info=True)
-            return None
+            raise RuntimeError(f"remote director composition failed: {type(e).__name__}: {e}") from e
 
     def _enrich_clip_directives(self, clip: Dict, shot_index: int = 0) -> Dict:
         """补齐场景驱动的镜头/转场指令，保证 GPU 与本地 fallback 都有明确剪辑动作。
@@ -826,6 +826,7 @@ class DirectorVideoComposer:
         for i, segment_data in enumerate(matched_segments):
             recording_id = segment_data.get('matched_recording_id')
             if not recording_id:
+                logger.warning("Segment %s has no recording_id; skipping", i)
                 continue
             
             # 查找录像文件（含 room_id、filename）
