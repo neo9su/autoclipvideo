@@ -437,12 +437,16 @@
             <option value="month">月后</option>
             <option value="year">年后</option>
           </select>
-          <input v-model="batchForm.end_datetime" type="datetime-local" class="input" />
+          <input v-model="batchForm.end_datetime" type="datetime-local" class="input" @change="refreshBatchSelection" />
         </div>
         <div class="field-hint">选择周期会自动填充结束时间，也可以直接修改右侧时间。</div>
 
         <label>发布间隔（分钟）</label>
-        <input v-model.number="batchForm.interval_minutes" type="number" min="1" class="input" />
+        <input v-model.number="batchForm.interval_minutes" type="number" min="1" class="input" @input="refreshBatchSelection" />
+        <div class="batch-selection-summary">
+          预计需要 <strong>{{ requiredBatchCount }}</strong> 个视频，当前已选 <strong>{{ displayedGroups.length }}</strong> 个
+          <span v-if="availableBatchCount < requiredBatchCount" class="batch-shortage">未发布视频不足（仅 {{ availableBatchCount }} 个）</span>
+        </div>
 
         <div class="no-cart-row" style="margin:12px 0 4px">
           <button :class="['no-cart-btn', batchForm.no_cart ? 'no-cart-btn-on' : 'no-cart-btn-off']"
@@ -487,7 +491,8 @@
         <!-- Preview -->
         <div v-if="displayedGroups.length" class="batch-preview">
           <div class="batch-preview-title">
-            待排期分组（{{ displayedGroups.length }} 个）：
+            待排期分组（{{ displayedGroups.length }} 个）
+            <button v-if="selectedGroupIds.size < unscheduledGroups.length" class="btn-xs" @click="selectMoreBatchGroups">补选视频</button>
           </div>
           <div class="batch-preview-list">
             <div v-for="(g, i) in displayedGroups" :key="g.id" class="batch-preview-item">
@@ -596,12 +601,44 @@ const batchLoading = ref(false)
 const unscheduledGroups = ref([])
 const excludedGroupIds = ref(new Set())
 
+const selectedGroupIds = ref(new Set())
+
 const displayedGroups = computed(() =>
-  unscheduledGroups.value.filter(g => !excludedGroupIds.value.has(g.id))
+  unscheduledGroups.value.filter(g => selectedGroupIds.value.has(g.id))
 )
+const availableBatchCount = computed(() => unscheduledGroups.value.length)
+const requiredBatchCount = computed(() => batchSlotCount(batchForm.value.start_datetime, batchForm.value.end_datetime, batchForm.value.interval_minutes))
+
+function batchSlotCount(startValue, endValue, intervalMinutes) {
+  if (!startValue || !endValue || !intervalMinutes || intervalMinutes < 1) return 0
+  const start = new Date(startValue)
+  const end = new Date(endValue)
+  if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime()) || end <= start) return 0
+  const totalMinutes = Math.floor((end - start) / 60000)
+  // Batch publishing reserves the first four hours of a day for preparation;
+  // this keeps the displayed count consistent with the scheduler's publish window.
+  const preparationMinutes = start.getHours() < 9 && end.getHours() >= 9 ? 4 * 60 : 0
+  return Math.max(0, Math.floor((totalMinutes - preparationMinutes) / intervalMinutes))
+}
+
+function autoSelectBatchGroups() {
+  const target = requiredBatchCount.value
+  selectedGroupIds.value = new Set(unscheduledGroups.value.slice(0, target).map(g => g.id))
+}
+
+function selectMoreBatchGroups() {
+  const target = Math.max(requiredBatchCount.value, selectedGroupIds.value.size + 1)
+  selectedGroupIds.value = new Set(unscheduledGroups.value.slice(0, target).map(g => g.id))
+}
+
+function refreshBatchSelection() {
+  autoSelectBatchGroups()
+}
 
 function excludeGroup(groupId) {
-  excludedGroupIds.value = new Set([...excludedGroupIds.value, groupId])
+  const next = new Set(selectedGroupIds.value)
+  next.delete(groupId)
+  selectedGroupIds.value = next
 }
 
 function _defaultBatchStart() {
@@ -655,6 +692,7 @@ function fillBatchEndTime() {
   if (!batchForm.value.start_datetime) return
   const end = addBatchPeriod(new Date(batchForm.value.start_datetime), batchForm.value.period_value, batchForm.value.period_unit)
   batchForm.value.end_datetime = end.toISOString().slice(0, 16)
+  refreshBatchSelection()
 }
 
 const batchFilteredProducts = computed(() => {
@@ -682,6 +720,7 @@ async function loadUnscheduledGroups() {
   batchLoading.value = true
   try {
     unscheduledGroups.value = await getUnscheduledGroups(batchForm.value.platform, batchForm.value.room_id)
+    autoSelectBatchGroups()
   } finally {
     batchLoading.value = false
   }
@@ -691,6 +730,7 @@ async function openBatchModal() {
   batchForm.value.start_datetime = _defaultBatchStart()
   fillBatchEndTime()
   excludedGroupIds.value = new Set()
+  selectedGroupIds.value = new Set()
   showBatchModal.value = true
   await loadUnscheduledGroups()
 }
@@ -745,6 +785,7 @@ async function _doSubmitBatch() {
       auto_meta: batchForm.value.auto_meta,
       room_id: batchForm.value.room_id || null,
       exclude_group_ids: excludedGroupIds.value.size ? [...excludedGroupIds.value] : null,
+      include_group_ids: [...selectedGroupIds.value],
     })
     showBatchModal.value = false
     cookieCheckPending.value = false
@@ -1539,6 +1580,9 @@ label { display: block; font-size: 12px; color: #888; margin: 12px 0 4px; }
 .batch-end-time-row .batch-period-value { width: 64px; }
 .batch-end-time-row .batch-period-unit { width: 82px; }
 .field-hint { color: #777; font-size: 11px; margin: 4px 0 8px; }
+.batch-selection-summary { padding: 8px 10px; margin: 8px 0 10px; border-radius: 6px; background: rgba(59,130,246,0.08); color: #aaa; font-size: 12px; }
+.batch-selection-summary strong { color: #60a5fa; }
+.batch-shortage { display: block; color: #f59e0b; margin-top: 4px; }
 .batch-preview { background: #111; border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px 12px; margin: 10px 0; max-height: 220px; overflow-y: auto; }
 .batch-preview-title { font-size: 12px; color: #999; margin-bottom: 6px; }
 .batch-preview-item { display: flex; align-items: center; gap: 8px; padding: 4px 0; border-bottom: 1px solid #1e1e1e; font-size: 12px; }
