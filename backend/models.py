@@ -84,6 +84,7 @@ class BatchScheduleCreate(BaseModel):
     product_ids: Optional[List[int]] = None  # 统一挂载商品（可不填）
     room_id: Optional[int] = None        # 只排期指定直播间的分组（None = 全部）
     exclude_group_ids: Optional[List[int]] = None  # 排除的分组 ID
+    include_group_ids: Optional[List[int]] = None  # 前端按排期槽位选择的分组 ID
 
 
 # ── Director Mode models ──────────────────────────────────────────────────────

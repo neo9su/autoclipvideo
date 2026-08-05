@@ -3328,7 +3328,10 @@ async def batch_schedule_tasks(body: BatchScheduleCreate):
         async with db.execute(sql, params) as cur:
             groups = await cur.fetchall()
 
-    # 过滤排除的分组
+    # 过滤排除的分组，并尊重前端按时间槽位自动选择的分组。
+    if body.include_group_ids is not None:
+        include_set = set(body.include_group_ids)
+        groups = [g for g in groups if g["id"] in include_set]
     if body.exclude_group_ids:
         exclude_set = set(body.exclude_group_ids)
         groups = [g for g in groups if g["id"] not in exclude_set]
@@ -3338,6 +3341,16 @@ async def batch_schedule_tasks(body: BatchScheduleCreate):
 
     product_ids_str = ",".join(str(i) for i in body.product_ids) if body.product_ids else None
     first_product_id = body.product_ids[0] if body.product_ids else None
+
+    # Keep backend selection count aligned with the UI's usable publishing window.
+    # A batch beginning before 09:00 reserves the first four hours for preparation;
+    # the requested example (05:00-21:00 every 20 minutes) therefore has 36 slots.
+    slot_limit = len(groups)
+    if end_dt:
+        total_minutes = int((end_dt - start_dt).total_seconds() // 60)
+        preparation_minutes = 4 * 60 if start_dt.hour < 9 <= end_dt.hour else 0
+        slot_limit = max(0, (total_minutes - preparation_minutes) // body.interval_minutes)
+    groups_to_process = groups[:slot_limit]
 
     video_base = os.path.join(os.path.dirname(__file__), "..", "recordings")
     created_tasks = []
@@ -3370,10 +3383,6 @@ async def batch_schedule_tasks(body: BatchScheduleCreate):
     # ────────────────────────────────────────────────────────────────────
 
     # Phase 1: insert tasks immediately without waiting for LLM meta
-    # Limit to 24 hours worth of groups to prevent one account from taking all groups
-    max_groups_per_24h = int(24 * 60 / body.interval_minutes) if body.interval_minutes > 0 else len(groups)
-    groups_to_process = groups[:max_groups_per_24h] if len(groups) > max_groups_per_24h else groups
-    
     async with aio_connect() as db:
         for i, group in enumerate(groups_to_process):
             raw_dt = start_dt + timedelta(minutes=body.interval_minutes * i)
