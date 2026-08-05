@@ -477,6 +477,11 @@ class DirectorVideoComposer:
             # 1. 准备片段元数据（含 room_id），用 TTS 时长对齐 video clip duration
             video_clips = await self._prepare_video_clips(matched_segments, config, tts_dur_by_scene)
             logger.info(f"[DIRECTOR] compose_final_video: prepared {len(video_clips) if video_clips else 0} video_clips")
+            if len(video_clips) < len(matched_segments):
+                logger.warning(
+                    "[DIRECTOR] dropped %s/%s matched clips before GPU submission",
+                    len(matched_segments) - len(video_clips), len(matched_segments),
+                )
             if not video_clips:
                 logger.error("[DIRECTOR] compose_final_video: video_clips is EMPTY after preparation")
                 return None
@@ -607,6 +612,11 @@ class DirectorVideoComposer:
                 status = data.get("status")
                 logger.info(f"[DIRECTOR] remote job {job_id}: status={status} phase={data.get('phase', '')}")
                 if status == "done":
+                    output_candidate = data.get("output_path")
+                    logger.info(
+                        "[DIRECTOR] remote job %s done: response=%s output_path=%s",
+                        job_id, {k: data.get(k) for k in ("status", "phase", "pct", "error")}, output_candidate,
+                    )
                     break
                 if status == "error":
                     raise RuntimeError(f"remote director job failed: {data.get('error', 'unknown error')}")
