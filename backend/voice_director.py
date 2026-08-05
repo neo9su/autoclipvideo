@@ -447,7 +447,7 @@ class VoiceDirector:
                         job_id = _tts_body["job_id"]
                         break
                     elif _tts_sc >= 500:
-                        logger.warning(f"GPU TTS returned {_tts_sc}, retry {_tts_retry+1}/3")
+                        logger.warning(f"GPU TTS returned {_tts_sc}: {_tts_body!r}, retry {_tts_retry+1}/3")
                         await asyncio.sleep(3 * (_tts_retry + 1))
                     else:
                         logger.warning(f"GPU TTS submit failed: {_tts_sc}")
@@ -480,7 +480,7 @@ class VoiceDirector:
                 if status == "done":
                     break
                 elif status == "error":
-                    logger.warning(f"GPU TTS error: {r_body.get('error')}")
+                    logger.warning(f"GPU TTS error for job {job_id}: {r_body.get('error')}")
                     return 0.0
             else:
                 logger.warning(f"GPU TTS timed out after {gpu_tts_timeout}s for job {job_id}")
@@ -498,11 +498,13 @@ class VoiceDirector:
             if os.path.getsize(output_path) == 0:
                 return 0.0
             actual_dur = await self._probe_duration(output_path)
+            if actual_dur <= 0:
+                logger.warning("GPU TTS returned audio but duration could not be read")
             # Speed correction must be performed by the remote GPU service.
             return actual_dur
 
         except Exception as e:
-            logger.warning(f"GPU TTS exception: {e}")
+            logger.warning(f"GPU TTS exception for scene_type={scene_type}: {type(e).__name__}: {e}")
             return 0.0
 
     # ── MiniMax 云端 TTS ───────────────────────────────────────────────────────
@@ -666,18 +668,13 @@ class VoiceDirector:
     async def _probe_duration(self, path: str) -> float:
         """ffprobe 获取音频时长（秒）。"""
         try:
-            async with local_media_slot(f"voice director ffprobe {os.path.basename(path)}"):
-                proc = await asyncio.create_subprocess_exec(
-                    "ffprobe", "-v", "error",
-                    "-show_entries", "format=duration",
-                    "-of", "default=noprint_wrappers=1:nokey=1",
-                    path,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.DEVNULL,
-                )
-                stdout, _ = await proc.communicate()
-            return float(stdout.decode().strip())
-        except Exception:
+            import wave
+            with wave.open(path, "rb") as wav_file:
+                frame_rate = wav_file.getframerate()
+                frame_count = wav_file.getnframes()
+            return frame_count / frame_rate if frame_rate else 0.0
+        except Exception as error:
+            logger.warning("Unable to read WAV duration for %s: %s", os.path.basename(path), error)
             return 0.0
 
     async def _merge_audio_segments(self, segments: List[Dict], group_id: int) -> Optional[str]:
@@ -690,38 +687,54 @@ class VoiceDirector:
         )
         list_file = merged_path + ".txt"
         try:
-            with open(list_file, "w", encoding="utf-8") as f:
-                for seg in segments:
-                    f.write(f"file '{seg['audio_path']}'\n")
-            async with local_media_slot(f"voice director audio concat group {group_id}"):
-                proc = await asyncio.create_subprocess_exec(
-                    "ffmpeg", "-y",
-                    "-f", "concat", "-safe", "0",
-                    "-i", list_file,
-                    "-c", "copy",
-                    merged_path,
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
-                )
-                await proc.communicate()
-            if not os.path.exists(merged_path) or os.path.getsize(merged_path) == 0:
-                logger.error("Audio merge produced empty output")
-                return None
-            # Clean up individual segment files now that merge succeeded
-            for seg in segments:
-                try:
-                    os.remove(seg["audio_path"])
-                except Exception:
-                    pass
-            return merged_path
-        except Exception as e:
-            logger.error(f"Audio merge failed: {e}")
-            return None
-        finally:
+            async with aiohttp.ClientSession() as session:
+                form = aiohttp.FormData()
+                for segment in segments:
+                    segment_path = segment["audio_path"]
+                    with open(segment_path, "rb") as audio_file:
+                        form.add_field("files", audio_file.read(), filename=os.path.basename(segment_path), content_type="audio/wav")
+                async with session.post(f"{_GPU_SERVICE_URL}/audio-concat-jobs", data=form, timeout=aiohttp.ClientTimeout(total=60)) as response:
+                    if response.status != 201:
+                        logger.error("Remote audio concat submit failed: %s", await response.text())
+                        return None
+                    job_id = (await response.json())["job_id"]
+                deadline = time.time() + 180
+                while time.time() < deadline:
+                    await asyncio.sleep(2)
+                    async with session.get(f"{_GPU_SERVICE_URL}/audio-concat-jobs/{job_id}", timeout=aiohttp.ClientTimeout(total=10)) as status_response:
+                        status = await status_response.json()
+                    if status.get("status") == "error":
+                        logger.error("Remote audio concat failed: %s", status.get("error"))
+                        return None
+                    if status.get("status") == "done":
+                        break
+                else:
+                    logger.error("Remote audio concat timed out for job %s", job_id)
+                    return None
+                async with session.get(f"{_GPU_SERVICE_URL}/audio-concat-jobs/{job_id}/audio", timeout=aiohttp.ClientTimeout(total=60)) as audio_response:
+                    if audio_response.status != 200:
+                        logger.error("Remote audio concat download failed: %s", audio_response.status)
+                        return None
+                    audio_data = await audio_response.read()
+            with open(merged_path, "wb") as merged_file:
+                merged_file.write(audio_data)
             try:
                 os.remove(list_file)
-            except Exception:
+            except OSError:
                 pass
+            for segment in segments:
+                try:
+                    os.remove(segment["audio_path"])
+                except OSError:
+                    logger.debug("Unable to remove temporary TTS segment", exc_info=True)
+            return merged_path
+        except Exception as error:
+            try:
+                os.remove(list_file)
+            except OSError:
+                pass
+            logger.error("Remote audio concat request failed: %s: %s", type(error).__name__, error)
+            return None
 
     async def _synthesize_full_text(
         self,

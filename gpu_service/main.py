@@ -79,6 +79,7 @@ COSYVOICE_MODEL_DIR = os.environ.get("COSYVOICE_MODEL_DIR", _default_cosy_dir())
 _jobs: dict = {}        # transcription jobs
 _clip_jobs: dict = {}   # clip jobs
 _tts_jobs: dict = {}    # TTS synthesis jobs
+_audio_concat_jobs: dict = {}
 _voice_refs: dict = {}  # lightweight voice reference extractions
 _model = None           # Singleton WhisperModel
 _cosyvoice = None       # Singleton CosyVoice2 model
@@ -1166,6 +1167,91 @@ async def get_clip_thumb(job_id: str):
     if not path or not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Thumbnail not available")
     return FileResponse(path, media_type="image/jpeg", filename=f"{job_id}_thumb.jpg")
+
+
+# ── Remote audio concat for control-plane TTS segments ───────────────────────
+
+class AudioConcatJobResponse(BaseModel):
+    job_id: str
+    status: str
+
+
+async def _run_audio_concat_job(job_id: str, input_paths: list[str]):
+    job = _audio_concat_jobs[job_id]
+    output_dir = os.path.join(STORAGE_DIR, "audio_concat", job_id)
+    output_path = os.path.join(output_dir, "merged.wav")
+    list_path = os.path.join(output_dir, "list.txt")
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+        with open(list_path, "w", encoding="utf-8") as list_file:
+            for path in input_paths:
+                list_file.write(f"file '{path}'\n")
+        return_code = await _run_ffmpeg(
+            "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path,
+            "-c", "copy", output_path,
+        )
+        if return_code != 0 or not os.path.exists(output_path):
+            raise RuntimeError("remote audio concat ffmpeg failed")
+        job.update(status="done", output_path=output_path)
+    except Exception as error:
+        logger.error("Audio concat job %s failed: %s", job_id, error)
+        job.update(status="error", error=str(error))
+    finally:
+        for path in input_paths:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        try:
+            os.remove(list_path)
+        except OSError:
+            pass
+
+
+@app.post("/audio-concat-jobs", status_code=201, response_model=AudioConcatJobResponse)
+async def create_audio_concat_job(files: list[UploadFile] = File(...)):
+    if not files:
+        raise HTTPException(status_code=422, detail="files is empty")
+    job_id = uuid.uuid4().hex[:16]
+    output_dir = os.path.join(STORAGE_DIR, "audio_concat", job_id, "uploads")
+    os.makedirs(output_dir, exist_ok=True)
+    input_paths = []
+    try:
+        for index, upload in enumerate(files):
+            path = os.path.join(output_dir, f"{index:03d}_{os.path.basename(upload.filename or 'segment.wav')}")
+            async with aiofiles.open(path, "wb") as target:
+                while chunk := await upload.read(1024 * 1024):
+                    await target.write(chunk)
+            input_paths.append(path)
+    except Exception:
+        for path in input_paths:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        raise
+    _audio_concat_jobs[job_id] = {"status": "queued", "output_path": None, "error": None}
+    asyncio.create_task(_run_audio_concat_job(job_id, input_paths))
+    return {"job_id": job_id, "status": "queued"}
+
+
+@app.get("/audio-concat-jobs/{job_id}")
+async def get_audio_concat_job(job_id: str):
+    job = _audio_concat_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Audio concat job not found")
+    return {"job_id": job_id, "status": job["status"], "error": job.get("error")}
+
+
+@app.get("/audio-concat-jobs/{job_id}/audio")
+async def get_audio_concat_audio(job_id: str):
+    job = _audio_concat_jobs.get(job_id)
+    if not job or job.get("status") != "done":
+        raise HTTPException(status_code=404, detail="Audio concat output not ready")
+    path = job.get("output_path")
+    if not path or not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Audio concat file missing")
+    return FileResponse(path, media_type="audio/wav", filename=f"{job_id}.wav")
 
 
 # ── Concat-merge endpoints ────────────────────────────────────────────────────
