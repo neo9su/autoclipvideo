@@ -305,12 +305,30 @@ class VoiceDirector:
 
         merged = await self._merge_audio_segments(audio_segments, group_id)
         if not merged:
-            # Clean up individual segment files on merge failure
-            for seg in audio_segments:
-                try:
-                    os.remove(seg["audio_path"])
-                except Exception:
-                    pass
+            # Older GPU workers may not yet expose audio-concat-jobs. Keep the
+            # pipeline usable by synthesizing one normalized remote-GPU track.
+            fallback_text = "。".join(
+                scene.get("voiceover_text", "").strip()
+                for scene in scenes
+                if scene.get("voiceover_text", "").strip()
+            )
+            fallback_path = os.path.join(
+                self._output_dir, f"group{group_id}_fallback_{int(time.time())}.wav"
+            )
+            fallback_duration = await self._tts(
+                fallback_text, fallback_path, "natural", room_id_for_tts,
+                scene_type="qianchuan_fallback", is_creative=is_creative,
+            ) if fallback_text else 0.0
+            if fallback_duration > 0:
+                logger.warning(
+                    "Audio concat unavailable; using one-track remote TTS fallback for group %s",
+                    group_id,
+                )
+                merged = fallback_path
+                total_duration = fallback_duration
+            else:
+                return {"success": False, "error": "音频合并失败（远程拼接不可用，单轨兜底也失败）"}
+        if not merged:
             return {"success": False, "error": "音频合并失败"}
 
         # ── 时长保底：自编/导演模式合成音频 < 30s 时自动降速拉长 ──────────────
