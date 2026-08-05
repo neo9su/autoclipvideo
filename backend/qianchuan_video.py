@@ -129,4 +129,6 @@ class QianchuanVideoComposer(DirectorVideoComposer):
             clone.setdefault("edit_actions", seg["edit_actions"])
             enriched.append(clone)
 
+        if not matched_segments and script.get("preview_mode"):
+            raise RuntimeError("千川预览无法合成: 没有可用录像片段")
         return await self.compose_final_video(enriched, audio_path, config, tts_audio_segments=audio_segments)
