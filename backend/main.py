@@ -3297,8 +3297,11 @@ async def batch_schedule_tasks(body: BatchScheduleCreate):
     # Parse start time
     try:
         start_dt = datetime.fromisoformat(body.start_datetime)
+        end_dt = datetime.fromisoformat(body.end_datetime) if body.end_datetime else None
     except ValueError:
-        raise HTTPException(status_code=422, detail="start_datetime must be ISO format, e.g. 2026-03-25T10:00:00")
+        raise HTTPException(status_code=422, detail="start_datetime and end_datetime must be ISO format, e.g. 2026-03-25T10:00:00")
+    if end_dt and end_dt < start_dt:
+        raise HTTPException(status_code=422, detail="end_datetime must not be earlier than start_datetime")
 
     # Fetch eligible groups (same logic as unscheduled-groups endpoint)
     async with aio_connect() as db:
@@ -3374,7 +3377,12 @@ async def batch_schedule_tasks(body: BatchScheduleCreate):
     async with aio_connect() as db:
         for i, group in enumerate(groups_to_process):
             raw_dt = start_dt + timedelta(minutes=body.interval_minutes * i)
-            scheduled_at = _snap_to_golden_hour(raw_dt).isoformat()
+            scheduled_dt = _snap_to_golden_hour(raw_dt)
+            # Do not create a task after the user-selected end time. Apply the
+            # limit after golden-hour snapping, since that is the actual publish time.
+            if end_dt and scheduled_dt > end_dt:
+                break
+            scheduled_at = scheduled_dt.isoformat()
             # Pick video based on publish_versions
             pub_ver = group["publish_versions"] or "both"
             use_qianchuan = pub_ver == "qianchuan" or (
