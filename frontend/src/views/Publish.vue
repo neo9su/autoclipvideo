@@ -424,7 +424,22 @@
         </select>
 
         <label>开始时间 *</label>
-        <input v-model="batchForm.start_datetime" type="datetime-local" class="input" />
+        <input v-model="batchForm.start_datetime" type="datetime-local" class="input" @change="fillBatchEndTime" />
+
+        <label>结束时间 *</label>
+        <div class="batch-end-time-row">
+          <select v-model.number="batchForm.period_value" class="input batch-period-value" @change="fillBatchEndTime">
+            <option v-for="value in periodValues" :key="value" :value="value">{{ value }}</option>
+          </select>
+          <select v-model="batchForm.period_unit" class="input batch-period-unit" @change="fillBatchEndTime">
+            <option value="day">天后</option>
+            <option value="week">周后</option>
+            <option value="month">月后</option>
+            <option value="year">年后</option>
+          </select>
+          <input v-model="batchForm.end_datetime" type="datetime-local" class="input" />
+        </div>
+        <div class="field-hint">选择周期会自动填充结束时间，也可以直接修改右侧时间。</div>
 
         <label>发布间隔（分钟）</label>
         <input v-model.number="batchForm.interval_minutes" type="number" min="1" class="input" />
@@ -604,12 +619,43 @@ const batchForm = ref({
   account_id: null,
   room_id: null,
   start_datetime: _defaultBatchStart(),
+  end_datetime: '',
+  period_value: 1,
+  period_unit: 'week',
   interval_minutes: 90,
   no_cart: false,
   auto_meta: true,
   product_ids: [],
 })
+const periodValues = [1, 2, 3, 7, 14, 30, 90, 365]
 const batchCartSearch = ref('')
+
+function addBatchPeriod(start, value, unit) {
+  const end = new Date(start)
+  if (unit === 'day') end.setDate(end.getDate() + value)
+  if (unit === 'week') end.setDate(end.getDate() + value * 7)
+  if (unit === 'month') {
+    const day = end.getDate()
+    end.setDate(1)
+    end.setMonth(end.getMonth() + value)
+    end.setDate(Math.min(day, new Date(end.getFullYear(), end.getMonth() + 1, 0).getDate()))
+  }
+  if (unit === 'year') {
+    const month = end.getMonth()
+    const day = end.getDate()
+    end.setDate(1)
+    end.setFullYear(end.getFullYear() + value)
+    end.setMonth(month)
+    end.setDate(Math.min(day, new Date(end.getFullYear(), month + 1, 0).getDate()))
+  }
+  return end
+}
+
+function fillBatchEndTime() {
+  if (!batchForm.value.start_datetime) return
+  const end = addBatchPeriod(new Date(batchForm.value.start_datetime), batchForm.value.period_value, batchForm.value.period_unit)
+  batchForm.value.end_datetime = end.toISOString().slice(0, 16)
+}
 
 const batchFilteredProducts = computed(() => {
   if (!batchCartSearch.value) return products.value
@@ -643,6 +689,7 @@ async function loadUnscheduledGroups() {
 
 async function openBatchModal() {
   batchForm.value.start_datetime = _defaultBatchStart()
+  fillBatchEndTime()
   excludedGroupIds.value = new Set()
   showBatchModal.value = true
   await loadUnscheduledGroups()
@@ -651,7 +698,11 @@ async function openBatchModal() {
 const cookieCheckPending = ref(false)
 
 async function submitBatch() {
-  if (!batchForm.value.start_datetime || !displayedGroups.value.length) return
+  if (!batchForm.value.start_datetime || !batchForm.value.end_datetime || !displayedGroups.value.length) return
+  if (new Date(batchForm.value.end_datetime) < new Date(batchForm.value.start_datetime)) {
+    showToast('结束时间不能早于开始时间', 'error')
+    return
+  }
   batchSubmitting.value = true
   try {
     // 检查账号 Cookie 是否有效
@@ -687,6 +738,7 @@ async function _doSubmitBatch() {
       platform: batchForm.value.platform,
       account_id: batchForm.value.account_id || null,
       start_datetime: new Date(batchForm.value.start_datetime).toISOString(),
+      end_datetime: new Date(batchForm.value.end_datetime).toISOString(),
       interval_minutes: batchForm.value.interval_minutes,
       no_cart: batchForm.value.no_cart,
       product_ids: batchForm.value.product_ids.length ? batchForm.value.product_ids : null,
@@ -1483,6 +1535,10 @@ label { display: block; font-size: 12px; color: #888; margin: 12px 0 4px; }
 .no-cart-btn-on { background: rgba(100,200,255,0.12); border-color: rgba(100,200,255,0.4); color: #67d4f0; }
 .no-cart-btn-on:hover { background: rgba(100,200,255,0.2); }
 .no-cart-hint { font-size: 12px; color: #67d4f0; padding: 8px 10px; background: rgba(100,200,255,0.08); border-radius: 6px; border: 1px solid rgba(100,200,255,0.2); margin-top: 4px; }
+.batch-end-time-row { display: flex; align-items: center; gap: 6px; }
+.batch-end-time-row .batch-period-value { width: 64px; }
+.batch-end-time-row .batch-period-unit { width: 82px; }
+.field-hint { color: #777; font-size: 11px; margin: 4px 0 8px; }
 .batch-preview { background: #111; border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px 12px; margin: 10px 0; max-height: 220px; overflow-y: auto; }
 .batch-preview-title { font-size: 12px; color: #999; margin-bottom: 6px; }
 .batch-preview-item { display: flex; align-items: center; gap: 8px; padding: 4px 0; border-bottom: 1px solid #1e1e1e; font-size: 12px; }
