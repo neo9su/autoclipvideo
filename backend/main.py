@@ -569,6 +569,7 @@ async def lifespan(app: FastAPI):
         raise RuntimeError("backend must run as the remote GPU backend; use the control-plane frontend locally")
     require_remote_gpu("backend startup")
     await init_db()
+    logger.info("Qianchuan fact-source SQLite DB: %s", os.path.abspath(DB_PATH))
     await _reset_stuck_clip_tasks()
     await _cleanup_stale_open_recording_placeholders()
     try:
