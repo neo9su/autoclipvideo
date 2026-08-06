@@ -17,12 +17,12 @@ import argparse
 import asyncio
 import sys
 import os
+import aiosqlite
 from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
 
-import aiosqlite
-
+from video_path_resolver import resolve_publish_video
 DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'douyin.db')
 
 ACCOUNTS = [
@@ -38,10 +38,14 @@ async def get_all_pending_groups() -> list:
     """获取所有还没有 scheduled/pending/done 任务的分组，按 id ASC 排序。"""
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("""
-            SELECT g.id, g.room_id, g.merged_filename, g.wig_model, g.wig_color
+            SELECT g.id, g.room_id, g.merged_filename, g.wig_model, g.wig_color,
+                   g.qianchuan_final_video, g.creative_final_video, g.director_final_video,
+                   g.publish_versions
             FROM clip_groups g
-            WHERE g.classic_status = 2
-              AND g.merged_filename IS NOT NULL
+            WHERE (g.merge_status = 2 OR g.classic_status = 2 OR g.director_status = 2
+                   OR g.creative_status = 2 OR g.qianchuan_status = 2)
+              AND (g.merged_filename IS NOT NULL OR g.qianchuan_final_video IS NOT NULL
+                   OR g.creative_final_video IS NOT NULL OR g.director_final_video IS NOT NULL)
               AND NOT EXISTS (
                   SELECT 1 FROM publish_tasks pt
                   WHERE pt.group_id = g.id
@@ -53,21 +57,39 @@ async def get_all_pending_groups() -> list:
             rows = await cur.fetchall()
 
     valid = []
-    for r in rows:
-        path = os.path.join(RECORDINGS_DIR, r[2])
-        if os.path.exists(path):
-            valid.append(dict(zip(['id', 'room_id', 'merged_filename', 'wig_model', 'wig_color'], r)))
+    fields = ['id', 'room_id', 'merged_filename', 'wig_model', 'wig_color',
+              'qianchuan_final_video', 'creative_final_video', 'director_final_video',
+              'publish_versions']
+    for row in rows:
+        group = dict(zip(fields, row))
+        resolved, selected_version, checked, alternatives = resolve_publish_video(
+            group, group.get('publish_versions') or 'both'
+        )
+        if resolved:
+            group['resolved_video_path'] = resolved
+            group['selected_version'] = selected_version
+            valid.append(group)
     return valid
 
 
 async def create_task(db, group_id: int, account_id: int, scheduled_at: str):
     """直接向 DB 插入发布任务。"""
-    # 查视频路径
-    async with db.execute("SELECT merged_filename FROM clip_groups WHERE id=?", (group_id,)) as cur:
+    async with db.execute(
+        """SELECT merged_filename, qianchuan_final_video, creative_final_video,
+                  director_final_video, publish_versions
+           FROM clip_groups WHERE id=?""",
+        (group_id,),
+    ) as cur:
         row = await cur.fetchone()
     if not row:
         return None
-    video_path = os.path.join(RECORDINGS_DIR, row[0])
+    group = dict(zip(
+        ['merged_filename', 'qianchuan_final_video', 'creative_final_video',
+         'director_final_video', 'publish_versions'], row
+    ))
+    video_path, _, _, _ = resolve_publish_video(group, group.get('publish_versions') or 'both')
+    if not video_path:
+        return None
 
     # 检查重复
     async with db.execute(
