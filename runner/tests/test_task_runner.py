@@ -50,6 +50,28 @@ def test_scan_dry_run_does_not_persist(tmp_path):
     assert s.status()['issues'] == []
 
 
+def test_run_once_dry_run_does_not_claim_or_start_worker(tmp_path):
+    db=tmp_path/'x.db'; s=TaskStore(db); s.upsert_issue(3, 'queued issue'); s.upsert_issue(4, 'retryable issue', 'retryable')
+    calls=[]
+    runner=Runner(RunnerConfig(db=db), s, worker=lambda issue: calls.append(issue['id']) or 0)
+    before=s.status()
+    result=runner.run_once(dry_run=True)
+    assert result == {'dry_run': True, 'candidates': [
+        {'id': 3, 'title': 'queued issue', 'payload': {}},
+        {'id': 4, 'title': 'retryable issue', 'payload': {}},
+    ]}
+    assert s.status() == before
+    assert calls == []
+
+
+def test_cli_run_once_dry_run_reports_candidates_without_creating_db(tmp_path):
+    db=tmp_path/'missing'/'runner.sqlite3'
+    command=[sys.executable, '-m', 'runner.ops.task_runner', '--db', str(db), 'run-once', '--dry-run']
+    result=subprocess.run(command, capture_output=True, text=True, check=True)
+    assert json.loads(result.stdout) == {'dry_run': True, 'candidates': []}
+    assert not db.exists()
+
+
 def test_cli_status_and_recover_dry_run(tmp_path):
     db=tmp_path/'x.db'
     command=[sys.executable, '-m', 'runner.ops.task_runner', '--db', str(db)]
