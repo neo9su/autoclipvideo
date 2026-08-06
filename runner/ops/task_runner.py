@@ -30,12 +30,23 @@ class RunnerConfig:
     gh_command: str = os.getenv("TASK_RUNNER_GH", "gh")
 
 class TaskStore:
-    def __init__(self, db: str | Path):
+    def __init__(self, db: str | Path, readonly=False):
         self.db = Path(db)
-        self.db.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(self.db, timeout=30, isolation_level=None)
+        self.readonly = readonly
+        if readonly:
+            # Dry runs must not create the database or its parent directory.
+            if self.db.exists():
+                self.conn = sqlite3.connect(f"file:{self.db.resolve()}?mode=ro", uri=True, timeout=30, isolation_level=None)
+            else:
+                self.conn = sqlite3.connect(":memory:", timeout=30, isolation_level=None)
+        else:
+            self.db.parent.mkdir(parents=True, exist_ok=True)
+            self.conn = sqlite3.connect(self.db, timeout=30, isolation_level=None)
         self.conn.row_factory = sqlite3.Row
-        self.conn.executescript(SCHEMA)
+        if not readonly:
+            self.conn.executescript(SCHEMA)
+        elif not self.db.exists():
+            self.conn.executescript(SCHEMA)
 
     def close(self): self.conn.close()
     def event(self, kind, issue_id=None, run_id=None, payload=None):
@@ -90,8 +101,10 @@ class Runner:
     def status(self):
         """Return the persisted runner state for the CLI and API callers."""
         return self.store.status()
-    def run_once(self, issue_id=None):
+    def run_once(self, issue_id=None, dry_run=False):
         rows=self.store.conn.execute("SELECT id,title,payload FROM issues WHERE state IN ('queued','retryable') AND (? IS NULL OR id=?) ORDER BY id",(issue_id,issue_id)).fetchall()
+        if dry_run:
+            return {"dry_run": True, "candidates": [{"id": row[0], "title": row[1], "payload": json.loads(row[2])} for row in rows]}
         if not rows: return None
         issue=rows[0]; owner=f"{os.uname().nodename}:{os.getpid()}"; iid=issue[0]
         if not self.store.claim(iid,owner,self.config.lease_seconds): return None
@@ -127,9 +140,9 @@ class Runner:
 def main(argv=None):
     p=argparse.ArgumentParser(prog="task-runner"); p.add_argument("--db",type=Path,default=None); sub=p.add_subparsers(dest="command",required=True)
     scan=sub.add_parser("scan"); scan.add_argument("--dry-run",action="store_true", help="fetch issues without changing the local store")
-    r=sub.add_parser("run-once"); r.add_argument("--issue",type=int); sub.add_parser("status"); rec=sub.add_parser("recover"); rec.add_argument("--dry-run",action="store_true")
-    args=p.parse_args(argv); cfg=RunnerConfig(db=args.db or RunnerConfig().db); runner=Runner(cfg)
-    if args.command == "run-once": result=runner.run_once(args.issue)
+    r=sub.add_parser("run-once"); r.add_argument("--issue",type=int); r.add_argument("--dry-run",action="store_true"); sub.add_parser("status"); rec=sub.add_parser("recover"); rec.add_argument("--dry-run",action="store_true")
+    args=p.parse_args(argv); dry_run=args.command == "run-once" and args.dry_run; cfg=RunnerConfig(db=args.db or RunnerConfig().db); store=TaskStore(cfg.db, readonly=dry_run); runner=Runner(cfg, store=store)
+    if args.command == "run-once": result=runner.run_once(args.issue, dry_run=dry_run)
     elif args.command == "recover": result=runner.recover(dry_run=args.dry_run)
     elif args.command == "scan": result=runner.scan(dry_run=args.dry_run)
     else: result=getattr(runner,args.command)()

@@ -6,14 +6,15 @@
 
 ```bash
 python -m runner.ops.task_runner --db .runner/runner.sqlite3 scan
-python -m runner.ops.task_runner --db .runner/runner.sqlite3 run-once
+python -m runner.ops.task_runner --db .runner/runner.sqlite3 run-once --dry-run
 python -m runner.ops.task_runner --db .runner/runner.sqlite3 status
 python -m runner.ops.task_runner --db .runner/runner.sqlite3 recover --dry-run
 python -m runner.ops.task_runner --db .runner/runner.sqlite3 scan --dry-run  # fetch without persisting
 ```
 
-Set `TASK_RUNNER_WORKER` to a command template (supports `{issue_id}`), `TASK_RUNNER_HARD_TIMEOUT`, `TASK_RUNNER_NO_PROGRESS_TIMEOUT`, `TASK_RUNNER_LEASE_SECONDS`, `TASK_RUNNER_CONCURRENCY`, and `TASK_RUNNER_GH`. The default worker concurrency is one. Workers run in their own process group and are terminated (then killed) on timeout. GitHub scanning uses configurable `gh`; unavailable/invalid output safely yields no issues.
+`run-once --dry-run` opens the existing database read-only (or uses an in-memory empty store when it does not exist) and reports queued/retryable candidates as JSON. It does not acquire leases, write runs/events/state, or start worker processes. Use it to inspect what the next run would select.
 
+Set `TASK_RUNNER_WORKER` to a command template (supports `{issue_id}`), `TASK_RUNNER_HARD_TIMEOUT`, `TASK_RUNNER_NO_PROGRESS_TIMEOUT`, `TASK_RUNNER_LEASE_SECONDS`, `TASK_RUNNER_CONCURRENCY`, and `TASK_RUNNER_GH`. The default worker concurrency is one. Workers run in their own process group and are terminated (then killed) on timeout. GitHub scanning uses configurable `gh`; unavailable/invalid output safely yields no issues.
 SQLite tables persist issues, runs, leases, and events. Startup recovery removes expired leases and moves running runs to `interrupted` with their issue `retryable`. `run-once` only selects queued/retryable work, so completed work is idempotent.
 
 ## launchd guidance (macOS)
