@@ -415,8 +415,9 @@ async def _qianchuan_generate_bg(group_id: int, script: Dict) -> None:
                 await _broadcast({"type": "qianchuan_error", "group_id": group_id, "error": str(qe)})
                 return
             if not quality.get("ok"):
-                await _set_qianchuan_error(group_id, -3, "; ".join(quality.get("errors", [])), quality)
-                await _broadcast({"type": "qianchuan_error", "group_id": group_id, "error": quality.get("errors", [])})
+                errors = quality.get("errors", []) + quality.get("hard_gate_failures", [])
+                await _set_qianchuan_error(group_id, -3, "; ".join(errors), quality)
+                await _broadcast({"type": "qianchuan_error", "group_id": group_id, "error": errors, "review": quality.get("review")})
                 return
 
             async with aiosqlite.connect(DB_PATH) as db:

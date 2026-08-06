@@ -74,6 +74,53 @@ async def _remote_quality(job_id: str) -> Dict:
     return payload
 
 
+MIN_QUALITY_SCORE = 80.0
+REQUIRED_REVIEW_FIELDS = ("timepoint", "subtitle", "shot", "selling_point", "audio_visual")
+
+
+def _review_report(quality: Dict) -> Dict:
+    """Normalize the remote 小美 report into auditable issue-level evidence."""
+    raw_issues = quality.get("issues") or quality.get("review", {}).get("issues") or []
+    issues = []
+    for item in raw_issues:
+        if isinstance(item, dict):
+            issues.append({field: item.get(field, "未提供") for field in REQUIRED_REVIEW_FIELDS} | {
+                "severity": item.get("severity", "warning"),
+                "detail": item.get("detail", ""),
+            })
+        else:
+            issues.append({"timepoint": "未提供", "subtitle": "未提供", "shot": "未提供",
+                           "selling_point": "未提供", "audio_visual": "未提供",
+                           "severity": "warning", "detail": str(item)})
+    score = quality.get("score")
+    try:
+        score = float(score)
+    except (TypeError, ValueError):
+        score = None
+    hard_gate_failures = list(quality.get("hard_gate_failures") or quality.get("gate_failures") or [])
+    if score is None:
+        hard_gate_failures.append("remote report missing score")
+    elif score < MIN_QUALITY_SCORE:
+        hard_gate_failures.append(f"score {score:.1f} below {MIN_QUALITY_SCORE:.0f}")
+    return {
+        "reviewer": "小美",
+        "iteration": quality.get("iteration", 1),
+        "score": score,
+        "issues": issues,
+        "hard_gate_failures": hard_gate_failures,
+        "execution_node": quality.get("execution_node", "remote-gpu"),
+        "job_id": quality.get("job_id"),
+    }
+
+
+def _apply_quality_gate(quality: Dict) -> Dict:
+    review = _review_report(quality)
+    quality = {**quality, "score": review["score"], "review": review,
+               "hard_gate_failures": review["hard_gate_failures"],
+               "ok": bool(quality.get("ok", True)) and not review["hard_gate_failures"]}
+    return quality
+
+
 async def check_qianchuan_video_quality(path: str, min_duration: float = 18.0, max_duration: float = 35.5, job_id: Optional[str] = None) -> Dict:
     if job_id:
         try:
@@ -81,70 +128,11 @@ async def check_qianchuan_video_quality(path: str, min_duration: float = 18.0, m
             report["path"] = path
             report["execution_node"] = "remote-gpu"
             report["job_id"] = job_id
-            return report
+            return _apply_quality_gate(report)
         except Exception as exc:
             return {"path": path, "ok": False, "errors": [str(exc)], "warnings": [],
-                    "execution_node": "remote-gpu", "job_id": job_id}
-    report: Dict = {"path": path, "ok": False, "errors": [], "warnings": [],
-                    "execution_node": "remote-gpu"}
-    if not path or not os.path.exists(path):
-        report["errors"].append("output file missing")
-        return report
-
-    try:
-        probe = await ffprobe_json(path)
-    except Exception as exc:
-        report["errors"].append(str(exc))
-        return report
-
-    streams: List[Dict] = probe.get("streams") or []
-    fmt = probe.get("format") or {}
-    videos = [s for s in streams if s.get("codec_type") == "video"]
-    audios = [s for s in streams if s.get("codec_type") == "audio"]
-    if not videos:
-        report["errors"].append("no video stream")
-    if not audios:
-        report["errors"].append("no audio stream")
-
-    duration = float(fmt.get("duration") or videos[0].get("duration") or 0) if videos else 0.0
-    report["duration"] = duration
-    if duration < min_duration or duration > max_duration:
-        report["errors"].append(f"duration {duration:.2f}s outside {min_duration:.0f}-{max_duration:.0f}s")
-
-    if videos:
-        v = videos[0]
-        width, height = int(v.get("width") or 0), int(v.get("height") or 0)
-        report.update({"width": width, "height": height, "video_codec": v.get("codec_name"), "pix_fmt": v.get("pix_fmt")})
-        if (width, height) not in {(1080, 1920), (1440, 2560)}:
-            report["errors"].append(f"resolution {width}x{height} is not 1080x1920 or 1440x2560")
-        if v.get("codec_name") != "h264":
-            report["errors"].append(f"video codec {v.get('codec_name')} is not h264")
-        fps_expr = v.get("avg_frame_rate") or "0/1"
-        try:
-            num, den = fps_expr.split("/")
-            fps = float(num) / max(1.0, float(den))
-        except Exception:
-            fps = 0.0
-        report["fps"] = round(fps, 3)
-        if abs(fps - 30.0) > 1.0:
-            report["warnings"].append(f"fps {fps:.2f} is not near 30")
-
-    if audios:
-        a = audios[0]
-        report.update({"audio_codec": a.get("codec_name"), "sample_rate": a.get("sample_rate")})
-        if a.get("codec_name") != "aac":
-            report["errors"].append(f"audio codec {a.get('codec_name')} is not aac")
-        vol = await volumedetect(path)
-        report["volume"] = vol
-        if not vol.get("ok"):
-            report["errors"].append("volumedetect failed")
-        elif vol.get("max_volume_db") is None or vol.get("max_volume_db") < -45:
-            report["errors"].append("audio appears silent")
-
-    dec = await decode_smoke(path)
-    report["decode"] = dec
-    if not dec["ok"]:
-        report["errors"].append("decode smoke test failed")
-
-    report["ok"] = not report["errors"]
-    return report
+                    "execution_node": "remote-gpu", "job_id": job_id,
+                    "hard_gate_failures": ["remote quality backend unavailable"]}
+    return {"path": path, "ok": False, "errors": ["remote GPU job_id is required; local quality fallback is disabled"],
+            "warnings": [], "execution_node": "remote-gpu",
+            "hard_gate_failures": ["missing remote job_id"]}
