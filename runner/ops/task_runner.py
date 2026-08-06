@@ -139,8 +139,14 @@ class Runner:
 
 def main(argv=None):
     p=argparse.ArgumentParser(prog="task-runner"); p.add_argument("--db",type=Path,default=None); sub=p.add_subparsers(dest="command",required=True)
-    scan=sub.add_parser("scan"); scan.add_argument("--dry-run",action="store_true", help="fetch issues without changing the local store")
-    r=sub.add_parser("run-once"); r.add_argument("--issue",type=int); r.add_argument("--dry-run",action="store_true"); sub.add_parser("status"); rec=sub.add_parser("recover"); rec.add_argument("--dry-run",action="store_true")
+    scan=sub.add_parser("scan")
+    scan.add_argument("--dry-run",action="store_true", help="fetch issues without changing the local store")
+    r=sub.add_parser("run-once", help="select one queued issue and run its worker")
+    r.add_argument("--issue",type=int)
+    r.add_argument("--dry-run",action="store_true", help="show selected candidates without claiming or running them")
+    sub.add_parser("status")
+    rec=sub.add_parser("recover")
+    rec.add_argument("--dry-run",action="store_true")
     args=p.parse_args(argv); dry_run=args.command == "run-once" and args.dry_run; cfg=RunnerConfig(db=args.db or RunnerConfig().db); store=TaskStore(cfg.db, readonly=dry_run); runner=Runner(cfg, store=store)
     if args.command == "run-once": result=runner.run_once(args.issue, dry_run=dry_run)
     elif args.command == "recover": result=runner.recover(dry_run=args.dry_run)

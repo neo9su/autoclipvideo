@@ -64,6 +64,21 @@ def test_run_once_dry_run_does_not_claim_or_start_worker(tmp_path):
     assert calls == []
 
 
+def test_run_once_dry_run_issue_filter_is_read_only(tmp_path):
+    db = tmp_path / 'x.db'
+    store = TaskStore(db)
+    store.upsert_issue(3, 'queued issue')
+    store.upsert_issue(4, 'retryable issue', 'retryable')
+    before = store.status()
+
+    result = Runner(RunnerConfig(db=db), store).run_once(issue_id=4, dry_run=True)
+
+    assert result == {'dry_run': True, 'candidates': [
+        {'id': 4, 'title': 'retryable issue', 'payload': {}},
+    ]}
+    assert store.status() == before
+
+
 def test_cli_run_once_dry_run_reports_candidates_without_creating_db(tmp_path):
     db=tmp_path/'missing'/'runner.sqlite3'
     command=[sys.executable, '-m', 'runner.ops.task_runner', '--db', str(db), 'run-once', '--dry-run']
