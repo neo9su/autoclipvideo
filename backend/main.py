@@ -3152,30 +3152,21 @@ async def create_publish_task(body: PublishTaskCreate):
             group = await cur.fetchone()
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
-    # Determine which video to publish based on publish_versions preference
-    publish_versions = group["publish_versions"] or "both"
-    _dir_ok = group["director_final_video"] and os.path.exists(group["director_final_video"])
-    _cr_ok = group["creative_final_video"] and os.path.exists(group["creative_final_video"])
-    _qc_ok = group["qianchuan_final_video"] and os.path.exists(group["qianchuan_final_video"])
-    # Priority: explicit qianchuan/creative/director > "both" prefers qianchuan > director > creative > classic
-    use_qianchuan = publish_versions == "qianchuan" or (publish_versions == "both" and _qc_ok)
-    use_creative = not use_qianchuan and (publish_versions == "creative" or (publish_versions == "both" and _cr_ok and not _dir_ok))
-    use_director = not use_qianchuan and not use_creative and (publish_versions == "director" or (publish_versions == "both" and _dir_ok))
-    if use_qianchuan:
-        if not _qc_ok:
-            raise HTTPException(status_code=409, detail="Qianchuan video not ready")
-    elif use_creative:
-        if not _cr_ok:
-            raise HTTPException(status_code=409, detail="Creative video not ready")
-    elif use_director:
-        if not _dir_ok:
-            raise HTTPException(status_code=409, detail="Director video not ready — compose video first")
-    else:
-        if group["merge_status"] != 2 or not group["merged_filename"]:
-            raise HTTPException(status_code=409, detail="Classic video not ready (merge_status must be 2)")
-        _classic_path = os.path.join(os.path.dirname(__file__), "..", "recordings", group["merged_filename"])
-        if not os.path.exists(_classic_path):
-            raise HTTPException(status_code=409, detail=f"Classic video file missing from disk: {group['merged_filename']}")
+    from video_path_resolver import resolve_publish_video
+    requested_version = group["publish_versions"] or "both"
+    video_path, selected_version, checked_paths, available_versions = resolve_publish_video(
+        dict(group), requested_version
+    )
+    if not video_path:
+        checked = "; ".join(checked_paths) or "无候选路径"
+        alternatives = ", ".join(available_versions) or "无"
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"group_id={body.group_id} 选择版本={requested_version} 无可用视频文件；"
+                f"已检查候选：{checked}；可用替代版本：{alternatives}"
+            ),
+        )
 
     # Duplicate publish guard: same group + platform already has an active or completed task
     async with aio_connect() as db:
@@ -3213,21 +3204,6 @@ async def create_publish_task(body: PublishTaskCreate):
                 title = grp["label"] if grp else f"分组 {body.group_id}"
                 description = ""
                 tags = ""
-
-    if use_qianchuan:
-        video_path = group["qianchuan_final_video"]
-    elif use_creative:
-        video_path = group["creative_final_video"]
-    elif use_director:
-        video_path = group["director_final_video"]
-    else:
-        video_path = os.path.join(
-            os.path.dirname(__file__), "..", "recordings", group["merged_filename"]
-        )
-    from video_path_resolver import resolve_video_path, describe_missing
-    video_path, path_reason = resolve_video_path(video_path, dict(group))
-    if not video_path:
-        raise HTTPException(status_code=409, detail=describe_missing(body.group_id, path_reason))
 
     status = "scheduled" if body.scheduled_at else "pending"
     product_ids_str = ",".join(str(i) for i in body.product_ids) if body.product_ids else None
@@ -3405,40 +3381,16 @@ async def batch_schedule_tasks(body: BatchScheduleCreate):
             if end_dt and scheduled_dt > end_dt:
                 break
             scheduled_at = scheduled_dt.isoformat()
-            # Pick video based on publish_versions
-            pub_ver = group["publish_versions"] or "both"
-            use_qianchuan = pub_ver == "qianchuan" or (
-                pub_ver == "both"
-                and group["qianchuan_final_video"]
-                and os.path.exists(group["qianchuan_final_video"])
+            from video_path_resolver import resolve_publish_video
+            video_path, selected_version, checked_paths, available_versions = resolve_publish_video(
+                dict(group), group["publish_versions"] or "both"
             )
-            use_creative = not use_qianchuan and (pub_ver == "creative" or (
-                pub_ver == "both"
-                and group["creative_final_video"]
-                and os.path.exists(group["creative_final_video"])
-                and not (group["director_final_video"] and os.path.exists(group["director_final_video"]))
-            ))
-            use_dir = not use_qianchuan and not use_creative and (pub_ver == "director" or (
-                pub_ver == "both"
-                and group["director_final_video"]
-                and os.path.exists(group["director_final_video"])
-            ))
-            if use_qianchuan:
-                video_path = group["qianchuan_final_video"]
-            elif use_creative:
-                video_path = group["creative_final_video"]
-            elif use_dir:
-                video_path = group["director_final_video"]
-            elif group["merged_filename"]:
-                video_path = os.path.join(video_base, group["merged_filename"])
-            else:
-                continue  # no video available, skip
-
-            resolved_path, path_reason = resolve_video_path(video_path, dict(group))
-            if not resolved_path:
-                logger.warning("Skipping batch group %s: %s", group["id"], path_reason)
+            if not video_path:
+                logger.warning(
+                    "Skipping batch group %s: no available video; checked=%s alternatives=%s",
+                    group["id"], checked_paths, available_versions,
+                )
                 continue
-            video_path = resolved_path
 
             cur = await db.execute(
                 """INSERT INTO publish_tasks
