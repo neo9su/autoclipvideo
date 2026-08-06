@@ -16,6 +16,7 @@ run_gate() {
 }
 
 run_gate lint python -m py_compile \
+  scripts/batch_qianchuan_regen.py \
   backend/api_v2.py backend/db.py backend/qianchuan_schema.py backend/main.py backend/voice_director.py backend/director_video.py \
   backend/qianchuan_script.py backend/qianchuan_matcher.py backend/qianchuan_video.py backend/qianchuan_quality.py \
   backend/local_media_guard.py backend/test_transcribe_queue.py backend/video_editing_skills.py backend/pipeline_state.py
