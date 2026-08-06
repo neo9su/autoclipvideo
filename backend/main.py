@@ -565,49 +565,50 @@ async def _periodic_cleanup():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    if os.environ.get("DEPLOYMENT_ROLE") != "gpu-backend":
-        raise RuntimeError("backend must run as the remote GPU backend; use the control-plane frontend locally")
-    require_remote_gpu("backend startup")
+    deployment_role = os.environ.get("DEPLOYMENT_ROLE", "gpu-backend")
+    if deployment_role not in {"gpu-backend", "control-plane"}:
+        raise RuntimeError(
+            "DEPLOYMENT_ROLE must be 'gpu-backend' or 'control-plane'"
+        )
+    is_control_plane = deployment_role == "control-plane"
+    if not is_control_plane:
+        require_remote_gpu("backend startup")
     await init_db()
     logger.info("Qianchuan fact-source SQLite DB: %s", os.path.abspath(DB_PATH))
     await _reset_stuck_clip_tasks()
     await _cleanup_stale_open_recording_placeholders()
-    try:
-        # Control-plane startup must never start local capture/worker loops.
-        # Rooms and media jobs are resumed by the remote GPU orchestration path.
-        logger.info("Control-plane mode: skipping local room monitors and startup media dispatch")
-    except Exception as e:
-        logger.error(f"Startup pipeline trigger failed: {e}")
     # Load human-approved keyword score overrides into the scoring table
     from editor import load_rule_overrides
     await load_rule_overrides()
-    # Do not start RoomRecorder/ffmpeg loops on the control-plane host.
-    asyncio.create_task(backfill_auto_merge())
+
     from gpu_state import watch_gpu_service, register_online_callback
-    register_online_callback(_on_gpu_online)
     gpu_watcher_task = asyncio.create_task(watch_gpu_service(broadcast_fn=broadcast))
-    transcribe_task = None
-    scheduler_task = asyncio.create_task(poll_publish_tasks(broadcast_fn=broadcast))
-    memory_task = asyncio.create_task(_memory_monitor(broadcast_fn=broadcast))
-    enhance_worker_task = asyncio.create_task(_enhance_worker())
-    cleanup_task = asyncio.create_task(_periodic_cleanup())
-    creative_dispatch_task = asyncio.create_task(_periodic_creative_dispatch())
-    director_dispatch_task = asyncio.create_task(_periodic_director_dispatch())
+    tasks = [gpu_watcher_task]
+
+    if is_control_plane:
+        # The Mac instance is API/static-file control plane only.  In particular,
+        # do not register the GPU-online callback: it dispatches media pipelines.
+        logger.info(
+            "DEPLOYMENT_ROLE=control-plane: background media jobs disabled "
+            "(capture, transcription, backfill, publish, enhance, creative/director, and room monitors)"
+        )
+    else:
+        register_online_callback(_on_gpu_online)
+        tasks.extend([
+            asyncio.create_task(backfill_auto_merge()),
+            asyncio.create_task(poll_publish_tasks(broadcast_fn=broadcast)),
+            asyncio.create_task(_memory_monitor(broadcast_fn=broadcast)),
+            asyncio.create_task(_enhance_worker()),
+            asyncio.create_task(_periodic_cleanup()),
+            asyncio.create_task(_periodic_creative_dispatch()),
+            asyncio.create_task(_periodic_director_dispatch()),
+        ])
     yield
-    gpu_watcher_task.cancel()
-    if transcribe_task:
-        transcribe_task.cancel()
-    scheduler_task.cancel()
-    memory_task.cancel()
-    enhance_worker_task.cancel()
-    cleanup_task.cancel()
-    creative_dispatch_task.cancel()
-    director_dispatch_task.cancel()
-    for t in [gpu_watcher_task, transcribe_task, scheduler_task, memory_task, enhance_worker_task, cleanup_task, creative_dispatch_task, director_dispatch_task]:
-        if t is None:
-            continue
+    for task in tasks:
+        task.cancel()
+    for task in tasks:
         try:
-            await t
+            await task
         except asyncio.CancelledError:
             pass
     for room_id in list(monitor._tasks.keys()):
