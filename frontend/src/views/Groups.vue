@@ -68,6 +68,7 @@
               <a :href="`${apiBase}/api/groups/${g.id}/download`" class="btn-action teal" title="经典版下载" download>↓</a>
             </template>
             <span v-else-if="g.classic_status === 1" class="badge yellow">经典版处理中…</span>
+            <span v-else-if="g.classic_status === 2 && g.classic_file_status !== 'ready'" class="badge red">经典版文件缺失，请重新生成</span>
             <span v-else-if="g.classic_status === -1" class="badge red">经典版失败</span>
             <!-- 自编版结果 -->
             <template v-if="g.creative_status === 2 && g.creative_available">
@@ -75,6 +76,7 @@
               <a :href="`${apiBase}/api/groups/${g.id}/creative-download`" class="btn-action green" title="自编版下载" download>↓</a>
             </template>
             <span v-else-if="(g.creative_status || 0) === 1" class="badge yellow">自编版处理中…</span>
+            <span v-else-if="g.creative_status === 2 && g.creative_file_status !== 'ready'" class="badge red">自编版文件缺失，请重新生成</span>
             <span v-else-if="g.creative_status === -1" class="badge red">自编版失败</span>
             <!-- 重剪 -->
             <button
@@ -141,6 +143,7 @@
               <a v-if="g.director_status === 2 && g.director_available" :href="`${apiBase}/api/groups/${g.id}/director-download`" class="btn-action purple" style="margin-left:4px" download>↓ 下载</a>
             </div>
           </div>
+          <div v-if="g.director_status === 2 && g.director_file_status !== 'ready'" class="director-error">⚠ 导演版文件缺失（stale_path），请重新生成</div>
           <div v-if="g.director_error" class="director-error">⚠ {{ g.director_error }}</div>
         </div>
 
@@ -173,6 +176,7 @@
             </div>
           </div>
           <div class="qianchuan-hint">{{ qianchuanStatusMeta(g).hint }}</div>
+          <div v-if="g.qianchuan_status === 2 && g.qianchuan_file_status !== 'ready'" class="qianchuan-error">⚠ 千川结果文件缺失（stale_path），请重新生成</div>
           <div v-if="g.qianchuan_error" class="qianchuan-error">⚠ {{ summarizeQianchuanError(g.qianchuan_error) }}</div>
         </div>
 
