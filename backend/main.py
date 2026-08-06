@@ -2100,6 +2100,7 @@ COMFYUI_URL = os.environ.get("COMFYUI_URL", "http://10.190.0.203:8188")
 @app.get("/api/gpu/status")
 async def gpu_status():
     from gpu_state import is_online as gpu_is_online, is_maintenance as gpu_is_maint, _offline_since
+    from gpu_state import WATCHDOG_URL
     import time as _time
     offline_sec = int(_time.monotonic() - _offline_since) if (not gpu_is_online() and _offline_since) else 0
     result = {
@@ -2114,14 +2115,19 @@ async def gpu_status():
     # scheduling, not for presenting stale status to operators.
     skip_gpu_probe = gpu_is_maint()
     try:
-        import aiohttp as _aio_status
-        _to = _aio_status.ClientTimeout(total=5)
-
+        # Use the established async HTTP client dependency rather than
+        # aiohttp.  aiohttp can be absent/misconfigured on the control-plane
+        # host, which previously made healthy remote ComfyUI endpoints look
+        # unreachable.  Keep this probe remote-only; there is no local fallback.
         async def _aio_get(url):
             try:
-                async with _aio_status.ClientSession() as _s:
-                    async with _s.get(url, timeout=_to) as _r:
-                        return _r.status, await _r.json()
+                async with httpx.AsyncClient(timeout=5) as _s:
+                    _r = await _s.get(url)
+                    try:
+                        _body = _r.json()
+                    except ValueError:
+                        _body = None
+                    return _r.status_code, _body
             except Exception as _e:
                 return None, _e
 
@@ -2174,8 +2180,28 @@ async def gpu_status():
                 "queue_pending": 0,
             }
         if queue_status == 200 and isinstance(queue_body, dict):
+            # /queue is also a valid liveness signal.  Do not require
+            # /system_stats (which may be temporarily unavailable while
+            # ComfyUI remains healthy) to report the service as reachable.
+            result["comfyui"]["reachable"] = True
             result["comfyui"]["queue_running"] = len(queue_body.get("queue_running", []))
             result["comfyui"]["queue_pending"] = len(queue_body.get("queue_pending", []))
+
+        # Keep the watchdog's view alongside the direct probes for diagnosing
+        # split-brain/network-path failures. It is diagnostic only and never
+        # enables local processing or replaces the remote GPU requirement.
+        watchdog_status_code, watchdog_body = await _aio_get(f"{WATCHDOG_URL}/status")
+        result["watchdog_probe"] = {
+            "reachable": watchdog_status_code == 200,
+            "services": watchdog_body if watchdog_status_code == 200 and isinstance(watchdog_body, dict) else {},
+        }
+        comfy_watchdog = (
+            watchdog_body.get("comfyui")
+            if watchdog_status_code == 200 and isinstance(watchdog_body, dict)
+            else None
+        )
+        if isinstance(comfy_watchdog, dict):
+            result["comfyui"]["watchdog_healthy"] = bool(comfy_watchdog.get("healthy"))
     except Exception as e:
         logger.error(f"GPU status check failed: {e}")
 
