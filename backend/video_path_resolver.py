@@ -1,14 +1,19 @@
-"""Resolve publish video paths across migrations without touching completed tasks."""
+"""Resolve persisted media paths without binding orphan output files."""
 from __future__ import annotations
 
-import os
 from pathlib import Path, PureWindowsPath
 from typing import Mapping, Optional
-
 
 BACKEND_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BACKEND_DIR.parent
 RECORDINGS_DIR = PROJECT_ROOT / "recordings"
+_VERSION_FIELDS = {
+    "qianchuan": "qianchuan_final_video",
+    "creative": "creative_final_video",
+    "director": "director_final_video",
+    "classic": "merged_filename",
+}
+_VERSION_ORDER = ("qianchuan", "creative", "director", "classic")
 
 
 def path_basename(value: object) -> str:
@@ -18,8 +23,8 @@ def path_basename(value: object) -> str:
     return Path(raw.replace("\\", "/")).name or PureWindowsPath(raw).name
 
 
-def _candidate_paths(path: object) -> list[Path]:
-    raw = str(path or "").strip()
+def _candidate_paths(value: object) -> list[Path]:
+    raw = str(value or "").strip()
     if not raw:
         return []
     normalized = Path(raw.replace("\\", "/"))
@@ -30,95 +35,57 @@ def _candidate_paths(path: object) -> list[Path]:
             RECORDINGS_DIR / basename,
             RECORDINGS_DIR / "director_outputs" / basename,
             RECORDINGS_DIR / "creative_outputs" / basename,
-            PROJECT_ROOT / "recordings" / "director_outputs" / basename,
         ])
     return candidates
 
 
-_VERSION_FIELDS = {
-    "qianchuan": "qianchuan_final_video",
-    "creative": "creative_final_video",
-    "director": "director_final_video",
-    "classic": "merged_filename",
-}
+def resolve_artifact_path(value: object) -> tuple[Optional[str], list[str]]:
+    """Resolve only explicitly persisted paths; never search orphan outputs."""
+    checked: list[str] = []
+    for candidate in _candidate_paths(value):
+        checked.append(str(candidate))
+        if candidate.is_file():
+            return str(candidate), checked
+    return None, checked
 
 
 def resolve_publish_video(
     group: Mapping[str, object], requested_version: object = "both"
 ) -> tuple[Optional[str], Optional[str], list[str], list[str]]:
-    """Resolve the file to store in a publish task.
-
-    ``both`` (and an empty selection) means the default publishing policy:
-    qianchuan, creative, director, then classic.  An explicit version is
-    strict: it is never silently replaced by another version.  The returned
-    candidate descriptions and available version names are intended for the
-    API's actionable 409 response.
-    """
+    """Resolve an existing artifact using strict explicit or fallback selection."""
     requested = str(requested_version or "both").strip().lower()
-    if requested in ("", "default", "both"):
-        versions = ["qianchuan", "creative", "director", "classic"]
-    elif requested in _VERSION_FIELDS:
-        versions = [requested]
-    else:
-        versions = []
-
+    versions = [_VERSION_ORDER] if requested in ("", "default", "both") else [[requested]]
+    selected_order = versions[0] if requested in ("", "default", "both") else versions[0]
     checked: list[str] = []
     available: list[str] = []
     resolved: dict[str, str] = {}
-    for version in ("qianchuan", "creative", "director", "classic"):
+    for version in _VERSION_ORDER:
         field = _VERSION_FIELDS[version]
         value = group.get(field)
         if not value:
-            checked.append(f"{version}: 未设置")
+            checked.append(f"{version}: 未设置 ({field})")
             continue
-        candidates = _candidate_paths(value)
-        found = None
-        for candidate in candidates:
-            checked.append(f"{version}: {candidate}")
-            if candidate.is_file():
-                found = str(candidate)
-                break
-        if found:
-            resolved[version] = found
+        path, paths = resolve_artifact_path(value)
+        checked.extend(f"{version}: {item}" for item in paths)
+        if path:
+            resolved[version] = path
             available.append(version)
-
-    for version in versions:
+    for version in selected_order:
         if version in resolved:
             return resolved[version], version, checked, available
-    return None, None, checked, available
+    return None, requested, checked, available
 
 
 def resolve_video_path(video_path: object, group: Optional[Mapping[str, object]] = None) -> tuple[Optional[str], str]:
-    """Return a local existing path and reason, preferring current group artifacts."""
-    values: list[object] = []
+    """Legacy scheduler resolver; it only returns files that exist."""
     if group:
-        for field in ("qianchuan_final_video", "creative_final_video", "director_final_video"):
-            if group.get(field):
-                values.append(group[field])
-        if group.get("merged_filename"):
-            values.append(RECORDINGS_DIR / str(group["merged_filename"]))
-    values.append(video_path)
-
-    seen: set[str] = set()
-    for value in values:
-        for candidate in _candidate_paths(value):
-            key = str(candidate)
-            if key in seen:
-                continue
-            seen.add(key)
-            if candidate.is_file():
-                return str(candidate), "resolved_current_or_migrated_path"
-
-    basename = path_basename(video_path)
-    if basename:
-        matches = sorted({p for p in RECORDINGS_DIR.rglob(basename) if p.is_file()})
-        if len(matches) == 1:
-            return str(matches[0]), "resolved_unique_basename"
-        if len(matches) > 1:
-            return None, f"ambiguous_basename_matches:{len(matches)}"
-    if video_path:
-        return None, "file_missing_after_path_mapping"
-    return None, "no_video_path"
+        path, _, _, _ = resolve_publish_video(group, group.get("publish_versions", "both"))
+        if path:
+            return path, "resolved_current_or_migrated_path"
+    path, checked = resolve_artifact_path(video_path)
+    if path:
+        return path, "resolved_current_or_migrated_path"
+    return None, f"file_missing_after_path_mapping; checked={len(checked)}" if video_path else "no_video_path"
 
 
 def describe_missing(video_path: object, reason: str) -> str:

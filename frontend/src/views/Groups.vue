@@ -136,7 +136,8 @@
                 @click="composeDirectorVideo(g)">
                 {{ directorBusy[g.id] === 'video' ? '合成中…' : (g.director_final_video ? '↺ 重新合成' : '合成视频') }}
               </button>
-              <span v-if="g.director_final_video" class="step-done">✓ 视频已生成</span>
+              <span v-if="g.director_final_video" class="step-done">✓ 视频路径已记录</span>
+              <span v-if="g.director_status === 2 && !g.director_final_video" class="badge red">文件缺失（需重新生成）</span>
               <button v-if="g.director_final_video" class="btn-action purple" style="margin-left:8px" @click="openDirectorPreview(g)">▶ 预览</button>
               <a v-if="g.director_final_video" :href="`${apiBase}/api/groups/${g.id}/director-download`" class="btn-action purple" style="margin-left:4px" download>↓ 下载</a>
             </div>
@@ -823,6 +824,17 @@ const vibeHints = {
   creative:  '自由创作·编造卖点·催单节奏',
 }
 
+function pipelineArtifactState(group, version) {
+  const status = Number(group[`${version}_status`] ?? 0)
+  const pathField = version === 'classic' ? 'merged_filename' : `${version}_final_video`
+  const path = group[pathField]
+  if (status === 1) return { key: 'running', label: '生成中' }
+  if (status < 0) return { key: status === -3 || status === -4 ? 'quality_failed' : 'failed', label: status === -3 || status === -4 ? '质量失败' : '生成失败' }
+  if (!path && status !== 2) return { key: 'not_generated', label: '未生成' }
+  if (status === 2 && !path) return { key: 'file_missing', label: '文件缺失（需重新生成）' }
+  return { key: 'ready', label: '已生成' }
+}
+
 const qianchuanStatusMap = {
   0: { label: '未开始', className: 'idle', hint: '适合投流的强匹配广告管线，可生成固定结构短视频。' },
   1: { label: '生成中', className: 'running', hint: '正在生成千川投流版，请勿重复提交。' },
@@ -835,6 +847,12 @@ const qianchuanStatusMap = {
 
 function qianchuanStatusMeta(group) {
   const status = group.qianchuan_status ?? 0
+  if (status === 0 && !group.qianchuan_final_video) {
+    return { label: '未生成', className: 'idle', hint: '千川结果尚未生成，请先生成/重试千川版。' }
+  }
+  if (status === 2 && !group.qianchuan_final_video) {
+    return { label: '文件缺失', className: 'failed', hint: '千川路径已失效，请重新生成千川版。' }
+  }
   return qianchuanStatusMap[status] || { label: `状态 ${status}`, className: 'failed', hint: '千川投流版状态异常，请查看错误摘要。' }
 }
 
