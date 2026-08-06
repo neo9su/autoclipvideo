@@ -61,9 +61,32 @@ async def decode_smoke(path: str) -> Dict:
     return {"ok": code == 0 and not err.strip(), "returncode": code, "errors": err[-1000:]}
 
 
-async def check_qianchuan_video_quality(path: str, min_duration: float = 18.0, max_duration: float = 35.5) -> Dict:
-    require_remote_gpu("remote quality check")
-    report: Dict = {"path": path, "ok": False, "errors": [], "warnings": []}
+async def _remote_quality(job_id: str) -> Dict:
+    """Ask the GPU worker to inspect its own output; never probe the download locally."""
+    import aiohttp
+    require_remote_gpu("remote media quality check")
+    gpu_url = os.environ.get("GPU_SERVICE_URL", "http://10.190.0.203:8877").rstrip("/")
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120)) as session:
+        async with session.get(f"{gpu_url}/director-jobs/{job_id}/quality") as response:
+            if response.status != 200:
+                raise RuntimeError(f"remote quality probe returned HTTP {response.status}")
+            payload = await response.json()
+    return payload
+
+
+async def check_qianchuan_video_quality(path: str, min_duration: float = 18.0, max_duration: float = 35.5, job_id: Optional[str] = None) -> Dict:
+    if job_id:
+        try:
+            report = await _remote_quality(job_id)
+            report["path"] = path
+            report["execution_node"] = "remote-gpu"
+            report["job_id"] = job_id
+            return report
+        except Exception as exc:
+            return {"path": path, "ok": False, "errors": [str(exc)], "warnings": [],
+                    "execution_node": "remote-gpu", "job_id": job_id}
+    report: Dict = {"path": path, "ok": False, "errors": [], "warnings": [],
+                    "execution_node": "remote-gpu"}
     if not path or not os.path.exists(path):
         report["errors"].append("output file missing")
         return report

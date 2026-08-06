@@ -13,6 +13,9 @@ QIANCHUAN_COLUMNS: dict[str, str] = {
     "qianchuan_error": "TEXT",
     "qianchuan_score": "REAL",
     "qianchuan_review": "TEXT",
+    "qianchuan_preview_video": "TEXT",
+    "qianchuan_preview_review": "TEXT",
+    "qianchuan_job_id": "TEXT",
 }
 
 

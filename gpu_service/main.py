@@ -2100,6 +2100,47 @@ async def get_director_job(job_id: str):
     }
 
 
+async def _probe_media(path: str) -> dict:
+    """Collect media facts on the GPU node using its local ffprobe/ffmpeg."""
+    proc = await asyncio.create_subprocess_exec(
+        "ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", path,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        return {"errors": [stderr.decode(errors="replace")[-500:]]}
+    import json as _json
+    payload = _json.loads(stdout.decode(errors="replace") or "{}")
+    streams = payload.get("streams") or []
+    videos = [item for item in streams if item.get("codec_type") == "video"]
+    audios = [item for item in streams if item.get("codec_type") == "audio"]
+    fmt = payload.get("format") or {}
+    errors = []
+    if not videos: errors.append("no video stream")
+    if not audios: errors.append("no audio stream")
+    report = {"duration": float(fmt.get("duration") or 0), "file_size": int(fmt.get("size") or 0),
+              "video_streams": len(videos), "audio_streams": len(audios), "errors": errors}
+    if videos:
+        report.update({"width": videos[0].get("width"), "height": videos[0].get("height"),
+                       "video_codec": videos[0].get("codec_name"), "fps": videos[0].get("avg_frame_rate")})
+    if audios:
+        report.update({"audio_codec": audios[0].get("codec_name"), "sample_rate": audios[0].get("sample_rate")})
+    return report
+
+
+@app.get("/director-jobs/{job_id}/quality")
+async def get_director_quality(job_id: str):
+    """Run ffprobe/decode/volume checks on the GPU node for a completed job."""
+    job = _director_jobs.get(job_id)
+    if not job or job.get("status") != "done":
+        raise HTTPException(status_code=404, detail="Director job not ready")
+    path = job.get("output_path")
+    if not path or not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="Output file missing on server")
+    probe = await _probe_media(path)
+    return {**probe, "ok": not probe["errors"], "execution_node": "remote-gpu", "job_id": job_id}
+
+
 @app.get("/director-jobs/{job_id}/mp4")
 async def get_director_mp4(job_id: str):
     job = _director_jobs.get(job_id)

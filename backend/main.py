@@ -1532,6 +1532,23 @@ async def download_creative_video(group_id: int, request: Request):
     return StreamingResponse(iter_file_creative(), media_type="video/mp4", headers=headers)
 
 
+@app.get("/api/groups/{group_id}/qianchuan-preview-download")
+async def download_qianchuan_preview(group_id: int, request: Request):
+    """Download the isolated Qianchuan test artifact, never the delivery video."""
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT qianchuan_preview_video FROM clip_groups WHERE id = ?", (group_id,)
+        ) as cur:
+            row = await cur.fetchone()
+    if not row or not row["qianchuan_preview_video"]:
+        raise HTTPException(status_code=404, detail="No qianchuan preview available")
+    path = row["qianchuan_preview_video"]
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="Qianchuan preview file missing")
+    return FileResponse(path, media_type="video/mp4", filename=os.path.basename(path))
+
+
 @app.get("/api/groups/{group_id}/qianchuan-download")
 async def download_qianchuan_video(group_id: int, request: Request):
     async with aio_connect() as db:

@@ -97,7 +97,9 @@ def build_sound_cues(script: Dict, audio_segments: Optional[List[Dict]] = None, 
 
 
 class QianchuanVideoComposer(DirectorVideoComposer):
-    """Thin isolated composer that reuses proven director GPU path with qianchuan metadata."""
+    def __init__(self, recordings_dir: str):
+        super().__init__(recordings_dir)
+        self.last_job_id: Optional[str] = None
 
     async def compose_qianchuan_video(
         self,
@@ -113,6 +115,7 @@ class QianchuanVideoComposer(DirectorVideoComposer):
         config["qianchuan_ass_content"] = build_qianchuan_ass(script, audio_segments)
         config["qianchuan_sound_cues"] = build_sound_cues(script, audio_segments)
         config["qianchuan_output_spec"] = {"vcodec": "h264", "acodec": "aac", "resolution": "1080x1920", "fps": 30}
+        config["preview_mode"] = bool(config.get("preview_mode") or script.get("preview_mode"))
 
         enriched: List[Dict] = []
         for item in matched_segments:
