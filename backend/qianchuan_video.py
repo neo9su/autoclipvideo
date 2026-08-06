@@ -18,15 +18,15 @@ QIANCHUAN_KEYWORDS = [
 
 ASS_HEADER = """[Script Info]
 ScriptType: v4.00+
-WrapStyle: 0
+WrapStyle: 2
 ScaledBorderAndShadow: yes
 PlayResX: 1080
 PlayResY: 1920
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: QCMain,Arial,92,&H00FFFFFF,&H000000FF,&H90202020,&H60000000,1,0,0,0,100,100,1,0,1,4,1,2,72,72,260,1
-Style: QCKW,Arial,118,&H0000CCFF,&H000000FF,&H90101010,&H60000000,1,0,0,0,100,100,0,0,1,6,3,9,72,72,150,1
+Style: QCMain,Arial,92,&H00FFFFFF,&H000000FF,&H90202020,&H60000000,1,0,0,0,100,100,1,0,1,4,1,2,104,104,300,1
+Style: QCKW,Arial,84,&H0000CCFF,&H000000FF,&H90101010,&H60000000,1,0,0,0,100,100,0,0,1,3,3,9,104,104,220,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -54,6 +54,24 @@ def _highlight(text: str) -> str:
     return escaped
 
 
+def _wrap_safe_text(text: str, max_chars: int = 18) -> str:
+    """Wrap CJK copy before ASS renders it, keeping both lines in the safe zone."""
+    compact = " ".join(str(text or "").split())
+    if len(compact) <= max_chars:
+        return compact
+    return r"\N".join(compact[index:index + max_chars] for index in range(0, len(compact), max_chars))
+
+
+def _subtitle_scale(text: str) -> int:
+    """Reduce long captions instead of allowing glyphs to cross the margins."""
+    length = len(str(text or "").replace(r"\N", ""))
+    if length > 36:
+        return 78
+    if length > 24:
+        return 86
+    return 92
+
+
 def build_qianchuan_ass(script: Dict, audio_segments: Optional[List[Dict]] = None) -> str:
     """Build safe-zone ASS subtitles with keyword emphasis."""
     dur_by_scene = {}
@@ -66,14 +84,21 @@ def build_qianchuan_ass(script: Dict, audio_segments: Optional[List[Dict]] = Non
         start = cursor if dur_by_scene else float(scene.get("timestamp_start") or 0)
         dur = float(dur_by_scene.get(sid) or scene.get("duration") or (float(scene.get("timestamp_end") or 0) - start) or 3.0)
         end = start + max(1.0, dur)
-        text = _highlight(scene.get("voiceover_text") or scene.get("description") or "")
-        anim = r"{\fad(80,80)\t(0,220,\fscx108\fscy108)\t(220,420,\fscx100\fscy100)}"
+        raw_text = scene.get("voiceover_text") or scene.get("description") or ""
+        text = _highlight(_wrap_safe_text(raw_text))
+        scale = _subtitle_scale(text)
+        # One restrained 100→106% pulse; no repeated flash and no movement into the subject area.
+        anim = (
+            "{\\fad(100,100)\\fs"
+            + str(scale)
+            + "\\t(0,180,\\fscx106\\fscy106)\\t(180,360,\\fscx100\\fscy100)}"
+        )
         events.append(f"Dialogue: 0,{_sec_to_ass(start)},{_sec_to_ass(end)},QCMain,,0,0,0,,{anim}{text}")
-        # Pop only the first keyword in the upper-right safe area.
+        # Pop only the first keyword in a small, fixed upper-right safe area.
         for kw in QIANCHUAN_KEYWORDS:
             if kw in (scene.get("voiceover_text") or ""):
                 pop_end = min(end, start + 1.2)
-                events.append(f"Dialogue: 1,{_sec_to_ass(start + 0.15)},{_sec_to_ass(pop_end)},QCKW,,0,0,0,,{{\\an9\\fad(0,180)\\t(0,160,\\fscx125\\fscy125)}}{kw}")
+                events.append(f"Dialogue: 1,{_sec_to_ass(start + 0.15)},{_sec_to_ass(pop_end)},QCKW,,0,0,0,,{{\\an9\\pos(900,220)\\fad(100,220)\\t(0,160,\\fscx108\\fscy108)}}{_wrap_safe_text(kw, 10)}")
                 break
         cursor = end
     return ASS_HEADER + "\n".join(events) + "\n"
