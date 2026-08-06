@@ -63,14 +63,14 @@
             </button>
             <button v-else class="btn-action yellow" disabled>处理中…</button>
             <!-- 经典版结果 -->
-            <template v-if="g.classic_status === 2">
+            <template v-if="g.classic_status === 2 && g.classic_available">
               <button class="btn-action teal" style="margin-right:2px" @click="openClassicPreview(g)">▶ 经典版</button>
               <a :href="`${apiBase}/api/groups/${g.id}/download`" class="btn-action teal" title="经典版下载" download>↓</a>
             </template>
             <span v-else-if="g.classic_status === 1" class="badge yellow">经典版处理中…</span>
             <span v-else-if="g.classic_status === -1" class="badge red">经典版失败</span>
             <!-- 自编版结果 -->
-            <template v-if="g.creative_status === 2">
+            <template v-if="g.creative_status === 2 && g.creative_available">
               <button class="btn-action green" style="margin-right:2px" @click="openCreativePreview(g)">▶ 自编版</button>
               <a :href="`${apiBase}/api/groups/${g.id}/creative-download`" class="btn-action green" title="自编版下载" download>↓</a>
             </template>
@@ -136,10 +136,9 @@
                 @click="composeDirectorVideo(g)">
                 {{ directorBusy[g.id] === 'video' ? '合成中…' : (g.director_final_video ? '↺ 重新合成' : '合成视频') }}
               </button>
-              <span v-if="g.director_final_video" class="step-done">✓ 视频路径已记录</span>
-              <span v-if="g.director_status === 2 && !g.director_final_video" class="badge red">文件缺失（需重新生成）</span>
-              <button v-if="g.director_final_video" class="btn-action purple" style="margin-left:8px" @click="openDirectorPreview(g)">▶ 预览</button>
-              <a v-if="g.director_final_video" :href="`${apiBase}/api/groups/${g.id}/director-download`" class="btn-action purple" style="margin-left:4px" download>↓ 下载</a>
+              <span v-if="g.director_final_video" class="step-done">✓ 视频已生成</span>
+              <button v-if="g.director_status === 2 && g.director_available" class="btn-action purple" style="margin-left:8px" @click="openDirectorPreview(g)">▶ 预览</button>
+              <a v-if="g.director_status === 2 && g.director_available" :href="`${apiBase}/api/groups/${g.id}/director-download`" class="btn-action purple" style="margin-left:4px" download>↓ 下载</a>
             </div>
           </div>
           <div v-if="g.director_error" class="director-error">⚠ {{ g.director_error }}</div>
@@ -161,7 +160,7 @@
                 @click="generateQianchuan(g)">
                 {{ qianchuanBusy[g.id] || g.qianchuan_status === 1 ? '生成中…' : (isQianchuanFailure(g.qianchuan_status) ? '↺ 重试千川版' : '生成千川版') }}
               </button>
-              <template v-if="g.qianchuan_status === 2 && g.qianchuan_final_video">
+              <template v-if="g.qianchuan_status === 2 && g.qianchuan_available">
                 <button class="btn-action cyan" @click="openQianchuanPreview(g)">▶ 预览</button>
                 <a :href="`${apiBase}/api/groups/${g.id}/qianchuan-download`" class="btn-action cyan" download>↓ 下载</a>
                 <button
@@ -824,19 +823,8 @@ const vibeHints = {
   creative:  '自由创作·编造卖点·催单节奏',
 }
 
-function pipelineArtifactState(group, version) {
-  const status = Number(group[`${version}_status`] ?? 0)
-  const pathField = version === 'classic' ? 'merged_filename' : `${version}_final_video`
-  const path = group[pathField]
-  if (status === 1) return { key: 'running', label: '生成中' }
-  if (status < 0) return { key: status === -3 || status === -4 ? 'quality_failed' : 'failed', label: status === -3 || status === -4 ? '质量失败' : '生成失败' }
-  if (!path && status !== 2) return { key: 'not_generated', label: '未生成' }
-  if (status === 2 && !path) return { key: 'file_missing', label: '文件缺失（需重新生成）' }
-  return { key: 'ready', label: '已生成' }
-}
-
 const qianchuanStatusMap = {
-  0: { label: '未开始', className: 'idle', hint: '适合投流的强匹配广告管线，可生成固定结构短视频。' },
+  0: { label: '未生成', className: 'idle', hint: '千川结果尚未生成，请先生成/重试千川版。' },
   1: { label: '生成中', className: 'running', hint: '正在生成千川投流版，请勿重复提交。' },
   2: { label: '已完成', className: 'done', hint: '千川投流版已生成，可预览或下载。' },
   '-1': { label: '普通失败', className: 'failed', hint: '生成失败，可查看错误摘要后重试。' },
@@ -847,12 +835,6 @@ const qianchuanStatusMap = {
 
 function qianchuanStatusMeta(group) {
   const status = group.qianchuan_status ?? 0
-  if (status === 0 && !group.qianchuan_final_video) {
-    return { label: '未生成', className: 'idle', hint: '千川结果尚未生成，请先生成/重试千川版。' }
-  }
-  if (status === 2 && !group.qianchuan_final_video) {
-    return { label: '文件缺失', className: 'failed', hint: '千川路径已失效，请重新生成千川版。' }
-  }
   return qianchuanStatusMap[status] || { label: `状态 ${status}`, className: 'failed', hint: '千川投流版状态异常，请查看错误摘要。' }
 }
 

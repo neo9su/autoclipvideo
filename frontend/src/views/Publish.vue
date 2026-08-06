@@ -181,10 +181,10 @@
             <div class="group-item-name">{{ g.label }}</div>
             <div class="group-item-sub">
               <span v-if="g.room_name" class="group-room-tag">{{ g.room_name }}</span>{{ g.wig_model }} · {{ g.wig_color }}
-              <span v-if="g.director_status === 2" class="vbadge vbadge-director">🎬</span>
+              <span v-if="g.director_status === 2 && g.director_available" class="vbadge vbadge-director">🎬</span>
               <span v-if="g.classic_status === 2" class="vbadge vbadge-classic">📹</span>
-              <span v-if="g.creative_status === 2" class="vbadge vbadge-creative">✍️</span>
-              <span v-if="g.qianchuan_status === 2" class="vbadge vbadge-qianchuan">📣</span>
+              <span v-if="g.creative_status === 2 && g.creative_available" class="vbadge vbadge-creative">✍️</span>
+              <span v-if="g.qianchuan_status === 2 && g.qianchuan_available" class="vbadge vbadge-qianchuan">📣</span>
             </div>
             <span v-if="publishedGroupIds.has(g.id)" class="group-published-badge">✓ 已发布</span>
             <div class="group-item-actions" @click.stop>
@@ -1168,7 +1168,7 @@ const previewVideoUrl = computed(() => {
 
 watch(previewGroup, (g) => {
   if (!g) return
-  previewVersion.value = g.qianchuan_status === 2 ? 'qianchuan' : g.director_status === 2 ? 'director' : g.creative_status === 2 ? 'creative' : 'classic'
+  previewVersion.value = g.qianchuan_status === 2 && g.qianchuan_available ? 'qianchuan' : g.director_status === 2 && g.director_available ? 'director' : g.creative_status === 2 && g.creative_available ? 'creative' : 'classic'
 })
 
 function groupVideoUrl(groupId) {

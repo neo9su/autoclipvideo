@@ -36,6 +36,7 @@ from gpu_execution import require_remote_gpu
 from thumbnail import generate_thumbnail
 from meta_generator import generate_meta, match_product
 from publish_scheduler import poll_publish_tasks
+from video_path_resolver import resolve_artifact_path
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -1259,31 +1260,18 @@ async def list_groups():
             ORDER BY g.created_at DESC
         """) as cur:
             rows = await cur.fetchall()
-    from video_path_resolver import resolve_artifact_path
-    result = []
-    for row in rows:
-        item = dict(row)
-        artifacts = {}
-        for version, field in (("classic", "merged_filename"), ("director", "director_final_video"), ("creative", "creative_final_video"), ("qianchuan", "qianchuan_final_video")):
-            path, checked = resolve_artifact_path(item.get(field))
-            status = item.get(f"{version}_status") or 0
-            if status == 1:
-                state = "running"
-            elif status < 0:
-                state = "quality_failed" if status in (-3, -4) else "failed"
-            elif path:
-                state = "ready"
-            elif item.get(field) or status == 2:
-                state = "stale_path"
-            else:
-                state = "not_generated"
-            artifacts[version] = {"state": state, "path_exists": bool(path), "checked_paths": checked}
-        item["artifact_states"] = artifacts
-        result.append(item)
-    return result
+    return [dict(r) | _artifact_statuses(dict(r)) for r in rows]
 
 
-@app.get("/api/groups/{group_id}")
+def _artifact_statuses(group: dict) -> dict:
+    statuses = {}
+    for version, field in (("classic", "merged_filename"), ("director", "director_final_video"),
+                           ("creative", "creative_final_video"), ("qianchuan", "qianchuan_final_video")):
+        path, reason = resolve_artifact_path(group.get(field), version)
+        statuses[f"{version}_file_status"] = "ready" if path else reason
+        statuses[f"{version}_available"] = bool(path)
+    return statuses
+
 async def get_group(group_id: int):
     async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
@@ -1301,7 +1289,7 @@ async def get_group(group_id: int):
             (group_id,)
         ) as cur:
             recs = await cur.fetchall()
-    return {**dict(group), "recordings": [dict(r) for r in recs]}
+    return dict(group) | _artifact_statuses(dict(group)) | {"recordings": [dict(r) for r in recs]}
 
 
 @app.post("/api/groups/{group_id}/merge")
@@ -1393,84 +1381,70 @@ async def set_publish_versions(group_id: int, body: dict):
     return {"group_id": group_id, "publish_versions": versions}
 
 
-async def _resolve_group_download_path(group_id: int, version: str) -> tuple[str, str]:
-    """Resolve a requested artifact and classify stale DB state for clients."""
-    from video_path_resolver import _VERSION_FIELDS, resolve_artifact_path
-
-    field = _VERSION_FIELDS[version]
-    async with aio_connect() as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            f"SELECT {field}, {version}_status FROM clip_groups WHERE id = ?", (group_id,)
-        ) as cur:
-            row = await cur.fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="Group not found")
-    value = row[field]
-    if not value:
-        if version == "qianchuan":
-            raise HTTPException(status_code=404, detail="千川结果尚未生成，请先生成/重试千川版。")
-        raise HTTPException(status_code=404, detail=f"{version} 结果尚未生成，请先生成后重试。")
-    path, checked = resolve_artifact_path(value)
-    if not path:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "file_missing",
-                "status": "stale_path",
-                "action": "needs_regeneration",
-                "group_id": group_id,
-                "version": version,
-                "message": f"{version} 数据库路径存在，但文件已缺失，请重新生成。",
-                "checked_paths": checked,
-            },
-        )
-    return path, field
-
-
 @app.get("/api/groups/{group_id}/download")
 async def download_merged(group_id: int, request: Request):
-    path, _ = await _resolve_group_download_path(group_id, "classic")
-    filename = os.path.basename(path)
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM clip_groups WHERE id = ?", (group_id,)) as cur:
+            group = await cur.fetchone()
+        if not group:
+            raise HTTPException(status_code=404, detail="Group not found")
+        # Prefer merged video; fall back to any ready clip in the group
+        if group["merge_status"] == 2 and group["merged_filename"]:
+            rel_path = group["merged_filename"]
+        else:
+            async with db.execute(
+                "SELECT clip_filename FROM recordings WHERE group_id = ? AND clip_filename IS NOT NULL AND clipped = 2 ORDER BY id DESC LIMIT 1",
+                (group_id,),
+            ) as cur:
+                rec = await cur.fetchone()
+            if not rec:
+                raise HTTPException(status_code=404, detail="No preview available")
+            rel_path = rec["clip_filename"]
+    path = os.path.join(os.path.dirname(__file__), "..", "recordings", rel_path)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="File missing")
+    filename = os.path.basename(rel_path)
     disposition_type = "inline" if request.headers.get("range") else "attachment"
-    return FileResponse(path, media_type="video/mp4", filename=filename, content_disposition_type=disposition_type)
+    return FileResponse(
+        path,
+        media_type="video/mp4",
+        filename=filename,
+        content_disposition_type=disposition_type,
+    )
 
 
 @app.get("/api/groups/{group_id}/director-download")
 async def download_director_video(group_id: int, request: Request):
-    path, _ = await _resolve_group_download_path(group_id, "director")
-    filename = os.path.basename(path)
-    return FileResponse(path, media_type="video/mp4", filename=filename, content_disposition_type="inline")
+    return await _download_artifact(group_id, "director", "director_final_video", "导演版", request)
 
 
 @app.get("/api/groups/{group_id}/creative-download")
 async def download_creative_video(group_id: int, request: Request):
-    path, _ = await _resolve_group_download_path(group_id, "creative")
-    filename = os.path.basename(path)
-    return FileResponse(path, media_type="video/mp4", filename=filename, content_disposition_type="inline")
+    return await _download_artifact(group_id, "creative", "creative_final_video", "自编版", request)
 
 
 @app.get("/api/groups/{group_id}/qianchuan-preview-download")
 async def download_qianchuan_preview(group_id: int, request: Request):
-    """Download the isolated Qianchuan test artifact, never the delivery video."""
-    async with aio_connect() as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT qianchuan_preview_video FROM clip_groups WHERE id = ?", (group_id,)
-        ) as cur:
-            row = await cur.fetchone()
-    if not row or not row["qianchuan_preview_video"]:
-        raise HTTPException(status_code=404, detail="No qianchuan preview available")
-    path = row["qianchuan_preview_video"]
-    if not os.path.isfile(path):
-        raise HTTPException(status_code=404, detail="Qianchuan preview file missing")
-    return FileResponse(path, media_type="video/mp4", filename=os.path.basename(path))
+    return await _download_artifact(group_id, "qianchuan_preview", "qianchuan_preview_video", "千川预览", request)
 
 
 @app.get("/api/groups/{group_id}/qianchuan-download")
 async def download_qianchuan_video(group_id: int, request: Request):
-    path, _ = await _resolve_group_download_path(group_id, "qianchuan")
-    return FileResponse(path, media_type="video/mp4", filename=os.path.basename(path), content_disposition_type="inline")
+    return await _download_artifact(group_id, "qianchuan", "qianchuan_final_video", "千川结果", request)
+
+
+async def _download_artifact(group_id: int, version: str, field: str, label: str, request: Request):
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(f"SELECT {field} FROM clip_groups WHERE id = ?", (group_id,)) as cur:
+            row = await cur.fetchone()
+    path, reason = resolve_artifact_path(row[field] if row else None, version)
+    if not path:
+        detail = f"{label}尚未生成，请先生成/重试{label}。" if reason == "not_generated" else f"{label}文件缺失（stale_path），请重新生成。"
+        raise HTTPException(status_code=404, detail=detail)
+    return FileResponse(path, media_type="video/mp4", filename=os.path.basename(path),
+                        content_disposition_type="inline" if request.headers.get("range") else "attachment")
 
 
 @app.get("/api/recordings/processing-progress")
