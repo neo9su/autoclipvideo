@@ -1,4 +1,6 @@
 import sqlite3
+import json
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -32,3 +34,26 @@ def test_timeout_terminates_worker(tmp_path):
     s=TaskStore(tmp_path/'x.db'); s.upsert_issue(1,'x')
     cfg=RunnerConfig(db=tmp_path/'x.db', worker_command='sleep 30', hard_timeout=.1, no_progress_timeout=.1)
     assert Runner(cfg,s).run_once() == 'retryable'
+
+
+def test_status_api_returns_store_state(tmp_path):
+    s=TaskStore(tmp_path/'x.db'); s.upsert_issue(1, 'x')
+    assert Runner(RunnerConfig(db=tmp_path/'x.db'), s).status()['issues'][0]['id'] == 1
+
+
+def test_scan_dry_run_does_not_persist(tmp_path):
+    class Adapter:
+        def scan(self): return [{'number': 7, 'title': 'remote'}]
+    s=TaskStore(tmp_path/'x.db')
+    runner=Runner(RunnerConfig(db=tmp_path/'x.db'), s, adapter=Adapter())
+    assert runner.scan(dry_run=True) == [{'number': 7, 'title': 'remote'}]
+    assert s.status()['issues'] == []
+
+
+def test_cli_status_and_recover_dry_run(tmp_path):
+    db=tmp_path/'x.db'
+    command=[sys.executable, '-m', 'runner.ops.task_runner', '--db', str(db)]
+    status=subprocess.run(command+['status'], capture_output=True, text=True, check=True)
+    assert json.loads(status.stdout) == {'issues': [], 'runs': [], 'leases': [], 'events': 0}
+    recover=subprocess.run(command+['recover', '--dry-run'], capture_output=True, text=True, check=True)
+    assert json.loads(recover.stdout) == {'expired_leases': 0, 'interrupted_runs': 0, 'dry_run': True}

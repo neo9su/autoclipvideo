@@ -78,13 +78,18 @@ class GitHubAdapter:
 class Runner:
     def __init__(self, config=None, store=None, adapter=None, worker: Callable | None = None):
         self.config=config or RunnerConfig(); self.store=store or TaskStore(self.config.db); self.adapter=adapter or GitHubAdapter(self.config.gh_command); self.worker=worker
-    def scan(self):
+    def scan(self, dry_run=False):
         issues=self.adapter.scan()
-        for i in issues:
-            number = i.get("number")
-            title = i.get("title", f"Issue {number}")
-            if number is not None: self.store.upsert_issue(number, title, "queued", i)
+        if not dry_run:
+            for i in issues:
+                number = i.get("number")
+                title = i.get("title", f"Issue {number}")
+                if number is not None: self.store.upsert_issue(number, title, "queued", i)
         return issues
+
+    def status(self):
+        """Return the persisted runner state for the CLI and API callers."""
+        return self.store.status()
     def run_once(self, issue_id=None):
         rows=self.store.conn.execute("SELECT id,title,payload FROM issues WHERE state IN ('queued','retryable') AND (? IS NULL OR id=?) ORDER BY id",(issue_id,issue_id)).fetchall()
         if not rows: return None
@@ -121,10 +126,12 @@ class Runner:
 
 def main(argv=None):
     p=argparse.ArgumentParser(prog="task-runner"); p.add_argument("--db",type=Path,default=None); sub=p.add_subparsers(dest="command",required=True)
-    sub.add_parser("scan"); r=sub.add_parser("run-once"); r.add_argument("--issue",type=int); sub.add_parser("status"); rec=sub.add_parser("recover"); rec.add_argument("--dry-run",action="store_true")
+    scan=sub.add_parser("scan"); scan.add_argument("--dry-run",action="store_true", help="fetch issues without changing the local store")
+    r=sub.add_parser("run-once"); r.add_argument("--issue",type=int); sub.add_parser("status"); rec=sub.add_parser("recover"); rec.add_argument("--dry-run",action="store_true")
     args=p.parse_args(argv); cfg=RunnerConfig(db=args.db or RunnerConfig().db); runner=Runner(cfg)
     if args.command == "run-once": result=runner.run_once(args.issue)
     elif args.command == "recover": result=runner.recover(dry_run=args.dry_run)
+    elif args.command == "scan": result=runner.scan(dry_run=args.dry_run)
     else: result=getattr(runner,args.command)()
     print(json.dumps(result,indent=2,default=str)); return 0
 if __name__ == "__main__": raise SystemExit(main())
