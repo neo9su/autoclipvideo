@@ -565,49 +565,50 @@ async def _periodic_cleanup():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    if os.environ.get("DEPLOYMENT_ROLE") != "gpu-backend":
-        raise RuntimeError("backend must run as the remote GPU backend; use the control-plane frontend locally")
-    require_remote_gpu("backend startup")
+    deployment_role = os.environ.get("DEPLOYMENT_ROLE", "gpu-backend")
+    if deployment_role not in {"gpu-backend", "control-plane"}:
+        raise RuntimeError(
+            "DEPLOYMENT_ROLE must be 'gpu-backend' or 'control-plane'"
+        )
+    is_control_plane = deployment_role == "control-plane"
+    if not is_control_plane:
+        require_remote_gpu("backend startup")
     await init_db()
     logger.info("Qianchuan fact-source SQLite DB: %s", os.path.abspath(DB_PATH))
     await _reset_stuck_clip_tasks()
     await _cleanup_stale_open_recording_placeholders()
-    try:
-        # Control-plane startup must never start local capture/worker loops.
-        # Rooms and media jobs are resumed by the remote GPU orchestration path.
-        logger.info("Control-plane mode: skipping local room monitors and startup media dispatch")
-    except Exception as e:
-        logger.error(f"Startup pipeline trigger failed: {e}")
     # Load human-approved keyword score overrides into the scoring table
     from editor import load_rule_overrides
     await load_rule_overrides()
-    # Do not start RoomRecorder/ffmpeg loops on the control-plane host.
-    asyncio.create_task(backfill_auto_merge())
+
     from gpu_state import watch_gpu_service, register_online_callback
-    register_online_callback(_on_gpu_online)
     gpu_watcher_task = asyncio.create_task(watch_gpu_service(broadcast_fn=broadcast))
-    transcribe_task = None
-    scheduler_task = asyncio.create_task(poll_publish_tasks(broadcast_fn=broadcast))
-    memory_task = asyncio.create_task(_memory_monitor(broadcast_fn=broadcast))
-    enhance_worker_task = asyncio.create_task(_enhance_worker())
-    cleanup_task = asyncio.create_task(_periodic_cleanup())
-    creative_dispatch_task = asyncio.create_task(_periodic_creative_dispatch())
-    director_dispatch_task = asyncio.create_task(_periodic_director_dispatch())
+    tasks = [gpu_watcher_task]
+
+    if is_control_plane:
+        # The Mac instance is API/static-file control plane only.  In particular,
+        # do not register the GPU-online callback: it dispatches media pipelines.
+        logger.info(
+            "DEPLOYMENT_ROLE=control-plane: background media jobs disabled "
+            "(capture, transcription, backfill, publish, enhance, creative/director, and room monitors)"
+        )
+    else:
+        register_online_callback(_on_gpu_online)
+        tasks.extend([
+            asyncio.create_task(backfill_auto_merge()),
+            asyncio.create_task(poll_publish_tasks(broadcast_fn=broadcast)),
+            asyncio.create_task(_memory_monitor(broadcast_fn=broadcast)),
+            asyncio.create_task(_enhance_worker()),
+            asyncio.create_task(_periodic_cleanup()),
+            asyncio.create_task(_periodic_creative_dispatch()),
+            asyncio.create_task(_periodic_director_dispatch()),
+        ])
     yield
-    gpu_watcher_task.cancel()
-    if transcribe_task:
-        transcribe_task.cancel()
-    scheduler_task.cancel()
-    memory_task.cancel()
-    enhance_worker_task.cancel()
-    cleanup_task.cancel()
-    creative_dispatch_task.cancel()
-    director_dispatch_task.cancel()
-    for t in [gpu_watcher_task, transcribe_task, scheduler_task, memory_task, enhance_worker_task, cleanup_task, creative_dispatch_task, director_dispatch_task]:
-        if t is None:
-            continue
+    for task in tasks:
+        task.cancel()
+    for task in tasks:
         try:
-            await t
+            await task
         except asyncio.CancelledError:
             pass
     for room_id in list(monitor._tasks.keys()):
@@ -2100,6 +2101,7 @@ COMFYUI_URL = os.environ.get("COMFYUI_URL", "http://10.190.0.203:8188")
 @app.get("/api/gpu/status")
 async def gpu_status():
     from gpu_state import is_online as gpu_is_online, is_maintenance as gpu_is_maint, _offline_since
+    from gpu_state import WATCHDOG_URL
     import time as _time
     offline_sec = int(_time.monotonic() - _offline_since) if (not gpu_is_online() and _offline_since) else 0
     result = {
@@ -2114,14 +2116,19 @@ async def gpu_status():
     # scheduling, not for presenting stale status to operators.
     skip_gpu_probe = gpu_is_maint()
     try:
-        import aiohttp as _aio_status
-        _to = _aio_status.ClientTimeout(total=5)
-
+        # Use the established async HTTP client dependency rather than
+        # aiohttp.  aiohttp can be absent/misconfigured on the control-plane
+        # host, which previously made healthy remote ComfyUI endpoints look
+        # unreachable.  Keep this probe remote-only; there is no local fallback.
         async def _aio_get(url):
             try:
-                async with _aio_status.ClientSession() as _s:
-                    async with _s.get(url, timeout=_to) as _r:
-                        return _r.status, await _r.json()
+                async with httpx.AsyncClient(timeout=5) as _s:
+                    _r = await _s.get(url)
+                    try:
+                        _body = _r.json()
+                    except ValueError:
+                        _body = None
+                    return _r.status_code, _body
             except Exception as _e:
                 return None, _e
 
@@ -2174,8 +2181,28 @@ async def gpu_status():
                 "queue_pending": 0,
             }
         if queue_status == 200 and isinstance(queue_body, dict):
+            # /queue is also a valid liveness signal.  Do not require
+            # /system_stats (which may be temporarily unavailable while
+            # ComfyUI remains healthy) to report the service as reachable.
+            result["comfyui"]["reachable"] = True
             result["comfyui"]["queue_running"] = len(queue_body.get("queue_running", []))
             result["comfyui"]["queue_pending"] = len(queue_body.get("queue_pending", []))
+
+        # Keep the watchdog's view alongside the direct probes for diagnosing
+        # split-brain/network-path failures. It is diagnostic only and never
+        # enables local processing or replaces the remote GPU requirement.
+        watchdog_status_code, watchdog_body = await _aio_get(f"{WATCHDOG_URL}/status")
+        result["watchdog_probe"] = {
+            "reachable": watchdog_status_code == 200,
+            "services": watchdog_body if watchdog_status_code == 200 and isinstance(watchdog_body, dict) else {},
+        }
+        comfy_watchdog = (
+            watchdog_body.get("comfyui")
+            if watchdog_status_code == 200 and isinstance(watchdog_body, dict)
+            else None
+        )
+        if isinstance(comfy_watchdog, dict):
+            result["comfyui"]["watchdog_healthy"] = bool(comfy_watchdog.get("healthy"))
     except Exception as e:
         logger.error(f"GPU status check failed: {e}")
 
