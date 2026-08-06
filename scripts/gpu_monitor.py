@@ -225,6 +225,7 @@ def restart_backend():
                     ["/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/Resources/Python.app/Contents/MacOS/Python",
                      "/opt/homebrew/bin/uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8099"],
                     cwd=backend_dir,
+                    env={**os.environ, "DEPLOYMENT_ROLE": "control-plane"},
                     stdout=open(os.path.join(backend_dir, "backend_run.log"), "a"),
                     stderr=subprocess.STDOUT,
                     start_new_session=True
@@ -243,6 +244,7 @@ def restart_backend():
                     ["/opt/homebrew/Cellar/python@3.11/3.11.15/Frameworks/Python.framework/Versions/3.11/Resources/Python.app/Contents/MacOS/Python",
                      "/opt/homebrew/bin/uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8099"],
                     cwd=backend_dir,
+                    env={**os.environ, "DEPLOYMENT_ROLE": "control-plane"},
                     stdout=open(os.path.join(backend_dir, "backend_run.log"), "a"),
                     stderr=subprocess.STDOUT,
                     start_new_session=True
