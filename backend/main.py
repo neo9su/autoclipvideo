@@ -41,6 +41,19 @@ from video_path_resolver import resolve_artifact_path
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
+# ── Deployment role (must be set BEFORE lifespan reads it) ──────────────────
+# control-plane = Mac light instance (port 8099): API/static files only, no media pipelines
+# gpu-backend   = GPU server (port 8899): full media pipeline with remote GPU access
+_DEPLOYMENT_ROLE = os.environ.get("DEPLOYMENT_ROLE", "gpu-backend")
+if _DEPLOYMENT_ROLE not in {"gpu-backend", "control-plane"}:
+    raise RuntimeError(
+        "DEPLOYMENT_ROLE must be 'gpu-backend' or 'control-plane'"
+    )
+IS_CONTROL_PLANE = _DEPLOYMENT_ROLE == "control-plane"
+
+# Remote GPU backend URL — canonical entry for media APIs (qianchuan, director, etc.)
+REMOTE_BACKEND_URL = os.environ.get("REMOTE_BACKEND_URL", "http://10.190.0.203:8899")
+
 STALE_OPEN_RECORDING_HOURS = 6
 
 # WebSocket connections
@@ -566,13 +579,8 @@ async def _periodic_cleanup():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    deployment_role = os.environ.get("DEPLOYMENT_ROLE", "gpu-backend")
-    if deployment_role not in {"gpu-backend", "control-plane"}:
-        raise RuntimeError(
-            "DEPLOYMENT_ROLE must be 'gpu-backend' or 'control-plane'"
-        )
-    is_control_plane = deployment_role == "control-plane"
-    if not is_control_plane:
+    # Deployment role is validated at module load (see _DEPLOYMENT_ROLE above)
+    if not IS_CONTROL_PLANE:
         require_remote_gpu("backend startup")
     await init_db()
     logger.info("Qianchuan fact-source SQLite DB: %s", os.path.abspath(DB_PATH))
@@ -586,12 +594,14 @@ async def lifespan(app: FastAPI):
     gpu_watcher_task = asyncio.create_task(watch_gpu_service(broadcast_fn=broadcast))
     tasks = [gpu_watcher_task]
 
-    if is_control_plane:
+    if IS_CONTROL_PLANE:
         # The Mac instance is API/static-file control plane only.  In particular,
         # do not register the GPU-online callback: it dispatches media pipelines.
         logger.info(
             "DEPLOYMENT_ROLE=control-plane: background media jobs disabled "
-            "(capture, transcription, backfill, publish, enhance, creative/director, and room monitors)"
+            "(capture, transcription, backfill, publish, enhance, creative/director, and room monitors). "
+            "Remote GPU backend: %s",
+            REMOTE_BACKEND_URL,
         )
     else:
         register_online_callback(_on_gpu_online)
@@ -628,21 +638,78 @@ app.add_middleware(
 )
 
 
+@app.get("/health")
+async def health():
+    """Health check with deployment role, remote backend status, and API routing info.
+
+    On the control-plane (Mac, port 8099), this shows the remote GPU backend URL
+    where media APIs (qianchuan, director, etc.) actually run.
+    On the GPU backend (port 8899), this shows local service health.
+    """
+    result = {
+        "ok": True,
+        "deployment_role": _DEPLOYMENT_ROLE,
+        "version": APP_VERSION,
+        "remote_backend_url": REMOTE_BACKEND_URL,
+    }
+    if IS_CONTROL_PLANE:
+        result["qianchuan_entry"] = f"{REMOTE_BACKEND_URL}/api/v2/qianchuan/status"
+        result["director_entry"] = f"{REMOTE_BACKEND_URL}/api/v2/director/status"
+        result["note"] = (
+            "Control-plane: 本机仅提供轻量API代理和静态文件服务。"
+            "千川投流版和导演模式API请使用远端GPU后端。"
+        )
+        # Probe remote backend liveness (best-effort, non-blocking)
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(f"{REMOTE_BACKEND_URL}/")
+                result["remote_backend_reachable"] = resp.status_code < 500
+        except Exception:
+            result["remote_backend_reachable"] = False
+    return result
+
+
 @app.get("/", include_in_schema=False)
 async def service_entrypoint():
     """Open the production frontend at the canonical remote backend URL."""
     return RedirectResponse(url="/frontend/", status_code=307)
 
 
-# 集成导演模式API路由
-try:
-    from api_v2 import director_router, qianchuan_router, set_broadcast_fn
-    app.include_router(director_router)
-    app.include_router(qianchuan_router)
-    set_broadcast_fn(broadcast)
-    logger.info("导演模式/千川投流版API路由已加载")
-except ImportError as e:
-    logger.warning(f"导演模式/千川投流版API加载失败: {e}")
+# ── API v2: Director & Qianchuan routes ─────────────────────────────────────
+# Control-plane (Mac port 8099) gets lightweight proxy routes pointing to the
+# remote GPU backend. GPU backend (port 8899) loads the full media pipeline.
+if IS_CONTROL_PLANE:
+    @app.get("/api/v2/qianchuan/status")
+    async def qianchuan_status():
+        return {
+            "local_qianchuan_available": False,
+            "deployment_role": "control-plane",
+            "message": "千川投流版API运行在远端GPU后端（8899端口）",
+            "remote_backend_url": REMOTE_BACKEND_URL,
+            "remote_qianchuan_status_url": f"{REMOTE_BACKEND_URL}/api/v2/qianchuan/status",
+        }
+
+    @app.get("/api/v2/director/status")
+    async def director_status():
+        return {
+            "local_director_available": False,
+            "deployment_role": "control-plane",
+            "message": "导演模式API运行在远端GPU后端（8899端口）",
+            "remote_backend_url": REMOTE_BACKEND_URL,
+            "remote_director_status_url": f"{REMOTE_BACKEND_URL}/api/v2/director/status",
+        }
+
+    logger.info("控制面: 已加载千川/导演模式代理路由 -> %s", REMOTE_BACKEND_URL)
+else:
+    # GPU backend: full api_v2 routes for media pipelines
+    try:
+        from api_v2 import director_router, qianchuan_router, set_broadcast_fn
+        app.include_router(director_router)
+        app.include_router(qianchuan_router)
+        set_broadcast_fn(broadcast)
+        logger.info("导演模式/千川投流版API路由已加载")
+    except ImportError as e:
+        logger.warning(f"导演模式/千川投流版API加载失败: {e}")
 
 
 # ── Rooms ────────────────────────────────────────────────────────────────────
@@ -2006,6 +2073,8 @@ async def gpu_status():
         "online": False,
         "gpu_service_url": GPU_SERVICE_URL,
         "gpu_offline_seconds": offline_sec,
+        "deployment_role": _DEPLOYMENT_ROLE,
+        "remote_backend_url": REMOTE_BACKEND_URL,
         "comfyui": {"reachable": False, "vram_total": 0, "vram_free": 0, "ram_total": 0, "ram_free": 0, "queue_running": 0, "queue_pending": 0},
     }
     # Probe the remote service on every request; watcher hysteresis is for
