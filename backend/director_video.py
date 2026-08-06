@@ -455,8 +455,9 @@ class DirectorVideoComposer:
 
         try:
             timestamp = time.time()
-            output_filename = f"director_output_{int(timestamp)}.mp4"
-            output_path = self.recordings_dir / "director_outputs" / output_filename
+            output_filename = f"qianchuan_{'preview_' if config.get('preview_mode') else ''}{int(timestamp)}.mp4"
+            output_namespace = "qianchuan_previews" if config.get("preview_mode") else "director_outputs"
+            output_path = self.recordings_dir / output_namespace / output_filename
             output_path.parent.mkdir(parents=True, exist_ok=True)
 
             video_style = config.get('video_style', 'dynamic')
@@ -574,6 +575,8 @@ class DirectorVideoComposer:
                     if _resp_status == 201:
                         import json as _json_dv
                         job_id = _json_dv.loads(_resp_text)["job_id"]
+                        if hasattr(self, "last_job_id"):
+                            self.last_job_id = job_id
                         logger.info(f"[DIRECTOR] compose_final_video: GPU job queued: {job_id}")
                         break
                     elif _resp_status >= 500:

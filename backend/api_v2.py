@@ -107,6 +107,7 @@ class QianchuanGenerateResponse(BaseModel):
     status: int
     script: Optional[Dict] = None
     output_path: Optional[str] = None
+    preview_path: Optional[str] = None
     score: Optional[float] = None
     metadata: Optional[Dict] = None
     review: Optional[Dict] = None
@@ -195,7 +196,7 @@ async def generate_qianchuan(request: QianchuanGenerateRequest):
     policy = validate_qianchuan_metadata(metadata)
     script["campaign_metadata"] = metadata
     script["policy_check"] = policy
-    if not policy["eligible_for_delivery"]:
+    if not policy["eligible_for_delivery"] and not request.preview_mode:
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
                 "UPDATE clip_groups SET qianchuan_status = -3, qianchuan_error = ?, qianchuan_script = ?, qianchuan_review = ? WHERE id = ?",
@@ -251,7 +252,8 @@ async def get_qianchuan_result(group_id: int):
         async with db.execute(
             """SELECT qianchuan_status, qianchuan_script, qianchuan_segments,
                       qianchuan_audio_path, qianchuan_final_video, qianchuan_error,
-                      qianchuan_score, qianchuan_review
+                      qianchuan_score, qianchuan_review, qianchuan_preview_video,
+                      qianchuan_preview_review, qianchuan_job_id
                FROM clip_groups WHERE id = ?""",
             (group_id,),
         ) as cur:
@@ -268,6 +270,9 @@ async def get_qianchuan_result(group_id: int):
         "error": row[5],
         "score": row[6],
         "review": _loads_qianchuan_json(row[7]),
+        "preview_video": row[8],
+        "preview_review": _loads_qianchuan_json(row[9]),
+        "job_id": row[10],
     }
 
 
@@ -393,13 +398,18 @@ async def _qianchuan_generate_bg(group_id: int, script: Dict) -> None:
             # 3) Compose via isolated composer wrapper.
             recordings_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "recordings"))
             composer = QianchuanVideoComposer(recordings_dir)
-            output_path = await composer.compose_qianchuan_video(matched, audio_path, script, audio_segments)
+            output_path = await composer.compose_qianchuan_video(
+                matched, audio_path, script, audio_segments,
+                config={"preview_mode": bool(script.get("preview_mode"))},
+            )
             if not output_path:
                 raise RuntimeError("千川视频合成失败: composer returned no output; check director/GPU logs")
 
             # 4) Quality gate. Keep statuses separate: -3 quality failure, -4 probe/encode failure.
             try:
-                quality = await check_qianchuan_video_quality(output_path)
+                quality = await check_qianchuan_video_quality(
+                    output_path, job_id=getattr(composer, "last_job_id", None)
+                )
             except Exception as qe:
                 await _set_qianchuan_error(group_id, -4, f"质量探测失败: {qe}")
                 await _broadcast({"type": "qianchuan_error", "group_id": group_id, "error": str(qe)})
@@ -410,11 +420,22 @@ async def _qianchuan_generate_bg(group_id: int, script: Dict) -> None:
                 return
 
             async with aiosqlite.connect(DB_PATH) as db:
-                await db.execute(
-                    """UPDATE clip_groups SET qianchuan_final_video = ?, qianchuan_error = NULL,
-                       qianchuan_status = 2, qianchuan_review = ? WHERE id = ?""",
-                    (output_path, json.dumps(quality, ensure_ascii=False), group_id),
-                )
+                quality = {**quality, "preview_mode": bool(script.get("preview_mode")),
+                           "delivery_eligible": False if script.get("preview_mode") else quality.get("ok", False),
+                           "job_id": getattr(composer, "last_job_id", None)}
+                if script.get("preview_mode"):
+                    await db.execute(
+                        """UPDATE clip_groups SET qianchuan_preview_video = ?,
+                           qianchuan_preview_review = ?, qianchuan_job_id = ?,
+                           qianchuan_error = NULL, qianchuan_status = 0 WHERE id = ?""",
+                        (output_path, json.dumps(quality, ensure_ascii=False), quality["job_id"], group_id),
+                    )
+                else:
+                    await db.execute(
+                        """UPDATE clip_groups SET qianchuan_final_video = ?, qianchuan_error = NULL,
+                           qianchuan_status = 2, qianchuan_review = ?, qianchuan_job_id = ? WHERE id = ?""",
+                        (output_path, json.dumps(quality, ensure_ascii=False), quality["job_id"], group_id),
+                    )
                 await db.commit()
             await _broadcast({"type": "qianchuan_done", "group_id": group_id, "output_path": output_path})
         except Exception as e:
