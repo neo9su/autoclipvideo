@@ -1403,15 +1403,8 @@ async def download_merged(group_id: int, request: Request):
             rel_path = rec["clip_filename"]
     path = os.path.join(os.path.dirname(__file__), "..", "recordings", rel_path)
     if not os.path.exists(path):
-        raise HTTPException(status_code=404, detail="File missing")
-    filename = os.path.basename(rel_path)
-    disposition_type = "inline" if request.headers.get("range") else "attachment"
-    return FileResponse(
-        path,
-        media_type="video/mp4",
-        filename=filename,
-        content_disposition_type=disposition_type,
-    )
+        raise HTTPException(status_code=404, detail="Classic video file missing (file_missing/stale_path/needs_regeneration)")
+    return _stream_video_file(path, request)
 
 
 @app.get("/api/groups/{group_id}/director-download")
@@ -1441,10 +1434,62 @@ async def _download_artifact(group_id: int, version: str, field: str, label: str
             row = await cur.fetchone()
     path, reason = resolve_artifact_path(row[field] if row else None, version)
     if not path:
-        detail = f"{label}尚未生成，请先生成/重试{label}。" if reason == "not_generated" else f"{label}文件缺失（stale_path），请重新生成。"
+        if reason == "not_generated" and version == "qianchuan":
+            detail = "千川结果尚未生成，请先生成/重试千川版。"
+        elif reason == "not_generated":
+            detail = f"{label}尚未生成，请先生成后重试。"
+        else:
+            detail = f"{label}文件缺失（file_missing/stale_path/needs_regeneration），请重新生成。"
         raise HTTPException(status_code=404, detail=detail)
-    return FileResponse(path, media_type="video/mp4", filename=os.path.basename(path),
-                        content_disposition_type="inline" if request.headers.get("range") else "attachment")
+    return _stream_video_file(path, request)
+
+
+def _stream_video_file(path: str, request: Request):
+    """Serve a verified video with browser-compatible byte-range streaming."""
+    file_size = os.path.getsize(path)
+    range_header = request.headers.get("range")
+    start, end, status_code = 0, file_size - 1, 200
+    if range_header:
+        try:
+            unit, value = range_header.split("=", 1)
+            if unit.strip().lower() != "bytes" or "," in value:
+                raise ValueError
+            start_text, end_text = value.strip().split("-", 1)
+            if start_text:
+                start = int(start_text)
+                end = int(end_text) if end_text else file_size - 1
+            else:
+                suffix_length = int(end_text)
+                if suffix_length <= 0:
+                    raise ValueError
+                start = max(file_size - suffix_length, 0)
+            if start < 0 or start >= file_size or end < start:
+                raise ValueError
+            end = min(end, file_size - 1)
+            status_code = 206
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=416, detail="Invalid Range header")
+    content_length = end - start + 1
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(content_length),
+        "Content-Disposition": f'inline; filename="{os.path.basename(path)}"',
+    }
+    if status_code == 206:
+        headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
+
+    def iter_video():
+        with open(path, "rb") as video_file:
+            video_file.seek(start)
+            remaining = content_length
+            while remaining:
+                chunk = video_file.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                yield chunk
+
+    return StreamingResponse(iter_video(), status_code=status_code, media_type="video/mp4", headers=headers)
 
 
 @app.get("/api/recordings/processing-progress")
