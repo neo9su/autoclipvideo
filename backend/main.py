@@ -36,6 +36,7 @@ from gpu_execution import require_remote_gpu
 from thumbnail import generate_thumbnail
 from meta_generator import generate_meta, match_product
 from publish_scheduler import poll_publish_tasks
+from video_path_resolver import resolve_artifact_path
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -1259,10 +1260,18 @@ async def list_groups():
             ORDER BY g.created_at DESC
         """) as cur:
             rows = await cur.fetchall()
-    return [dict(r) for r in rows]
+    return [dict(r) | _artifact_statuses(dict(r)) for r in rows]
 
 
-@app.get("/api/groups/{group_id}")
+def _artifact_statuses(group: dict) -> dict:
+    statuses = {}
+    for version, field in (("classic", "merged_filename"), ("director", "director_final_video"),
+                           ("creative", "creative_final_video"), ("qianchuan", "qianchuan_final_video")):
+        path, reason = resolve_artifact_path(group.get(field), version)
+        statuses[f"{version}_file_status"] = "ready" if path else reason
+        statuses[f"{version}_available"] = bool(path)
+    return statuses
+
 async def get_group(group_id: int):
     async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
@@ -1280,7 +1289,7 @@ async def get_group(group_id: int):
             (group_id,)
         ) as cur:
             recs = await cur.fetchall()
-    return {**dict(group), "recordings": [dict(r) for r in recs]}
+    return dict(group) | _artifact_statuses(dict(group)) | {"recordings": [dict(r) for r in recs]}
 
 
 @app.post("/api/groups/{group_id}/merge")
@@ -1407,210 +1416,35 @@ async def download_merged(group_id: int, request: Request):
 
 @app.get("/api/groups/{group_id}/director-download")
 async def download_director_video(group_id: int, request: Request):
-    async with aio_connect() as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT director_final_video FROM clip_groups WHERE id = ?", (group_id,)
-        ) as cur:
-            row = await cur.fetchone()
-    if not row or not row["director_final_video"]:
-        raise HTTPException(status_code=404, detail="No director video available")
-    path = row["director_final_video"]
-    if not os.path.exists(path):
-        raise HTTPException(status_code=404, detail="Director video file missing")
-    filename = os.path.basename(path)
-    file_size = os.path.getsize(path)
-
-    # Support Range requests for browser <video> seek
-    range_header = request.headers.get("range")
-    if range_header:
-        try:
-            range_val = range_header.strip().replace("bytes=", "")
-            start_str, end_str = range_val.split("-")
-            start = int(start_str)
-            end = int(end_str) if end_str else file_size - 1
-        except Exception:
-            raise HTTPException(status_code=416, detail="Invalid Range header")
-        end = min(end, file_size - 1)
-        chunk_size = end - start + 1
-
-        def iter_range():
-            with open(path, "rb") as f:
-                f.seek(start)
-                remaining = chunk_size
-                while remaining > 0:
-                    data = f.read(min(65536, remaining))
-                    if not data:
-                        break
-                    remaining -= len(data)
-                    yield data
-
-        headers = {
-            "Content-Range": f"bytes {start}-{end}/{file_size}",
-            "Accept-Ranges": "bytes",
-            "Content-Length": str(chunk_size),
-            "Content-Disposition": f'inline; filename="{filename}"',
-        }
-        return StreamingResponse(iter_range(), status_code=206, media_type="video/mp4", headers=headers)
-
-    # Full file response
-    disposition_type = "inline" if range_header else "attachment"
-    headers = {
-        "Accept-Ranges": "bytes",
-        "Content-Length": str(file_size),
-        "Content-Disposition": f'{disposition_type}; filename="{filename}"',
-    }
-    def iter_file():
-        with open(path, "rb") as f:
-            while True:
-                data = f.read(65536)
-                if not data:
-                    break
-                yield data
-    return StreamingResponse(iter_file(), media_type="video/mp4", headers=headers)
+    return await _download_artifact(group_id, "director", "director_final_video", "导演版", request)
 
 
 @app.get("/api/groups/{group_id}/creative-download")
 async def download_creative_video(group_id: int, request: Request):
-    async with aio_connect() as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT creative_final_video FROM clip_groups WHERE id = ?", (group_id,)
-        ) as cur:
-            row = await cur.fetchone()
-    if not row or not row["creative_final_video"]:
-        raise HTTPException(status_code=404, detail="No creative video available")
-    path = row["creative_final_video"]
-    if not os.path.exists(path):
-        raise HTTPException(status_code=404, detail="Creative video file missing")
-    filename = os.path.basename(path)
-    file_size = os.path.getsize(path)
-
-    range_header = request.headers.get("range")
-    if range_header:
-        try:
-            range_val = range_header.strip().replace("bytes=", "")
-            start_str, end_str = range_val.split("-")
-            start = int(start_str)
-            end = int(end_str) if end_str else file_size - 1
-        except Exception:
-            raise HTTPException(status_code=416, detail="Invalid Range header")
-        end = min(end, file_size - 1)
-        chunk_size = end - start + 1
-
-        def iter_range_creative():
-            with open(path, "rb") as f:
-                f.seek(start)
-                remaining = chunk_size
-                while remaining > 0:
-                    data = f.read(min(65536, remaining))
-                    if not data:
-                        break
-                    remaining -= len(data)
-                    yield data
-
-        headers = {
-            "Content-Range": f"bytes {start}-{end}/{file_size}",
-            "Accept-Ranges": "bytes",
-            "Content-Length": str(chunk_size),
-            "Content-Disposition": f'inline; filename="{filename}"',
-        }
-        return StreamingResponse(iter_range_creative(), status_code=206, media_type="video/mp4", headers=headers)
-
-    headers = {
-        "Accept-Ranges": "bytes",
-        "Content-Length": str(file_size),
-        "Content-Disposition": f'attachment; filename="{filename}"',
-    }
-    def iter_file_creative():
-        with open(path, "rb") as f:
-            while True:
-                data = f.read(65536)
-                if not data:
-                    break
-                yield data
-    return StreamingResponse(iter_file_creative(), media_type="video/mp4", headers=headers)
+    return await _download_artifact(group_id, "creative", "creative_final_video", "自编版", request)
 
 
 @app.get("/api/groups/{group_id}/qianchuan-preview-download")
 async def download_qianchuan_preview(group_id: int, request: Request):
-    """Download the isolated Qianchuan test artifact, never the delivery video."""
-    async with aio_connect() as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT qianchuan_preview_video FROM clip_groups WHERE id = ?", (group_id,)
-        ) as cur:
-            row = await cur.fetchone()
-    if not row or not row["qianchuan_preview_video"]:
-        raise HTTPException(status_code=404, detail="No qianchuan preview available")
-    path = row["qianchuan_preview_video"]
-    if not os.path.isfile(path):
-        raise HTTPException(status_code=404, detail="Qianchuan preview file missing")
-    return FileResponse(path, media_type="video/mp4", filename=os.path.basename(path))
+    return await _download_artifact(group_id, "qianchuan_preview", "qianchuan_preview_video", "千川预览", request)
 
 
 @app.get("/api/groups/{group_id}/qianchuan-download")
 async def download_qianchuan_video(group_id: int, request: Request):
+    return await _download_artifact(group_id, "qianchuan", "qianchuan_final_video", "千川结果", request)
+
+
+async def _download_artifact(group_id: int, version: str, field: str, label: str, request: Request):
     async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT qianchuan_final_video FROM clip_groups WHERE id = ?", (group_id,)
-        ) as cur:
+        async with db.execute(f"SELECT {field} FROM clip_groups WHERE id = ?", (group_id,)) as cur:
             row = await cur.fetchone()
-    if not row or not row["qianchuan_final_video"]:
-        raise HTTPException(status_code=404, detail="No qianchuan video available")
-    path = row["qianchuan_final_video"]
-    if not os.path.exists(path):
-        raise HTTPException(status_code=404, detail="Qianchuan video file missing")
-    filename = os.path.basename(path)
-    file_size = os.path.getsize(path)
-
-    range_header = request.headers.get("range")
-    if range_header:
-        try:
-            range_val = range_header.strip().replace("bytes=", "")
-            start_str, end_str = range_val.split("-")
-            start = int(start_str)
-            end = int(end_str) if end_str else file_size - 1
-        except Exception:
-            raise HTTPException(status_code=416, detail="Invalid Range header")
-        end = min(end, file_size - 1)
-        chunk_size = end - start + 1
-
-        def iter_range_qianchuan():
-            with open(path, "rb") as f:
-                f.seek(start)
-                remaining = chunk_size
-                while remaining > 0:
-                    data = f.read(min(65536, remaining))
-                    if not data:
-                        break
-                    remaining -= len(data)
-                    yield data
-
-        headers = {
-            "Content-Range": f"bytes {start}-{end}/{file_size}",
-            "Accept-Ranges": "bytes",
-            "Content-Length": str(chunk_size),
-            "Content-Disposition": f'inline; filename="{filename}"',
-        }
-        return StreamingResponse(iter_range_qianchuan(), status_code=206, media_type="video/mp4", headers=headers)
-
-    headers = {
-        "Accept-Ranges": "bytes",
-        "Content-Length": str(file_size),
-        "Content-Disposition": f'attachment; filename="{filename}"',
-    }
-
-    def iter_file_qianchuan():
-        with open(path, "rb") as f:
-            while True:
-                data = f.read(65536)
-                if not data:
-                    break
-                yield data
-
-    return StreamingResponse(iter_file_qianchuan(), media_type="video/mp4", headers=headers)
+    path, reason = resolve_artifact_path(row[field] if row else None, version)
+    if not path:
+        detail = f"{label}尚未生成，请先生成/重试{label}。" if reason == "not_generated" else f"{label}文件缺失（stale_path），请重新生成。"
+        raise HTTPException(status_code=404, detail=detail)
+    return FileResponse(path, media_type="video/mp4", filename=os.path.basename(path),
+                        content_disposition_type="inline" if request.headers.get("range") else "attachment")
 
 
 @app.get("/api/recordings/processing-progress")

@@ -63,18 +63,20 @@
             </button>
             <button v-else class="btn-action yellow" disabled>处理中…</button>
             <!-- 经典版结果 -->
-            <template v-if="g.classic_status === 2">
+            <template v-if="g.classic_status === 2 && g.classic_available">
               <button class="btn-action teal" style="margin-right:2px" @click="openClassicPreview(g)">▶ 经典版</button>
               <a :href="`${apiBase}/api/groups/${g.id}/download`" class="btn-action teal" title="经典版下载" download>↓</a>
             </template>
             <span v-else-if="g.classic_status === 1" class="badge yellow">经典版处理中…</span>
+            <span v-else-if="g.classic_status === 2 && g.classic_file_status !== 'ready'" class="badge red">经典版文件缺失，请重新生成</span>
             <span v-else-if="g.classic_status === -1" class="badge red">经典版失败</span>
             <!-- 自编版结果 -->
-            <template v-if="g.creative_status === 2">
+            <template v-if="g.creative_status === 2 && g.creative_available">
               <button class="btn-action green" style="margin-right:2px" @click="openCreativePreview(g)">▶ 自编版</button>
               <a :href="`${apiBase}/api/groups/${g.id}/creative-download`" class="btn-action green" title="自编版下载" download>↓</a>
             </template>
             <span v-else-if="(g.creative_status || 0) === 1" class="badge yellow">自编版处理中…</span>
+            <span v-else-if="g.creative_status === 2 && g.creative_file_status !== 'ready'" class="badge red">自编版文件缺失，请重新生成</span>
             <span v-else-if="g.creative_status === -1" class="badge red">自编版失败</span>
             <!-- 重剪 -->
             <button
@@ -137,10 +139,11 @@
                 {{ directorBusy[g.id] === 'video' ? '合成中…' : (g.director_final_video ? '↺ 重新合成' : '合成视频') }}
               </button>
               <span v-if="g.director_final_video" class="step-done">✓ 视频已生成</span>
-              <button v-if="g.director_final_video" class="btn-action purple" style="margin-left:8px" @click="openDirectorPreview(g)">▶ 预览</button>
-              <a v-if="g.director_final_video" :href="`${apiBase}/api/groups/${g.id}/director-download`" class="btn-action purple" style="margin-left:4px" download>↓ 下载</a>
+              <button v-if="g.director_status === 2 && g.director_available" class="btn-action purple" style="margin-left:8px" @click="openDirectorPreview(g)">▶ 预览</button>
+              <a v-if="g.director_status === 2 && g.director_available" :href="`${apiBase}/api/groups/${g.id}/director-download`" class="btn-action purple" style="margin-left:4px" download>↓ 下载</a>
             </div>
           </div>
+          <div v-if="g.director_status === 2 && g.director_file_status !== 'ready'" class="director-error">⚠ 导演版文件缺失（stale_path），请重新生成</div>
           <div v-if="g.director_error" class="director-error">⚠ {{ g.director_error }}</div>
         </div>
 
@@ -160,7 +163,7 @@
                 @click="generateQianchuan(g)">
                 {{ qianchuanBusy[g.id] || g.qianchuan_status === 1 ? '生成中…' : (isQianchuanFailure(g.qianchuan_status) ? '↺ 重试千川版' : '生成千川版') }}
               </button>
-              <template v-if="g.qianchuan_status === 2 && g.qianchuan_final_video">
+              <template v-if="g.qianchuan_status === 2 && g.qianchuan_available">
                 <button class="btn-action cyan" @click="openQianchuanPreview(g)">▶ 预览</button>
                 <a :href="`${apiBase}/api/groups/${g.id}/qianchuan-download`" class="btn-action cyan" download>↓ 下载</a>
                 <button
@@ -173,6 +176,7 @@
             </div>
           </div>
           <div class="qianchuan-hint">{{ qianchuanStatusMeta(g).hint }}</div>
+          <div v-if="g.qianchuan_status === 2 && g.qianchuan_file_status !== 'ready'" class="qianchuan-error">⚠ 千川结果文件缺失（stale_path），请重新生成</div>
           <div v-if="g.qianchuan_error" class="qianchuan-error">⚠ {{ summarizeQianchuanError(g.qianchuan_error) }}</div>
         </div>
 
@@ -824,7 +828,7 @@ const vibeHints = {
 }
 
 const qianchuanStatusMap = {
-  0: { label: '未开始', className: 'idle', hint: '适合投流的强匹配广告管线，可生成固定结构短视频。' },
+  0: { label: '未生成', className: 'idle', hint: '千川结果尚未生成，请先生成/重试千川版。' },
   1: { label: '生成中', className: 'running', hint: '正在生成千川投流版，请勿重复提交。' },
   2: { label: '已完成', className: 'done', hint: '千川投流版已生成，可预览或下载。' },
   '-1': { label: '普通失败', className: 'failed', hint: '生成失败，可查看错误摘要后重试。' },

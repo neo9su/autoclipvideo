@@ -26,12 +26,7 @@ def _candidate_paths(path: object) -> list[Path]:
     candidates = [normalized]
     basename = path_basename(raw)
     if basename:
-        candidates.extend([
-            RECORDINGS_DIR / basename,
-            RECORDINGS_DIR / "director_outputs" / basename,
-            RECORDINGS_DIR / "creative_outputs" / basename,
-            PROJECT_ROOT / "recordings" / "director_outputs" / basename,
-        ])
+        candidates.append(RECORDINGS_DIR / basename)
     return candidates
 
 
@@ -41,6 +36,18 @@ _VERSION_FIELDS = {
     "director": "director_final_video",
     "classic": "merged_filename",
 }
+
+
+def resolve_artifact_path(value: object, version: str) -> tuple[Optional[str], str]:
+    """Resolve one version's database path without borrowing another artifact."""
+    if not value:
+        return None, "not_generated"
+    if version not in _VERSION_FIELDS and version != "qianchuan_preview":
+        return None, "invalid_version"
+    for candidate in _candidate_paths(value):
+        if candidate.is_file():
+            return str(candidate), "ready"
+    return None, "stale_path"
 
 
 def resolve_publish_video(
@@ -109,16 +116,9 @@ def resolve_video_path(video_path: object, group: Optional[Mapping[str, object]]
             if candidate.is_file():
                 return str(candidate), "resolved_current_or_migrated_path"
 
-    basename = path_basename(video_path)
-    if basename:
-        matches = sorted({p for p in RECORDINGS_DIR.rglob(basename) if p.is_file()})
-        if len(matches) == 1:
-            return str(matches[0]), "resolved_unique_basename"
-        if len(matches) > 1:
-            return None, f"ambiguous_basename_matches:{len(matches)}"
     if video_path:
-        return None, "file_missing_after_path_mapping"
-    return None, "no_video_path"
+        return None, "stale_path"
+    return None, "not_generated"
 
 
 def describe_missing(video_path: object, reason: str) -> str:

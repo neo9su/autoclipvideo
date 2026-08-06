@@ -181,10 +181,10 @@
             <div class="group-item-name">{{ g.label }}</div>
             <div class="group-item-sub">
               <span v-if="g.room_name" class="group-room-tag">{{ g.room_name }}</span>{{ g.wig_model }} · {{ g.wig_color }}
-              <span v-if="g.director_status === 2" class="vbadge vbadge-director">🎬</span>
+              <span v-if="g.director_status === 2 && g.director_available" class="vbadge vbadge-director">🎬</span>
               <span v-if="g.classic_status === 2" class="vbadge vbadge-classic">📹</span>
-              <span v-if="g.creative_status === 2" class="vbadge vbadge-creative">✍️</span>
-              <span v-if="g.qianchuan_status === 2" class="vbadge vbadge-qianchuan">📣</span>
+              <span v-if="g.creative_status === 2 && g.creative_available" class="vbadge vbadge-creative">✍️</span>
+              <span v-if="g.qianchuan_status === 2 && g.qianchuan_available" class="vbadge vbadge-qianchuan">📣</span>
             </div>
             <span v-if="publishedGroupIds.has(g.id)" class="group-published-badge">✓ 已发布</span>
             <div class="group-item-actions" @click.stop>
@@ -345,10 +345,10 @@
         <div class="preview-header">
           <span>{{ previewGroup.label }}</span>
           <div v-if="availableVersionCount(previewGroup) >= 2" class="preview-tabs">
-            <button v-if="previewGroup.director_status === 2" :class="['ptab', previewVersion === 'director' && 'ptab-active']" @click="previewVersion = 'director'">🎬 导演版</button>
-            <button v-if="previewGroup.classic_status === 2" :class="['ptab', previewVersion === 'classic' && 'ptab-active']" @click="previewVersion = 'classic'">📹 经典版</button>
-            <button v-if="previewGroup.creative_status === 2" :class="['ptab', previewVersion === 'creative' && 'ptab-active']" @click="previewVersion = 'creative'">✍️ 自编版</button>
-            <button v-if="previewGroup.qianchuan_status === 2" :class="['ptab', previewVersion === 'qianchuan' && 'ptab-active']" @click="previewVersion = 'qianchuan'">📣 千川投流</button>
+            <button v-if="previewGroup.director_status === 2 && previewGroup.director_available" :class="['ptab', previewVersion === 'director' && 'ptab-active']" @click="previewVersion = 'director'">🎬 导演版</button>
+            <button v-if="previewGroup.classic_status === 2 && previewGroup.classic_available" :class="['ptab', previewVersion === 'classic' && 'ptab-active']" @click="previewVersion = 'classic'">📹 经典版</button>
+            <button v-if="previewGroup.creative_status === 2 && previewGroup.creative_available" :class="['ptab', previewVersion === 'creative' && 'ptab-active']" @click="previewVersion = 'creative'">✍️ 自编版</button>
+            <button v-if="previewGroup.qianchuan_status === 2 && previewGroup.qianchuan_available" :class="['ptab', previewVersion === 'qianchuan' && 'ptab-active']" @click="previewVersion = 'qianchuan'">📣 千川投流</button>
           </div>
           <button class="preview-close" @click="previewGroup = null">✕</button>
         </div>
@@ -897,25 +897,22 @@ function formatTaskId(task) {
 
 function availableVersionCount(group) {
   if (!group) return 0
-  return (group.classic_status === 2 ? 1 : 0)
-    + (group.director_status === 2 ? 1 : 0)
-    + (group.creative_status === 2 ? 1 : 0)
-    + (group.qianchuan_status === 2 ? 1 : 0)
+  return (group.classic_status === 2 && group.classic_available ? 1 : 0)
+    + (group.director_status === 2 && group.director_available ? 1 : 0)
+    + (group.creative_status === 2 && group.creative_available ? 1 : 0)
+    + (group.qianchuan_status === 2 && group.qianchuan_available ? 1 : 0)
 }
 
 function isPublishableGroup(group) {
   if (!group) return false
   return (
-    group.merge_status === 2 ||
-    group.classic_status === 2 ||
-    group.director_status === 2 ||
-    group.creative_status === 2 ||
-    group.qianchuan_status === 2
+    group.merge_status === 2 && group.classic_available ||
+    group.classic_status === 2 && group.classic_available ||
+    group.director_status === 2 && group.director_available ||
+    group.creative_status === 2 && group.creative_available ||
+    group.qianchuan_status === 2 && group.qianchuan_available
   ) && (
-    group.merged_filename ||
-    group.director_final_video ||
-    group.creative_final_video ||
-    group.qianchuan_final_video
+    group.classic_available || group.director_available || group.creative_available || group.qianchuan_available
   )
 }
 
@@ -1168,7 +1165,7 @@ const previewVideoUrl = computed(() => {
 
 watch(previewGroup, (g) => {
   if (!g) return
-  previewVersion.value = g.qianchuan_status === 2 ? 'qianchuan' : g.director_status === 2 ? 'director' : g.creative_status === 2 ? 'creative' : 'classic'
+  previewVersion.value = g.qianchuan_status === 2 && g.qianchuan_available ? 'qianchuan' : g.director_status === 2 && g.director_available ? 'director' : g.creative_status === 2 && g.creative_available ? 'creative' : 'classic'
 })
 
 function groupVideoUrl(groupId) {
