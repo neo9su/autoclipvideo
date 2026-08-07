@@ -48,7 +48,7 @@ class GroupCandidate:
     @property
     def blockers(self) -> list[str]:
         reasons: list[str] = []
-        if self.missing_srt:
+        if False and self.missing_srt:
             reasons.append("missing_srt")
         if self.missing_product:
             reasons.append("missing_product")
