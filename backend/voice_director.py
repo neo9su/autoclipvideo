@@ -9,6 +9,7 @@ TTS 优先级：
 import asyncio
 import logging
 import os
+import subprocess
 import time
 from typing import Dict, List, Optional
 
@@ -305,7 +306,7 @@ class VoiceDirector:
 
         merged = await self._merge_audio_segments(audio_segments, group_id)
         if not merged:
-            # Older GPU workers may not yet expose audio-concat-jobs. Keep the
+            # Older GPU workers may not yet expose classic-concat-jobs. Keep the
             # pipeline usable by synthesizing one normalized remote-GPU track.
             fallback_text = "。".join(
                 scene.get("voiceover_text", "").strip()
@@ -700,10 +701,12 @@ class VoiceDirector:
         if len(segments) == 1:
             return segments[0]["audio_path"]
 
-        merged_path = os.path.join(
-            self._output_dir, f"group{group_id}_merged_{int(time.time())}.wav"
+        merged_base = os.path.join(
+            self._output_dir, f"group{group_id}_merged_{int(time.time())}"
         )
-        list_file = merged_path + ".txt"
+        merged_mp4 = merged_base + ".mp4"
+        merged_wav = merged_base + ".wav"
+        list_file = merged_wav + ".txt"
         try:
             async with aiohttp.ClientSession() as session:
                 form = aiohttp.FormData()
@@ -711,7 +714,7 @@ class VoiceDirector:
                     segment_path = segment["audio_path"]
                     with open(segment_path, "rb") as audio_file:
                         form.add_field("files", audio_file.read(), filename=os.path.basename(segment_path), content_type="audio/wav")
-                async with session.post(f"{_GPU_SERVICE_URL}/audio-concat-jobs", data=form, timeout=aiohttp.ClientTimeout(total=60)) as response:
+                async with session.post(f"{_GPU_SERVICE_URL}/classic-concat-jobs", data=form, timeout=aiohttp.ClientTimeout(total=60)) as response:
                     if response.status != 201:
                         logger.error("Remote audio concat submit failed: %s", await response.text())
                         return None
@@ -719,7 +722,7 @@ class VoiceDirector:
                 deadline = time.time() + 180
                 while time.time() < deadline:
                     await asyncio.sleep(2)
-                    async with session.get(f"{_GPU_SERVICE_URL}/audio-concat-jobs/{job_id}", timeout=aiohttp.ClientTimeout(total=10)) as status_response:
+                    async with session.get(f"{_GPU_SERVICE_URL}/classic-concat-jobs/{job_id}", timeout=aiohttp.ClientTimeout(total=10)) as status_response:
                         status = await status_response.json()
                     if status.get("status") == "error":
                         logger.error("Remote audio concat failed: %s", status.get("error"))
@@ -729,13 +732,34 @@ class VoiceDirector:
                 else:
                     logger.error("Remote audio concat timed out for job %s", job_id)
                     return None
-                async with session.get(f"{_GPU_SERVICE_URL}/audio-concat-jobs/{job_id}/audio", timeout=aiohttp.ClientTimeout(total=60)) as audio_response:
-                    if audio_response.status != 200:
-                        logger.error("Remote audio concat download failed: %s", audio_response.status)
+                async with session.get(f"{_GPU_SERVICE_URL}/classic-concat-jobs/{job_id}/mp4", timeout=aiohttp.ClientTimeout(total=60)) as mp4_response:
+                    if mp4_response.status != 200:
+                        logger.error("Remote audio concat download failed: %s", mp4_response.status)
                         return None
-                    audio_data = await audio_response.read()
-            with open(merged_path, "wb") as merged_file:
-                merged_file.write(audio_data)
+                    mp4_data = await mp4_response.read()
+            with open(merged_mp4, "wb") as f:
+                f.write(mp4_data)
+            # Convert MP4 to WAV locally (codec-only, no GPU)
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y", "-i", merged_mp4,
+                "-vn", "-acodec", "pcm_s16le",
+                merged_wav,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.communicate()
+            if not os.path.exists(merged_wav) or os.path.getsize(merged_wav) == 0:
+                logger.error("ffmpeg MP4→WAV conversion produced no output")
+                try:
+                    os.remove(merged_mp4)
+                except OSError:
+                    pass
+                return None
+            # Cleanup intermediate MP4
+            try:
+                os.remove(merged_mp4)
+            except OSError:
+                pass
             try:
                 os.remove(list_file)
             except OSError:
@@ -745,10 +769,18 @@ class VoiceDirector:
                     os.remove(segment["audio_path"])
                 except OSError:
                     logger.debug("Unable to remove temporary TTS segment", exc_info=True)
-            return merged_path
+            return merged_wav
         except Exception as error:
             try:
                 os.remove(list_file)
+            except OSError:
+                pass
+            try:
+                os.remove(merged_mp4)
+            except OSError:
+                pass
+            try:
+                os.remove(merged_wav)
             except OSError:
                 pass
             logger.error("Remote audio concat request failed: %s: %s", type(error).__name__, error)
