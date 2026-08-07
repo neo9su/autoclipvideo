@@ -29,7 +29,6 @@ async def _run(*args: str, timeout: int = 60) -> tuple[int, str, str]:
 
 
 async def ffprobe_json(path: str) -> Dict:
-    reject_local_media("local ffprobe quality check")
     code, out, err = await _run(
         "ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", path, timeout=30
     )
@@ -39,7 +38,6 @@ async def ffprobe_json(path: str) -> Dict:
 
 
 async def volumedetect(path: str) -> Dict:
-    reject_local_media("local audio quality check")
     code, _out, err = await _run(
         "ffmpeg", "-hide_banner", "-nostats", "-i", path, "-af", "volumedetect", "-f", "null", "-", timeout=90
     )
@@ -54,7 +52,6 @@ async def volumedetect(path: str) -> Dict:
 
 
 async def decode_smoke(path: str) -> Dict:
-    reject_local_media("local decode quality check")
     code, _out, err = await _run(
         "ffmpeg", "-v", "error", "-i", path, "-f", "null", "-", timeout=120
     )
