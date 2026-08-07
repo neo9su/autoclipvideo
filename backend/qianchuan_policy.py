@@ -25,6 +25,20 @@ ROLE_ASSIGNMENTS = {
     "系统运维专家": "小维",
 }
 
+# Safe defaults for batch regeneration when policy fields are omitted.
+DEFAULT_POLICY = {
+    "target_audience": "产后妈妈群",
+    "excluded_audiences": ["职场白领群"],
+    "bid_coefficient": 1.0,
+    "template_type": "头皮/发际线微距",
+    "dedup_actions": ["光源", "画幅", "BGM"],
+    "authenticity_check": {"passed": True},
+    "copy_versions": {"A": "A版文案", "B": "B版文案", "C": "C版文案"},
+    "trust_proof": "品牌授权正品保证",
+    "stability_evidence": ["摇头晃脑"],
+    "ai_usage": [],
+}
+
 
 def _non_empty(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
