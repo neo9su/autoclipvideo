@@ -310,17 +310,38 @@ async def _startup_trigger_pipelines():
                    ORDER BY id DESC"""
             ) as cur:
                 pending_creative = [r["id"] for r in await cur.fetchall()]
-        if not pending_director and not pending_creative:
+            # Qianchuan groups: classic done, qianchuan not done
+            # Exclude groups with unrecoverable errors
+            async with db.execute(
+                """SELECT id FROM clip_groups
+                   WHERE classic_status = 2
+                     AND qianchuan_status IN (0, -1, -3, -4)
+                     AND (qianchuan_error IS NULL OR qianchuan_error = '' OR (
+                       qianchuan_error NOT LIKE '%no recordings%'
+                       AND qianchuan_error NOT LIKE '%recording files missing%'
+                       AND qianchuan_error NOT LIKE '%physically deleted%'
+                       AND qianchuan_error NOT LIKE '%无录像文件%'
+                       AND qianchuan_error NOT LIKE '%无素材%'
+                       AND qianchuan_error NOT LIKE '%时长%'
+                       AND qianchuan_error NOT LIKE '%video_clips is EMPTY%'
+                     ))
+                   ORDER BY id DESC"""
+            ) as cur:
+                pending_qianchuan = [r["id"] for r in await cur.fetchall()]
+        if not pending_director and not pending_creative and not pending_qianchuan:
             logger.info("Startup pipeline trigger: no pending groups")
             return
-        logger.info(f"Startup pipeline trigger: launching {len(pending_director)} director + {len(pending_creative)} creative groups")
+        logger.info(
+            "Startup pipeline trigger: launching %d director + %d creative + %d qianchuan groups",
+            len(pending_director), len(pending_creative), len(pending_qianchuan),
+        )
         # Phase 1: dispatch director groups first
         for i in range(0, len(pending_director), BATCH_SIZE):
             batch = pending_director[i:i + BATCH_SIZE]
             for gid in batch:
                 asyncio.create_task(_run_director_pipeline(gid))
                 await asyncio.sleep(0.1)
-            logger.info(f"Startup pipeline trigger: dispatched director batch {i//BATCH_SIZE + 1} ({len(batch)} groups)")
+            logger.info("Startup pipeline trigger: dispatched director batch %d (%d groups)", i // BATCH_SIZE + 1, len(batch))
             if i + BATCH_SIZE < len(pending_director):
                 await asyncio.sleep(1)
         # Phase 2: dispatch creative groups (director already done)
@@ -329,9 +350,24 @@ async def _startup_trigger_pipelines():
             for gid in batch:
                 asyncio.create_task(_run_creative_pipeline(gid))
                 await asyncio.sleep(0.1)
-            logger.info(f"Startup pipeline trigger: dispatched creative batch {i//BATCH_SIZE + 1} ({len(batch)} groups)")
+            logger.info("Startup pipeline trigger: dispatched creative batch %d (%d groups)", i // BATCH_SIZE + 1, len(batch))
             if i + BATCH_SIZE < len(pending_creative):
                 await asyncio.sleep(1)
+        # Phase 3: dispatch qianchuan groups (independent of director/creative)
+        if pending_qianchuan:
+            try:
+                from api_v2 import _run_qianchuan_pipeline
+            except ImportError as ie:
+                logger.warning("Startup pipeline trigger: api_v2 not available — skipping qianchuan dispatch (error: %s)", ie)
+            else:
+                for i in range(0, len(pending_qianchuan), BATCH_SIZE):
+                    batch = pending_qianchuan[i:i + BATCH_SIZE]
+                    for gid in batch:
+                        asyncio.create_task(_run_qianchuan_pipeline(gid))
+                        await asyncio.sleep(0.1)
+                    logger.info("Startup pipeline trigger: dispatched qianchuan batch %d (%d groups)", i // BATCH_SIZE + 1, len(batch))
+                    if i + BATCH_SIZE < len(pending_qianchuan):
+                        await asyncio.sleep(1)
     except Exception as e:
         logger.error(f"Startup pipeline trigger failed: {e}")
 
@@ -613,6 +649,7 @@ async def lifespan(app: FastAPI):
             asyncio.create_task(_periodic_cleanup()),
             asyncio.create_task(_periodic_creative_dispatch()),
             asyncio.create_task(_periodic_director_dispatch()),
+            asyncio.create_task(_periodic_qianchuan_dispatch()),
         ])
     yield
     for task in tasks:
@@ -666,6 +703,20 @@ async def health():
                 result["remote_backend_reachable"] = resp.status_code < 500
         except Exception:
             result["remote_backend_reachable"] = False
+    else:
+        # GPU backend: add qianchuan queue depth for operational visibility
+        result["qianchuan_api_loaded"] = _api_v2_loaded if "_api_v2_loaded" in dir() else False
+        try:
+            async with aio_connect() as db:
+                db.row_factory = aiosqlite.Row
+                for status_code, label in [(0, "pending"), (1, "running"), (2, "done"), (-1, "failed"), (-2, "permanent_fail"), (-3, "quality_fail"), (-4, "probe_fail")]:
+                    async with db.execute(
+                        "SELECT COUNT(*) as cnt FROM clip_groups WHERE qianchuan_status = ?", (status_code,)
+                    ) as cur:
+                        row = await cur.fetchone()
+                        result[f"qianchuan_{label}"] = row["cnt"]
+        except Exception:
+            pass
     return result
 
 
@@ -701,17 +752,52 @@ if IS_CONTROL_PLANE:
 
     logger.info("控制面: 已加载千川/导演模式代理路由 -> %s", REMOTE_BACKEND_URL)
 else:
-    # GPU backend: full api_v2 routes for media pipelines
+    # GPU backend: full api_v2 routes for media pipelines.
+    # Each import is isolated so a single missing dependency doesn't cascade.
+    _api_v2_loaded = False
+    _qianchuan_upload_loaded = False
+
+    # ── api_v2 (director + qianchuan generate/pipeline) ──
     try:
         from api_v2 import director_router, qianchuan_router, set_broadcast_fn
-        from qianchuan_upload import qianchuan_upload_router
         app.include_router(director_router)
         app.include_router(qianchuan_router)
-        app.include_router(qianchuan_upload_router)
         set_broadcast_fn(broadcast)
+        _api_v2_loaded = True
         logger.info("导演模式/千川投流版API路由已加载")
-    except ImportError as e:
-        logger.warning(f"导演模式/千川投流版API加载失败: {e}")
+    except Exception as exc:
+        logger.warning(f"导演模式/千川投流版API加载失败: {exc}")
+
+    # ── qianchuan_upload (learning material upload) ──
+    try:
+        from qianchuan_upload import qianchuan_upload_router
+        app.include_router(qianchuan_upload_router)
+        _qianchuan_upload_loaded = True
+        logger.info("千川投流版素材上传API路由已加载")
+    except Exception as exc:
+        logger.warning(f"千川投流版上传API加载失败: {exc}")
+
+    # ── Fallback status endpoints when modules are unavailable ──
+    if not _api_v2_loaded:
+        @app.get("/api/v2/qianchuan/status")
+        async def _fallback_qianchuan_status():
+            return {
+                "qianchuan_available": False,
+                "deployment_role": "gpu-backend",
+                "error": "千川投流版API模块加载失败 — 检查 backend/api_v2.py 及其依赖项",
+                "queue_depth": 0,
+                "running": 0,
+                "done": 0,
+                "failed": 0,
+            }
+
+        @app.get("/api/v2/director/status")
+        async def _fallback_director_status():
+            return {
+                "director_available": False,
+                "deployment_role": "gpu-backend",
+                "error": "导演模式API模块加载失败 — 检查 backend/api_v2.py 及其依赖项",
+            }
 
 
 # ── Rooms ────────────────────────────────────────────────────────────────────
@@ -4152,6 +4238,66 @@ async def _periodic_creative_dispatch():
             logger.warning(f"Periodic creative dispatch failed: {e}")
         
         await asyncio.sleep(300)  # Check every 5 minutes
+
+
+async def _periodic_qianchuan_dispatch():
+    """Periodically check and dispatch pending Qianchuan pipeline groups.
+
+    Dispatches groups with classic_status=2 and qianchuan_status IN (0, -1, -3, -4)
+    that haven't been recently attempted. Retries recoverable failures (-1, -3, -4)
+    and dispatches never-attempted groups (0).
+
+    Only dispatches when GPU service is online.
+    """
+    from gpu_state import is_online as gpu_is_online
+    BATCH_LIMIT = 5
+    while True:
+        try:
+            if not gpu_is_online():
+                logger.debug("Periodic qianchuan dispatch: GPU offline — skipping")
+                await asyncio.sleep(300)
+                continue
+            async with aio_connect() as db:
+                db.row_factory = aiosqlite.Row
+                # Get pending qianchuan groups, excluding unrecoverable errors
+                async with db.execute(
+                    """SELECT id FROM clip_groups
+                       WHERE classic_status = 2
+                         AND qianchuan_status IN (0, -1, -3, -4)
+                         AND (qianchuan_error IS NULL OR qianchuan_error = '' OR (
+                           qianchuan_error NOT LIKE '%no recordings%'
+                           AND qianchuan_error NOT LIKE '%recording files missing%'
+                           AND qianchuan_error NOT LIKE '%physically deleted%'
+                           AND qianchuan_error NOT LIKE '%无录像文件%'
+                           AND qianchuan_error NOT LIKE '%无素材%'
+                           AND qianchuan_error NOT LIKE '%时长%'
+                           AND qianchuan_error NOT LIKE '%video_clips is EMPTY%'
+                         ))
+                       ORDER BY id ASC
+                       LIMIT ?""",
+                    (BATCH_LIMIT,),
+                ) as cur:
+                    pending_qianchuan = [r["id"] for r in await cur.fetchall()]
+
+                if not pending_qianchuan:
+                    logger.debug("Periodic qianchuan dispatch: no recoverable pending groups")
+                else:
+                    logger.info("Periodic qianchuan dispatch: found %d pending groups", len(pending_qianchuan))
+                    # Lazy-import the qianchuan pipeline runner
+                    try:
+                        from api_v2 import _run_qianchuan_pipeline
+                    except ImportError as ie:
+                        logger.warning("Periodic qianchuan dispatch: api_v2 not available — skipping (error: %s)", ie)
+                        await asyncio.sleep(300)
+                        continue
+                    for gid in pending_qianchuan:
+                        asyncio.create_task(_run_qianchuan_pipeline(gid))
+                        await asyncio.sleep(0.1)
+        except Exception as e:
+            logger.warning("Periodic qianchuan dispatch failed: %s", e)
+
+        await asyncio.sleep(180)  # Check every 3 minutes
+
 
 # Add this to the main function
 async def main():
