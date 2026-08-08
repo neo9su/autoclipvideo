@@ -157,6 +157,12 @@
             </div>
             <div class="qianchuan-actions">
               <button
+                class="btn-action teal btn-sm"
+                @click="openUploadModal"
+                title="上传参考视频进行学习分析">
+                📤 学习素材
+              </button>
+              <button
                 v-if="g.qianchuan_status !== 2"
                 class="btn-qianchuan"
                 :disabled="qianchuanBusy[g.id] || g.qianchuan_status === 1"
@@ -678,12 +684,16 @@
     </div>
   </div>
 
+  <!-- Qianchuan Learning Upload Modal -->
+  <QianchuanUpload v-if="showUploadModal" @close="showUploadModal = false" />
+
 </template>
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { REMOTE_API_BASE } from '../remoteApi.js'
 import { getGroups, getGroup, getRooms, mergeGroup, retryModes, createGroup, updateGroup, reassignRecording, importGroupVideos, createWS, getThumbnailUrl, createCustomGroup, uploadCustomGroupVideo, deleteGroup, getProcessingProgress, reclipRecording, reclipGroupAll, generateQianchuanGroup } from '../api.js'
+import QianchuanUpload from '../components/QianchuanUpload.vue'
 import { useToast } from '../composables/toast.js'
 
 const groups = ref([])
@@ -817,6 +827,11 @@ function openReclip(r) { reclipModal.value = { rec: r, feedback: '' } }
 // Director mode busy state: { [groupId]: 'script' | 'voice' | 'video' | null }
 const directorBusy = ref({})
 const qianchuanBusy = ref({})
+const showUploadModal = ref(false)
+
+function openUploadModal() {
+  showUploadModal.value = true
+}
 
 const vibeHints = {
   trendy:    '快节奏·强钩子·追热点',
