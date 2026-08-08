@@ -18,12 +18,12 @@ run_gate() {
 run_gate lint python -m py_compile \
   scripts/batch_qianchuan_regen.py \
   backend/api_v2.py backend/db.py backend/qianchuan_schema.py backend/main.py backend/voice_director.py backend/director_video.py \
-  backend/qianchuan_script.py backend/qianchuan_matcher.py backend/qianchuan_video.py backend/qianchuan_quality.py \
+  backend/qianchuan_script.py backend/qianchuan_matcher.py backend/qianchuan_video.py backend/qianchuan_quality.py backend/qianchuan_learning.py \
   backend/local_media_guard.py backend/test_transcribe_queue.py backend/video_editing_skills.py backend/pipeline_state.py
 
 run_gate types python - <<'PY'
 from pathlib import Path
-for path in [Path('backend/qianchuan_script.py'), Path('backend/qianchuan_matcher.py'), Path('backend/qianchuan_video.py'), Path('backend/qianchuan_quality.py')]:
+for path in [Path('backend/qianchuan_script.py'), Path('backend/qianchuan_matcher.py'), Path('backend/qianchuan_video.py'), Path('backend/qianchuan_quality.py'), Path('backend/qianchuan_learning.py')]:
     assert 'from __future__ import annotations' in path.read_text(), path
 print('type-hint smoke ok')
 PY
@@ -142,9 +142,11 @@ assert 'remote-gpu' in Path('backend/director_video.py').read_text()
 print('gpu-only policy smoke ok')
 PY
 
+run_gate tests_learning python -m pytest tests/test_qianchuan_learning.py -v --tb=short -x 2>&1
+
 run_gate coverage python - <<'PY'
 from pathlib import Path
-files = [Path('backend/qianchuan_script.py'), Path('backend/qianchuan_matcher.py'), Path('backend/qianchuan_video.py'), Path('backend/qianchuan_quality.py'), Path('backend/video_editing_skills.py')]
+files = [Path('backend/qianchuan_script.py'), Path('backend/qianchuan_matcher.py'), Path('backend/qianchuan_video.py'), Path('backend/qianchuan_quality.py'), Path('backend/qianchuan_learning.py'), Path('backend/video_editing_skills.py')]
 for path in files:
     assert path.exists() and path.stat().st_size > 1000, path
 print('coverage smoke: qianchuan critical modules exercised by tests gate')
