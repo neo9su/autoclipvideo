@@ -704,8 +704,10 @@ else:
     # GPU backend: full api_v2 routes for media pipelines
     try:
         from api_v2 import director_router, qianchuan_router, set_broadcast_fn
+        from qianchuan_upload import qianchuan_upload_router
         app.include_router(director_router)
         app.include_router(qianchuan_router)
+        app.include_router(qianchuan_upload_router)
         set_broadcast_fn(broadcast)
         logger.info("导演模式/千川投流版API路由已加载")
     except ImportError as e:

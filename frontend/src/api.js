@@ -489,6 +489,33 @@ export async function getQianchuanGroupResult(groupId) {
   return requestJson(`${BASE}/api/v2/qianchuan/group/${groupId}/result`, undefined, '千川投流版结果加载失败')
 }
 
+// ── Qianchuan Learning Upload ───────────────────────────────────────────────
+
+export async function uploadQianchuanMaterials(mainFile, auxiliaryFiles = [], label = null, triggerAnalysis = true) {
+  const form = new FormData()
+  form.append('file', mainFile)
+  for (const aux of auxiliaryFiles) {
+    form.append('auxiliary', aux)
+  }
+  if (label) form.append('label', label)
+  form.append('trigger_analysis', String(triggerAnalysis))
+  const res = await fetch(`${BASE}/api/v2/qianchuan/upload`, { method: 'POST', body: form })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function getQianchuanUploadJobStatus(jobId) {
+  const res = await fetch(`${BASE}/api/v2/qianchuan/upload/${jobId}`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function getQianchuanUploadServiceStatus() {
+  const res = await fetch(`${BASE}/api/v2/qianchuan/upload-status`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
 // ── 画质增强 ──────────────────────────────────────────────────────────────────
 
 export async function getEnhanceServiceStatus() {
