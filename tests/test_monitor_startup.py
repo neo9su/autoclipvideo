@@ -1,67 +1,34 @@
+import asyncio
 import sys
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
-from backend import monitor as monitor_module
+sys.path.insert(0, str(Path(__file__).parents[1] / "backend"))
+
+import monitor
+from gpu_execution import RemoteGpuRequiredError
 
 
 @pytest.mark.asyncio
-async def test_start_all_recreates_enabled_room_tasks(monkeypatch):
-    manager = monitor_module.MonitorManager()
-    added = []
+async def test_control_plane_monitor_rejects_local_media(monkeypatch):
+    manager = monitor.MonitorManager()
 
-    class Cursor:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, traceback):
-            return False
-
-        async def fetchall(self):
-            return [
-                {"id": 11, "name": "room-a", "url": "https://example.invalid/a"},
-                {"id": 12, "name": "room-b", "url": "https://example.invalid/b"},
-            ]
-
-    class Connection:
-        row_factory = None
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, traceback):
-            return False
-
-        def execute(self, query):
-            assert "enabled = 1" in query
-            return Cursor()
-
-    async def fake_add_room(room_id, name, url):
-        added.append((room_id, name, url))
-
-    monkeypatch.setattr(monitor_module, "aio_connect", lambda: Connection())
-    monkeypatch.setattr(manager, "add_room", fake_add_room)
-
-    await manager.start_all()
-
-    assert added == [
-        (11, "room-a", "https://example.invalid/a"),
-        (12, "room-b", "https://example.invalid/b"),
-    ]
+    with pytest.raises(RemoteGpuRequiredError):
+        await manager.add_room(1, "room", "https://live.douyin.com/1")
 
 
-def test_status_exposes_monitor_health_fields():
-    manager = monitor_module.MonitorManager()
-    manager._room_status[11] = "offline"
-    manager._last_check_at[11] = monitor_module.datetime(2026, 8, 10, 3, 0, 0)
-    manager._last_error[11] = None
-    manager._consecutive_errors[11] = 0
+@pytest.mark.asyncio
+async def test_gpu_monitor_starts_enabled_room_task(monkeypatch):
+    manager = monitor.MonitorManager(allow_local_media=True)
 
-    status = manager.get_status(11)
+    async def fake_monitor_loop(room_id, name, url):
+        await asyncio.sleep(3600)
 
-    assert status["live_status"] == "offline"
-    assert status["last_check_at"] == "2026-08-10T03:00:00"
-    assert status["last_error"] is None
-    assert status["consecutive_errors"] == 0
+    monkeypatch.setattr(manager, "_monitor_loop", fake_monitor_loop)
+    await manager.add_room(1, "room", "https://live.douyin.com/1")
+
+    assert 1 in manager._tasks
+    assert not manager._tasks[1].done()
+
+    await manager.remove_room(1)

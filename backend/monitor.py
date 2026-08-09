@@ -8,6 +8,7 @@ from typing import Dict, Optional
 from recorder import RoomRecorder, get_stream_url
 from sync import sync_file
 from db import DB_PATH, aio_connect
+from gpu_execution import reject_local_media
 
 logger = logging.getLogger(__name__)
 
@@ -18,21 +19,17 @@ RECORDINGS_DIR = os.path.join(os.path.dirname(__file__), "..", "recordings")
 
 
 class MonitorManager:
-    def __init__(self, broadcast_fn=None, media_enabled: bool = True):
+    def __init__(self, broadcast_fn=None, allow_local_media: bool = False):
         self._recorders: Dict[int, RoomRecorder] = {}
         self._tasks: Dict[int, asyncio.Task] = {}
         self._room_status: Dict[int, str] = {}  # room_id -> live/offline/unknown
         self._resolution_warnings: Dict[int, Optional[str]] = {}  # room_id -> warning or None
-        self._last_check_at: Dict[int, datetime] = {}
-        self._last_error: Dict[int, Optional[str]] = {}
-        self._consecutive_errors: Dict[int, int] = {}
         self._broadcast = broadcast_fn  # WebSocket broadcast callback
-        self._media_enabled = media_enabled
+        self._allow_local_media = allow_local_media
 
     async def start_all(self):
-        """Start monitoring enabled rooms on a media-enabled deployment."""
-        if not self._media_enabled:
-            return
+        """Start enabled room monitors on a media-enabled deployment."""
+        self._require_media_worker("room monitoring/recording")
         async with aio_connect() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute("SELECT * FROM rooms WHERE enabled = 1") as cursor:
@@ -41,8 +38,7 @@ class MonitorManager:
             await self.add_room(room["id"], room["name"], room["url"])
 
     async def add_room(self, room_id: int, name: str, url: str):
-        if not self._media_enabled:
-            return
+        self._require_media_worker("room monitoring/recording")
         if room_id in self._tasks:
             return
         logger.info(f"Starting monitor for room: {name} ({room_id})")
@@ -61,9 +57,11 @@ class MonitorManager:
         if recorder:
             await recorder.stop()
         self._room_status.pop(room_id, None)
-        self._last_check_at.pop(room_id, None)
-        self._last_error.pop(room_id, None)
-        self._consecutive_errors.pop(room_id, None)
+
+    def _require_media_worker(self, operation: str) -> None:
+        """Keep control-plane instances from accidentally recording locally."""
+        if not self._allow_local_media:
+            reject_local_media(operation)
 
     def get_status(self, room_id: int) -> dict:
         recorder = self._recorders.get(room_id)
@@ -75,9 +73,6 @@ class MonitorManager:
             "segment_start": recorder.segment_start.isoformat() if (recorder and recorder.segment_start) else None,
             "session_start": recorder.session_start.isoformat() if (recorder and recorder.session_start) else None,
             "resolution_warning": self._resolution_warnings.get(room_id),
-            "last_check_at": self._last_check_at[room_id].isoformat() if room_id in self._last_check_at else None,
-            "last_error": self._last_error.get(room_id),
-            "consecutive_errors": self._consecutive_errors.get(room_id, 0),
         }
 
     async def _check_stream_resolution(self, room_id: int, filename: str):
@@ -181,10 +176,7 @@ class MonitorManager:
         logger.info(f"[{name}] Monitor started")
         while True:
             try:
-                self._last_check_at[room_id] = datetime.now()
                 stream_url = await get_stream_url(url)
-                self._last_error[room_id] = None
-                self._consecutive_errors[room_id] = 0
                 is_live = stream_url is not None
                 prev_status = self._room_status.get(room_id, "unknown")
 
@@ -214,8 +206,6 @@ class MonitorManager:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                self._last_error[room_id] = str(e)[:500]
-                self._consecutive_errors[room_id] = self._consecutive_errors.get(room_id, 0) + 1
                 logger.error(f"[{name}] Monitor error: {e}")
 
             await asyncio.sleep(POLL_INTERVAL)

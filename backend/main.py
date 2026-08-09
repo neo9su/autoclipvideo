@@ -70,7 +70,10 @@ async def broadcast(message: dict):
     _ws_clients.difference_update(dead)
 
 
-monitor = MonitorManager(broadcast_fn=broadcast, media_enabled=not IS_CONTROL_PLANE)
+monitor = MonitorManager(
+    broadcast_fn=broadcast,
+    allow_local_media=not IS_CONTROL_PLANE,
+)
 
 
 def _recording_file_path(filename: str | None) -> str | None:
@@ -645,9 +648,6 @@ async def lifespan(app: FastAPI):
             "DEPLOYMENT_ROLE=gpu-backend: media workers enabled "
             "(capture, transcription, backfill, publish, enhance, creative/director, and room monitors)"
         )
-        # Room monitors are owned by the GPU backend. Start them during
-        # application startup so enabled rooms are actually polled.
-        await monitor.start_all()
         tasks.extend([
             asyncio.create_task(poll_transcriptions(broadcast_fn=broadcast)),
             asyncio.create_task(backfill_auto_merge()),
@@ -659,6 +659,7 @@ async def lifespan(app: FastAPI):
             asyncio.create_task(_periodic_director_dispatch()),
             asyncio.create_task(_periodic_qianchuan_dispatch()),
         ])
+        await monitor.start_all()
     yield
     for task in tasks:
         task.cancel()
