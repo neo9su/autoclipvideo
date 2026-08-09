@@ -216,18 +216,25 @@ const overallPct = computed(() => {
 
 async function load() {
   loading.value = true
-  try {
-    const [clipRes, transcribeRes, failedRes] = await Promise.all([
-      remoteFetch('/api/clip-queue'),
-      remoteFetch('/api/transcribe-queue'),
-      remoteFetch('/api/recordings?status=clip_failed&limit=50'),
-    ])
-    if (clipRes.ok) {
-      const data = await clipRes.json()
+  const results = await Promise.allSettled([
+    remoteFetch('/api/clip-queue'),
+    remoteFetch('/api/transcribe-queue'),
+    remoteFetch('/api/recordings?status=clip_failed&limit=50'),
+  ])
+
+  // Process each result independently so one failure does not block the others.
+  const [clipResult, transcribeResult, failedResult] = results
+
+  if (clipResult.status === 'fulfilled' && clipResult.value.ok) {
+    try {
+      const data = await clipResult.value.json()
       queue.value = { running: data.running || [], queued: data.queued || [], paused: data.paused || [] }
-    }
-    if (transcribeRes.ok) {
-      const data = await transcribeRes.json()
+    } catch { /* stale response — keep previous queue state */ }
+  }
+
+  if (transcribeResult.status === 'fulfilled' && transcribeResult.value.ok) {
+    try {
+      const data = await transcribeResult.value.json()
       transcribeJobs.value = data.jobs || []
       transcribeMeta.value = {
         total: data.total || 0,
@@ -235,16 +242,23 @@ async function load() {
         avg_duration_s: data.avg_duration_s || 0,
         eta_seconds: data.eta_seconds ?? null,
       }
-    }
-    if (failedRes.ok) {
-      const data = await failedRes.json()
-      failedClips.value = data.items || []
-    }
-  } catch (e) {
-    showToast('加载队列失败', 'error')
-  } finally {
-    loading.value = false
+    } catch { /* stale response — keep previous state */ }
   }
+
+  if (failedResult.status === 'fulfilled' && failedResult.value.ok) {
+    try {
+      const data = await failedResult.value.json()
+      failedClips.value = data.items || []
+    } catch { /* stale response — keep previous state */ }
+  }
+
+  // Show a single toast only when ALL requests fail.
+  const allFailed = results.every(r => r.status === 'rejected' || !r.value?.ok)
+  if (allFailed && (queue.value.running.length + queue.value.queued.length + transcribeJobs.value.length) === 0) {
+    showToast('无法连接后端服务', 'error')
+  }
+
+  loading.value = false
 }
 
 async function setPriority(recordingId, rawValue) {

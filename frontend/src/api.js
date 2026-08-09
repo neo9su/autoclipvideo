@@ -1,4 +1,14 @@
 const BASE = (import.meta.env.VITE_API_BASE || 'http://10.190.0.203:8899').replace(/\/$/, '')
+const FETCH_TIMEOUT_MS = 15000
+
+/** Wrapper that aborts fetch after timeout so an unreachable backend does not hang the UI. */
+function fetchWithTimeout(url, options = {}, timeout = FETCH_TIMEOUT_MS) {
+  const controller = new AbortController()
+  const timeoutId = timeout > 0 ? setTimeout(() => controller.abort(), timeout) : null
+  return fetch(url, { ...options, signal: controller.signal }).finally(() => {
+    if (timeoutId !== null) clearTimeout(timeoutId)
+  })
+}
 
 async function readErrorMessage(response, fallback = '请求失败') {
   const contentType = response.headers.get('content-type') || ''
@@ -23,7 +33,7 @@ async function readErrorMessage(response, fallback = '请求失败') {
 }
 
 async function requestJson(url, options, fallback = '请求失败') {
-  const response = await fetch(url, options)
+  const response = await fetchWithTimeout(url, options)
   if (!response.ok) throw new Error(await readErrorMessage(response, fallback))
   try {
     return await response.json()
@@ -37,7 +47,7 @@ export async function getRooms() {
 }
 
 export async function addRoom(name, url) {
-  const res = await fetch(`${BASE}/api/rooms`, {
+  const res = await fetchWithTimeout(`${BASE}/api/rooms`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, url }),
@@ -47,34 +57,34 @@ export async function addRoom(name, url) {
 }
 
 export async function deleteRoom(id) {
-  await fetch(`${BASE}/api/rooms/${id}`, { method: 'DELETE' })
+  await fetchWithTimeout(`${BASE}/api/rooms/${id}`, { method: 'DELETE' })
 }
 
 export async function toggleRoom(id) {
-  const res = await fetch(`${BASE}/api/rooms/${id}/toggle`, { method: 'PATCH' })
+  const res = await fetchWithTimeout(`${BASE}/api/rooms/${id}/toggle`, { method: 'PATCH' })
   return res.json()
 }
 
 export async function getRecordings(roomId) {
-  const res = await fetch(`${BASE}/api/rooms/${roomId}/recordings`)
+  const res = await fetchWithTimeout(`${BASE}/api/rooms/${roomId}/recordings`)
   return res.json()
 }
 
 export async function getAllRecordings(page = 1, status = '', sort = 'start_time', order = 'desc') {
   const params = new URLSearchParams({ page, limit: 50, sort, order })
   if (status) params.set('status', status)
-  const res = await fetch(`${BASE}/api/recordings?${params}`)
+  const res = await fetchWithTimeout(`${BASE}/api/recordings?${params}`)
   return res.json()
 }
 
 export async function getRecordingClipsBulk(ids) {
   if (!ids.length) return {}
-  const res = await fetch(`${BASE}/api/recording-clips/bulk?ids=${ids.join(',')}`)
+  const res = await fetchWithTimeout(`${BASE}/api/recording-clips/bulk?ids=${ids.join(',')}`)
   return res.json()
 }
 
 export async function getStatus() {
-  const res = await fetch(`${BASE}/api/status`)
+  const res = await fetchWithTimeout(`${BASE}/api/status`)
   return res.json()
 }
 
@@ -83,16 +93,21 @@ export function createWS(onMessage) {
   let ws = null
   let reconnectTimer = null
   let closed = false
+  let reconnectDelay = 2000  // start at 2s, exponential backoff to 30s max
 
   function connect() {
     if (closed) return
     ws = new WebSocket(`${wsBase}/ws/events`)
+    ws.onopen = () => {
+      reconnectDelay = 2000  // reset backoff on successful connection
+    }
     ws.onmessage = (e) => {
       try { onMessage(JSON.parse(e.data)) } catch {}
     }
     ws.onclose = () => {
       if (closed) return
-      reconnectTimer = setTimeout(connect, 5000)
+      reconnectTimer = setTimeout(connect, reconnectDelay)
+      reconnectDelay = Math.min(reconnectDelay * 2, 30000)
     }
     ws.onerror = () => {}  // onclose always fires after onerror; reconnect there
   }
@@ -114,13 +129,13 @@ export async function getGroup(id) {
 }
 
 export async function mergeGroup(id) {
-  const res = await fetch(`${BASE}/api/groups/${id}/merge`, { method: 'POST' })
+  const res = await fetchWithTimeout(`${BASE}/api/groups/${id}/merge`, { method: 'POST' })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
 
 export async function retryModes(id) {
-  const res = await fetch(`${BASE}/api/groups/${id}/retry-modes`, { method: 'POST' })
+  const res = await fetchWithTimeout(`${BASE}/api/groups/${id}/retry-modes`, { method: 'POST' })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
@@ -131,13 +146,13 @@ export async function uploadRecording(roomId, file, srtFile = null, durationSec 
   if (srtFile) form.append('srt', srtFile)
   if (durationSec) form.append('duration_sec', String(durationSec))
   form.append('clip_count', String(clipCount))
-  const res = await fetch(`${BASE}/api/rooms/${roomId}/upload`, { method: 'POST', body: form })
+  const res = await fetchWithTimeout(`${BASE}/api/rooms/${roomId}/upload`, { method: 'POST', body: form })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
 
 export async function getRecordingClips(recordingId) {
-  const res = await fetch(`${BASE}/api/recordings/${recordingId}/clips`)
+  const res = await fetchWithTimeout(`${BASE}/api/recordings/${recordingId}/clips`)
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
@@ -147,37 +162,37 @@ export function recordingClipDownloadUrl(clipId) {
 }
 
 export async function getRecording(id) {
-  const res = await fetch(`${BASE}/api/recordings/${id}`)
+  const res = await fetchWithTimeout(`${BASE}/api/recordings/${id}`)
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
 
 export async function retryTranscribe(id) {
-  const res = await fetch(`${BASE}/api/recordings/${id}/retry-transcribe`, { method: 'POST' })
+  const res = await fetchWithTimeout(`${BASE}/api/recordings/${id}/retry-transcribe`, { method: 'POST' })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
 
 export async function retryClip(id) {
-  const res = await fetch(`${BASE}/api/recordings/${id}/retry-clip`, { method: 'POST' })
+  const res = await fetchWithTimeout(`${BASE}/api/recordings/${id}/retry-clip`, { method: 'POST' })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
 
 export async function getClips() {
-  const res = await fetch(`${BASE}/api/clips`)
+  const res = await fetchWithTimeout(`${BASE}/api/clips`)
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
 
 export async function revealClip(id) {
-  const res = await fetch(`${BASE}/api/recordings/${id}/reveal-clip`, { method: 'POST' })
+  const res = await fetchWithTimeout(`${BASE}/api/recordings/${id}/reveal-clip`, { method: 'POST' })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
 
 export async function createGroup(body) {
-  const res = await fetch(`${BASE}/api/groups`, {
+  const res = await fetchWithTimeout(`${BASE}/api/groups`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -187,7 +202,7 @@ export async function createGroup(body) {
 }
 
 export async function updateGroup(id, body) {
-  const res = await fetch(`${BASE}/api/groups/${id}`, {
+  const res = await fetchWithTimeout(`${BASE}/api/groups/${id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -197,7 +212,7 @@ export async function updateGroup(id, body) {
 }
 
 export async function importGroupVideos(groupId, paths) {
-  const res = await fetch(`${BASE}/api/groups/${groupId}/import-videos`, {
+  const res = await fetchWithTimeout(`${BASE}/api/groups/${groupId}/import-videos`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ paths }),
@@ -207,12 +222,12 @@ export async function importGroupVideos(groupId, paths) {
 }
 
 export async function deleteGroup(id) {
-  const res = await fetch(`${BASE}/api/groups/${id}`, { method: 'DELETE' })
+  const res = await fetchWithTimeout(`${BASE}/api/groups/${id}`, { method: 'DELETE' })
   if (!res.ok) throw new Error(await res.text())
 }
 
 export async function createCustomGroup(body) {
-  const res = await fetch(`${BASE}/api/groups/custom`, {
+  const res = await fetchWithTimeout(`${BASE}/api/groups/custom`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -225,13 +240,13 @@ export async function uploadCustomGroupVideo(groupId, file, clipCount = 1) {
   const form = new FormData()
   form.append('file', file)
   form.append('clip_count', String(clipCount))
-  const res = await fetch(`${BASE}/api/groups/${groupId}/upload-video`, { method: 'POST', body: form })
+  const res = await fetchWithTimeout(`${BASE}/api/groups/${groupId}/upload-video`, { method: 'POST', body: form })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
 
 export async function reassignRecording(recordingId, groupId) {
-  const res = await fetch(`${BASE}/api/recordings/${recordingId}/group`, {
+  const res = await fetchWithTimeout(`${BASE}/api/recordings/${recordingId}/group`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ group_id: groupId ?? null }),
@@ -241,12 +256,12 @@ export async function reassignRecording(recordingId, groupId) {
 }
 
 export async function deleteLocalFile(id) {
-  const res = await fetch(`${BASE}/api/recordings/${id}/local-file`, { method: 'DELETE' })
+  const res = await fetchWithTimeout(`${BASE}/api/recordings/${id}/local-file`, { method: 'DELETE' })
   if (!res.ok) throw new Error(await res.text())
 }
 
 export async function reclip(roomName, date, durationSec, clipCount = 1) {
-  const res = await fetch(`${BASE}/api/reclip`, {
+  const res = await fetchWithTimeout(`${BASE}/api/reclip`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ room_name: roomName, date, duration_sec: durationSec, clip_count: clipCount }),
@@ -256,13 +271,13 @@ export async function reclip(roomName, date, durationSec, clipCount = 1) {
 }
 
 export async function clipMissing() {
-  const res = await fetch(`${BASE}/api/recordings/clip-missing`, { method: 'POST' })
+  const res = await fetchWithTimeout(`${BASE}/api/recordings/clip-missing`, { method: 'POST' })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
 
 export async function bulkCleanup() {
-  const res = await fetch(`${BASE}/api/cleanup/local-files`, { method: 'POST' })
+  const res = await fetchWithTimeout(`${BASE}/api/cleanup/local-files`, { method: 'POST' })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
@@ -282,12 +297,12 @@ export function formatBytes(bytes) {
 
 export async function getProducts(keyword = '') {
   const q = keyword ? `?keyword=${encodeURIComponent(keyword)}` : ''
-  const res = await fetch(`${BASE}/api/products${q}`)
+  const res = await fetchWithTimeout(`${BASE}/api/products${q}`)
   return res.json()
 }
 
 export async function createProduct(body) {
-  const res = await fetch(`${BASE}/api/products`, {
+  const res = await fetchWithTimeout(`${BASE}/api/products`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -297,7 +312,7 @@ export async function createProduct(body) {
 }
 
 export async function bulkCreateProducts(items) {
-  const res = await fetch(`${BASE}/api/products/bulk`, {
+  const res = await fetchWithTimeout(`${BASE}/api/products/bulk`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(items),
@@ -307,7 +322,7 @@ export async function bulkCreateProducts(items) {
 }
 
 export async function updateProduct(id, body) {
-  const res = await fetch(`${BASE}/api/products/${id}`, {
+  const res = await fetchWithTimeout(`${BASE}/api/products/${id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -317,19 +332,19 @@ export async function updateProduct(id, body) {
 }
 
 export async function deleteProduct(id) {
-  const res = await fetch(`${BASE}/api/products/${id}`, { method: 'DELETE' })
+  const res = await fetchWithTimeout(`${BASE}/api/products/${id}`, { method: 'DELETE' })
   if (!res.ok) throw new Error(await res.text())
 }
 
 // ── Publish Accounts ──────────────────────────────────────────────────────────
 
 export async function getPublishAccounts() {
-  const res = await fetch(`${BASE}/api/publish-accounts`)
+  const res = await fetchWithTimeout(`${BASE}/api/publish-accounts`)
   return res.json()
 }
 
 export async function createPublishAccount(body) {
-  const res = await fetch(`${BASE}/api/publish-accounts`, {
+  const res = await fetchWithTimeout(`${BASE}/api/publish-accounts`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -339,18 +354,18 @@ export async function createPublishAccount(body) {
 }
 
 export async function deletePublishAccount(id) {
-  const res = await fetch(`${BASE}/api/publish-accounts/${id}`, { method: 'DELETE' })
+  const res = await fetchWithTimeout(`${BASE}/api/publish-accounts/${id}`, { method: 'DELETE' })
   if (!res.ok) throw new Error(await res.text())
 }
 
 export async function loginPublishAccount(id) {
-  const res = await fetch(`${BASE}/api/publish-accounts/${id}/login`, { method: 'POST' })
+  const res = await fetchWithTimeout(`${BASE}/api/publish-accounts/${id}/login`, { method: 'POST' })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
 
 export async function checkAccountCookie(id) {
-  const res = await fetch(`${BASE}/api/publish-accounts/${id}/check-cookie`)
+  const res = await fetchWithTimeout(`${BASE}/api/publish-accounts/${id}/check-cookie`)
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
@@ -359,12 +374,12 @@ export async function checkAccountCookie(id) {
 
 export async function getPublishTasks(status = null) {
   const q = status ? `?status=${encodeURIComponent(status)}` : ''
-  const res = await fetch(`${BASE}/api/publish-tasks${q}`)
+  const res = await fetchWithTimeout(`${BASE}/api/publish-tasks${q}`)
   return res.json()
 }
 
 export async function createPublishTask(body) {
-  const res = await fetch(`${BASE}/api/publish-tasks`, {
+  const res = await fetchWithTimeout(`${BASE}/api/publish-tasks`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -374,24 +389,24 @@ export async function createPublishTask(body) {
 }
 
 export async function retryPublishTask(id) {
-  const res = await fetch(`${BASE}/api/publish-tasks/${id}/retry`, { method: 'POST' })
+  const res = await fetchWithTimeout(`${BASE}/api/publish-tasks/${id}/retry`, { method: 'POST' })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
 
 export async function cancelPublishTask(id) {
-  const res = await fetch(`${BASE}/api/publish-tasks/${id}`, { method: 'DELETE' })
+  const res = await fetchWithTimeout(`${BASE}/api/publish-tasks/${id}`, { method: 'DELETE' })
   if (!res.ok) throw new Error(await res.text())
 }
 
 export async function regenPublishTaskMeta(id) {
-  const res = await fetch(`${BASE}/api/publish-tasks/${id}/regen-meta`, { method: 'POST' })
+  const res = await fetchWithTimeout(`${BASE}/api/publish-tasks/${id}/regen-meta`, { method: 'POST' })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
 
 export async function bulkRegenPublishTaskMeta(task_ids) {
-  const res = await fetch(`${BASE}/api/publish-tasks/bulk-regen-meta`, {
+  const res = await fetchWithTimeout(`${BASE}/api/publish-tasks/bulk-regen-meta`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ task_ids }),
@@ -401,7 +416,7 @@ export async function bulkRegenPublishTaskMeta(task_ids) {
 }
 
 export async function reschedulePublishTask(id, scheduledAt) {
-  const res = await fetch(`${BASE}/api/publish-tasks/${id}`, {
+  const res = await fetchWithTimeout(`${BASE}/api/publish-tasks/${id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ scheduled_at: scheduledAt }),
@@ -411,7 +426,7 @@ export async function reschedulePublishTask(id, scheduledAt) {
 }
 
 export async function bulkCancelPublishTasks(body) {
-  const res = await fetch(`${BASE}/api/publish-tasks/bulk-cancel`, {
+  const res = await fetchWithTimeout(`${BASE}/api/publish-tasks/bulk-cancel`, {
     method: 'DELETE',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -423,12 +438,12 @@ export async function bulkCancelPublishTasks(body) {
 export async function getUnscheduledGroups(platform = 'douyin', roomId = null) {
   const q = new URLSearchParams({ platform })
   if (roomId) q.set('room_id', roomId)
-  const res = await fetch(`${BASE}/api/publish-tasks/unscheduled-groups?${q}`)
+  const res = await fetchWithTimeout(`${BASE}/api/publish-tasks/unscheduled-groups?${q}`)
   return res.json()
 }
 
 export async function batchSchedulePublish(body) {
-  const res = await fetch(`${BASE}/api/publish-tasks/batch-schedule`, {
+  const res = await fetchWithTimeout(`${BASE}/api/publish-tasks/batch-schedule`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -438,7 +453,7 @@ export async function batchSchedulePublish(body) {
 }
 
 export async function markManualPublish(taskId) {
-  const res = await fetch(`${BASE}/api/publish-tasks/${taskId}/manual-publish`, {
+  const res = await fetchWithTimeout(`${BASE}/api/publish-tasks/${taskId}/manual-publish`, {
     method: 'POST',
   })
   if (!res.ok) throw new Error(await res.text())
@@ -448,37 +463,37 @@ export async function markManualPublish(taskId) {
 // ── Meta generation & product matching ────────────────────────────────────────
 
 export async function generatePublishMeta(groupId) {
-  const res = await fetch(`${BASE}/api/groups/${groupId}/generate-meta`, { method: 'POST' })
+  const res = await fetchWithTimeout(`${BASE}/api/groups/${groupId}/generate-meta`, { method: 'POST' })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
 
 export async function matchGroupProduct(groupId) {
-  const res = await fetch(`${BASE}/api/groups/${groupId}/match-product`, { method: 'POST' })
+  const res = await fetchWithTimeout(`${BASE}/api/groups/${groupId}/match-product`, { method: 'POST' })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
 
 export async function getStats() {
-  const res = await fetch(`${BASE}/api/stats`)
+  const res = await fetchWithTimeout(`${BASE}/api/stats`)
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
 
 export async function getProcessingProgress() {
-  const res = await fetch(`${BASE}/api/recordings/processing-progress`)
+  const res = await fetchWithTimeout(`${BASE}/api/recordings/processing-progress`)
   if (!res.ok) return {}
   return res.json()
 }
 
 export async function getClipJobs() {
-  const res = await fetch(`${BASE}/api/clip-jobs`)
+  const res = await fetchWithTimeout(`${BASE}/api/clip-jobs`)
   if (!res.ok) return {}
   return res.json()
 }
 
 export async function getGpuStatus() {
-  const res = await fetch(`${BASE}/api/gpu/status`)
+  const res = await fetchWithTimeout(`${BASE}/api/gpu/status`)
   return res.json()
 }
 
@@ -518,19 +533,19 @@ export async function uploadQianchuanMaterials(mainFile, auxiliaryFiles = [], la
   }
   if (label) form.append('label', label)
   form.append('trigger_analysis', String(triggerAnalysis))
-  const res = await fetch(`${BASE}/api/v2/qianchuan/upload`, { method: 'POST', body: form })
+  const res = await fetchWithTimeout(`${BASE}/api/v2/qianchuan/upload`, { method: 'POST', body: form })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
 
 export async function getQianchuanUploadJobStatus(jobId) {
-  const res = await fetch(`${BASE}/api/v2/qianchuan/upload/${jobId}`)
+  const res = await fetchWithTimeout(`${BASE}/api/v2/qianchuan/upload/${jobId}`)
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
 
 export async function getQianchuanUploadServiceStatus() {
-  const res = await fetch(`${BASE}/api/v2/qianchuan/upload-status`)
+  const res = await fetchWithTimeout(`${BASE}/api/v2/qianchuan/upload-status`)
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
@@ -538,7 +553,7 @@ export async function getQianchuanUploadServiceStatus() {
 // ── 画质增强 ──────────────────────────────────────────────────────────────────
 
 export async function getEnhanceServiceStatus() {
-  const res = await fetch(`${BASE}/api/enhance-service/status`)
+  const res = await fetchWithTimeout(`${BASE}/api/enhance-service/status`)
   return res.json()
 }
 
@@ -549,13 +564,13 @@ export async function createEnhanceJob(file, { model = 'general', targetRes = '1
   form.append('target_res', targetRes)
   form.append('denoise', denoise)
   form.append('preview_only', String(previewOnly))
-  const res = await fetch(`${BASE}/api/enhance-jobs`, { method: 'POST', body: form })
+  const res = await fetchWithTimeout(`${BASE}/api/enhance-jobs`, { method: 'POST', body: form })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
 
 export async function getEnhanceJob(jobId) {
-  const res = await fetch(`${BASE}/api/enhance-jobs/${jobId}`)
+  const res = await fetchWithTimeout(`${BASE}/api/enhance-jobs/${jobId}`)
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
@@ -565,7 +580,7 @@ export function enhanceJobDownloadUrl(jobId) {
 }
 
 export async function cancelEnhanceJob(jobId) {
-  await fetch(`${BASE}/api/enhance-jobs/${jobId}`, { method: 'DELETE' })
+  await fetchWithTimeout(`${BASE}/api/enhance-jobs/${jobId}`, { method: 'DELETE' })
 }
 
 export function formatDuration(start, end) {

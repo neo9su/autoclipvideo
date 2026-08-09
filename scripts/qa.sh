@@ -136,6 +136,27 @@ async def main():
         'api.js createWS must guard against reconnects after close'
     assert 'ws.onclose = null' in api_js, \
         'api.js createWS must nullify onclose before closing'
+    # ── Regression: fetch timeouts must prevent UI freeze on unreachable backend ──
+    remote_api_js = Path('frontend/src/remoteApi.js').read_text()
+    assert 'REMOTE_FETCH_TIMEOUT_MS' in remote_api_js and 'AbortController' in remote_api_js, \
+        'remoteApi.js must include AbortController-based fetch timeout'
+    assert 'fetchWithTimeout' in api_js, \
+        'api.js must have fetchWithTimeout wrapper with AbortController timeout'
+    assert 'FETCH_TIMEOUT_MS' in api_js, \
+        'api.js must define FETCH_TIMEOUT_MS'
+    # ── Regression: WebSocket reconnect must use exponential backoff ──
+    assert 'reconnectDelay' in api_js and 'Math.min(reconnectDelay * 2, 30000)' in api_js, \
+        'api.js createWS must use exponential backoff on reconnect'
+    # ── Regression: Dashboard must gate fallback polling to avoid duplicate loads ──
+    dash_vue_text = Path('frontend/src/views/Dashboard.vue').read_text()
+    assert 'lastWsMessage' in dash_vue_text, \
+        'Dashboard.vue must track last WebSocket message time'
+    assert 'Date.now() - lastWsMessage > 30000' in dash_vue_text, \
+        'Dashboard.vue must gate fallback polling behind WebSocket silence threshold'
+    # ── Regression: ClipQueue must use Promise.allSettled for independent requests ──
+    cq_vue_text = Path('frontend/src/views/ClipQueue.vue').read_text()
+    assert 'Promise.allSettled' in cq_vue_text, \
+        'ClipQueue.vue must use Promise.allSettled for independent request handling'
 asyncio.run(main())
 print('qianchuan workflow smoke ok')
 

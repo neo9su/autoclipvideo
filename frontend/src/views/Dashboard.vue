@@ -171,11 +171,22 @@ async function remove(room) {
   await load()
 }
 
+let lastWsMessage = 0
+
 onMounted(() => {
   load()
-  wsCleanup = createWS(() => load())
-  // Fallback polling in case WebSocket is unavailable (e.g., control-plane mode)
-  timer = setInterval(load, 10000)
+  wsCleanup = createWS(() => {
+    lastWsMessage = Date.now()
+    load()
+  })
+  // Fallback polling only activates when WebSocket is silent/unavailable.
+  // When WebSocket is delivering events the poll is skipped, avoiding
+  // duplicate API requests that double-load the backend.
+  timer = setInterval(() => {
+    if (Date.now() - lastWsMessage > 30000) {
+      load()
+    }
+  }, 10000)
 })
 
 onUnmounted(() => {
