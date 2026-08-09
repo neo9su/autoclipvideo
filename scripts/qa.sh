@@ -22,7 +22,7 @@ run_gate lint python -m py_compile \
   backend/qianchuan_learning.py backend/qianchuan_upload.py \
   backend/local_media_guard.py backend/test_transcribe_queue.py backend/video_editing_skills.py backend/pipeline_state.py \
   backend/transcribe.py backend/reclip_batch.py \
-  scripts/reclip_batch.py \
+  scripts/reclip_batch.py gpu_service/main.py \
   tests/test_qianchuan_learning.py tests/test_qianchuan_upload.py tests/test_reclip_batch.py
 
 run_gate types python - <<'PY'

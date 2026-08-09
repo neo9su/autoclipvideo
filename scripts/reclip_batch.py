@@ -129,6 +129,7 @@ def validate_manifest_item(source_dir: Path, item: dict[str, Any]) -> None:
 class Checkpoint:
     """Durable job state and append-only evidence in SQLite."""
     def __init__(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(path, timeout=30)
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("""CREATE TABLE IF NOT EXISTS jobs (
@@ -138,13 +139,44 @@ class Checkpoint:
             status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
             remote_job_id TEXT, output_mp4 TEXT, output_srt TEXT,
             failure_class TEXT, failure_reason TEXT, updated_at REAL NOT NULL,
-            evidence_json TEXT NOT NULL DEFAULT '{}')""")
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            lease_owner TEXT, lease_until REAL)""")
+        self.db.execute("""CREATE TABLE IF NOT EXISTS events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, job_key TEXT NOT NULL,
+            event TEXT NOT NULL, detail_json TEXT NOT NULL, at REAL NOT NULL)""")
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(jobs)")}
         for name, definition in (("srt_sha256", "TEXT NOT NULL DEFAULT ''"),
-                                 ("srt_size", "INTEGER NOT NULL DEFAULT 0")):
+                                 ("srt_size", "INTEGER NOT NULL DEFAULT 0"),
+                                 ("lease_owner", "TEXT"),
+                                 ("lease_until", "REAL")):
             if name not in columns:
                 self.db.execute(f"ALTER TABLE jobs ADD COLUMN {name} {definition}")
         self.db.commit()
+
+    def claim(self, owner: str, lease_seconds: float, retries: int) -> dict[str, Any] | None:
+        """Atomically claim one job and reclaim only expired worker leases."""
+        if not owner or lease_seconds <= 0 or retries < 1:
+            raise ValueError("owner, lease_seconds, and retries must be positive")
+        now = time.time()
+        self.db.execute("BEGIN IMMEDIATE")
+        row = self.db.execute(
+            """SELECT * FROM jobs WHERE attempts < ? AND
+               (status IN ('pending','retry') OR
+                (status='processing' AND lease_until IS NOT NULL AND lease_until < ?))
+               ORDER BY updated_at LIMIT 1""", (retries, now)).fetchone()
+        if row is None:
+            self.db.commit()
+            return None
+        columns = [item[1] for item in self.db.execute("PRAGMA table_info(jobs)")]
+        self.db.execute(
+            """UPDATE jobs SET status='processing', attempts=attempts+1,
+               lease_owner=?, lease_until=?, updated_at=? WHERE job_key=?""",
+            (owner, now + lease_seconds, now, row[0]),
+        )
+        self._event(row[0], "claimed", {"owner": owner, "lease_until": now + lease_seconds})
+        self.db.commit()
+        claimed = self.db.execute("SELECT * FROM jobs WHERE job_key=?", (row[0],)).fetchone()
+        return dict(zip(columns, claimed))
 
     def seed(self, records: Iterator[dict[str, Any]]) -> None:
         now = time.time()
@@ -163,10 +195,32 @@ class Checkpoint:
         return dict(zip(columns, row))
 
     def update(self, key: str, **fields: Any) -> None:
+        owner = fields.pop("lease_owner", None)
+        if owner is not None:
+            row = self.db.execute("SELECT lease_owner FROM jobs WHERE job_key=?", (key,)).fetchone()
+            if row is None or row[0] != owner:
+                raise PermissionError("job lease owner does not match")
+        if fields.get("status") in {"success", "done"}:
+            evidence = json.loads(fields.get("evidence_json", "{}"))
+            required = {"job_id", "request", "response", "gpu_consumed", "exit_code",
+                        "output_mp4", "output_srt", "mp4_readable", "srt_readable",
+                        "mp4_size_bytes", "srt_size_bytes", "ffprobe"}
+            if not required.issubset(evidence) or not evidence["gpu_consumed"] or evidence["exit_code"] != 0:
+                raise ValueError("success requires complete GPU and artifact evidence")
+            fields["lease_owner"] = None
+            fields["lease_until"] = None
+        elif fields.get("status") in {"retry", "permanent_failure", "skipped"}:
+            fields["lease_owner"] = None
+            fields["lease_until"] = None
         fields["updated_at"] = time.time()
         assignments = ",".join(f"{name}=?" for name in fields)
         self.db.execute(f"UPDATE jobs SET {assignments} WHERE job_key=?", (*fields.values(), key))
+        self._event(key, str(fields.get("status", "updated")), fields)
         self.db.commit()
+
+    def _event(self, key: str, event: str, detail: dict[str, Any]) -> None:
+        self.db.execute("INSERT INTO events(job_key,event,detail_json,at) VALUES(?,?,?,?)",
+                        (key, event, json.dumps(detail, ensure_ascii=False, default=str), time.time()))
 
     def counts(self) -> dict[str, int]:
         return {row[0]: row[1] for row in self.db.execute("SELECT status,COUNT(*) FROM jobs GROUP BY status")}
@@ -257,13 +311,12 @@ def ffprobe(path: Path) -> dict[str, Any]:
     return json.loads(completed.stdout).get("format", {})
 
 
-def run_one(job: dict[str, Any], checkpoint: Checkpoint, args: argparse.Namespace) -> None:
+def run_one(job: dict[str, Any], checkpoint: Checkpoint, args: argparse.Namespace, owner: str) -> None:
     key = job["job_key"]
     source = Path(job["source"])
     output_dir = args.output_dir / key
     output_dir.mkdir(parents=True, exist_ok=True)
-    attempts = job["attempts"] + 1
-    checkpoint.update(key, status="processing", attempts=attempts)
+    attempts = job["attempts"]
     started = time.time()
     try:
         validate_manifest_item(args.source_dir, job)
@@ -278,7 +331,7 @@ def run_one(job: dict[str, Any], checkpoint: Checkpoint, args: argparse.Namespac
         remote_id = response.get("job_id")
         if not remote_id:
             raise ValueError("missing_remote_job_id")
-        checkpoint.update(key, remote_job_id=remote_id)
+        checkpoint.update(key, remote_job_id=remote_id, lease_owner=owner)
         deadline = time.monotonic() + args.job_timeout
         while True:
             if args.pause_file.exists():
@@ -317,11 +370,11 @@ def run_one(job: dict[str, Any], checkpoint: Checkpoint, args: argparse.Namespac
             "output_srt_sha256": sha256_file(destination_srt),
             "elapsed_s": round(time.time() - started, 3),
         }
-        checkpoint.update(key, status="success", output_mp4=str(destination_mp4), output_srt=str(destination_srt), evidence_json=json.dumps(evidence, ensure_ascii=False))
+        checkpoint.update(key, status="success", output_mp4=str(destination_mp4), output_srt=str(destination_srt), evidence_json=json.dumps(evidence, ensure_ascii=False), lease_owner=owner)
     except Exception as exc:
         category = classify_failure(exc)
         status = "retry" if str(exc) == "paused_by_operator" or (attempts < args.retries and category in {"remote_transient", "transport", "unknown"}) else "permanent_failure"
-        checkpoint.update(key, status=status, failure_class=category, failure_reason=str(exc)[:500], evidence_json=json.dumps({"job_id": job.get("remote_job_id"), "elapsed_s": round(time.time() - started, 3)}))
+        checkpoint.update(key, status=status, failure_class=category, failure_reason=str(exc)[:500], evidence_json=json.dumps({"job_id": job.get("remote_job_id"), "elapsed_s": round(time.time() - started, 3)}), lease_owner=owner)
 
 
 def load_manifest(path: Path) -> Iterator[dict[str, Any]]:
@@ -347,6 +400,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--job-timeout", type=float, default=3600.0)
     parser.add_argument("--timeout", type=float, default=300.0)
     parser.add_argument("--pause-file", type=Path, default=Path("reclip.pause"))
+    parser.add_argument("--lease-seconds", type=float, default=7200.0)
+    parser.add_argument("--worker-id", default=f"reclip-{os.getpid()}-{uuid.uuid4().hex[:8]}")
     parser.add_argument("--scan", action="store_true", help="create manifest and exit")
     args = parser.parse_args(argv)
     if not args.source_dir.is_dir() or args.retries < 1 or args.rate_limit < 0:
@@ -368,10 +423,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         with lease(args.checkpoint.with_suffix(args.checkpoint.suffix + ".lease")):
             while processed < args.sample if args.sample else True:
-                job = checkpoint.next_job(args.retries)
-                if job is None or args.pause_file.exists():
+                if args.pause_file.exists():
                     break
-                run_one(job, checkpoint, args)
+                job = checkpoint.claim(args.worker_id, args.lease_seconds, args.retries)
+                if job is None:
+                    break
+                run_one(job, checkpoint, args, args.worker_id)
                 processed += 1
                 time.sleep(args.rate_limit)
     except FileExistsError:

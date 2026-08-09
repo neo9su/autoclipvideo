@@ -1139,8 +1139,12 @@ class ClipJobRequest(BaseModel):
 
 
 @app.post("/clip-jobs", status_code=201)
-async def create_clip_job(req: ClipJobRequest):
+async def create_clip_job(request: Request, req: ClipJobRequest):
+    _require_api_auth(request)
     from urllib.parse import quote
+    safe_filename = req.mp4_filename.replace("\\", "/")
+    if not safe_filename or Path(safe_filename).name != safe_filename or "\x00" in safe_filename:
+        raise HTTPException(status_code=400, detail="mp4_filename must be a safe basename")
     if req.execution_node != "remote-gpu":
         raise HTTPException(status_code=400, detail="media jobs must execute on remote-gpu")
     if not req.idempotency_key:
@@ -1172,7 +1176,8 @@ async def create_clip_job(req: ClipJobRequest):
 
 
 @app.get("/clip-jobs/{job_id}")
-async def get_clip_job(job_id: str):
+async def get_clip_job(request: Request, job_id: str):
+    _require_api_auth(request)
     job = _clip_jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Clip job not found")
@@ -1186,7 +1191,8 @@ async def get_clip_job(job_id: str):
 
 
 @app.get("/clip-jobs/{job_id}/mp4")
-async def get_clip_mp4(job_id: str):
+async def get_clip_mp4(request: Request, job_id: str):
+    _require_api_auth(request)
     job = _clip_jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Clip job not found")
@@ -1199,7 +1205,8 @@ async def get_clip_mp4(job_id: str):
 
 
 @app.get("/clip-jobs/{job_id}/thumb")
-async def get_clip_thumb(job_id: str):
+async def get_clip_thumb(request: Request, job_id: str):
+    _require_api_auth(request)
     job = _clip_jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Clip job not found")

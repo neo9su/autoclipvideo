@@ -44,6 +44,21 @@ def test_checkpoint_seeds_idempotently_and_tracks_failures(tmp_path: Path) -> No
     checkpoint.close()
 
 
+def test_checkpoint_claims_with_lease_and_requires_owner_for_success(tmp_path: Path) -> None:
+    checkpoint = Checkpoint(tmp_path / "checkpoint.db")
+    checkpoint.seed(iter([{"job_key": "key", "source": "/source.mp4", "srt": "/source.srt",
+                          "source_sha256": "a", "source_size": 7, "srt_sha256": "b", "srt_size": 3}]))
+    claimed = checkpoint.claim("worker-a", 60, 2)
+    assert claimed and claimed["lease_owner"] == "worker-a"
+    with pytest.raises(PermissionError):
+        checkpoint.update("key", status="retry", lease_owner="worker-b")
+    with pytest.raises(ValueError, match="complete GPU"):
+        checkpoint.update("key", status="success", lease_owner="worker-a", evidence_json="{}")
+    checkpoint.update("key", status="retry", lease_owner="worker-a", failure_reason="temporary")
+    assert checkpoint.counts() == {"retry": 1}
+    checkpoint.close()
+
+
 def test_lease_rejects_second_runner_and_cleans_up(tmp_path: Path) -> None:
     lock = tmp_path / "run.lease"
     with lease(lock):
