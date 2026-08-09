@@ -14,3 +14,7 @@ rsync -az --delete \
   "$REPO_ROOT/" "$REMOTE:$GPU_BACKEND_DIR/"
 scp "$GPU_BACKEND_ENV_FILE" "$REMOTE:$GPU_BACKEND_DIR/deploy/gpu-backend.env"
 ssh "$REMOTE" "cd '$GPU_BACKEND_DIR' && docker compose --env-file deploy/gpu-backend.env -f deploy/docker-compose.gpu-backend.yml up -d --build && docker compose --env-file deploy/gpu-backend.env -f deploy/docker-compose.gpu-backend.yml ps"
+
+echo "Verifying deployed GPU backend and worker role..."
+ssh "$REMOTE" "cd '$GPU_BACKEND_DIR' && curl --fail --silent --show-error http://127.0.0.1:8899/api/status"
+ssh "$REMOTE" "cd '$GPU_BACKEND_DIR' && docker compose --env-file deploy/gpu-backend.env -f deploy/docker-compose.gpu-backend.yml logs --since=2m --tail=100 douyin-backend | grep -E 'DEPLOYMENT_ROLE|background media jobs|poll_transcriptions|director|creative' || true"

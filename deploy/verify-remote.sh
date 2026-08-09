@@ -20,6 +20,17 @@ check_http "/frontend/" 200
 check_http "/api/status" 200
 check_http "/docs" 200
 
+curl --silent --show-error "$BASE_URL/health" > "$TMP_DIR/health.json"
+python - "$TMP_DIR/health.json" <<'PY'
+import json, sys
+payload = json.load(open(sys.argv[1]))
+assert payload.get('deployment_role') == 'gpu-backend', payload
+assert payload.get('media_workers_enabled') is True, payload
+required = {'transcription', 'backfill', 'publish', 'enhance', 'creative', 'director', 'qianchuan', 'room-monitors'}
+assert required <= set(payload.get('worker_services', [])), payload
+print('PASS /health: gpu-backend media workers enabled')
+PY
+
 curl --silent --show-error "$BASE_URL/frontend/" > "$TMP_DIR/frontend.html"
 
 # Fetch the referenced production bundle and verify the visible Qianchuan marker.
