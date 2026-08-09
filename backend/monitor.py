@@ -24,6 +24,9 @@ class MonitorManager:
         self._tasks: Dict[int, asyncio.Task] = {}
         self._room_status: Dict[int, str] = {}  # room_id -> live/offline/unknown
         self._resolution_warnings: Dict[int, Optional[str]] = {}  # room_id -> warning or None
+        self._last_check_at: Dict[int, datetime] = {}
+        self._last_error: Dict[int, Optional[str]] = {}
+        self._consecutive_errors: Dict[int, int] = {}
         self._broadcast = broadcast_fn  # WebSocket broadcast callback
         self._allow_local_media = allow_local_media
 
@@ -57,6 +60,9 @@ class MonitorManager:
         if recorder:
             await recorder.stop()
         self._room_status.pop(room_id, None)
+        self._last_check_at.pop(room_id, None)
+        self._last_error.pop(room_id, None)
+        self._consecutive_errors.pop(room_id, None)
 
     def _require_media_worker(self, operation: str) -> None:
         """Keep control-plane instances from accidentally recording locally."""
@@ -73,6 +79,9 @@ class MonitorManager:
             "segment_start": recorder.segment_start.isoformat() if (recorder and recorder.segment_start) else None,
             "session_start": recorder.session_start.isoformat() if (recorder and recorder.session_start) else None,
             "resolution_warning": self._resolution_warnings.get(room_id),
+            "last_check_at": self._last_check_at[room_id].isoformat() if room_id in self._last_check_at else None,
+            "last_error": self._last_error.get(room_id),
+            "consecutive_errors": self._consecutive_errors.get(room_id, 0),
         }
 
     async def _check_stream_resolution(self, room_id: int, filename: str):
@@ -176,7 +185,10 @@ class MonitorManager:
         logger.info(f"[{name}] Monitor started")
         while True:
             try:
+                self._last_check_at[room_id] = datetime.now()
                 stream_url = await get_stream_url(url)
+                self._last_error[room_id] = None
+                self._consecutive_errors[room_id] = 0
                 is_live = stream_url is not None
                 prev_status = self._room_status.get(room_id, "unknown")
 
@@ -206,6 +218,8 @@ class MonitorManager:
             except asyncio.CancelledError:
                 break
             except Exception as e:
+                self._last_error[room_id] = str(e)[:500]
+                self._consecutive_errors[room_id] = self._consecutive_errors.get(room_id, 0) + 1
                 logger.error(f"[{name}] Monitor error: {e}")
 
             await asyncio.sleep(POLL_INTERVAL)
