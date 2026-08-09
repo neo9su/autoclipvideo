@@ -96,6 +96,14 @@ def create_manifest(source_dir: Path, manifest_path: Path) -> int:
     return count
 
 
+def validate_output_root(source_dir: Path, output_dir: Path) -> None:
+    """Reject output locations that could overwrite or contain the sources."""
+    source = source_dir.resolve()
+    output = output_dir.resolve()
+    if output == source or source in output.parents:
+        raise ValueError("output directory must be isolated from source directory")
+
+
 class Checkpoint:
     """Durable job state and append-only evidence in SQLite."""
     def __init__(self, path: Path) -> None:
@@ -169,7 +177,8 @@ def classify_failure(exc: Exception) -> str:
     return "unknown"
 
 
-def multipart_upload(url: str, source: Path, room_id: int, idempotency_key: str, timeout: float) -> dict[str, Any]:
+def multipart_upload(url: str, source: Path, room_id: int, idempotency_key: str,
+                     timeout: float, headers: dict[str, str] | None = None) -> dict[str, Any]:
     """Upload with bounded memory; the source is never read all at once."""
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
@@ -186,6 +195,8 @@ def multipart_upload(url: str, source: Path, room_id: int, idempotency_key: str,
         connection.putheader("Content-Type", f"multipart/form-data; boundary={boundary}")
         connection.putheader("Content-Length", str(len(prefix) + source.stat().st_size + len(suffix)))
         connection.putheader("X-Idempotency-Key", idempotency_key)
+        for name, value in (headers or {}).items():
+            connection.putheader(name, value)
         connection.endheaders()
         connection.send(prefix)
         with source.open("rb") as stream:
@@ -201,16 +212,19 @@ def multipart_upload(url: str, source: Path, room_id: int, idempotency_key: str,
         connection.close()
 
 
-def get_json(url: str, timeout: float) -> dict[str, Any]:
-    with urllib.request.urlopen(urllib.request.Request(url), timeout=timeout) as response:
+def get_json(url: str, timeout: float, headers: dict[str, str] | None = None) -> dict[str, Any]:
+    request = urllib.request.Request(url, headers=headers or {})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read())
 
 
-def download(url: str, destination: Path, timeout: float) -> None:
+def download(url: str, destination: Path, timeout: float, headers: dict[str, str] | None = None) -> dict[str, Any]:
     temporary = destination.with_suffix(destination.suffix + ".part")
-    with urllib.request.urlopen(url, timeout=timeout) as response, temporary.open("wb") as stream:
+    request = urllib.request.Request(url, headers=headers or {})
+    with urllib.request.urlopen(request, timeout=timeout) as response, temporary.open("wb") as stream:
         shutil.copyfileobj(response, stream)
     os.replace(temporary, destination)
+    return {"status": response.status, "headers": {"content-length": response.headers.get("Content-Length")}}
 
 
 def ffprobe(path: Path) -> dict[str, Any]:
@@ -237,7 +251,7 @@ def run_one(job: dict[str, Any], checkpoint: Checkpoint, args: argparse.Namespac
         if (sidecar.stat().st_size != job["srt_size"]
                 or sha256_file(sidecar) != job["srt_sha256"]):
             raise ValueError("srt_changed_since_manifest")
-        response = multipart_upload(f"{args.gpu_url.rstrip('/')}/jobs", source, args.room_id, key, args.timeout)
+        response = multipart_upload(f"{args.gpu_url.rstrip('/')}/jobs", source, args.room_id, key, args.timeout, args.headers)
         remote_id = response.get("job_id")
         if not remote_id:
             raise ValueError("missing_remote_job_id")
@@ -246,7 +260,7 @@ def run_one(job: dict[str, Any], checkpoint: Checkpoint, args: argparse.Namespac
         while True:
             if args.pause_file.exists():
                 raise RuntimeError("paused_by_operator")
-            status = get_json(f"{args.gpu_url.rstrip('/')}/jobs/{remote_id}", args.timeout)
+            status = get_json(f"{args.gpu_url.rstrip('/')}/jobs/{remote_id}", args.timeout, args.headers)
             if status.get("status") == "done":
                 break
             if status.get("status") in {"error", "failed"}:
@@ -254,15 +268,19 @@ def run_one(job: dict[str, Any], checkpoint: Checkpoint, args: argparse.Namespac
             if time.monotonic() > deadline:
                 raise TimeoutError("remote_job_timeout")
             time.sleep(args.poll_interval)
+        # A copied source is not a reclip result.  The remote adapter must
+        # expose the generated MP4; fail closed when it does not.
         destination_mp4 = output_dir / source.name
         destination_srt = output_dir / f"{source.stem}.srt"
-        shutil.copy2(source, destination_mp4)
-        download(f"{args.gpu_url.rstrip('/')}/jobs/{remote_id}/srt", destination_srt, args.timeout)
+        mp4_response = download(f"{args.gpu_url.rstrip('/')}/jobs/{remote_id}/mp4", destination_mp4, args.timeout, args.headers)
+        srt_response = download(f"{args.gpu_url.rstrip('/')}/jobs/{remote_id}/srt", destination_srt, args.timeout, args.headers)
         output_probe = ffprobe(destination_mp4)
         evidence = {
             "job_id": remote_id,
             "request": {"method": "POST", "path": "/jobs", "idempotency_key": key},
             "response": response,
+            "mp4_response": mp4_response,
+            "srt_response": srt_response,
             "gpu_consumed": True,
             "exit_code": 0,
             "output_mp4": str(destination_mp4),
@@ -297,6 +315,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--gpu-url", required=True)
+    parser.add_argument("--auth-token", default="", help="Bearer token for the private GPU API")
     parser.add_argument("--room-id", type=int, default=0)
     parser.add_argument("--sample", type=int, default=0, help="process at most N manifest entries")
     parser.add_argument("--retries", type=int, default=DEFAULT_RETRIES)
@@ -309,6 +328,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if not args.source_dir.is_dir() or args.retries < 1 or args.rate_limit < 0:
         parser.error("source directory, retry limit, and rate limit are invalid")
+    try:
+        validate_output_root(args.source_dir, args.output_dir)
+    except ValueError as exc:
+        parser.error(str(exc))
+    args.headers = {"Authorization": f"Bearer {args.auth_token}"} if args.auth_token else {}
     if args.scan:
         print(json.dumps({"candidates": create_manifest(args.source_dir, args.manifest), "manifest": str(args.manifest)}))
         return 0

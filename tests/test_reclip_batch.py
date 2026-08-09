@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from scripts.reclip_batch import Checkpoint, create_manifest, lease, scan_pairs, stable_job_key
+from scripts.reclip_batch import (Checkpoint, create_manifest, lease, scan_pairs,
+                                  stable_job_key, validate_output_root)
 
 
 def test_manifest_uses_supported_sidecars_and_preserves_sources(tmp_path: Path) -> None:
@@ -49,3 +50,13 @@ def test_lease_rejects_second_runner_and_cleans_up(tmp_path: Path) -> None:
             with lease(lock):
                 pass
     assert not lock.exists()
+
+
+def test_output_root_cannot_be_source_or_child(tmp_path: Path) -> None:
+    source_dir = tmp_path / "recordings"
+    source_dir.mkdir()
+    with pytest.raises(ValueError):
+        validate_output_root(source_dir, source_dir)
+    with pytest.raises(ValueError):
+        validate_output_root(source_dir, source_dir / "outputs")
+    validate_output_root(source_dir, tmp_path / "isolated-output")
