@@ -5,7 +5,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "backend"))
 
-from reclip_batch import Manifest, classify_error, discover_candidates, sha256_file, verify_immutable
+from reclip_batch import (Manifest, classify_error, discover_candidates,
+                          sha256_file, validate_success_evidence,
+                          verify_immutable)
 
 
 def test_manifest_discovers_pairs_and_rejects_changed_input(tmp_path):
@@ -57,3 +59,23 @@ def test_error_classification_is_explicit():
     assert classify_error(RuntimeError("ffprobe artifact invalid")) == "artifact"
     assert classify_error(RuntimeError("bad request")) == "permanent"
     assert classify_error(RuntimeError("remote"), status_code=503) == "remote_5xx"
+
+
+def test_discovery_accepts_mp4_srt_sidecar_and_success_requires_evidence(tmp_path):
+    source = tmp_path / "recordings"
+    source.mkdir()
+    (source / "sample.mp4").write_bytes(b"video")
+    (source / "sample.mp4.srt").write_text("subtitle", encoding="utf-8")
+    assert len(discover_candidates(source)) == 1
+
+    with pytest.raises(ValueError, match="incomplete success evidence"):
+        validate_success_evidence({})
+
+    evidence = {
+        "job_id": "gpu-job-1", "request": {"method": "POST"},
+        "response": {"status": 201}, "gpu_consumed": True,
+        "exit_code": 0, "output_mp4": "out.mp4", "output_srt": "out.srt",
+        "mp4_readable": True, "srt_readable": True,
+        "mp4_size_bytes": 10, "srt_size_bytes": 3, "ffprobe": {"duration": 1},
+    }
+    validate_success_evidence(evidence)

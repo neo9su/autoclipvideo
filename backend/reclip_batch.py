@@ -44,8 +44,13 @@ def discover_candidates(input_dir: Path) -> list[Candidate]:
     """Discover only MP4 files with a same-stem SRT; never mutate either file."""
     candidates = []
     for mp4 in sorted(input_dir.rglob("*.mp4")):
-        srt = mp4.with_suffix(".srt")
-        if not srt.is_file() or not mp4.is_file():
+        # Recorder/transcriber versions have emitted both ``x.srt`` and
+        # ``x.mp4.srt``.  Select an existing non-empty sidecar without
+        # changing either source file.
+        sidecars = (Path(f"{mp4}.srt"), mp4.with_suffix(".srt"))
+        srt = next((candidate for candidate in sidecars
+                    if candidate.is_file() and candidate.stat().st_size > 0), None)
+        if srt is None or not mp4.is_file() or mp4.stat().st_size == 0:
             continue
         mp4_hash = sha256_file(mp4)
         srt_hash = sha256_file(srt)
@@ -119,6 +124,14 @@ class Manifest:
         return self.db.execute("SELECT * FROM items WHERE key=?", (row["key"],)).fetchone()
 
     def record(self, key: str, status: str, **fields: object) -> None:
+        if status == "succeeded":
+            raw_evidence = fields.get("evidence_json")
+            if not isinstance(raw_evidence, str):
+                raise ValueError("succeeded items require evidence_json")
+            try:
+                validate_success_evidence(json.loads(raw_evidence))
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise ValueError("evidence_json must be valid JSON") from exc
         allowed = {"job_id", "output_mp4", "output_srt", "evidence_json", "last_error", "lease_owner", "lease_until"}
         updates = {name: value for name, value in fields.items() if name in allowed}
         updates.update(status=status, updated_at=time.time())
@@ -154,6 +167,26 @@ def classify_error(error: Exception, status_code: int | None = None) -> str:
     if "artifact" in str(error).lower() or "ffprobe" in str(error).lower():
         return "artifact"
     return "permanent"
+
+
+def validate_success_evidence(evidence: dict) -> None:
+    """Require artifact and remote-consumption proof before terminal success."""
+    required = {
+        "job_id", "request", "response", "gpu_consumed", "exit_code",
+        "output_mp4", "output_srt", "mp4_readable", "srt_readable",
+        "mp4_size_bytes", "srt_size_bytes", "ffprobe",
+    }
+    missing = sorted(required - set(evidence))
+    if missing:
+        raise ValueError(f"incomplete success evidence: {', '.join(missing)}")
+    if not evidence["job_id"] or not evidence["gpu_consumed"]:
+        raise ValueError("success evidence must include a job ID and GPU consumption")
+    if evidence["exit_code"] != 0 or not evidence["mp4_readable"] or not evidence["srt_readable"]:
+        raise ValueError("outputs must be readable and have zero exit code")
+    if evidence["mp4_size_bytes"] <= 0 or evidence["srt_size_bytes"] <= 0:
+        raise ValueError("output sizes must be positive")
+    if not evidence["ffprobe"]:
+        raise ValueError("ffprobe evidence is required")
 
 
 def output_path(root: Path, key: str, suffix: str) -> Path:
