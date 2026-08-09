@@ -7,7 +7,7 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "backend"))
 
 from reclip_batch import (Manifest, classify_error, discover_candidates,
                           sha256_file, validate_success_evidence,
-                          verify_immutable)
+                          validate_output_root, verify_immutable)
 
 
 def test_manifest_discovers_pairs_and_rejects_changed_input(tmp_path):
@@ -79,3 +79,51 @@ def test_discovery_accepts_mp4_srt_sidecar_and_success_requires_evidence(tmp_pat
         "mp4_size_bytes": 10, "srt_size_bytes": 3, "ffprobe": {"duration": 1},
     }
     validate_success_evidence(evidence)
+
+
+def test_manifest_preserves_terminal_rows_and_bounds_retry(tmp_path):
+    source = tmp_path / "recordings"
+    source.mkdir()
+    media = source / "sample.mp4"
+    sidecar = source / "sample.srt"
+    media.write_bytes(b"video")
+    sidecar.write_text("subtitle", encoding="utf-8")
+    candidate = discover_candidates(source)[0]
+    manifest = Manifest(tmp_path / "checkpoint.db")
+    try:
+        manifest.import_candidates([candidate])
+        manifest.record(candidate.key, "skipped", last_error="not eligible")
+        manifest.import_candidates([candidate])
+        assert manifest.counts() == {"skipped": 1}
+        with pytest.raises(ValueError, match="unknown manifest status"):
+            manifest.record(candidate.key, "bogus")
+    finally:
+        manifest.close()
+
+
+def test_retry_classification_and_lease_ownership(tmp_path):
+    source = tmp_path / "recordings"
+    source.mkdir()
+    (source / "sample.mp4").write_bytes(b"video")
+    (source / "sample.srt").write_text("subtitle", encoding="utf-8")
+    candidate = discover_candidates(source)[0]
+    manifest = Manifest(tmp_path / "checkpoint.db")
+    try:
+        manifest.import_candidates([candidate])
+        claimed = manifest.claim("worker-a", lease_seconds=60, max_attempts=2)
+        with pytest.raises(PermissionError):
+            manifest.renew(candidate.key, "worker-b", 60)
+        manifest.renew(candidate.key, "worker-a", 60)
+        assert manifest.fail(candidate.key, TimeoutError("timeout"), max_attempts=2, lease_owner="worker-a") == "pending"
+        claimed = manifest.claim("worker-a", lease_seconds=60, max_attempts=2)
+        assert manifest.fail(candidate.key, RuntimeError("bad request"), max_attempts=2, lease_owner="worker-a") == "permanent_failed"
+    finally:
+        manifest.close()
+
+
+def test_output_root_must_be_sibling_or_above_source(tmp_path):
+    source = tmp_path / "recordings"
+    source.mkdir()
+    with pytest.raises(ValueError):
+        validate_output_root(source, source / "outputs")
+    validate_output_root(source, tmp_path / "reclip-output")

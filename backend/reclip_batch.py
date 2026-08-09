@@ -14,11 +14,12 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Iterable
 
 
 TERMINAL = {"succeeded", "permanent_failed", "skipped"}
 RETRYABLE = {"network", "remote_5xx", "timeout", "artifact"}
+VALID_STATUSES = TERMINAL | RETRYABLE | {"pending", "running"}
 
 
 @dataclass(frozen=True)
@@ -100,7 +101,8 @@ class Manifest:
               mp4_path=excluded.mp4_path,srt_path=excluded.srt_path,
               mp4_size=excluded.mp4_size,srt_size=excluded.srt_size,
               mp4_sha256=excluded.mp4_sha256,srt_sha256=excluded.srt_sha256,
-              updated_at=excluded.updated_at""",
+              updated_at=CASE WHEN items.status IN ('succeeded', 'permanent_failed', 'skipped')
+                THEN items.updated_at ELSE excluded.updated_at END""",
               (item.key, item.mp4_path, item.srt_path, item.mp4_size, item.srt_size,
                item.mp4_sha256, item.srt_sha256, time.time()))
             count += 1
@@ -124,6 +126,8 @@ class Manifest:
         return self.db.execute("SELECT * FROM items WHERE key=?", (row["key"],)).fetchone()
 
     def record(self, key: str, status: str, **fields: object) -> None:
+        if status not in VALID_STATUSES:
+            raise ValueError(f"unknown manifest status: {status}")
         if status == "succeeded":
             raw_evidence = fields.get("evidence_json")
             if not isinstance(raw_evidence, str):
@@ -138,6 +142,34 @@ class Manifest:
         assignments = ",".join(f"{name}=?" for name in updates)
         self.db.execute(f"UPDATE items SET {assignments} WHERE key=?", (*updates.values(), key))
         self._event(key, status, fields)
+        self.db.commit()
+
+    def fail(self, key: str, error: Exception, *, status_code: int | None = None,
+             max_attempts: int = 3, lease_owner: str | None = None) -> str:
+        """Record a bounded failure and return the resulting manifest status."""
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be positive")
+        category = classify_error(error, status_code)
+        row = self.db.execute("SELECT attempts, lease_owner FROM items WHERE key=?", (key,)).fetchone()
+        if row is None:
+            raise KeyError(key)
+        if lease_owner is not None and row["lease_owner"] != lease_owner:
+            raise PermissionError("lease owner does not match claimed item")
+        final_status = "permanent_failed" if category == "permanent" or row["attempts"] >= max_attempts else "pending"
+        self.record(key, final_status, last_error=f"{category}: {error}", lease_until=None)
+        return final_status
+
+    def renew(self, key: str, owner: str, lease_seconds: int) -> None:
+        """Extend a lease only for its current owner."""
+        if lease_seconds < 1:
+            raise ValueError("lease_seconds must be positive")
+        updated = self.db.execute(
+            "UPDATE items SET lease_until=?, updated_at=? WHERE key=? AND status='running' AND lease_owner=?",
+            (time.time() + lease_seconds, time.time(), key, owner),
+        )
+        if updated.rowcount != 1:
+            raise PermissionError("cannot renew an unowned or non-running item")
+        self._event(key, "lease_renewed", {"owner": owner, "lease_seconds": lease_seconds})
         self.db.commit()
 
     def _event(self, key: str, event: str, detail: dict) -> None:
@@ -179,6 +211,8 @@ def validate_success_evidence(evidence: dict) -> None:
     missing = sorted(required - set(evidence))
     if missing:
         raise ValueError(f"incomplete success evidence: {', '.join(missing)}")
+    if not isinstance(evidence["request"], dict) or not isinstance(evidence["response"], dict):
+        raise ValueError("request and response evidence must be objects")
     if not evidence["job_id"] or not evidence["gpu_consumed"]:
         raise ValueError("success evidence must include a job ID and GPU consumption")
     if evidence["exit_code"] != 0 or not evidence["mp4_readable"] or not evidence["srt_readable"]:
@@ -187,6 +221,14 @@ def validate_success_evidence(evidence: dict) -> None:
         raise ValueError("output sizes must be positive")
     if not evidence["ffprobe"]:
         raise ValueError("ffprobe evidence is required")
+
+
+def validate_output_root(source_root: Path, output_root: Path) -> None:
+    """Reject output paths that could overwrite or sit below immutable input."""
+    source = source_root.resolve()
+    output = output_root.resolve()
+    if output == source or source in output.parents:
+        raise ValueError("output must be isolated from input")
 
 
 def output_path(root: Path, key: str, suffix: str) -> Path:

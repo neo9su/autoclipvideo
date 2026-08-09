@@ -170,7 +170,7 @@ except ImportError:
     has_pytest = False
 if has_pytest:
     result = subprocess.run(
-        [sys.executable, '-m', 'pytest', 'tests/test_qianchuan_learning.py', 'tests/test_qianchuan_upload.py', '-v', '--tb=short', '-x'],
+        [sys.executable, '-m', 'pytest', 'tests/test_qianchuan_learning.py', 'tests/test_qianchuan_upload.py', 'tests/test_reclip_batch.py', '-v', '--tb=short', '-x'],
         capture_output=True, text=True,
     )
     print(result.stdout[-3000:] if result.stdout else '')

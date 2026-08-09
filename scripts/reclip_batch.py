@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "backend"))
-from reclip_batch import Manifest, discover_candidates
+from reclip_batch import Manifest, discover_candidates, validate_output_root
 
 
 def parse_args() -> argparse.Namespace:
@@ -24,7 +24,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-items", type=int, default=0, help="plan at most N candidates (0 means all)")
     parser.add_argument("--max-attempts", type=int, default=3)
     parser.add_argument("--lease-seconds", type=int, default=1800)
-    parser.add_argument("--plan-only", action="store_true", default=True)
     return parser.parse_args()
 
 
@@ -33,8 +32,13 @@ def main() -> int:
     if not args.input.is_dir():
         print(json.dumps({"status": "blocked", "reason": "input directory does not exist"}, ensure_ascii=False))
         return 2
-    if args.input.resolve() == args.output.resolve() or args.output.resolve().is_relative_to(args.input.resolve()):
-        print(json.dumps({"status": "blocked", "reason": "output must be isolated from input"}, ensure_ascii=False))
+    try:
+        validate_output_root(args.input, args.output)
+    except ValueError as error:
+        print(json.dumps({"status": "blocked", "reason": str(error)}, ensure_ascii=False))
+        return 2
+    if args.max_items < 0 or args.max_attempts < 1 or args.lease_seconds < 1:
+        print(json.dumps({"status": "blocked", "reason": "batch limits must be positive"}, ensure_ascii=False))
         return 2
     candidates = discover_candidates(args.input)
     if args.max_items > 0:
