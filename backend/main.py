@@ -3883,6 +3883,19 @@ async def select_group_cover(group_id: int, body: dict):
     if not cover:
         raise HTTPException(status_code=400, detail="cover field required")
     async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT cover_candidates FROM clip_groups WHERE id = ?", (group_id,)
+        ) as cur:
+            group = await cur.fetchone()
+        if not group:
+            raise HTTPException(status_code=404, detail="Group not found")
+        try:
+            candidates = json.loads(group["cover_candidates"] or "[]")
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=409, detail="Cover candidates are invalid; regenerate covers") from exc
+        if not isinstance(candidates, list) or cover not in candidates:
+            raise HTTPException(status_code=400, detail="cover must be one of the generated candidates")
         await db.execute(
             "UPDATE clip_groups SET selected_cover = ? WHERE id = ?",
             (cover, group_id),
@@ -3894,8 +3907,23 @@ async def select_group_cover(group_id: int, body: dict):
 @app.get("/api/groups/{group_id}/cover/{filename:path}")
 async def get_group_cover(group_id: int, filename: str):
     """Serve a cover candidate image."""
-    cover_path = os.path.join(RECORDINGS_DIR, filename)
-    if not os.path.exists(cover_path):
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT cover_candidates FROM clip_groups WHERE id = ?", (group_id,)
+        ) as cur:
+            group = await cur.fetchone()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    try:
+        candidates = json.loads(group["cover_candidates"] or "[]")
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=409, detail="Cover candidates are invalid; regenerate covers") from exc
+    if not isinstance(candidates, list) or filename not in candidates:
+        raise HTTPException(status_code=404, detail="Cover not associated with group")
+    cover_root = os.path.realpath(RECORDINGS_DIR)
+    cover_path = os.path.realpath(os.path.join(cover_root, filename))
+    if not cover_path.startswith(cover_root + os.sep) or not os.path.isfile(cover_path):
         raise HTTPException(status_code=404, detail="Cover not found")
     return FileResponse(
         cover_path,
