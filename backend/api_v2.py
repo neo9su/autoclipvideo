@@ -7,7 +7,7 @@ import json
 import logging
 from typing import Dict, List, Optional, Any
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 
 from director_script import DirectorScriptGenerator
@@ -126,18 +126,49 @@ async def get_director_status():
             for k, v in VIBE_CONFIGS.items()
         },
         "version": "2.0.1",
+        "routes": [
+            {"method": "GET", "path": "/api/v2/director/status"},
+            {"method": "POST", "path": "/api/v2/director/generate-script"},
+            {"method": "POST", "path": "/api/v2/director/compose-video"},
+        ],
     }
 
 
 @qianchuan_router.get("/status")
 async def get_qianchuan_status():
+    import aiosqlite
+    from db import DB_PATH
+    from media_contract import STORAGE_DIR, storage_contract
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT COUNT(*) FROM recordings") as cur:
+            local_files = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM recordings WHERE local_deleted = 0") as cur:
+            active_files = (await cur.fetchone())[0]
     return {
         "qianchuan_available": True,
         "default_duration": 22,
         "duration_range": "18-25s recommended, 35s hard max",
         "structure": "0-3s结果钩子 / 3-7s痛点 / 7-13s产品证据 / 13-19s上脸效果 / 19-23s CTA",
         "version": "1.0.0",
+        "routes": [
+            {"method": "GET", "path": "/api/v2/qianchuan/status"},
+            {"method": "POST", "path": "/api/v2/qianchuan/generate"},
+            {"method": "POST", "path": "/api/v2/qianchuan/compose"},
+            {"method": "GET", "path": "/api/v2/qianchuan/media/audit?filename={basename}"},
+        ],
+        "media_contract": storage_contract(),
+        "media_records": {"local_files": local_files, "active_files": active_files, "storage_dir": str(STORAGE_DIR.resolve())},
     }
+
+
+@qianchuan_router.get("/media/audit")
+async def audit_qianchuan_media(filename: str = Query(min_length=1, max_length=255)):
+    """Audit one mounted source and its non-empty SRT sidecar."""
+    from media_contract import audit_media_file
+    evidence = audit_media_file(filename)
+    if not evidence["valid_filename"]:
+        raise HTTPException(status_code=400, detail="filename must be a basename inside STORAGE_DIR")
+    return {"ok": evidence["mp4"]["readable"] and evidence["srt"]["readable"], "evidence": evidence}
 
 
 @qianchuan_router.post("/generate", response_model=QianchuanGenerateResponse)
@@ -399,8 +430,8 @@ async def _qianchuan_generate_bg(group_id: int, script: Dict) -> None:
                 await db.commit()
 
             # 3) Compose via isolated composer wrapper.
-            recordings_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "recordings"))
-            composer = QianchuanVideoComposer(recordings_dir)
+            from media_contract import STORAGE_DIR
+            composer = QianchuanVideoComposer(str(STORAGE_DIR))
             output_path = await composer.compose_qianchuan_video(
                 matched, audio_path, script, audio_segments,
                 config={"preview_mode": bool(script.get("preview_mode"))},
@@ -738,12 +769,11 @@ async def _extract_srt_content(group_id: int) -> Optional[str]:
             
         # 提取SRT纯文字（去掉序号和时间码），按句子合并
         text_lines: list[str] = []
-        recordings_dir = os.path.join(os.path.dirname(__file__), "..", "recordings")
+        from media_contract import resolve_srt_file
 
         for (filename,) in recordings:
-            srt_filename = os.path.splitext(filename)[0] + '.srt'
-            srt_path = os.path.join(recordings_dir, srt_filename)
-            if not os.path.exists(srt_path):
+            srt_path = resolve_srt_file(filename)
+            if srt_path is None:
                 continue
             try:
                 with open(srt_path, 'r', encoding='utf-8') as f:
@@ -887,7 +917,8 @@ async def compose_video(group_id: int, video_style: str = "dynamic"):
         }
         for scene in scenes
     ]
-    recordings_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "recordings"))
+    from media_contract import STORAGE_DIR
+    recordings_dir = str(STORAGE_DIR)
 
     # ── 后台执行（匹配 + 编码，可能数分钟）────────────────────────────────────────
     async with aiosqlite.connect(DB_PATH) as db:

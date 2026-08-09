@@ -169,11 +169,11 @@ async def load_group_context(db_path: str, group_id: int, product_id: Optional[s
         ) as cur:
             recs = await cur.fetchall()
 
-    recordings_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "recordings"))
     srt_texts: List[str] = []
+    from media_contract import resolve_srt_file
     for rec in recs:
-        srt_path = os.path.join(recordings_dir, os.path.splitext(rec["filename"])[0] + ".srt")
-        if not os.path.exists(srt_path):
+        srt_path = resolve_srt_file(rec["filename"])
+        if srt_path is None:
             continue
         try:
             with open(srt_path, encoding="utf-8") as f:

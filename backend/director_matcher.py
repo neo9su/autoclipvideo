@@ -559,7 +559,8 @@ class SemanticMatcher:
     async def _get_group_recordings(self, group_id: int) -> List[Dict]:
         """获取分组的录像数据及 SRT 分段信息（保留每条 SRT 的时间戳）"""
         recordings = []
-        recordings_dir = os.path.join(os.path.dirname(__file__), "..", "recordings")
+        from media_contract import STORAGE_DIR, resolve_media_file
+        recordings_dir = STORAGE_DIR
 
         try:
             from datetime import datetime
@@ -577,15 +578,17 @@ class SemanticMatcher:
                 # 计算实际文件时长（用 ffprobe，而非数据库的 start/end time）
                 source_filename = row["filename"]
                 clip_filename = row["clip_filename"]
-                media_filename = clip_filename if clip_filename and os.path.exists(os.path.join(recordings_dir, clip_filename)) else source_filename
-                filepath = os.path.join(recordings_dir, media_filename)
+                clip_path = resolve_media_file(clip_filename) if clip_filename else None
+                source_path = resolve_media_file(source_filename)
+                media_filename = clip_filename if clip_path and clip_path.is_file() else source_filename
+                filepath = clip_path if clip_path and clip_path.is_file() else source_path
                 duration = 30.0
-                if os.path.exists(filepath):
+                if filepath and filepath.is_file():
                     try:
                         import subprocess
                         result = subprocess.run(
                             ["ffprobe", "-v", "quiet", "-show_entries",
-                             "format=duration", "-of", "csv=p=0", filepath],
+                             "format=duration", "-of", "csv=p=0", str(filepath)],
                             capture_output=True, text=True, timeout=5
                         )
                         if result.returncode == 0 and result.stdout.strip():
@@ -601,13 +604,11 @@ class SemanticMatcher:
                     except Exception:
                         pass
 
-                srt_path = os.path.join(
-                    recordings_dir,
-                    os.path.splitext(source_filename)[0] + ".srt",
-                )
+                from media_contract import resolve_srt_file
+                srt_path = resolve_srt_file(source_filename)
                 
                 # 解析 SRT 为结构化段落（保留时间戳）
-                srt_entries = _parse_srt_entries(srt_path)
+                srt_entries = _parse_srt_entries(str(srt_path)) if srt_path else []
                 # 同时保留全文拼接（向后兼容）
                 transcript_text = " ".join(e['text'] for e in srt_entries)
 
