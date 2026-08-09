@@ -77,6 +77,8 @@ class TaskStore:
             if name not in lease_columns:
                 self.conn.execute(f"ALTER TABLE leases ADD COLUMN {name} {definition}")
 
+    def close(self): self.conn.close()
+
     def preflight(self) -> dict[str, object]:
         """Require writable persistent state and a single coordinator owner."""
         if self.readonly or not os.access(self.db.parent, os.W_OK):
@@ -88,9 +90,12 @@ class TaskStore:
 
     def acquire_single_flight(self, owner: str) -> bool:
         try:
+            self.conn.execute("BEGIN IMMEDIATE")
             self.conn.execute("INSERT INTO coordinator_lock(name,owner,acquired_at) VALUES('coordinator',?,?)", (owner, time.time()))
+            self.conn.execute("COMMIT")
             return True
         except sqlite3.IntegrityError:
+            if self.conn.in_transaction: self.conn.execute("ROLLBACK")
             return False
 
     def release_single_flight(self, owner: str) -> None:
@@ -122,8 +127,7 @@ class TaskStore:
                 self.conn.execute("UPDATE issues SET state='recovery_needed',updated_at=? WHERE id=?", (time.time(), issue[0]))
                 self.event("quarantined", issue_id=issue[0], payload={"reason": "lifecycle truth mismatch"})
         return {"issues": report, "dry_run": dry_run}
-
-
+    def reconcile_accepted_idle(self, now=None, alert_after=120, fence_after=180, max_retries=1, dry_run=False):
         now = time.time() if now is None else now
         rows = self.conn.execute("SELECT id,issue_id,generation,retry_count,started_at FROM runs WHERE state='accepted_idle'").fetchall()
         alerts = fenced = 0
@@ -140,6 +144,7 @@ class TaskStore:
                     self.conn.execute("UPDATE runs SET state=?,finished_at=?,error=?,error_class=?,retry_count=retry_count+1 WHERE id=? AND generation=? AND state='accepted_idle'", (next_state, now, "worker readiness was not verified", "accepted_idle_timeout", run_id, generation))
                     self.conn.execute("UPDATE issues SET state=?,updated_at=? WHERE id=? AND state='accepted_idle'", (next_state, now, issue_id))
                     self.conn.execute("DELETE FROM leases WHERE issue_id=? AND run_id=? AND generation=?", (issue_id, run_id, generation))
+                    self.event("accepted_idle_fenced", issue_id, run_id, generation, {"next_state": next_state})
         return {"accepted_idle": len(rows), "alerts": alerts, "fenced": fenced, "dry_run": dry_run}
 
     def event(self, kind, issue_id=None, run_id=None, generation=None, payload=None, lease_epoch=None, seq=None):
@@ -266,7 +271,7 @@ class TaskStore:
                 self.event("requeued", r[1], r[0], r[2], {"reason": "gateway_restart"})
         return {"expired_leases":len(expired),"interrupted_runs":len(running),"dry_run":dry_run}
     def status(self):
-        return {"issues": [dict(x) for x in self.conn.execute("SELECT * FROM issues ORDER BY id")], "runs": [dict(x) for x in self.conn.execute("SELECT * FROM runs ORDER BY started_at DESC")], "leases": [dict(x) for x in self.conn.execute("SELECT * FROM leases")], "sessions": [dict(x) for x in self.conn.execute("SELECT * FROM sessions")], "events": self.conn.execute("SELECT count(*) FROM events").fetchone()[0]}
+        return {"issues": [dict(x) for x in self.conn.execute("SELECT * FROM issues ORDER BY id")], "runs": [dict(x) for x in self.conn.execute("SELECT * FROM runs ORDER BY started_at DESC")], "leases": [dict(x) for x in self.conn.execute("SELECT * FROM leases")], "sessions": [dict(x) for x in self.conn.execute("SELECT * FROM sessions")], "alerts": [dict(x) for x in self.conn.execute("SELECT * FROM alerts ORDER BY created_at DESC")], "events": self.conn.execute("SELECT count(*) FROM events").fetchone()[0]}
 
     def pending_issue_ids(self):
         return [row[0] for row in self.conn.execute("SELECT id FROM issues WHERE state IN ('queued','retryable') ORDER BY id")]
@@ -296,9 +301,9 @@ class Runner:
                 if number is not None: self.store.upsert_issue(number, title, "queued", i)
         return issues
 
-    def status(self):
-        """Return the persisted runner state for the CLI and API callers."""
-        return self.store.status()
+    def preflight(self):
+        return self.store.preflight()
+
     def run_once(self, issue_id=None, dry_run=False):
         rows=self.store.conn.execute("SELECT id,title,payload FROM issues WHERE state IN ('queued','retryable') AND (? IS NULL OR id=?) ORDER BY id",(issue_id,issue_id)).fetchall()
         if dry_run:
