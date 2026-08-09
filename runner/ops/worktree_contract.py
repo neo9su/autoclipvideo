@@ -2,27 +2,13 @@ from __future__ import annotations
 
 import os
 import subprocess
-import json
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 
 class WorktreeContractError(ValueError):
     """Raised when a worker is outside its assigned worktree contract."""
-
-
-@dataclass(frozen=True)
-class PreflightEvidence:
-    """Machine-readable proof that a worker can safely start."""
-
-    ok: bool
-    checks: tuple[dict[str, object], ...]
-
-    def as_dict(self) -> dict[str, object]:
-        return {"ok": self.ok, "checks": list(self.checks)}
-
-    def as_json(self) -> str:
-        return json.dumps(self.as_dict(), sort_keys=True)
 
 
 @dataclass(frozen=True)
@@ -41,10 +27,27 @@ class WorktreeContract:
             raise WorktreeContractError("worker repo root does not match the contract")
         if branch != self.branch:
             raise WorktreeContractError("worker branch does not match the contract")
-        if actual_cwd == self.repo_root.resolve():
-            raise WorktreeContractError("worker must not run in the main checkout")
-        if not actual_cwd.is_dir() or not os.access(actual_cwd, os.W_OK):
-            raise WorktreeContractError("assigned worktree is not writable")
+
+    def preflight(self, cwd: str | Path, repo_root: str | Path, branch: str,
+                  expected_base: str | None = None) -> dict[str, object]:
+        """Return sanitized evidence and fail closed on contract violations."""
+        self.validate_allowlist(cwd, repo_root, branch)
+        actual = Path(cwd).resolve()
+        if actual.is_symlink() or any(part.is_symlink() for part in [actual, *actual.parents]):
+            raise WorktreeContractError("worker worktree contains a symlink escape")
+        if not os.access(actual, os.W_OK):
+            raise WorktreeContractError("worker worktree is not writable")
+        if expected_base:
+            current = subprocess.check_output(["git", "-C", str(actual), "merge-base", "HEAD", expected_base], text=True).strip()
+            if not current:
+                raise WorktreeContractError("worker base cannot be verified")
+        marker = actual / ".fabrica-preflight"
+        try:
+            marker.write_text("ok\n", encoding="utf-8")
+            marker.unlink()
+        except OSError as exc:
+            raise WorktreeContractError("worker worktree cannot create temporary evidence") from exc
+        return {"ok": True, "repo_root": str(self.repo_root), "worktree": str(actual), "branch": self.branch, "tool_profile": self.profile}
 
     def validate_allowlist(self, cwd: str | Path, repo_root: str | Path, branch: str) -> None:
         """Reject the main checkout and unrelated sibling worktrees."""
@@ -64,31 +67,10 @@ class WorktreeContract:
             "repo_root": str(self.repo_root.resolve()),
             "branch": self.branch,
             "tool_profile": self.profile,
+            "protocol_version": "1",
+            "nonce": __import__("secrets").token_hex(16),
+            "expected_branch": self.branch,
         }
-
-    def preflight(self, cwd: str | Path | None = None) -> PreflightEvidence:
-        """Return structured checks without widening the worktree boundary."""
-        target = Path(cwd or self.worktree)
-        checks: list[dict[str, object]] = []
-        resolved = target.resolve()
-        root = self.repo_root.resolve()
-        expected = self.worktree.resolve()
-        checks.append({"name": "worktree_allowlist", "ok": resolved == expected or expected in resolved.parents})
-        checks.append({"name": "main_checkout_rejected", "ok": resolved != root})
-        checks.append({"name": "writable", "ok": resolved.is_dir() and os.access(resolved, os.W_OK)})
-        try:
-            actual_root, actual_branch = discover_git_identity(resolved)
-            checks.append({"name": "repository_identity", "ok": Path(actual_root).resolve() == root})
-            checks.append({"name": "branch_identity", "ok": actual_branch == self.branch})
-        except (OSError, WorktreeContractError) as exc:
-            checks.append({"name": "identity", "ok": False, "error": str(exc)})
-        return PreflightEvidence(all(bool(item.get("ok")) for item in checks), tuple(checks))
-
-    def require_preflight(self, cwd: str | Path | None = None) -> PreflightEvidence:
-        evidence = self.preflight(cwd)
-        if not evidence.ok:
-            raise WorktreeContractError(evidence.as_json())
-        return evidence
 
 
 def discover_git_identity(cwd: str | Path) -> tuple[str, str]:

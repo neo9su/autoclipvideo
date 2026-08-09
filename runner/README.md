@@ -14,20 +14,42 @@ python -m runner.ops.task_runner --db .runner/runner.sqlite3 scan --dry-run  # f
 
 `run-once --dry-run` opens the existing database read-only (or uses an in-memory empty store when it does not exist) and reports queued/retryable candidates as JSON. It does not acquire leases, write runs/events/state, or start worker processes. Use it to inspect what the next run would select.
 
-## P0 rollout and recovery runbook
+`reconcile` compares durable non-terminal records and conservatively quarantines
+ambiguous records instead of closing or force-requeueing them:
 
-Before rollout, run `reconcile` in read-only mode and verify that exactly one scheduler/heartbeat dispatcher owns the persistent state. Confirm the Gateway/CLI protocol compatibility, that the state directory is writable, and that every configured worker path is an explicitly assigned worktree (never the main checkout). Preflight failures are structured and fail closed; do not widen the allowlist to make a worker start.
-
-The coordinator is authoritative for run, lease, session, event, artifact, QA, deployment, and outbox state. GitHub labels and issue states are a projection. A reconciliation record is marked `quarantine` when remote and durable state disagree or required evidence is ambiguous. Quarantine must be reviewed by an operator; it must not be force-closed or silently requeued.
-
-For recovery, stop duplicate dispatchers, run `recover --dry-run`, inspect `status`, then run `recover`. Expired leases are removed and active runs are interrupted and requeued with an audit trail. A worker may be requeued only after its prior generation is fenced. Late heartbeats, completion, or cleanup from an old generation are audit-only and cannot mutate the new lease or terminal state. Safe cleanup deletes only a lease matching issue, owner, run, and generation; never remove another generation's lease or state database.
-
-Completion requires verified worker readiness/activity plus the required PR artifact, canonical QA evidence, and deployment smoke evidence (or an explicit out-of-scope policy record). External GitHub/PR/deploy effects are queued by idempotent outbox keys and notification delivery is non-authoritative. On rollback, preserve the database and evidence, quarantine affected records, and use a reviewed manual recovery rather than deleting durable history.
+```bash
+python -m runner.ops.task_runner --db .runner/runner.sqlite3 reconcile
+```
 
 Set `TASK_RUNNER_WORKER` to a trusted command template (supports `{issue_id}`), `TASK_RUNNER_HARD_TIMEOUT`, `TASK_RUNNER_NO_PROGRESS_TIMEOUT`, `TASK_RUNNER_CONFIRM_TIMEOUT`, `TASK_RUNNER_BOOTSTRAP_TIMEOUT`, `TASK_RUNNER_LEASE_SECONDS`, `TASK_RUNNER_MAX_RETRIES`, `TASK_RUNNER_CONCURRENCY`, and `TASK_RUNNER_GH`. The default worker concurrency is one. Workers run in their own process group and are terminated (then killed) on timeout. GitHub scanning uses configurable `gh`; unavailable/invalid output safely yields no issues.
 SQLite tables persist issues, runs, leases, sessions, and lifecycle events. Every run has an immutable `run_id`, `generation`, and session key. A run enters `accepted_idle` only while its session is being confirmed; lifecycle events distinguish session request/confirmation/bootstrap/activity and late events are fenced as audit-only. Startup recovery removes expired leases and moves running runs to `interrupted` with the `gateway_restart` error class and their issue `retryable`. `run-once` only selects queued/retryable work, so completed work is idempotent.
 
-Trusted workers should validate the assigned worktree before writing. `runner.ops.worktree_contract.WorktreeContract` requires the assigned worktree, repository root, and branch to match; use its `bootstrap_payload()` as the first activity report. This is an application-level allowlist and does not disable the host sandbox or grant access to the main checkout. Session confirmation, bootstrap, first activity, completion, lease release, and recovery are generation-fenced; late events are retained only as audit events. Retry budgets are persisted per issue generation and exhausted runs remain diagnosable instead of being dispatched forever.
+Trusted workers should validate the assigned worktree before writing. `runner.ops.worktree_contract.WorktreeContract` requires the assigned worktree, repository root, and branch to match; `preflight()` emits structured evidence and `bootstrap_payload()` carries the run, generation, nonce, protocol, branch, and tool profile. This is an application-level allowlist and does not disable the host sandbox or grant access to the main checkout. Session confirmation, bootstrap, progress, completion, lease release, and recovery are generation-fenced; late events are retained only as audit events. Retry budgets are persisted per issue generation and exhausted runs remain diagnosable instead of being dispatched forever. Artifacts, QA/deploy records, and external effects are durable and idempotent.
+
+## P0 rollout and recovery runbook
+
+1. **Preflight:** run `reconcile` in read-only operational review, verify the
+   coordinator database directory is writable, and confirm only one heartbeat
+   dispatcher owns the durable `heartbeat` lock. Do not start a second global
+   heartbeat or widen the worktree allowlist.
+2. **Startup:** run `recover --dry-run`, inspect the counts and then run
+   `recover`. A restart fences active runs, expires old leases, and makes work
+   retryable; it never declares a run complete.
+3. **Fencing:** every worker envelope must retain its `run_id`, generation,
+   lease epoch, protocol, and nonce. Reject stale or out-of-order progress;
+   late cleanup is an audit event and cannot mutate newer state.
+4. **Quarantine:** if reconciliation reports missing sessions, leases,
+   worktrees, or evidence, leave the issue quarantined. Inspect the durable
+   status and external artifacts, then explicitly requeue only after identity
+   and evidence are verified.
+5. **Safe cleanup:** stop the owning dispatcher, preserve the state database
+   and audit records, terminate only the recorded worker process group, and
+   remove a lease only with matching owner/run/generation. Never delete a
+   worktree or state file as a recovery shortcut.
+6. **Delivery gate:** completion requires verified PR/branch artifacts and
+   canonical QA evidence. Deployment evidence is required when policy says so;
+   otherwise record the explicit policy decision. Notifications are asynchronous
+   and are never the source of truth.
 
 ## launchd guidance (macOS)
 

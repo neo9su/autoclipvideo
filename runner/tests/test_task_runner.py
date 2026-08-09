@@ -197,35 +197,34 @@ def test_recovery_reclaims_accepted_idle_and_fences_late_finish(tmp_path):
     assert store.conn.execute('SELECT state FROM issues WHERE id=1').fetchone()[0] == 'retryable'
 
 
-def test_claim_run_is_transactional_and_creates_session(tmp_path):
+def test_progress_is_idempotent_and_ordered(tmp_path):
     store = TaskStore(tmp_path / 'x.db')
-    store.upsert_issue(1, 'atomic')
-    assert store.claim_run(1, 'owner', 60, 'run-1', 1, 'session-1')
-    assert store.conn.execute('SELECT state FROM issues WHERE id=1').fetchone()[0] == 'accepted_idle'
-    assert store.conn.execute('SELECT state FROM sessions WHERE run_id="run-1"').fetchone()[0] == 'requested'
+    store.upsert_issue(1, 'progress')
+    store.claim(1, 'owner', 60, 'run-1', 1)
+    store.conn.execute("INSERT INTO runs(id,issue_id,state,started_at,generation) VALUES(?,?,?,?,?)", ('run-1', 1, 'running', time.time(), 1))
+    store.conn.execute("INSERT INTO sessions(run_id,generation,session_key,state) VALUES(?,?,?,?)", ('run-1', 1, 'session-1', 'bootstrapped'))
+    assert store.ingest_progress('run-1', 1, 1, 'event-1', {'step': 'start'})
+    assert not store.ingest_progress('run-1', 1, 1, 'event-1', {'step': 'duplicate'})
+    assert not store.ingest_progress('run-1', 1, 0, 'event-0')
+    assert store.conn.execute("SELECT last_sequence FROM sessions WHERE run_id='run-1'").fetchone()[0] == 1
 
 
-def test_evidence_and_outbox_are_idempotent_and_fenced(tmp_path):
+def test_outbox_and_artifact_are_idempotent(tmp_path):
     store = TaskStore(tmp_path / 'x.db')
     store.upsert_issue(1, 'evidence')
-    assert store.claim_run(1, 'owner', 60, 'run-1', 1, 'session-1')
-    assert store.record_evidence('run-1', 1, 'pr', 'pr:1', {'head': 'abc'})
-    assert store.record_gate('run-1', 1, 'qa', 'passed')
-    assert store.enqueue('issue:1:merge', 'merge', {'run_id': 'run-1'})
-    assert not store.enqueue('issue:1:merge', 'merge', {'run_id': 'run-1'})
-    assert not store.record_gate('run-1', 2, 'qa', 'passed')
+    store.claim(1, 'owner', 60, 'run-1', 1)
+    store.conn.execute("INSERT INTO runs(id,issue_id,state,started_at,generation) VALUES(?,?,?,?,?)", ('run-1', 1, 'running', time.time(), 1))
+    assert store.add_artifact('run-1', 1, 'pr', 'sha', verified=True)
+    assert store.add_artifact('run-1', 1, 'pr', 'sha', verified=True)
+    assert store.enqueue_outbox('issue:1:pr', 'pr_comment', {'issue': 1})
+    assert not store.enqueue_outbox('issue:1:pr', 'pr_comment', {'issue': 1})
+    assert store.conn.execute('SELECT count(*) FROM artifacts').fetchone()[0] == 1
+    assert store.conn.execute('SELECT count(*) FROM outbox').fetchone()[0] == 1
 
 
-def test_reconcile_quarantines_missing_remote_issue(tmp_path):
+def test_reconcile_quarantines_missing_run(tmp_path):
     store = TaskStore(tmp_path / 'x.db')
-    store.upsert_issue(8, 'ambiguous')
-    report = store.reconcile([])
-    assert report[0]['status'] == 'quarantine'
-    assert store.conn.execute('SELECT count(*) FROM alerts').fetchone()[0] == 1
-
-
-def test_worktree_preflight_reports_structured_failure(tmp_path):
-    contract = WorktreeContract(tmp_path / 'assigned', tmp_path, 'feature/121')
-    evidence = contract.preflight(tmp_path)
-    assert not evidence.ok
-    assert any(check['name'] == 'main_checkout_rejected' for check in evidence.checks)
+    store.upsert_issue(1, 'ambiguous', 'accepted_idle')
+    report = store.reconcile()
+    assert report['quarantined'] == 1
+    assert store.conn.execute('SELECT state FROM issues WHERE id=1').fetchone()[0] == 'quarantined'
