@@ -70,7 +70,7 @@ async def broadcast(message: dict):
     _ws_clients.difference_update(dead)
 
 
-monitor = MonitorManager(broadcast_fn=broadcast)
+monitor = MonitorManager(broadcast_fn=broadcast, media_enabled=not IS_CONTROL_PLANE)
 
 
 def _recording_file_path(filename: str | None) -> str | None:
@@ -641,6 +641,7 @@ async def lifespan(app: FastAPI):
         )
     else:
         register_online_callback(_on_gpu_online)
+        await monitor.start_all()
         logger.info(
             "DEPLOYMENT_ROLE=gpu-backend: media workers enabled "
             "(capture, transcription, backfill, publish, enhance, creative/director, and room monitors)"
