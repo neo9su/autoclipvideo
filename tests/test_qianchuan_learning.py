@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "backend"))
 
 # Module under test
 import qianchuan_learning as qlearn  # noqa: E402
+from qianchuan_policy import build_qianchuan_metadata, validate_qianchuan_metadata  # noqa: E402
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -324,6 +325,31 @@ def _make_good_analysis() -> qlearn.VideoAnalysis:
         ],
         audience_adaptation=qlearn.AudienceAdaptation(primary_audience="产后妈妈群", pain_points_addressed=["脱发"]),
     )
+
+
+def test_qianchuan_policy_does_not_invent_missing_evidence():
+    """An omitted campaign field must remain a delivery blocker."""
+    metadata = build_qianchuan_metadata()
+    report = validate_qianchuan_metadata(metadata)
+    assert not report["eligible_for_delivery"]
+    assert "缺少或无效的剪辑模板" in report["errors"]
+    assert "缺少 A/B/C 三版本文案" in report["errors"]
+    assert "缺少真实感检查" in report["errors"]
+
+
+def test_qianchuan_policy_accepts_explicit_evidence():
+    metadata = build_qianchuan_metadata(
+        target_audience="产后妈妈群",
+        excluded_audiences=["职场白领群"],
+        bid_coefficient=1.0,
+        template_type="头皮/发际线微距",
+        dedup_actions=["光源", "画幅", "BGM"],
+        authenticity_check={"passed": True},
+        copy_versions={"A": "文案 A", "B": "文案 B", "C": "文案 C"},
+        trust_proof="品牌授权正品保证",
+        stability_evidence=["摇头晃脑"],
+    )
+    assert validate_qianchuan_metadata(metadata)["eligible_for_delivery"]
 
 
 def test_score_quality_degraded_no_quality_result():

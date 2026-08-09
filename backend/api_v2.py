@@ -19,9 +19,7 @@ from qianchuan_matcher import (QianchuanMatcher, audit_qianchuan_segments,
                                 load_group_context, score_product_match)
 from qianchuan_video import QianchuanVideoComposer
 from qianchuan_quality import check_qianchuan_video_quality
-from qianchuan_policy import (
-    build_qianchuan_metadata, validate_qianchuan_metadata, DEFAULT_POLICY,
-)
+from qianchuan_policy import build_qianchuan_metadata, validate_qianchuan_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -198,34 +196,9 @@ async def generate_qianchuan(request: QianchuanGenerateRequest):
     policy = validate_qianchuan_metadata(metadata)
     script["campaign_metadata"] = metadata
     script["policy_check"] = policy
-    # Auto-fill missing policy fields with sensible defaults so batch runs
-    # don't get blocked by -3 validation errors.
-    if not policy["eligible_for_delivery"] and not request.preview_mode:
-        missing = policy["errors"]
-        if any(m in missing for m in ["缺少或无效的主攻人群", "缺少排除人群", "缺少有效出价系数",
-                                       "缺少或无效的剪辑模板", "去重动作至少需要 3 项有效维度",
-                                       "缺少 A/B/C 三版本文案", "缺少信任证明",
-                                       "缺少摇头晃脑或风吹动态稳定性证据", "缺少真实感检查"]):
-            auto_filled = build_qianchuan_metadata(
-                target_audience=request.target_audience or DEFAULT_POLICY["target_audience"],
-                excluded_audiences=request.excluded_audiences or DEFAULT_POLICY["excluded_audiences"],
-                bid_coefficient=request.bid_coefficient or DEFAULT_POLICY["bid_coefficient"],
-                template_type=request.template_type or DEFAULT_POLICY["template_type"],
-                dedup_actions=request.dedup_actions or DEFAULT_POLICY["dedup_actions"],
-                authenticity_check=request.authenticity_check or DEFAULT_POLICY["authenticity_check"],
-                copy_versions=request.copy_versions or DEFAULT_POLICY["copy_versions"],
-                trust_proof=request.trust_proof or DEFAULT_POLICY["trust_proof"],
-                stability_evidence=request.stability_evidence or DEFAULT_POLICY["stability_evidence"],
-                ai_usage=request.ai_usage or DEFAULT_POLICY["ai_usage"],
-                execution_node=request.execution_node,
-            )
-            auto_policy = validate_qianchuan_metadata(auto_filled)
-            if auto_policy["eligible_for_delivery"]:
-                logger.warning("Auto-filled missing policy fields for group %s", request.group_id)
-                metadata = auto_filled
-                policy = auto_policy
-                script["campaign_metadata"] = metadata
-                script["policy_check"] = policy
+    # Do not invent campaign evidence. In particular, an omitted field must
+    # remain omitted so operators can distinguish real material evidence from
+    # a generated script or a batch request using an old contract.
     if not policy["eligible_for_delivery"] and not request.preview_mode:
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
