@@ -702,7 +702,7 @@ const openId = ref(null)
 const detail = ref(null)
 const detailLoading = ref(false)
 const apiBase = REMOTE_API_BASE
-let ws = null
+let wsCleanup = null
 
 async function readResponseError(response, fallback) {
   const contentType = response.headers.get('content-type') || ''
@@ -1298,7 +1298,7 @@ async function doReassign(recordingId, newGroupId) {
 onMounted(() => {
   load()
   loadSuggestions()
-  ws = createWS((msg) => {
+  wsCleanup = createWS((msg) => {
     if (msg.type === 'merged') {
       show('视频合并完成', 'success')
       load()
@@ -1466,7 +1466,7 @@ async function rejectSuggestion(id) {
   } catch (e) { show(e.message || '操作失败', 'error') }
 }
 
-onUnmounted(() => { ws?.close(); stopProgressPolling() })
+onUnmounted(() => { wsCleanup?.(); stopProgressPolling() })
 </script>
 
 <style scoped>

@@ -588,7 +588,7 @@ const selectedPublishVersion = ref('both')
 const apiBase = REMOTE_API_BASE
 const scheduleMode = ref('now')
 const progressLog = ref({})   // task_id → string[]
-let ws = null
+let wsCleanup = null
 const scheduleTime = ref('10:00')
 const scheduleInterval = ref(60)
 const showAccounts = ref(false)
@@ -1369,7 +1369,7 @@ onMounted(async () => {
   const defaultAccount = accounts.value.find(a => a.account_name === '颜遇生活')
   if (defaultAccount) newTask.value.account_id = defaultAccount.id
   products.value = (await getProducts()).filter(p => p.enabled)
-  ws = createWS((msg) => {
+  wsCleanup = createWS((msg) => {
     if (msg.type === 'publish_task_update') {
       loadTasks()
       if (selectedTask.value?.id === msg.task_id) {
@@ -1400,7 +1400,7 @@ onMounted(async () => {
   })
 })
 
-onUnmounted(() => ws?.close())
+onUnmounted(() => wsCleanup?.())
 </script>
 
 <style scoped>
