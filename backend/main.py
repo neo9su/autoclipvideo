@@ -70,7 +70,10 @@ async def broadcast(message: dict):
     _ws_clients.difference_update(dead)
 
 
-monitor = MonitorManager(broadcast_fn=broadcast)
+monitor = MonitorManager(
+    broadcast_fn=broadcast,
+    allow_local_media=not IS_CONTROL_PLANE,
+)
 
 
 def _recording_file_path(filename: str | None) -> str | None:
@@ -656,6 +659,7 @@ async def lifespan(app: FastAPI):
             asyncio.create_task(_periodic_director_dispatch()),
             asyncio.create_task(_periodic_qianchuan_dispatch()),
         ])
+        await monitor.start_all()
     yield
     for task in tasks:
         task.cancel()
