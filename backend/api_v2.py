@@ -430,8 +430,8 @@ async def _qianchuan_generate_bg(group_id: int, script: Dict) -> None:
                 await db.commit()
 
             # 3) Compose via isolated composer wrapper.
-            recordings_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "recordings"))
-            composer = QianchuanVideoComposer(recordings_dir)
+            from media_contract import STORAGE_DIR
+            composer = QianchuanVideoComposer(str(STORAGE_DIR))
             output_path = await composer.compose_qianchuan_video(
                 matched, audio_path, script, audio_segments,
                 config={"preview_mode": bool(script.get("preview_mode"))},
@@ -917,7 +917,8 @@ async def compose_video(group_id: int, video_style: str = "dynamic"):
         }
         for scene in scenes
     ]
-    recordings_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "recordings"))
+    from media_contract import STORAGE_DIR
+    recordings_dir = str(STORAGE_DIR)
 
     # ── 后台执行（匹配 + 编码，可能数分钟）────────────────────────────────────────
     async with aiosqlite.connect(DB_PATH) as db:
