@@ -77,11 +77,23 @@ def stable_job_key(pair: MediaPair) -> str:
 
 
 def create_manifest(source_dir: Path, manifest_path: Path) -> int:
-    """Create a JSONL manifest atomically; existing source files are untouched."""
+    """Create a JSONL manifest atomically; existing source files are untouched.
+
+    The adjacent summary is deliberately separate from the JSONL rows so the
+    row format stays append/import compatible.  It records the inventory
+    denominator, including MP4s skipped because their sidecar is missing or
+    unusable; this prevents a successful run from being mistaken for a full
+    library run when the source tree contains unmatched recordings.
+    """
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = manifest_path.with_suffix(manifest_path.suffix + ".tmp")
     count = 0
+    skipped = 0
     with temporary.open("w", encoding="utf-8") as stream:
+        all_mp4s = sorted(source_dir.rglob("*.mp4"))
+        for source in all_mp4s:
+            if not source.is_file() or source.stat().st_size <= 0 or find_sidecar(source) is None:
+                skipped += 1
         for pair in scan_pairs(source_dir):
             count += 1
             stream.write(json.dumps({
@@ -93,6 +105,15 @@ def create_manifest(source_dir: Path, manifest_path: Path) -> int:
         stream.flush()
         os.fsync(stream.fileno())
     os.replace(temporary, manifest_path)
+    summary_path = manifest_path.with_suffix(manifest_path.suffix + ".summary.json")
+    summary_temporary = summary_path.with_suffix(summary_path.suffix + ".tmp")
+    with summary_temporary.open("w", encoding="utf-8") as stream:
+        json.dump({"source_dir": str(source_dir.resolve()), "candidates": count,
+                   "skipped": skipped, "generated_at": time.time()}, stream)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(summary_temporary, summary_path)
     return count
 
 
@@ -195,6 +216,13 @@ class Checkpoint:
         return dict(zip(columns, row))
 
     def update(self, key: str, **fields: Any) -> None:
+        allowed_fields = {
+            "status", "remote_job_id", "output_mp4", "output_srt", "failure_class",
+            "failure_reason", "evidence_json", "lease_owner", "lease_until",
+        }
+        unknown_fields = set(fields) - allowed_fields
+        if unknown_fields:
+            raise ValueError(f"unsupported checkpoint fields: {', '.join(sorted(unknown_fields))}")
         owner = fields.pop("lease_owner", None)
         if owner is not None:
             row = self.db.execute("SELECT lease_owner FROM jobs WHERE job_key=?", (key,)).fetchone()
@@ -413,7 +441,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(exc))
     args.headers = {"Authorization": f"Bearer {args.auth_token}"} if args.auth_token else {}
     if args.scan:
-        print(json.dumps({"candidates": create_manifest(args.source_dir, args.manifest), "manifest": str(args.manifest)}))
+        candidates = create_manifest(args.source_dir, args.manifest)
+        summary_path = args.manifest.with_suffix(args.manifest.suffix + ".summary.json")
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        print(json.dumps({**summary, "manifest": str(args.manifest)}, ensure_ascii=False))
         return 0
     if not args.manifest.is_file():
         parser.error("manifest does not exist; run with --scan first")
