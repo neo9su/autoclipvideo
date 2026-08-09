@@ -769,12 +769,11 @@ async def _extract_srt_content(group_id: int) -> Optional[str]:
             
         # 提取SRT纯文字（去掉序号和时间码），按句子合并
         text_lines: list[str] = []
-        recordings_dir = os.path.join(os.path.dirname(__file__), "..", "recordings")
+        from media_contract import resolve_srt_file
 
         for (filename,) in recordings:
-            srt_filename = os.path.splitext(filename)[0] + '.srt'
-            srt_path = os.path.join(recordings_dir, srt_filename)
-            if not os.path.exists(srt_path):
+            srt_path = resolve_srt_file(filename)
+            if srt_path is None:
                 continue
             try:
                 with open(srt_path, 'r', encoding='utf-8') as f:

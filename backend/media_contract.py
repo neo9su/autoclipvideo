@@ -29,7 +29,22 @@ def resolve_media_file(filename: str) -> Path | None:
 
 def srt_candidates(mp4_path: Path) -> tuple[Path, ...]:
     """Return supported sidecar names without inventing a remote host path."""
-    return (mp4_path.with_suffix(".srt"), Path(f"{mp4_path}.srt"))
+    # Existing recordings use both ``name.srt`` and ``name.mp4.srt``. Prefer
+    # the latter when it is present because it is the sidecar produced by the
+    # recorder/transcriber for an MP4 source.
+    return (Path(f"{mp4_path}.srt"), mp4_path.with_suffix(".srt"))
+
+
+def resolve_srt_file(filename: str) -> Path | None:
+    """Resolve the first readable, non-empty SRT sidecar for an MP4 basename."""
+    mp4_path = resolve_media_file(filename)
+    if mp4_path is None:
+        return None
+    return next(
+        (path for path in srt_candidates(mp4_path)
+         if path.is_file() and os.access(path, os.R_OK) and path.stat().st_size > 0),
+        None,
+    )
 
 
 def audit_media_file(filename: str) -> dict[str, Any]:
@@ -38,8 +53,8 @@ def audit_media_file(filename: str) -> dict[str, Any]:
     if mp4_path is None:
         return {"filename": filename, "valid_filename": False, "mp4": {"readable": False}, "srt": {"readable": False}}
     mp4_readable = mp4_path.is_file() and os.access(mp4_path, os.R_OK)
-    srt_path = next((path for path in srt_candidates(mp4_path) if path.is_file()), None)
-    srt_readable = bool(srt_path and os.access(srt_path, os.R_OK) and srt_path.stat().st_size > 0)
+    srt_path = resolve_srt_file(filename)
+    srt_readable = srt_path is not None
     mp4_size = mp4_path.stat().st_size if mp4_readable else 0
     srt_size = srt_path.stat().st_size if srt_readable else 0
     return {

@@ -601,13 +601,11 @@ class SemanticMatcher:
                     except Exception:
                         pass
 
-                srt_path = os.path.join(
-                    recordings_dir,
-                    os.path.splitext(source_filename)[0] + ".srt",
-                )
+                from media_contract import resolve_srt_file
+                srt_path = resolve_srt_file(source_filename)
                 
                 # 解析 SRT 为结构化段落（保留时间戳）
-                srt_entries = _parse_srt_entries(srt_path)
+                srt_entries = _parse_srt_entries(str(srt_path)) if srt_path else []
                 # 同时保留全文拼接（向后兼容）
                 transcript_text = " ".join(e['text'] for e in srt_entries)
 
