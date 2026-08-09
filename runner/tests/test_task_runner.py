@@ -4,9 +4,11 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[2]))
 from runner.ops.task_runner import Runner, RunnerConfig, TaskStore
+from runner.ops.worktree_contract import WorktreeContract, WorktreeContractError
 
 
 def test_lease_uniqueness(tmp_path):
@@ -18,7 +20,7 @@ def test_lease_uniqueness(tmp_path):
 
 def test_restart_recovery(tmp_path):
     s=TaskStore(tmp_path/'x.db'); s.upsert_issue(1,'x'); s.claim(1,'a',-1)
-    s.conn.execute("INSERT INTO runs VALUES ('r',1,'running',?,?,?)",(time.time(),None,None))
+    s.conn.execute("INSERT INTO runs(id,issue_id,state,started_at,finished_at,error) VALUES ('r',1,'running',?,?,?)",(time.time(),None,None))
     got=s.recover(); assert got=={'expired_leases':1,'interrupted_runs':1,'dry_run':False}
     assert s.conn.execute("SELECT state FROM runs").fetchone()[0]=='interrupted'
     assert s.conn.execute("SELECT state FROM issues").fetchone()[0]=='retryable'
@@ -91,6 +93,105 @@ def test_cli_status_and_recover_dry_run(tmp_path):
     db=tmp_path/'x.db'
     command=[sys.executable, '-m', 'runner.ops.task_runner', '--db', str(db)]
     status=subprocess.run(command+['status'], capture_output=True, text=True, check=True)
-    assert json.loads(status.stdout) == {'issues': [], 'runs': [], 'leases': [], 'events': 0}
+    assert json.loads(status.stdout) == {'issues': [], 'runs': [], 'leases': [], 'sessions': [], 'events': 0}
     recover=subprocess.run(command+['recover', '--dry-run'], capture_output=True, text=True, check=True)
     assert json.loads(recover.stdout) == {'expired_leases': 0, 'interrupted_runs': 0, 'dry_run': True}
+
+
+def test_run_has_generation_and_session_lifecycle(tmp_path):
+    store = TaskStore(tmp_path / 'x.db')
+    store.upsert_issue(9, 'lifecycle')
+    assert Runner(RunnerConfig(db=tmp_path / 'x.db'), store, worker=lambda issue: 0).run_once() == 'succeeded'
+    run = store.conn.execute('SELECT id,generation,session_key FROM runs').fetchone()
+    assert run['generation'] == 1 and run['session_key'].startswith('issue:9:run:')
+    kinds = [row[0] for row in store.conn.execute('SELECT kind FROM events ORDER BY id')]
+    assert kinds[:3] == ['lease_acquired', 'session_requested', 'session_confirmed']
+
+
+def test_late_generation_activity_is_fenced(tmp_path):
+    store = TaskStore(tmp_path / 'x.db')
+    store.upsert_issue(1, 'fence')
+    Runner(RunnerConfig(db=tmp_path / 'x.db'), store, worker=lambda issue: 0).run_once()
+    run_id = store.conn.execute('SELECT id FROM runs').fetchone()[0]
+    assert not store.record_activity(run_id, 2)
+    assert store.conn.execute("SELECT state FROM sessions WHERE run_id=?", (run_id,)).fetchone()[0] == 'active'
+
+
+def test_finish_run_fences_completed_and_stale_generations(tmp_path):
+    store = TaskStore(tmp_path / 'x.db')
+    store.upsert_issue(1, 'fence finish')
+    runner = Runner(RunnerConfig(db=tmp_path / 'x.db'), store, worker=lambda issue: 0)
+    assert runner.run_once() == 'succeeded'
+    run = store.conn.execute('SELECT id,generation,state FROM runs').fetchone()
+    assert not store.finish_run(run['id'], run['generation'], 'succeeded')
+    assert not store.finish_run(run['id'], run['generation'] + 1, 'succeeded')
+    assert store.conn.execute('SELECT state FROM issues WHERE id=1').fetchone()[0] == 'done'
+
+
+def test_retry_generation_increments_for_same_issue(tmp_path):
+    store = TaskStore(tmp_path / 'x.db')
+    store.upsert_issue(1, 'generation')
+    runner = Runner(RunnerConfig(db=tmp_path / 'x.db'), store, worker=lambda issue: 1)
+    assert runner.run_once() == 'failed'
+    assert runner.run_once() == 'failed'
+    generations = [row[0] for row in store.conn.execute('SELECT generation FROM runs ORDER BY started_at')]
+    assert generations == [1, 2]
+
+
+def test_worktree_contract_rejects_wrong_branch(tmp_path):
+    contract = WorktreeContract(tmp_path / 'assigned', tmp_path, 'feature/118')
+    with pytest.raises(WorktreeContractError):
+        contract.validate(tmp_path / 'assigned', tmp_path, 'master')
+
+
+def test_session_confirmation_and_bootstrap_are_fenced(tmp_path):
+    store = TaskStore(tmp_path / 'x.db')
+    store.upsert_issue(1, 'lifecycle')
+    assert store.claim(1, 'owner', 60, 'run-1', 1)
+    store.conn.execute(
+        "INSERT INTO runs(id,issue_id,state,started_at,generation,session_key) VALUES(?,?,?,?,?,?)",
+        ('run-1', 1, 'accepted_idle', time.time(), 1, 'session-1'),
+    )
+    store.conn.execute(
+        "INSERT INTO sessions(run_id,generation,session_key,state) VALUES(?,?,?,?)",
+        ('run-1', 1, 'session-1', 'requested'),
+    )
+    assert not store.record_activity('run-1', 1)
+    assert store.confirm_session('run-1', 1)
+    assert store.mark_bootstrap('run-1', 1)
+    assert not store.confirm_session('run-1', 2)
+    assert not store.mark_bootstrap('run-1', 2)
+    assert store.record_activity('run-1', 1)
+
+
+def test_late_lease_release_cannot_remove_new_generation(tmp_path):
+    store = TaskStore(tmp_path / 'x.db')
+    assert store.claim(1, 'owner-a', 60, 'run-a', 1)
+    assert store.claim(1, 'owner-b', 60, 'run-b', 2) is False
+    store.conn.execute(
+        "UPDATE leases SET owner='owner-b',run_id='run-b',generation=2 WHERE issue_id=1"
+    )
+    store.release(1, 'owner-a', 'run-a', 1)
+    lease = store.conn.execute('SELECT owner,run_id,generation FROM leases').fetchone()
+    assert tuple(lease) == ('owner-b', 'run-b', 2)
+
+
+def test_lease_renewal_is_generation_fenced(tmp_path):
+    store = TaskStore(tmp_path / 'x.db')
+    assert store.claim(1, 'owner', 60, 'run-1', 1)
+    assert store.renew(1, 'owner', 120, 'run-1', 1)
+    assert not store.renew(1, 'owner', 120, 'run-1', 2)
+    assert not store.renew(1, 'other', 120, 'run-1', 1)
+
+
+def test_recovery_reclaims_accepted_idle_and_fences_late_finish(tmp_path):
+    store = TaskStore(tmp_path / 'x.db')
+    store.upsert_issue(1, 'recovery')
+    store.claim(1, 'owner', -1, 'run-1', 1)
+    store.conn.execute(
+        "INSERT INTO runs(id,issue_id,state,started_at,generation,session_key) VALUES(?,?,?,?,?,?)",
+        ('run-1', 1, 'accepted_idle', time.time(), 1, 'session-1'),
+    )
+    assert store.recover()['interrupted_runs'] == 1
+    assert not store.finish_run('run-1', 1, 'succeeded')
+    assert store.conn.execute('SELECT state FROM issues WHERE id=1').fetchone()[0] == 'retryable'
