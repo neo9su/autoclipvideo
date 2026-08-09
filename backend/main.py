@@ -641,7 +641,6 @@ async def lifespan(app: FastAPI):
         )
     else:
         register_online_callback(_on_gpu_online)
-        await monitor.start_all()
         logger.info(
             "DEPLOYMENT_ROLE=gpu-backend: media workers enabled "
             "(capture, transcription, backfill, publish, enhance, creative/director, and room monitors)"
