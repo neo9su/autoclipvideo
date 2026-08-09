@@ -8,7 +8,6 @@ from typing import Dict, Optional
 from recorder import RoomRecorder, get_stream_url
 from sync import sync_file
 from db import DB_PATH, aio_connect
-from gpu_execution import RemoteGpuRequiredError
 
 logger = logging.getLogger(__name__)
 
@@ -27,13 +26,10 @@ class MonitorManager:
         self._broadcast = broadcast_fn  # WebSocket broadcast callback
         self._media_enabled = media_enabled
 
-    def _require_media_enabled(self) -> None:
-        if not self._media_enabled:
-            raise RemoteGpuRequiredError("local room monitoring/recording is disabled on the control plane")
-
     async def start_all(self):
-        """Start monitors for all enabled rooms on the media worker."""
-        self._require_media_enabled()
+        """Start monitoring enabled rooms on a media-enabled deployment."""
+        if not self._media_enabled:
+            return
         async with aio_connect() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute("SELECT * FROM rooms WHERE enabled = 1") as cursor:
@@ -42,7 +38,8 @@ class MonitorManager:
             await self.add_room(room["id"], room["name"], room["url"])
 
     async def add_room(self, room_id: int, name: str, url: str):
-        self._require_media_enabled()
+        if not self._media_enabled:
+            return
         if room_id in self._tasks:
             return
         logger.info(f"Starting monitor for room: {name} ({room_id})")
