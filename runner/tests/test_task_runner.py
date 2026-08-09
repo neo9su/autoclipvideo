@@ -114,7 +114,7 @@ def test_late_generation_activity_is_fenced(tmp_path):
     Runner(RunnerConfig(db=tmp_path / 'x.db'), store, worker=lambda issue: 0).run_once()
     run_id = store.conn.execute('SELECT id FROM runs').fetchone()[0]
     assert not store.record_activity(run_id, 2)
-    assert store.conn.execute("SELECT state FROM sessions WHERE run_id=?", (run_id,)).fetchone()[0] == 'confirmed'
+    assert store.conn.execute("SELECT state FROM sessions WHERE run_id=?", (run_id,)).fetchone()[0] == 'active'
 
 
 def test_finish_run_fences_completed_and_stale_generations(tmp_path):
@@ -142,3 +142,47 @@ def test_worktree_contract_rejects_wrong_branch(tmp_path):
     contract = WorktreeContract(tmp_path / 'assigned', tmp_path, 'feature/118')
     with pytest.raises(WorktreeContractError):
         contract.validate(tmp_path / 'assigned', tmp_path, 'master')
+
+
+def test_session_confirmation_and_bootstrap_are_fenced(tmp_path):
+    store = TaskStore(tmp_path / 'x.db')
+    store.upsert_issue(1, 'lifecycle')
+    assert store.claim(1, 'owner', 60, 'run-1', 1)
+    store.conn.execute(
+        "INSERT INTO runs(id,issue_id,state,started_at,generation,session_key) VALUES(?,?,?,?,?,?)",
+        ('run-1', 1, 'accepted_idle', time.time(), 1, 'session-1'),
+    )
+    store.conn.execute(
+        "INSERT INTO sessions(run_id,generation,session_key,state) VALUES(?,?,?,?)",
+        ('run-1', 1, 'session-1', 'requested'),
+    )
+    assert store.confirm_session('run-1', 1)
+    assert store.mark_bootstrap('run-1', 1)
+    assert not store.confirm_session('run-1', 2)
+    assert not store.mark_bootstrap('run-1', 2)
+    assert store.record_activity('run-1', 1)
+
+
+def test_late_lease_release_cannot_remove_new_generation(tmp_path):
+    store = TaskStore(tmp_path / 'x.db')
+    assert store.claim(1, 'owner-a', 60, 'run-a', 1)
+    assert store.claim(1, 'owner-b', 60, 'run-b', 2) is False
+    store.conn.execute(
+        "UPDATE leases SET owner='owner-b',run_id='run-b',generation=2 WHERE issue_id=1"
+    )
+    store.release(1, 'owner-a', 'run-a', 1)
+    lease = store.conn.execute('SELECT owner,run_id,generation FROM leases').fetchone()
+    assert tuple(lease) == ('owner-b', 'run-b', 2)
+
+
+def test_recovery_reclaims_accepted_idle_and_fences_late_finish(tmp_path):
+    store = TaskStore(tmp_path / 'x.db')
+    store.upsert_issue(1, 'recovery')
+    store.claim(1, 'owner', -1, 'run-1', 1)
+    store.conn.execute(
+        "INSERT INTO runs(id,issue_id,state,started_at,generation,session_key) VALUES(?,?,?,?,?,?)",
+        ('run-1', 1, 'accepted_idle', time.time(), 1, 'session-1'),
+    )
+    assert store.recover()['interrupted_runs'] == 1
+    assert not store.finish_run('run-1', 1, 'succeeded')
+    assert store.conn.execute('SELECT state FROM issues WHERE id=1').fetchone()[0] == 'retryable'

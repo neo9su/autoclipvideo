@@ -15,7 +15,7 @@ from typing import Callable
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS issues (id INTEGER PRIMARY KEY, title TEXT NOT NULL, state TEXT NOT NULL, payload TEXT NOT NULL DEFAULT '{}', updated_at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, issue_id INTEGER NOT NULL, state TEXT NOT NULL, started_at REAL NOT NULL, finished_at REAL, error TEXT, generation INTEGER NOT NULL DEFAULT 1, session_key TEXT, retry_count INTEGER NOT NULL DEFAULT 0, error_class TEXT, UNIQUE(issue_id, id));
-CREATE TABLE IF NOT EXISTS leases (issue_id INTEGER PRIMARY KEY, owner TEXT NOT NULL, expires_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS leases (issue_id INTEGER PRIMARY KEY, owner TEXT NOT NULL, expires_at REAL NOT NULL, run_id TEXT, generation INTEGER NOT NULL DEFAULT 1);
 CREATE TABLE IF NOT EXISTS sessions (run_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, session_key TEXT NOT NULL UNIQUE, state TEXT NOT NULL, confirmed_at REAL, last_activity_at REAL);
 CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, issue_id INTEGER, run_id TEXT, generation INTEGER, payload TEXT NOT NULL DEFAULT '{}', created_at REAL NOT NULL);
 '''
@@ -63,6 +63,10 @@ class TaskStore:
         if "generation" not in event_columns:
             self.conn.execute("ALTER TABLE events ADD COLUMN generation INTEGER")
         self.conn.execute("CREATE TABLE IF NOT EXISTS sessions (run_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, session_key TEXT NOT NULL UNIQUE, state TEXT NOT NULL, confirmed_at REAL, last_activity_at REAL)")
+        lease_columns = {row[1] for row in self.conn.execute("PRAGMA table_info(leases)")}
+        for name, definition in (("run_id", "TEXT"), ("generation", "INTEGER NOT NULL DEFAULT 1")):
+            if name not in lease_columns:
+                self.conn.execute(f"ALTER TABLE leases ADD COLUMN {name} {definition}")
 
     def close(self): self.conn.close()
     def event(self, kind, issue_id=None, run_id=None, generation=None, payload=None):
@@ -83,6 +87,41 @@ class TaskStore:
         self.conn.execute("UPDATE sessions SET state='active', last_activity_at=? WHERE run_id=? AND generation=?", (time.time(), run_id, generation))
         self.event(kind, run_id=run_id, generation=generation)
         return True
+
+    def confirm_session(self, run_id: str, generation: int) -> bool:
+        """Confirm only the requested session belonging to the current generation."""
+        if not self.is_current(run_id, generation):
+            self.event("late_event_ignored", run_id=run_id, generation=generation,
+                       payload={"kind": "session_confirmed"})
+            return False
+        changed = self.conn.execute(
+            "UPDATE sessions SET state='confirmed',confirmed_at=? "
+            "WHERE run_id=? AND generation=? AND state='requested'",
+            (time.time(), run_id, generation),
+        ).rowcount
+        if changed:
+            self.event("session_confirmed", run_id=run_id, generation=generation)
+        return bool(changed)
+
+    def mark_bootstrap(self, run_id: str, generation: int) -> bool:
+        """Record trusted bootstrap without allowing a stale session to advance."""
+        if not self.is_current(run_id, generation):
+            self.event("late_event_ignored", run_id=run_id, generation=generation,
+                       payload={"kind": "bootstrap"})
+            return False
+        session = self.conn.execute(
+            "SELECT state FROM sessions WHERE run_id=? AND generation=?",
+            (run_id, generation),
+        ).fetchone()
+        if not session or session[0] not in {"confirmed", "bootstrapped", "active"}:
+            return False
+        changed = self.conn.execute(
+            "UPDATE sessions SET state='bootstrapped' WHERE run_id=? AND generation=?",
+            (run_id, generation),
+        ).rowcount
+        if changed:
+            self.event("bootstrap", run_id=run_id, generation=generation)
+        return bool(changed)
 
     def finish_run(self, run_id: str, generation: int, state: str,
                    error: str | None = None, error_class: str | None = None) -> bool:
@@ -111,20 +150,30 @@ class TaskStore:
         if existing and existing[0] in {"done", "running"}:
             state = existing[0]
         self.conn.execute("INSERT INTO issues(id,title,state,payload,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,payload=excluded.payload,updated_at=excluded.updated_at", (issue_id,title,state,json.dumps(payload or {}),now))
-    def claim(self, issue_id, owner, ttl):
+    def claim(self, issue_id, owner, ttl, run_id=None, generation=1):
         now=time.time(); self.conn.execute("BEGIN IMMEDIATE")
         try:
             row=self.conn.execute("SELECT owner,expires_at FROM leases WHERE issue_id=?",(issue_id,)).fetchone()
             if row and row[1] > now and row[0] != owner: self.conn.execute("ROLLBACK"); return False
-            self.conn.execute("INSERT INTO leases(issue_id,owner,expires_at) VALUES(?,?,?) ON CONFLICT(issue_id) DO UPDATE SET owner=excluded.owner,expires_at=excluded.expires_at",(issue_id,owner,now+ttl)); self.conn.execute("COMMIT"); self.event("lease_acquired",issue_id,payload={"owner":owner}); return True
+            self.conn.execute("INSERT INTO leases(issue_id,owner,expires_at,run_id,generation) VALUES(?,?,?,?,?) ON CONFLICT(issue_id) DO UPDATE SET owner=excluded.owner,expires_at=excluded.expires_at,run_id=excluded.run_id,generation=excluded.generation",(issue_id,owner,now+ttl,run_id,generation)); self.conn.execute("COMMIT"); self.event("lease_acquired",issue_id,run_id,generation,{"owner":owner}); return True
         except Exception: self.conn.execute("ROLLBACK"); raise
-    def release(self, issue_id, owner): self.conn.execute("DELETE FROM leases WHERE issue_id=? AND owner=?",(issue_id,owner))
+    def release(self, issue_id, owner, run_id=None, generation=None):
+        """Release only the lease owned by this run; late cleanup is a no-op."""
+        query = "DELETE FROM leases WHERE issue_id=? AND owner=?"
+        values = [issue_id, owner]
+        if run_id is not None:
+            query += " AND run_id=?"
+            values.append(run_id)
+        if generation is not None:
+            query += " AND generation=?"
+            values.append(generation)
+        self.conn.execute(query, values)
     def recover(self, now=None, dry_run=False):
-        now=time.time() if now is None else now; expired=self.conn.execute("SELECT issue_id,owner FROM leases WHERE expires_at<=?",(now,)).fetchall(); running=self.conn.execute("SELECT id,issue_id FROM runs WHERE state='running'").fetchall()
+        now=time.time() if now is None else now; expired=self.conn.execute("SELECT issue_id,owner,run_id,generation FROM leases WHERE expires_at<=?",(now,)).fetchall(); running=self.conn.execute("SELECT id,issue_id,generation FROM runs WHERE state IN ('running','accepted_idle')").fetchall()
         if not dry_run:
-            for r in expired: self.conn.execute("DELETE FROM leases WHERE issue_id=?",(r[0],)); self.event("lease_expired",r[0])
+            for r in expired: self.conn.execute("DELETE FROM leases WHERE issue_id=? AND owner=?",(r[0],r[1])); self.event("lease_expired",r[0],r[2],r[3])
             for r in running:
-                self.conn.execute("UPDATE runs SET state='interrupted',finished_at=?,error=?,error_class=? WHERE id=?",(now,"runner restart recovery","gateway_restart",r[0])); self.conn.execute("UPDATE issues SET state='retryable',updated_at=? WHERE id=?",(now,r[1])); self.event("run_interrupted",r[1],r[0])
+                self.conn.execute("UPDATE runs SET state='interrupted',finished_at=?,error=?,error_class=? WHERE id=? AND generation=?",(now,"runner restart recovery","gateway_restart",r[0],r[2])); self.conn.execute("UPDATE issues SET state='retryable',updated_at=? WHERE id=? AND state != 'done'",(now,r[1])); self.event("run_interrupted",r[1],r[0],r[2])
         return {"expired_leases":len(expired),"interrupted_runs":len(running),"dry_run":dry_run}
     def status(self):
         return {"issues": [dict(x) for x in self.conn.execute("SELECT * FROM issues ORDER BY id")], "runs": [dict(x) for x in self.conn.execute("SELECT * FROM runs ORDER BY started_at DESC")], "leases": [dict(x) for x in self.conn.execute("SELECT * FROM leases")], "events": self.conn.execute("SELECT count(*) FROM events").fetchone()[0]}
@@ -162,26 +211,37 @@ class Runner:
             return {"dry_run": True, "candidates": [{"id": row[0], "title": row[1], "payload": json.loads(row[2])} for row in rows]}
         if not rows: return None
         issue=rows[0]; owner=f"{os.uname().nodename}:{os.getpid()}"; iid=issue[0]
-        if not self.store.claim(iid,owner,self.config.lease_seconds): return None
         generation = self.store.conn.execute(
             "SELECT COALESCE(MAX(generation), 0) + 1 FROM runs WHERE issue_id=?", (iid,)
         ).fetchone()[0]
+        prior_failures = self.store.conn.execute(
+            "SELECT COALESCE(MAX(retry_count), 0) FROM runs WHERE issue_id=?", (iid,)
+        ).fetchone()[0]
         run_id=str(uuid.uuid4()); now=time.time(); session_key=f"issue:{iid}:run:{run_id}:generation:{generation}"
-        self.store.conn.execute("INSERT INTO runs(id,issue_id,state,started_at,generation,session_key) VALUES(?,?,?,?,?,?)",(run_id,iid,"running",now,generation,session_key)); self.store.conn.execute("INSERT INTO sessions(run_id,generation,session_key,state) VALUES(?,?,?,?)",(run_id,generation,session_key,"requested")); self.store.event("session_requested",iid,run_id,generation)
+        if not self.store.claim(iid, owner, self.config.lease_seconds, run_id, generation):
+            return None
+        self.store.conn.execute("INSERT INTO runs(id,issue_id,state,started_at,generation,session_key,retry_count) VALUES(?,?,?,?,?,?,?)",(run_id,iid,"running",now,generation,session_key,prior_failures)); self.store.conn.execute("INSERT INTO sessions(run_id,generation,session_key,state) VALUES(?,?,?,?)",(run_id,generation,session_key,"requested")); self.store.event("session_requested",iid,run_id,generation)
         self.store.conn.execute("UPDATE issues SET state='accepted_idle',updated_at=? WHERE id=?",(now,iid))
         try:
-            self.store.event("session_confirmed",iid,run_id,generation)
-            self.store.conn.execute("UPDATE sessions SET state='confirmed',confirmed_at=? WHERE run_id=?",(time.time(),run_id))
-            self.store.event("bootstrap",iid,run_id,generation)
+            if not self.store.confirm_session(run_id, generation):
+                raise TimeoutError("session confirmation timeout")
+            if not self.store.mark_bootstrap(run_id, generation):
+                raise TimeoutError("bootstrap timeout")
+            self.store.record_activity(run_id, generation)
             if self.worker: result=self.worker(dict(issue))
             elif self.config.worker_command: result=self._execute(self.config.worker_command, iid)
             else: result=0
             succeeded = result is None or result is True or (isinstance(result, int) and not isinstance(result, bool) and result == 0)
             state="succeeded" if succeeded else "failed"; err=None if state=="succeeded" else str(result); error_class=None if state=="succeeded" else "worker_failed"
-        except TimeoutError as exc: state,err,error_class="retryable",str(exc),"timeout"
+        except TimeoutError as exc: state,err,error_class="retryable",str(exc),"bootstrap_timeout" if "bootstrap" in str(exc) else "timeout"
         except Exception as exc: state,err,error_class="failed",str(exc),"tool_runtime_failed"
+        retry_count = self.store.conn.execute("SELECT retry_count FROM runs WHERE id=?", (run_id,)).fetchone()[0]
+        if state != "succeeded" and retry_count >= self.config.max_retries:
+            state = "failed"
+            error_class = "retry_budget_exhausted"
+        self.store.conn.execute("UPDATE runs SET retry_count=? WHERE id=? AND generation=?", (retry_count + (state != "succeeded"), run_id, generation))
         self.store.finish_run(run_id, generation, state, err, error_class)
-        self.store.release(iid,owner)
+        self.store.release(iid, owner, run_id, generation)
         return state
     def run(self, issue_id=None):
         """Run up to configured concurrency, returning per-issue outcomes."""
@@ -192,7 +252,8 @@ class Runner:
         return self.store.recover(dry_run=dry_run)
 
     def _execute(self, command, issue_id):
-        proc=subprocess.Popen(command.format(issue_id=issue_id), shell=True, start_new_session=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        formatted_command = command.format(issue_id=issue_id)
+        proc=subprocess.Popen(formatted_command, shell=True, start_new_session=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         started=last=time.monotonic()
         while proc.poll() is None:
             time.sleep(.05)
