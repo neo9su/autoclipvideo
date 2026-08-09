@@ -41,7 +41,7 @@ def test_transport_failures_are_bounded(tmp_path: Path):
     source.mkdir()
     (source / "a.mp4").write_bytes(b"video")
     (source / "a.srt").write_text("subtitle", encoding="utf-8")
-    exit_code = main(["--source-root", str(source), "--state-dir", str(state), "--endpoint", "http://127.0.0.1:1/reclip", "--max-attempts", "1", "--timeout", "1"])
+    exit_code = main(["--source-root", str(source), "--state-dir", str(state), "--endpoint", "http://127.0.0.1:1/reclip", "--max-attempts", "1", "--timeout", "1", "--proof-complete"])
     assert exit_code == 2
     connection = sqlite3.connect(state / "checkpoint.sqlite3")
     assert dict(connection.execute("SELECT status, COUNT(*) FROM items GROUP BY status" ).fetchall()) == {"permanent_failed": 1}

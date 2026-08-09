@@ -50,6 +50,14 @@ class Pair:
     srt: Path
 
 
+def validate_source_root(source_root: Path) -> Path:
+    """Return a resolved directory and reject symlinked/non-directory roots."""
+    resolved = source_root.expanduser().resolve()
+    if not resolved.is_dir():
+        raise ValueError(f"source-root is not a directory: {source_root}")
+    return resolved
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -85,14 +93,21 @@ def init_db(path: Path) -> sqlite3.Connection:
 
 def write_manifest(path: Path, pairs: list[Pair], connection: sqlite3.Connection) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as manifest:
+    # A manifest is an append-only inventory.  Re-running discovery must not
+    # rewrite history or reset an already completed checkpoint.
+    known = {line.split('"item_key": "', 1)[1].split('"', 1)[0]
+             for line in path.read_text(encoding="utf-8").splitlines()
+             if '"item_key": "' in line} if path.exists() else set()
+    with path.open("a", encoding="utf-8") as manifest:
         for pair in pairs:
             digest = sha256_file(pair.mp4)
             key = item_key(pair, digest)
             record = {"item_key": key, "mp4": str(pair.mp4), "srt": str(pair.srt),
                       "mp4_size": pair.mp4.stat().st_size, "srt_size": pair.srt.stat().st_size,
                       "mp4_sha256": digest}
-            manifest.write(json.dumps(record, ensure_ascii=False) + "\n")
+            if key not in known:
+                manifest.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+                known.add(key)
             connection.execute(
                 "INSERT OR IGNORE INTO items(item_key,source_mp4,source_srt,mp4_size,srt_size,mp4_sha256,updated_at) VALUES(?,?,?,?,?,?,?)",
                 (key, str(pair.mp4), str(pair.srt), record["mp4_size"], record["srt_size"], digest, time.time()),
@@ -141,9 +156,12 @@ def acquire_lock(lock_path: Path, lease_seconds: int) -> None:
         raise RuntimeError(f"active lease exists: {lock_path}") from exc
 
 
-def post_json(url: str, payload: dict[str, Any], timeout: int) -> tuple[int, str]:
+def post_json(url: str, payload: dict[str, Any], timeout: int, auth_token: str | None = None) -> tuple[int, str]:
     body = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if auth_token:
+        headers["Authorization"] = f"Bearer {auth_token}"
+    request = urllib.request.Request(url, data=body, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.status, response.read(1024 * 1024).decode("utf-8", errors="replace")
@@ -151,7 +169,23 @@ def post_json(url: str, payload: dict[str, Any], timeout: int) -> tuple[int, str
         return error.code, error.read(1024 * 1024).decode("utf-8", errors="replace")
 
 
-def process(connection: sqlite3.Connection, logger: logging.Logger, endpoint: str, max_attempts: int, interval: float, limit: int | None, timeout: int) -> None:
+def validate_success_response(response: dict[str, Any]) -> tuple[bool, str]:
+    """Require durable output and GPU-consumption evidence, not just a job id."""
+    output = response.get("output")
+    evidence = response.get("evidence")
+    if not isinstance(output, dict) or not output.get("mp4_path") or not output.get("srt_path"):
+        return False, "missing isolated output paths"
+    if not isinstance(evidence, dict):
+        return False, "missing output evidence"
+    required = ("mp4_readable", "srt_readable", "mp4_bytes", "srt_bytes", "ffprobe", "gpu_consumed")
+    if any(not evidence.get(field) for field in required):
+        return False, "incomplete output or GPU evidence"
+    if not isinstance(evidence["mp4_bytes"], int) or not isinstance(evidence["srt_bytes"], int):
+        return False, "output byte sizes must be integers"
+    return True, "ok"
+
+
+def process(connection: sqlite3.Connection, logger: logging.Logger, endpoint: str, max_attempts: int, interval: float, limit: int | None, timeout: int, auth_token: str | None = None) -> None:
     rows = connection.execute("SELECT * FROM items WHERE status IN ('pending','retry') ORDER BY rowid").fetchall()
     for row in rows[:limit]:
         key, source_mp4, source_srt, mp4_size, srt_size, digest, status, attempts = row[:8]
@@ -168,17 +202,21 @@ def process(connection: sqlite3.Connection, logger: logging.Logger, endpoint: st
         connection.execute("UPDATE items SET status='running',attempts=?,updated_at=? WHERE item_key=?", (attempt, time.time(), key)); connection.commit()
         record_event(connection, logger, key, "submitted", {"attempt": attempt, "endpoint": endpoint, "input_mp4": source_mp4, "input_srt": source_srt, "input_bytes": mp4_size})
         try:
-            http_status, response_text = post_json(endpoint, payload, timeout)
+            http_status, response_text = post_json(endpoint, payload, timeout, auth_token)
             response: dict[str, Any] = json.loads(response_text) if response_text else {}
-            if 200 <= http_status < 300 and response.get("job_id"):
+            valid, evidence_reason = validate_success_response(response)
+            if 200 <= http_status < 300 and response.get("job_id") and valid:
                 output = response.get("output", {})
                 connection.execute("UPDATE items SET status='success',job_id=?,output_mp4=?,output_srt=?,last_http_status=?,last_response=?,failure_class=NULL,failure_reason=NULL,updated_at=? WHERE item_key=?", (str(response["job_id"]), output.get("mp4_path"), output.get("srt_path"), http_status, response_text[:4000], time.time(), key))
                 connection.commit(); record_event(connection, logger, key, "success", {"job_id": response["job_id"], "http_status": http_status, "response": response, "output_mp4": output.get("mp4_path"), "output_srt": output.get("srt_path")})
             else:
                 failure_class, retryable = classify_http(http_status)
+                if 200 <= http_status < 300 and response.get("job_id"):
+                    failure_class, retryable, evidence_reason = "contract", False, evidence_reason
                 next_status = "retry" if retryable and attempt < max_attempts else "permanent_failed"
-                connection.execute("UPDATE items SET status=?,last_http_status=?,last_response=?,failure_class=?,failure_reason=?,updated_at=? WHERE item_key=?", (next_status, http_status, response_text[:4000], failure_class, f"remote response {http_status}", time.time(), key)); connection.commit()
-                record_event(connection, logger, key, next_status, {"job_id": response.get("job_id"), "http_status": http_status, "response": response_text[:1000], "attempt": attempt})
+                reason = evidence_reason if http_status < 300 else f"remote response {http_status}"
+                connection.execute("UPDATE items SET status=?,last_http_status=?,last_response=?,failure_class=?,failure_reason=?,updated_at=? WHERE item_key=?", (next_status, http_status, response_text[:4000], failure_class, reason, time.time(), key)); connection.commit()
+                record_event(connection, logger, key, next_status, {"job_id": response.get("job_id"), "http_status": http_status, "response": response_text[:1000], "failure_reason": reason, "attempt": attempt})
         except (OSError, TimeoutError, ValueError) as error:
             next_status = "retry" if attempt < max_attempts else "permanent_failed"
             connection.execute("UPDATE items SET status=?,failure_class='transport',failure_reason=?,updated_at=? WHERE item_key=?", (next_status, type(error).__name__, time.time(), key)); connection.commit()
@@ -200,9 +238,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--limit", type=int)
     parser.add_argument("--timeout", type=int, default=60)
     parser.add_argument("--lease-seconds", type=int, default=3600)
+    parser.add_argument("--auth-token-env", help="environment variable containing the remote API bearer token")
+    parser.add_argument("--proof-complete", action="store_true", help="operator confirms three-recording E2E proof is recorded")
     args = parser.parse_args(argv)
-    if not args.source_root.is_dir() or args.max_attempts < 1 or args.interval < 0:
+    if args.max_attempts < 1 or args.interval < 0 or args.timeout < 1 or args.lease_seconds < 1:
         parser.error("source-root must be a directory; max-attempts >= 1; interval >= 0")
+    try:
+        args.source_root = validate_source_root(args.source_root)
+    except ValueError as error:
+        parser.error(str(error))
+    if args.endpoint and args.limit is None and not args.proof_complete:
+        parser.error("full batch requires --proof-complete after the three-recording E2E proof")
+    auth_token = os.environ.get(args.auth_token_env) if args.auth_token_env else None
     args.state_dir.mkdir(parents=True, exist_ok=True)
     lock = args.state_dir / "batch.lock"
     try:
@@ -216,7 +263,7 @@ def main(argv: list[str] | None = None) -> int:
         write_manifest(args.state_dir / "manifest.jsonl", pairs, connection)
         logger.info(json.dumps({"at": time.time(), "status": "inventory", "candidates": len(pairs), "skipped": skipped, "source_root": str(args.source_root)}, ensure_ascii=False))
         if args.endpoint:
-            process(connection, logger, args.endpoint, args.max_attempts, args.interval, args.limit, args.timeout)
+            process(connection, logger, args.endpoint, args.max_attempts, args.interval, args.limit, args.timeout, auth_token)
         print(json.dumps({"candidates": len(pairs), "skipped": skipped, **summary(connection)}, ensure_ascii=False, sort_keys=True))
         return 0 if not args.endpoint or not any(summary(connection).get(s, 0) for s in ("retry", "permanent_failed")) else 2
     finally:
