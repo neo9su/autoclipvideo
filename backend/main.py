@@ -645,9 +645,8 @@ async def lifespan(app: FastAPI):
             "DEPLOYMENT_ROLE=gpu-backend: media workers enabled "
             "(capture, transcription, backfill, publish, enhance, creative/director, and room monitors)"
         )
-        # Restore persisted room monitors after every GPU-backend restart. The
-        # room rows remain enabled in SQLite, but the in-memory manager starts
-        # empty unless these polling tasks are explicitly recreated.
+        # Room monitors are owned by the GPU backend. Start them during
+        # application startup so enabled rooms are actually polled.
         await monitor.start_all()
         tasks.extend([
             asyncio.create_task(poll_transcriptions(broadcast_fn=broadcast)),

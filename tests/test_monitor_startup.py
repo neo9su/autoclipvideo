@@ -38,12 +38,12 @@ async def test_start_all_recreates_enabled_room_tasks(monkeypatch):
             assert "enabled = 1" in query
             return Cursor()
 
-    async def fake_add_room(room_id, name, url):
+    async def fake_start_room_monitor(room_id, name, url):
         added.append((room_id, name, url))
 
     monkeypatch.setattr(monitor_module, "reject_local_media", lambda reason: None)
     monkeypatch.setattr(monitor_module, "aio_connect", lambda: Connection())
-    monkeypatch.setattr(manager, "add_room", fake_add_room)
+    monkeypatch.setattr(manager, "_start_room_monitor", fake_start_room_monitor)
 
     await manager.start_all()
 
