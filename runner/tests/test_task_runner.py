@@ -93,7 +93,7 @@ def test_cli_status_and_recover_dry_run(tmp_path):
     db=tmp_path/'x.db'
     command=[sys.executable, '-m', 'runner.ops.task_runner', '--db', str(db)]
     status=subprocess.run(command+['status'], capture_output=True, text=True, check=True)
-    assert json.loads(status.stdout) == {'issues': [], 'runs': [], 'leases': [], 'events': 0}
+    assert json.loads(status.stdout) == {'issues': [], 'runs': [], 'leases': [], 'sessions': [], 'events': 0}
     recover=subprocess.run(command+['recover', '--dry-run'], capture_output=True, text=True, check=True)
     assert json.loads(recover.stdout) == {'expired_leases': 0, 'interrupted_runs': 0, 'dry_run': True}
 
@@ -156,6 +156,7 @@ def test_session_confirmation_and_bootstrap_are_fenced(tmp_path):
         "INSERT INTO sessions(run_id,generation,session_key,state) VALUES(?,?,?,?)",
         ('run-1', 1, 'session-1', 'requested'),
     )
+    assert not store.record_activity('run-1', 1)
     assert store.confirm_session('run-1', 1)
     assert store.mark_bootstrap('run-1', 1)
     assert not store.confirm_session('run-1', 2)
@@ -173,6 +174,14 @@ def test_late_lease_release_cannot_remove_new_generation(tmp_path):
     store.release(1, 'owner-a', 'run-a', 1)
     lease = store.conn.execute('SELECT owner,run_id,generation FROM leases').fetchone()
     assert tuple(lease) == ('owner-b', 'run-b', 2)
+
+
+def test_lease_renewal_is_generation_fenced(tmp_path):
+    store = TaskStore(tmp_path / 'x.db')
+    assert store.claim(1, 'owner', 60, 'run-1', 1)
+    assert store.renew(1, 'owner', 120, 'run-1', 1)
+    assert not store.renew(1, 'owner', 120, 'run-1', 2)
+    assert not store.renew(1, 'other', 120, 'run-1', 1)
 
 
 def test_recovery_reclaims_accepted_idle_and_fences_late_finish(tmp_path):

@@ -81,7 +81,7 @@ class TaskStore:
             "SELECT state FROM sessions WHERE run_id=? AND generation=?",
             (run_id, generation),
         ).fetchone()
-        if not self.is_current(run_id, generation) or not session:
+        if not self.is_current(run_id, generation) or not session or session[0] not in {"confirmed", "bootstrapped", "active"}:
             self.event("late_event_ignored", run_id=run_id, generation=generation, payload={"kind": kind})
             return False
         self.conn.execute("UPDATE sessions SET state='active', last_activity_at=? WHERE run_id=? AND generation=?", (time.time(), run_id, generation))
@@ -134,10 +134,14 @@ class TaskStore:
         if not row:
             return False
         now = time.time()
-        self.conn.execute(
+        changed = self.conn.execute(
             "UPDATE runs SET state=?,finished_at=?,error=?,error_class=? WHERE id=? AND generation=? AND state IN ('running','accepted_idle')",
             (state, now, error, error_class, run_id, generation),
-        )
+        ).rowcount
+        if not changed:
+            self.event("late_event_ignored", row[0], run_id, generation,
+                       {"kind": "work_finish", "state": state})
+            return False
         issue_state = "done" if state == "succeeded" else "retryable"
         self.conn.execute("UPDATE issues SET state=?,updated_at=? WHERE id=? AND state IN ('running','accepted_idle')",
                           (issue_state, now, row[0]))
@@ -168,15 +172,27 @@ class TaskStore:
             query += " AND generation=?"
             values.append(generation)
         self.conn.execute(query, values)
+
+    def renew(self, issue_id, owner, ttl, run_id, generation) -> bool:
+        """Renew only the lease fenced to the current run generation."""
+        expires_at = time.time() + ttl
+        changed = self.conn.execute(
+            "UPDATE leases SET expires_at=? WHERE issue_id=? AND owner=? AND run_id=? AND generation=?",
+            (expires_at, issue_id, owner, run_id, generation),
+        ).rowcount
+        if changed:
+            self.event("lease_renewed", issue_id, run_id, generation)
+        return bool(changed)
     def recover(self, now=None, dry_run=False):
         now=time.time() if now is None else now; expired=self.conn.execute("SELECT issue_id,owner,run_id,generation FROM leases WHERE expires_at<=?",(now,)).fetchall(); running=self.conn.execute("SELECT id,issue_id,generation FROM runs WHERE state IN ('running','accepted_idle')").fetchall()
         if not dry_run:
             for r in expired: self.conn.execute("DELETE FROM leases WHERE issue_id=? AND owner=?",(r[0],r[1])); self.event("lease_expired",r[0],r[2],r[3])
             for r in running:
                 self.conn.execute("UPDATE runs SET state='interrupted',finished_at=?,error=?,error_class=? WHERE id=? AND generation=?",(now,"runner restart recovery","gateway_restart",r[0],r[2])); self.conn.execute("UPDATE issues SET state='retryable',updated_at=? WHERE id=? AND state != 'done'",(now,r[1])); self.event("run_interrupted",r[1],r[0],r[2])
+                self.event("requeued", r[1], r[0], r[2], {"reason": "gateway_restart"})
         return {"expired_leases":len(expired),"interrupted_runs":len(running),"dry_run":dry_run}
     def status(self):
-        return {"issues": [dict(x) for x in self.conn.execute("SELECT * FROM issues ORDER BY id")], "runs": [dict(x) for x in self.conn.execute("SELECT * FROM runs ORDER BY started_at DESC")], "leases": [dict(x) for x in self.conn.execute("SELECT * FROM leases")], "events": self.conn.execute("SELECT count(*) FROM events").fetchone()[0]}
+        return {"issues": [dict(x) for x in self.conn.execute("SELECT * FROM issues ORDER BY id")], "runs": [dict(x) for x in self.conn.execute("SELECT * FROM runs ORDER BY started_at DESC")], "leases": [dict(x) for x in self.conn.execute("SELECT * FROM leases")], "sessions": [dict(x) for x in self.conn.execute("SELECT * FROM sessions")], "events": self.conn.execute("SELECT count(*) FROM events").fetchone()[0]}
 
     def pending_issue_ids(self):
         return [row[0] for row in self.conn.execute("SELECT id FROM issues WHERE state IN ('queued','retryable') ORDER BY id")]
@@ -193,6 +209,10 @@ class GitHubAdapter:
 class Runner:
     def __init__(self, config=None, store=None, adapter=None, worker: Callable | None = None):
         self.config=config or RunnerConfig(); self.store=store or TaskStore(self.config.db); self.adapter=adapter or GitHubAdapter(self.config.gh_command); self.worker=worker
+        # A heartbeat process must not share an owner identity with another
+        # process.  Hostname/pid alone allowed overlapping ticks to overwrite
+        # each other's lease when they ran in the same process.
+        self.owner = f"{os.uname().nodename}:{os.getpid()}:{uuid.uuid4()}"
     def scan(self, dry_run=False):
         issues=self.adapter.scan()
         if not dry_run:
@@ -210,7 +230,7 @@ class Runner:
         if dry_run:
             return {"dry_run": True, "candidates": [{"id": row[0], "title": row[1], "payload": json.loads(row[2])} for row in rows]}
         if not rows: return None
-        issue=rows[0]; owner=f"{os.uname().nodename}:{os.getpid()}"; iid=issue[0]
+        issue=rows[0]; owner=self.owner; iid=issue[0]
         generation = self.store.conn.execute(
             "SELECT COALESCE(MAX(generation), 0) + 1 FROM runs WHERE issue_id=?", (iid,)
         ).fetchone()[0]
@@ -242,6 +262,8 @@ class Runner:
         self.store.conn.execute("UPDATE runs SET retry_count=? WHERE id=? AND generation=?", (retry_count + (state != "succeeded"), run_id, generation))
         self.store.finish_run(run_id, generation, state, err, error_class)
         self.store.release(iid, owner, run_id, generation)
+        if state == "retryable":
+            self.store.event("requeued", iid, run_id, generation, {"error_class": error_class})
         return state
     def run(self, issue_id=None):
         """Run up to configured concurrency, returning per-issue outcomes."""
