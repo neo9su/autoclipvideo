@@ -110,6 +110,8 @@ class Manifest:
         return count
 
     def claim(self, owner: str, lease_seconds: int, max_attempts: int) -> sqlite3.Row | None:
+        if not owner or lease_seconds < 1 or max_attempts < 1:
+            raise ValueError("owner, lease_seconds, and max_attempts must be positive")
         now = time.time()
         self.db.execute("BEGIN IMMEDIATE")
         row = self.db.execute("""SELECT * FROM items WHERE
@@ -136,8 +138,25 @@ class Manifest:
                 validate_success_evidence(json.loads(raw_evidence))
             except (TypeError, json.JSONDecodeError) as exc:
                 raise ValueError("evidence_json must be valid JSON") from exc
+        current = self.db.execute(
+            "SELECT status, lease_owner FROM items WHERE key=?", (key,)
+        ).fetchone()
+        if current is None:
+            raise KeyError(key)
+        requested_owner = fields.get("lease_owner")
+        current_owner = current["lease_owner"]
+        if current["status"] == "running":
+            if not requested_owner or requested_owner != current_owner:
+                raise PermissionError("running item must be recorded by its lease owner")
+        elif requested_owner is not None and current_owner not in (None, requested_owner):
+            raise PermissionError("lease owner does not match manifest item")
         allowed = {"job_id", "output_mp4", "output_srt", "evidence_json", "last_error", "lease_owner", "lease_until"}
         updates = {name: value for name, value in fields.items() if name in allowed}
+        if status != "running":
+            # A retry or terminal transition releases the exact worker lease.
+            # This prevents a late worker from looking active after its result
+            # has been durably classified.
+            updates.update(lease_owner=None, lease_until=None)
         updates.update(status=status, updated_at=time.time())
         assignments = ",".join(f"{name}=?" for name in updates)
         self.db.execute(f"UPDATE items SET {assignments} WHERE key=?", (*updates.values(), key))
@@ -156,7 +175,8 @@ class Manifest:
         if lease_owner is not None and row["lease_owner"] != lease_owner:
             raise PermissionError("lease owner does not match claimed item")
         final_status = "permanent_failed" if category == "permanent" or row["attempts"] >= max_attempts else "pending"
-        self.record(key, final_status, last_error=f"{category}: {error}", lease_until=None)
+        self.record(key, final_status, lease_owner=row["lease_owner"],
+                    last_error=f"{category}: {error}", lease_until=None)
         return final_status
 
     def renew(self, key: str, owner: str, lease_seconds: int) -> None:
