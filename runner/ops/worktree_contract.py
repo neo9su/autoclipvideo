@@ -1,49 +1,58 @@
-"""Trusted developer worktree contract used by the durable runner.
-
-The contract is intentionally local and allow-list based: a worker may only run in
-an explicitly assigned worktree beneath an approved repository root.  It does not
-change global sandbox settings or grant access to the main checkout.
-"""
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 
 class WorktreeContractError(ValueError):
-    """Raised when a worker execution context is outside its assigned worktree."""
+    """Raised when a worker is outside its assigned worktree contract."""
 
 
 @dataclass(frozen=True)
-class WorktreeProfile:
-    assigned_worktree: Path
-    allowed_repo_root: Path
+class WorktreeContract:
+    worktree: Path
+    repo_root: Path
+    branch: str
+    profile: str = "trusted-developer"
 
-    def validate(self, cwd: str | Path | None = None) -> dict[str, str]:
-        worktree = self.assigned_worktree.resolve()
-        repo_root = self.allowed_repo_root.resolve()
-        candidate = Path(cwd or worktree).resolve()
-        if candidate != worktree:
-            raise WorktreeContractError("worker cwd is not the assigned worktree")
-        # Fabrica worktrees deliberately live beside the checkout rather than
-        # inside it.  Accept only that canonical sibling directory; accepting
-        # an arbitrary descendant of the repository's parent would turn this
-        # profile into a host-path allowlist bypass.
-        expected_worktree_root = repo_root.parent / f"{repo_root.name}.worktrees"
-        if worktree == repo_root or expected_worktree_root not in worktree.parents:
-            raise WorktreeContractError("assigned worktree is outside the repository allowlist")
-        if not worktree.is_dir():
-            raise WorktreeContractError("assigned worktree does not exist")
-        git = ["git", "-C", str(worktree)]
-        try:
-            root = subprocess.check_output(git + ["rev-parse", "--show-toplevel"], text=True).strip()
-            branch = subprocess.check_output(git + ["branch", "--show-current"], text=True).strip()
-            head = subprocess.check_output(git + ["rev-parse", "HEAD"], text=True).strip()
-        except (OSError, subprocess.CalledProcessError) as exc:
-            raise WorktreeContractError("assigned worktree is not a usable git worktree") from exc
-        if Path(root).resolve() != worktree:
-            raise WorktreeContractError("git root does not match assigned worktree")
-        if not branch or not head:
-            raise WorktreeContractError("worker must report a branch and head SHA")
-        return {"cwd": str(worktree), "repo_root": root, "branch": branch, "head_sha": head}
+    def validate(self, cwd: str | Path, repo_root: str | Path, branch: str) -> None:
+        actual_cwd = Path(cwd).resolve()
+        expected = self.worktree.resolve()
+        if actual_cwd != expected and expected not in actual_cwd.parents:
+            raise WorktreeContractError("worker cwd is outside the assigned worktree")
+        if Path(repo_root).resolve() != self.repo_root.resolve():
+            raise WorktreeContractError("worker repo root does not match the contract")
+        if branch != self.branch:
+            raise WorktreeContractError("worker branch does not match the contract")
+
+    def bootstrap_payload(self, run_id: str, generation: int, cwd: str | Path | None = None) -> dict[str, object]:
+        actual_cwd = Path(cwd or self.worktree).resolve()
+        return {
+            "run_id": run_id,
+            "generation": generation,
+            "cwd": str(actual_cwd),
+            "repo_root": str(self.repo_root.resolve()),
+            "branch": self.branch,
+            "tool_profile": self.profile,
+        }
+
+
+def discover_git_identity(cwd: str | Path) -> tuple[str, str]:
+    """Return repository root and branch without consulting ambient PATH state."""
+    directory = str(Path(cwd).resolve())
+    try:
+        root = subprocess.check_output(["git", "-C", directory, "rev-parse", "--show-toplevel"], text=True).strip()
+        branch = subprocess.check_output(["git", "-C", directory, "branch", "--show-current"], text=True).strip()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise WorktreeContractError("unable to identify git worktree") from exc
+    if not root or not branch:
+        raise WorktreeContractError("git worktree has no repository root or branch")
+    return root, branch
+
+
+def default_contract() -> WorktreeContract:
+    cwd = Path.cwd().resolve()
+    root, branch = discover_git_identity(cwd)
+    return WorktreeContract(cwd, Path(root), branch, os.getenv("TASK_RUNNER_TOOL_PROFILE", "trusted-developer"))

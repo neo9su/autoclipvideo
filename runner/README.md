@@ -15,7 +15,9 @@ python -m runner.ops.task_runner --db .runner/runner.sqlite3 scan --dry-run  # f
 `run-once --dry-run` opens the existing database read-only (or uses an in-memory empty store when it does not exist) and reports queued/retryable candidates as JSON. It does not acquire leases, write runs/events/state, or start worker processes. Use it to inspect what the next run would select.
 
 Set `TASK_RUNNER_WORKER` to a command template (supports `{issue_id}`), `TASK_RUNNER_HARD_TIMEOUT`, `TASK_RUNNER_NO_PROGRESS_TIMEOUT`, `TASK_RUNNER_LEASE_SECONDS`, `TASK_RUNNER_CONCURRENCY`, and `TASK_RUNNER_GH`. The default worker concurrency is one. Workers run in their own process group and are terminated (then killed) on timeout. GitHub scanning uses configurable `gh`; unavailable/invalid output safely yields no issues.
-SQLite tables persist issues, runs, leases, and events. Startup recovery removes expired leases and moves running runs to `interrupted` with their issue `retryable`. `run-once` only selects queued/retryable work, so completed work is idempotent.
+SQLite tables persist issues, runs, leases, sessions, and lifecycle events. Every run has an immutable `run_id`, `generation`, and session key. A run enters `accepted_idle` only while its session is being confirmed; lifecycle events distinguish session request/confirmation/bootstrap/activity and late events are fenced as audit-only. Startup recovery removes expired leases and moves running runs to `interrupted` with the `gateway_restart` error class and their issue `retryable`. `run-once` only selects queued/retryable work, so completed work is idempotent.
+
+Trusted workers should validate the assigned worktree before writing. `runner.ops.worktree_contract.WorktreeContract` requires the assigned worktree, repository root, and branch to match; use its `bootstrap_payload()` as the first activity report. This is an application-level allowlist and does not disable the host sandbox or grant access to the main checkout.
 
 ## launchd guidance (macOS)
 

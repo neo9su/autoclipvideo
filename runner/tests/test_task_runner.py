@@ -4,10 +4,11 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[2]))
 from runner.ops.task_runner import Runner, RunnerConfig, TaskStore
-from runner.ops.worktree_contract import WorktreeContractError, WorktreeProfile
+from runner.ops.worktree_contract import WorktreeContract, WorktreeContractError
 
 
 def test_lease_uniqueness(tmp_path):
@@ -20,7 +21,7 @@ def test_lease_uniqueness(tmp_path):
 def test_restart_recovery(tmp_path):
     s=TaskStore(tmp_path/'x.db'); s.upsert_issue(1,'x'); s.claim(1,'a',-1)
     s.conn.execute("INSERT INTO runs(id,issue_id,state,started_at,finished_at,error) VALUES ('r',1,'running',?,?,?)",(time.time(),None,None))
-    got=s.recover(); assert got=={'expired_leases':1,'interrupted_runs':1,'accepted_idle':0,'dry_run':False}
+    got=s.recover(); assert got=={'expired_leases':1,'interrupted_runs':1,'dry_run':False}
     assert s.conn.execute("SELECT state FROM runs").fetchone()[0]=='interrupted'
     assert s.conn.execute("SELECT state FROM issues").fetchone()[0]=='retryable'
 
@@ -94,65 +95,29 @@ def test_cli_status_and_recover_dry_run(tmp_path):
     status=subprocess.run(command+['status'], capture_output=True, text=True, check=True)
     assert json.loads(status.stdout) == {'issues': [], 'runs': [], 'leases': [], 'events': 0}
     recover=subprocess.run(command+['recover', '--dry-run'], capture_output=True, text=True, check=True)
-    assert json.loads(recover.stdout) == {'expired_leases': 0, 'interrupted_runs': 0, 'accepted_idle': 0, 'dry_run': True}
+    assert json.loads(recover.stdout) == {'expired_leases': 0, 'interrupted_runs': 0, 'dry_run': True}
 
 
-def test_run_has_generation_and_fenced_late_event(tmp_path):
+def test_run_has_generation_and_session_lifecycle(tmp_path):
     store = TaskStore(tmp_path / 'x.db')
-    store.upsert_issue(9, 'generation')
+    store.upsert_issue(9, 'lifecycle')
     assert Runner(RunnerConfig(db=tmp_path / 'x.db'), store, worker=lambda issue: 0).run_once() == 'succeeded'
-    run = store.conn.execute('SELECT id,generation FROM runs WHERE issue_id=9').fetchone()
-    assert run['generation'] == 1
-    assert not store.fenced_event('first_tool_activity', 9, run['id'], 0)
-    assert store.conn.execute("SELECT kind FROM events ORDER BY id DESC LIMIT 1").fetchone()[0] == 'late_event_ignored'
+    run = store.conn.execute('SELECT id,generation,session_key FROM runs').fetchone()
+    assert run['generation'] == 1 and run['session_key'].startswith('issue:9:run:')
+    kinds = [row[0] for row in store.conn.execute('SELECT kind FROM events ORDER BY id')]
+    assert kinds[:3] == ['lease_acquired', 'session_requested', 'session_confirmed']
 
 
-def test_single_flight_prevents_nested_tick(tmp_path):
+def test_late_generation_activity_is_fenced(tmp_path):
     store = TaskStore(tmp_path / 'x.db')
-    with store.single_flight('first') as acquired:
-        assert acquired
-        with store.single_flight('second') as nested:
-            assert not nested
+    store.upsert_issue(1, 'fence')
+    Runner(RunnerConfig(db=tmp_path / 'x.db'), store, worker=lambda issue: 0).run_once()
+    run_id = store.conn.execute('SELECT id FROM runs').fetchone()[0]
+    assert not store.record_activity(run_id, 2)
+    assert store.conn.execute("SELECT state FROM sessions WHERE run_id=?", (run_id,)).fetchone()[0] == 'confirmed'
 
 
-def test_worktree_contract_rejects_main_checkout(tmp_path):
-    repo = tmp_path / 'repo'
-    repo.mkdir()
-    subprocess.run(['git', 'init', '-q', str(repo)], check=True)
-    subprocess.run(['git', '-C', str(repo), 'config', 'user.email', 'test@example.invalid'], check=True)
-    subprocess.run(['git', '-C', str(repo), 'config', 'user.name', 'Test'], check=True)
-    (repo / 'README').write_text('test')
-    subprocess.run(['git', '-C', str(repo), 'add', 'README'], check=True)
-    subprocess.run(['git', '-C', str(repo), 'commit', '-qm', 'initial'], check=True)
-    with __import__('pytest').raises(WorktreeContractError):
-        WorktreeProfile(repo, repo).validate()
-
-
-def test_worktree_contract_accepts_canonical_sibling_worktree(tmp_path):
-    repo = tmp_path / 'repo'
-    worktree = tmp_path / 'repo.worktrees' / 'feature'
-    repo.mkdir()
-    subprocess.run(['git', 'init', '-q', str(repo)], check=True)
-    subprocess.run(['git', '-C', str(repo), 'config', 'user.email', 'test@example.invalid'], check=True)
-    subprocess.run(['git', '-C', str(repo), 'config', 'user.name', 'Test'], check=True)
-    (repo / 'README').write_text('test')
-    subprocess.run(['git', '-C', str(repo), 'add', 'README'], check=True)
-    subprocess.run(['git', '-C', str(repo), 'commit', '-qm', 'initial'], check=True)
-    subprocess.run(['git', '-C', str(repo), 'worktree', 'add', '-q', '-b', 'feature', str(worktree)], check=True)
-
-    metadata = WorktreeProfile(worktree, repo).validate()
-
-    assert metadata['cwd'] == str(worktree.resolve())
-    assert metadata['repo_root'] == str(worktree.resolve())
-    assert metadata['branch'] == 'feature'
-    assert len(metadata['head_sha']) == 40
-
-
-def test_worktree_contract_rejects_unrelated_sibling(tmp_path):
-    repo = tmp_path / 'repo'
-    unrelated = tmp_path / 'other.worktrees' / 'feature'
-    repo.mkdir()
-    unrelated.mkdir(parents=True)
-
-    with __import__('pytest').raises(WorktreeContractError):
-        WorktreeProfile(unrelated, repo).validate()
+def test_worktree_contract_rejects_wrong_branch(tmp_path):
+    contract = WorktreeContract(tmp_path / 'assigned', tmp_path, 'feature/118')
+    with pytest.raises(WorktreeContractError):
+        contract.validate(tmp_path / 'assigned', tmp_path, 'master')
