@@ -104,6 +104,28 @@ def validate_output_root(source_dir: Path, output_dir: Path) -> None:
         raise ValueError("output directory must be isolated from source directory")
 
 
+def validate_control_paths(source_dir: Path, *paths: Path) -> None:
+    """Keep every mutable control-plane artifact outside immutable media.
+
+    This also prevents a manifest or checkpoint created by mistake below the
+    input tree from being mistaken for a recording on the next scan.
+    """
+    source = source_dir.resolve()
+    for path in paths:
+        resolved = path.resolve()
+        if resolved == source or source in resolved.parents:
+            raise ValueError("manifest, checkpoint, and output must be outside source directory")
+
+
+def validate_manifest_item(source_dir: Path, item: dict[str, Any]) -> None:
+    """Reject hand-edited manifests that escape the declared Mac input root."""
+    root = source_dir.resolve()
+    for field in ("source", "srt"):
+        path = Path(item[field]).resolve()
+        if path == root or root not in path.parents:
+            raise ValueError(f"manifest_{field}_outside_source_dir")
+
+
 class Checkpoint:
     """Durable job state and append-only evidence in SQLite."""
     def __init__(self, path: Path) -> None:
@@ -244,6 +266,7 @@ def run_one(job: dict[str, Any], checkpoint: Checkpoint, args: argparse.Namespac
     checkpoint.update(key, status="processing", attempts=attempts)
     started = time.time()
     try:
+        validate_manifest_item(args.source_dir, job)
         sidecar = Path(job["srt"])
         if (source.stat().st_size != job["source_size"]
                 or sha256_file(source) != job["source_sha256"]):
@@ -330,6 +353,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("source directory, retry limit, and rate limit are invalid")
     try:
         validate_output_root(args.source_dir, args.output_dir)
+        validate_control_paths(args.source_dir, args.manifest, args.checkpoint, args.output_dir)
     except ValueError as exc:
         parser.error(str(exc))
     args.headers = {"Authorization": f"Bearer {args.auth_token}"} if args.auth_token else {}

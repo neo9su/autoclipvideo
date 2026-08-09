@@ -7,7 +7,8 @@ from pathlib import Path
 import pytest
 
 from scripts.reclip_batch import (Checkpoint, create_manifest, lease, scan_pairs,
-                                  stable_job_key, validate_output_root)
+                                  stable_job_key, validate_control_paths,
+                                  validate_manifest_item, validate_output_root)
 
 
 def test_manifest_uses_supported_sidecars_and_preserves_sources(tmp_path: Path) -> None:
@@ -60,3 +61,15 @@ def test_output_root_cannot_be_source_or_child(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         validate_output_root(source_dir, source_dir / "outputs")
     validate_output_root(source_dir, tmp_path / "isolated-output")
+
+
+def test_control_plane_artifacts_and_manifest_inputs_are_isolated(tmp_path: Path) -> None:
+    source_dir = tmp_path / "recordings"
+    source_dir.mkdir()
+    validate_control_paths(source_dir, tmp_path / "manifest.jsonl", tmp_path / "checkpoint.db")
+    with pytest.raises(ValueError):
+        validate_control_paths(source_dir, source_dir / "checkpoint.db")
+    valid = {"source": str(source_dir / "a.mp4"), "srt": str(source_dir / "a.srt")}
+    validate_manifest_item(source_dir, valid)
+    with pytest.raises(ValueError):
+        validate_manifest_item(source_dir, {"source": str(tmp_path / "outside.mp4"), "srt": str(source_dir / "a.srt")})
