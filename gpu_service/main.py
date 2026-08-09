@@ -18,6 +18,7 @@ os.environ.setdefault("MODELSCOPE_OFFLINE", "1")
 os.environ.setdefault("MS_OFFLINE", "1")
 
 import asyncio
+import hashlib
 import logging
 import os as _os
 import sqlite3
@@ -48,6 +49,24 @@ _DEFAULT_STORAGE = (
 )
 STORAGE_DIR = os.environ.get("STORAGE_DIR", _DEFAULT_STORAGE)
 os.makedirs(STORAGE_DIR, exist_ok=True)
+
+# The GPU host is on a private network, but the reclip workflow still needs an
+# explicit authentication boundary.  Keep legacy deployments compatible by
+# making enforcement opt-in until the operator provisions a token; a missing
+# token is never treated as an empty credential when enforcement is enabled.
+GPU_API_TOKEN = os.environ.get("GPU_API_TOKEN", "")
+RECLIP_REQUIRE_AUTH = os.environ.get("RECLIP_REQUIRE_AUTH", "0") == "1"
+
+
+def _require_api_auth(request: Request) -> None:
+    """Require a configured bearer token for reclip job endpoints."""
+    if not RECLIP_REQUIRE_AUTH:
+        return
+    if not GPU_API_TOKEN:
+        raise HTTPException(status_code=503, detail="GPU API authentication is not configured")
+    authorization = request.headers.get("Authorization", "")
+    if authorization != f"Bearer {GPU_API_TOKEN}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
 DB_PATH = os.path.join(STORAGE_DIR, "jobs.db")
 
@@ -973,14 +992,19 @@ async def create_job(
     room_id: int = Form(...),
 ):
     """Receive MP4 file and start transcription."""
+    _require_api_auth(request)
     from urllib.parse import unquote
     _raw_filename = unquote(file.filename)  # decode %E5%B0%8F... → 中文
+    if not _raw_filename or os.path.basename(_raw_filename) != _raw_filename or "\x00" in _raw_filename:
+        raise HTTPException(status_code=400, detail="filename must be a safe basename")
     idempotency_key = request.headers.get("X-Idempotency-Key") if request else None
     if idempotency_key:
         existing = _jobs.get(idempotency_key)
         if existing and existing.get("job_id"):
             return {"job_id": existing["job_id"], "status": existing["status"], "deduplicated": True}
-    job_id = os.path.splitext(_raw_filename)[0]
+    # A content-derived ID avoids collisions when different directories contain
+    # the same basename and remains safe on Windows (unlike raw header values).
+    job_id = hashlib.sha256((idempotency_key or _raw_filename).encode("utf-8")).hexdigest()[:32]
     room_dir = os.path.join(STORAGE_DIR, str(room_id))
     # exist_ok=True doesn't suppress WinError 183 on Windows when the path is a junction/symlink;
     # catch the OSError explicitly so the endpoint doesn't return 500.
@@ -1005,16 +1029,18 @@ async def create_job(
 
 
 @app.get("/jobs/{job_id}")
-async def get_job(job_id: str):
+async def get_job(request: Request, job_id: str):
     job = _jobs.get(job_id)
+    _require_api_auth(request)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return {"job_id": job_id, "status": job["status"], "error": job.get("error")}
 
 
 @app.get("/jobs/{job_id}/srt")
-async def get_srt(job_id: str):
+async def get_srt(request: Request, job_id: str):
     job = _jobs.get(job_id)
+    _require_api_auth(request)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     if job["status"] != "done":
@@ -1024,6 +1050,21 @@ async def get_srt(job_id: str):
         raise HTTPException(status_code=404, detail="SRT file missing on disk")
     return FileResponse(srt_path, media_type="text/plain; charset=utf-8",
                         filename=os.path.basename(srt_path))
+
+
+@app.get("/jobs/{job_id}/mp4")
+async def get_job_mp4(request: Request, job_id: str):
+    """Return the GPU-consumed MP4 artifact for auditable reclip runs."""
+    _require_api_auth(request)
+    job = _jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job["status"] != "done":
+        raise HTTPException(status_code=404, detail="MP4 not ready")
+    mp4_path = job.get("mp4_path")
+    if not mp4_path or not os.path.isfile(mp4_path) or os.path.getsize(mp4_path) <= 0:
+        raise HTTPException(status_code=404, detail="MP4 file missing on disk")
+    return FileResponse(mp4_path, media_type="video/mp4", filename=os.path.basename(mp4_path))
 
 
 # ── Frame extraction endpoint ─────────────────────────────────────────────────
