@@ -16,6 +16,7 @@ import aiosqlite
 import httpx
 
 from gpu_execution import reject_local_media
+from srt_resolver import resolve_srt_path
 
 from db import DB_PATH, aio_connect
 from llm_client import llm_post, LLM_MODEL as BEDROCK_MODEL, _LLM_BASE_URL, _LLM_API_KEY
@@ -421,10 +422,8 @@ async def _build_merged_srt(group_id: int, merged_filename: str) -> None:
 
     text_parts = []
     for row in rows:
-        srt_path = os.path.join(
-            RECORDINGS_DIR, os.path.splitext(row["filename"])[0] + ".srt"
-        )
-        if not os.path.exists(srt_path):
+        srt_path = resolve_srt_path(os.path.join(RECORDINGS_DIR, row["filename"]))
+        if not srt_path:
             continue
         try:
             with open(srt_path, encoding="utf-8") as f:
