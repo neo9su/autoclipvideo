@@ -14,10 +14,16 @@ from typing import Callable
 
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS issues (id INTEGER PRIMARY KEY, title TEXT NOT NULL, state TEXT NOT NULL, payload TEXT NOT NULL DEFAULT '{}', updated_at REAL NOT NULL);
-CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, issue_id INTEGER NOT NULL, state TEXT NOT NULL, started_at REAL NOT NULL, finished_at REAL, error TEXT, generation INTEGER NOT NULL DEFAULT 1, session_key TEXT, retry_count INTEGER NOT NULL DEFAULT 0, error_class TEXT, UNIQUE(issue_id, id));
-CREATE TABLE IF NOT EXISTS leases (issue_id INTEGER PRIMARY KEY, owner TEXT NOT NULL, expires_at REAL NOT NULL, run_id TEXT, generation INTEGER NOT NULL DEFAULT 1);
-CREATE TABLE IF NOT EXISTS sessions (run_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, session_key TEXT NOT NULL UNIQUE, state TEXT NOT NULL, confirmed_at REAL, last_activity_at REAL);
-CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, issue_id INTEGER, run_id TEXT, generation INTEGER, payload TEXT NOT NULL DEFAULT '{}', created_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, issue_id INTEGER NOT NULL, state TEXT NOT NULL, started_at REAL NOT NULL, finished_at REAL, error TEXT, generation INTEGER NOT NULL DEFAULT 1, session_key TEXT, retry_count INTEGER NOT NULL DEFAULT 0, error_class TEXT, protocol_version TEXT NOT NULL DEFAULT '1', nonce TEXT, UNIQUE(issue_id, id));
+CREATE TABLE IF NOT EXISTS leases (issue_id INTEGER PRIMARY KEY, owner TEXT NOT NULL, expires_at REAL NOT NULL, run_id TEXT, generation INTEGER NOT NULL DEFAULT 1, epoch INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS sessions (run_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, session_key TEXT NOT NULL UNIQUE, state TEXT NOT NULL, confirmed_at REAL, last_activity_at REAL, nonce TEXT, protocol_version TEXT NOT NULL DEFAULT '1', last_sequence INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_uuid TEXT NOT NULL UNIQUE, sequence INTEGER NOT NULL, kind TEXT NOT NULL, issue_id INTEGER, run_id TEXT, generation INTEGER, payload TEXT NOT NULL DEFAULT '{}', created_at REAL NOT NULL, UNIQUE(run_id, sequence));
+CREATE TABLE IF NOT EXISTS artifacts (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, generation INTEGER NOT NULL, kind TEXT NOT NULL, value TEXT NOT NULL, sha256 TEXT, verified INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL, UNIQUE(run_id, generation, kind, value));
+CREATE TABLE IF NOT EXISTS qa_records (run_id TEXT NOT NULL, generation INTEGER NOT NULL, evidence TEXT NOT NULL, passed INTEGER NOT NULL, created_at REAL NOT NULL, PRIMARY KEY(run_id, generation));
+CREATE TABLE IF NOT EXISTS deploy_records (run_id TEXT NOT NULL, generation INTEGER NOT NULL, evidence TEXT NOT NULL, verified INTEGER NOT NULL, policy TEXT NOT NULL, created_at REAL NOT NULL, PRIMARY KEY(run_id, generation));
+CREATE TABLE IF NOT EXISTS outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', created_at REAL NOT NULL, delivered_at REAL);
+CREATE TABLE IF NOT EXISTS alerts (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'open', payload TEXT NOT NULL DEFAULT '{}', created_at REAL NOT NULL, updated_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS coordinator_lock (name TEXT PRIMARY KEY, owner TEXT NOT NULL, acquired_at REAL NOT NULL);
 '''
 
 @dataclass
@@ -67,10 +73,123 @@ class TaskStore:
         for name, definition in (("run_id", "TEXT"), ("generation", "INTEGER NOT NULL DEFAULT 1")):
             if name not in lease_columns:
                 self.conn.execute(f"ALTER TABLE leases ADD COLUMN {name} {definition}")
+        for name, definition in (("epoch", "INTEGER NOT NULL DEFAULT 1"),):
+            if name not in lease_columns:
+                self.conn.execute(f"ALTER TABLE leases ADD COLUMN {name} {definition}")
+        run_columns = {row[1] for row in self.conn.execute("PRAGMA table_info(runs)")}
+        for name, definition in (("protocol_version", "TEXT NOT NULL DEFAULT '1'"), ("nonce", "TEXT")):
+            if name not in run_columns:
+                self.conn.execute(f"ALTER TABLE runs ADD COLUMN {name} {definition}")
+        session_columns = {row[1] for row in self.conn.execute("PRAGMA table_info(sessions)")}
+        for name, definition in (("nonce", "TEXT"), ("protocol_version", "TEXT NOT NULL DEFAULT '1'"), ("last_sequence", "INTEGER NOT NULL DEFAULT 0")):
+            if name not in session_columns:
+                self.conn.execute(f"ALTER TABLE sessions ADD COLUMN {name} {definition}")
+        # Older databases have an integer-only event identity. Preserve them and
+        # add the idempotency fields without rewriting historical audit data.
+        event_columns = {row[1] for row in self.conn.execute("PRAGMA table_info(events)")}
+        if "event_uuid" not in event_columns:
+            self.conn.execute("ALTER TABLE events ADD COLUMN event_uuid TEXT")
+            rows = self.conn.execute("SELECT id FROM events WHERE event_uuid IS NULL").fetchall()
+            for row in rows:
+                self.conn.execute("UPDATE events SET event_uuid=?, sequence=? WHERE id=?", (str(uuid.uuid4()), row[0], row[0]))
+        if "sequence" not in event_columns:
+            self.conn.execute("ALTER TABLE events ADD COLUMN sequence INTEGER")
+            self.conn.execute("UPDATE events SET sequence=id WHERE sequence IS NULL")
+        self.conn.executescript('''
+            CREATE TABLE IF NOT EXISTS artifacts (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, generation INTEGER NOT NULL, kind TEXT NOT NULL, value TEXT NOT NULL, sha256 TEXT, verified INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL, UNIQUE(run_id, generation, kind, value));
+            CREATE TABLE IF NOT EXISTS qa_records (run_id TEXT NOT NULL, generation INTEGER NOT NULL, evidence TEXT NOT NULL, passed INTEGER NOT NULL, created_at REAL NOT NULL, PRIMARY KEY(run_id, generation));
+            CREATE TABLE IF NOT EXISTS deploy_records (run_id TEXT NOT NULL, generation INTEGER NOT NULL, evidence TEXT NOT NULL, verified INTEGER NOT NULL, policy TEXT NOT NULL, created_at REAL NOT NULL, PRIMARY KEY(run_id, generation));
+            CREATE TABLE IF NOT EXISTS outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', created_at REAL NOT NULL, delivered_at REAL);
+            CREATE TABLE IF NOT EXISTS alerts (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'open', payload TEXT NOT NULL DEFAULT '{}', created_at REAL NOT NULL, updated_at REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS coordinator_lock (name TEXT PRIMARY KEY, owner TEXT NOT NULL, acquired_at REAL NOT NULL);
+        ''')
 
     def close(self): self.conn.close()
-    def event(self, kind, issue_id=None, run_id=None, generation=None, payload=None):
-        self.conn.execute("INSERT INTO events(kind,issue_id,run_id,generation,payload,created_at) VALUES(?,?,?,?,?,?)", (kind, issue_id, run_id, generation, json.dumps(payload or {}), time.time()))
+    def event(self, kind, issue_id=None, run_id=None, generation=None, payload=None, event_uuid=None, sequence=None):
+        event_uuid = event_uuid or str(uuid.uuid4())
+        if sequence is None:
+            sequence = self.conn.execute("SELECT COALESCE(MAX(sequence), 0) + 1 FROM events WHERE run_id IS ?", (run_id,)).fetchone()[0]
+        try:
+            self.conn.execute("INSERT INTO events(event_uuid,sequence,kind,issue_id,run_id,generation,payload,created_at) VALUES(?,?,?,?,?,?,?,?)", (event_uuid, sequence, kind, issue_id, run_id, generation, json.dumps(payload or {}), time.time()))
+        except sqlite3.IntegrityError:
+            # Replaying the same envelope is deliberately a no-op. A run may
+            # already have lifecycle events at the worker's sequence number;
+            # preserve both records with the next durable audit sequence.
+            if self.conn.execute("SELECT 1 FROM events WHERE event_uuid=?", (event_uuid,)).fetchone():
+                return
+            sequence = self.conn.execute("SELECT COALESCE(MAX(sequence), 0) + 1 FROM events WHERE run_id IS ?", (run_id,)).fetchone()[0]
+            self.conn.execute("INSERT INTO events(event_uuid,sequence,kind,issue_id,run_id,generation,payload,created_at) VALUES(?,?,?,?,?,?,?,?)", (event_uuid, sequence, kind, issue_id, run_id, generation, json.dumps(payload or {}), time.time()))
+
+    def acquire_coordinator(self, owner: str) -> bool:
+        now = time.time()
+        try:
+            self.conn.execute("INSERT INTO coordinator_lock(name,owner,acquired_at) VALUES('heartbeat',?,?)", (owner, now))
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+    def release_coordinator(self, owner: str) -> bool:
+        return bool(self.conn.execute("DELETE FROM coordinator_lock WHERE name='heartbeat' AND owner=?", (owner,)).rowcount)
+
+    def add_artifact(self, run_id, generation, kind, value, sha256=None, verified=False) -> bool:
+        if not self.is_current(run_id, generation):
+            self.event("late_event_ignored", run_id=run_id, generation=generation, payload={"kind": "artifact"})
+            return False
+        self.conn.execute("INSERT OR IGNORE INTO artifacts(run_id,generation,kind,value,sha256,verified,created_at) VALUES(?,?,?,?,?,?,?)", (run_id, generation, kind, value, sha256, int(verified), time.time()))
+        return True
+
+    def record_evidence(self, run_id, generation, qa=None, deploy=None) -> bool:
+        if not self.is_current(run_id, generation):
+            self.event("late_event_ignored", run_id=run_id, generation=generation, payload={"kind": "evidence"})
+            return False
+        if qa is not None:
+            self.conn.execute("INSERT OR REPLACE INTO qa_records VALUES(?,?,?,?,?)", (run_id, generation, json.dumps(qa), int(bool(qa.get("passed"))), time.time()))
+        if deploy is not None:
+            self.conn.execute("INSERT OR REPLACE INTO deploy_records VALUES(?,?,?,?,?,?)", (run_id, generation, json.dumps(deploy), int(bool(deploy.get("verified"))), deploy.get("policy", "required"), time.time()))
+        return True
+
+    def enqueue_outbox(self, key, kind, payload) -> bool:
+        return bool(self.conn.execute("INSERT OR IGNORE INTO outbox(key,kind,payload,created_at) VALUES(?,?,?,?)", (key, kind, json.dumps(payload), time.time())).rowcount)
+
+    def ingest_progress(self, run_id: str, generation: int, sequence: int,
+                        event_uuid: str, payload=None) -> bool:
+        """Accept a worker heartbeat exactly once and only in its fenced session."""
+        if not self.is_current(run_id, generation):
+            self.event("late_event_ignored", run_id=run_id, generation=generation,
+                       payload={"kind": "progress", "sequence": sequence})
+            return False
+        session = self.conn.execute(
+            "SELECT last_sequence,state FROM sessions WHERE run_id=? AND generation=?",
+            (run_id, generation),
+        ).fetchone()
+        if not session or session[1] not in {"bootstrapped", "active", "confirmed"} or sequence <= session[0]:
+            self.event("stale_event_ignored", run_id=run_id, generation=generation,
+                       payload={"kind": "progress", "sequence": sequence})
+            return False
+        self.conn.execute("UPDATE sessions SET state='active',last_sequence=?,last_activity_at=? WHERE run_id=? AND generation=? AND last_sequence<?", (sequence, time.time(), run_id, generation, sequence))
+        self.event("progress", run_id=run_id, generation=generation, payload=payload or {}, event_uuid=event_uuid, sequence=sequence)
+        return True
+
+    def reconcile(self, worktree=None) -> dict:
+        """Produce a conservative report; ambiguous records are quarantined, never closed."""
+        records = []
+        for row in self.conn.execute("SELECT i.id,i.state,r.id,r.state,r.generation,l.owner,s.state FROM issues i LEFT JOIN runs r ON r.issue_id=i.id AND r.started_at=(SELECT MAX(started_at) FROM runs WHERE issue_id=i.id) LEFT JOIN leases l ON l.issue_id=i.id LEFT JOIN sessions s ON s.run_id=r.id WHERE i.state NOT IN ('done','closed') ORDER BY i.id"):
+            issue_id, issue_state, run_id, run_state, generation, owner, session_state = row
+            problems = []
+            if run_id is None:
+                problems.append("missing_run")
+            if issue_state in {"accepted_idle", "running"} and not owner:
+                problems.append("missing_lease")
+            if run_id and not session_state:
+                problems.append("missing_session")
+            if worktree and run_id and not Path(worktree).exists():
+                problems.append("missing_worktree")
+            quarantined = bool(problems)
+            if quarantined:
+                self.conn.execute("UPDATE issues SET state='quarantined',updated_at=? WHERE id=? AND state NOT IN ('done','closed')", (time.time(), issue_id))
+                self.event("quarantined", issue_id, run_id, generation, {"reasons": problems})
+            records.append({"issue_id": issue_id, "issue_state": issue_state, "run_id": run_id, "run_state": run_state, "generation": generation, "session_state": session_state, "quarantined": quarantined, "reasons": problems})
+        return {"records": records, "quarantined": sum(item["quarantined"] for item in records)}
 
     def is_current(self, run_id: str, generation: int) -> bool:
         row = self.conn.execute("SELECT generation,state FROM runs WHERE id=?", (run_id,)).fetchone()
@@ -296,10 +415,13 @@ def main(argv=None):
     sub.add_parser("status")
     rec=sub.add_parser("recover")
     rec.add_argument("--dry-run",action="store_true")
+    reconcile=sub.add_parser("reconcile", help="report and quarantine ambiguous non-terminal records")
+    reconcile.add_argument("--worktree", type=Path)
     args=p.parse_args(argv); dry_run=args.command == "run-once" and args.dry_run; cfg=RunnerConfig(db=args.db or RunnerConfig().db); store=TaskStore(cfg.db, readonly=dry_run); runner=Runner(cfg, store=store)
     if args.command == "run-once": result=runner.run_once(args.issue, dry_run=dry_run)
     elif args.command == "recover": result=runner.recover(dry_run=args.dry_run)
     elif args.command == "scan": result=runner.scan(dry_run=args.dry_run)
+    elif args.command == "reconcile": result=store.reconcile(args.worktree)
     else: result=getattr(runner,args.command)()
     print(json.dumps(result,indent=2,default=str)); return 0
 if __name__ == "__main__": raise SystemExit(main())
