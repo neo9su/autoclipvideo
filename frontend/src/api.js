@@ -80,10 +80,29 @@ export async function getStatus() {
 
 export function createWS(onMessage) {
   const wsBase = (import.meta.env.VITE_WS_BASE || BASE.replace(/^http/, 'ws')).replace(/\/$/, '')
-  const ws = new WebSocket(`${wsBase}/ws/events`)
-  ws.onmessage = (e) => onMessage(JSON.parse(e.data))
-  ws.onclose = () => setTimeout(() => createWS(onMessage), 3000)
-  return ws
+  let ws = null
+  let reconnectTimer = null
+  let closed = false
+
+  function connect() {
+    if (closed) return
+    ws = new WebSocket(`${wsBase}/ws/events`)
+    ws.onmessage = (e) => {
+      try { onMessage(JSON.parse(e.data)) } catch {}
+    }
+    ws.onclose = () => {
+      if (closed) return
+      reconnectTimer = setTimeout(connect, 5000)
+    }
+    ws.onerror = () => {}  // onclose always fires after onerror; reconnect there
+  }
+
+  connect()
+  return () => {
+    closed = true
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
+    if (ws) { ws.onclose = null; ws.onerror = null; ws.close(); ws = null }
+  }
 }
 
 export async function getGroups() {

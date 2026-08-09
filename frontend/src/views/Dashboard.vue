@@ -105,7 +105,7 @@ const addError = ref('')
 const uploadingRooms = ref(new Set())
 const srtInputs = ref({})
 let pendingUpload = null  // { room, file }
-let ws = null
+let wsCleanup = null
 let timer = null
 
 const statusLabel = (s) => ({ live: '直播中', offline: '离线', unknown: '检测中' }[s] || '未知')
@@ -173,12 +173,13 @@ async function remove(room) {
 
 onMounted(() => {
   load()
-  ws = createWS(() => load())
+  wsCleanup = createWS(() => load())
+  // Fallback polling in case WebSocket is unavailable (e.g., control-plane mode)
   timer = setInterval(load, 10000)
 })
 
 onUnmounted(() => {
-  ws?.close()
+  wsCleanup?.()
   clearInterval(timer)
 })
 </script>

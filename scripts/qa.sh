@@ -21,6 +21,7 @@ run_gate lint python -m py_compile \
   backend/qianchuan_script.py backend/qianchuan_matcher.py backend/qianchuan_video.py backend/qianchuan_quality.py \
   backend/qianchuan_learning.py backend/qianchuan_upload.py \
   backend/local_media_guard.py backend/test_transcribe_queue.py backend/video_editing_skills.py backend/pipeline_state.py \
+  backend/transcribe.py \
   tests/test_qianchuan_learning.py tests/test_qianchuan_upload.py
 
 run_gate types python - <<'PY'
@@ -121,6 +122,20 @@ async def main():
     assert '千川投流版' in groups_vue and 'qianchuanStatusMap' in groups_vue
     assert '/api/v2/qianchuan/generate' in api_js
     assert '/api/groups/{group_id}/qianchuan-download' in main_py
+    # ── Regression: poll_transcriptions must be started as background task ──
+    assert 'asyncio.create_task(poll_transcriptions(broadcast_fn=broadcast))' in main_py, \
+        'poll_transcriptions is not started as a background task in lifespan'
+    # ── Regression: createWS must return cleanup function, not raw WebSocket ──
+    assert 'let wsCleanup = null' in Path('frontend/src/views/Dashboard.vue').read_text(), \
+        'Dashboard.vue must use wsCleanup variable'
+    assert 'wsCleanup = createWS' in Path('frontend/src/views/Dashboard.vue').read_text(), \
+        'Dashboard.vue must assign createWS result to wsCleanup'
+    assert 'wsCleanup?.()' in Path('frontend/src/views/Dashboard.vue').read_text(), \
+        'Dashboard.vue must call cleanup function on unmount'
+    assert 'if (closed) return' in api_js, \
+        'api.js createWS must guard against reconnects after close'
+    assert 'ws.onclose = null' in api_js, \
+        'api.js createWS must nullify onclose before closing'
 asyncio.run(main())
 print('qianchuan workflow smoke ok')
 

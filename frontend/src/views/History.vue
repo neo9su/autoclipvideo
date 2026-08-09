@@ -212,7 +212,7 @@ const clipJobs = ref({})        // { recording_id: { pct, msg } }
 const clipVariants = ref({})    // { recording_id: [clips] }
 const sortField = ref('start_time')
 const sortOrder = ref('desc')
-let ws = null
+let wsCleanup = null
 
 const shortError = (msg) => msg && msg.length > 40 ? msg.slice(0, 40) + '…' : msg
 
@@ -410,7 +410,7 @@ onMounted(async () => {
     if (Object.keys(jobs).length > 0) filterStatus.value = 'active'
   } catch {}
   load()
-  ws = createWS((msg) => {
+  wsCleanup = createWS((msg) => {
     if (msg.type === 'transcribed') {
       show('转录完成', 'success')
       load()
@@ -430,7 +430,7 @@ onMounted(async () => {
   })
 })
 
-onUnmounted(() => ws?.close())
+onUnmounted(() => wsCleanup?.())
 </script>
 
 <style scoped>

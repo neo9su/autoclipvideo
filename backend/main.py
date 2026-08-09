@@ -642,6 +642,7 @@ async def lifespan(app: FastAPI):
     else:
         register_online_callback(_on_gpu_online)
         tasks.extend([
+            asyncio.create_task(poll_transcriptions(broadcast_fn=broadcast)),
             asyncio.create_task(backfill_auto_merge()),
             asyncio.create_task(poll_publish_tasks(broadcast_fn=broadcast)),
             asyncio.create_task(_memory_monitor(broadcast_fn=broadcast)),
