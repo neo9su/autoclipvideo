@@ -70,7 +70,7 @@ async def broadcast(message: dict):
     _ws_clients.difference_update(dead)
 
 
-monitor = MonitorManager(broadcast_fn=broadcast)
+monitor = MonitorManager(broadcast_fn=broadcast, media_enabled=not IS_CONTROL_PLANE)
 
 
 def _recording_file_path(filename: str | None) -> str | None:
@@ -649,6 +649,7 @@ async def lifespan(app: FastAPI):
         # application startup so enabled rooms are actually polled.
         await monitor.start_all()
         tasks.extend([
+            asyncio.create_task(monitor.start_all()),
             asyncio.create_task(poll_transcriptions(broadcast_fn=broadcast)),
             asyncio.create_task(backfill_auto_merge()),
             asyncio.create_task(poll_publish_tasks(broadcast_fn=broadcast)),
