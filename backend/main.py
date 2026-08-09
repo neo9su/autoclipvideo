@@ -660,6 +660,9 @@ async def lifespan(app: FastAPI):
             asyncio.create_task(_periodic_director_dispatch()),
             asyncio.create_task(_periodic_qianchuan_dispatch()),
         ])
+        # Room monitors are owned by the GPU backend. Start them during
+        # application startup so enabled rooms are actually polled.
+        await monitor.start_all()
     yield
     for task in tasks:
         task.cancel()
