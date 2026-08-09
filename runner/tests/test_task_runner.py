@@ -117,6 +117,27 @@ def test_late_generation_activity_is_fenced(tmp_path):
     assert store.conn.execute("SELECT state FROM sessions WHERE run_id=?", (run_id,)).fetchone()[0] == 'confirmed'
 
 
+def test_finish_run_fences_completed_and_stale_generations(tmp_path):
+    store = TaskStore(tmp_path / 'x.db')
+    store.upsert_issue(1, 'fence finish')
+    runner = Runner(RunnerConfig(db=tmp_path / 'x.db'), store, worker=lambda issue: 0)
+    assert runner.run_once() == 'succeeded'
+    run = store.conn.execute('SELECT id,generation,state FROM runs').fetchone()
+    assert not store.finish_run(run['id'], run['generation'], 'succeeded')
+    assert not store.finish_run(run['id'], run['generation'] + 1, 'succeeded')
+    assert store.conn.execute('SELECT state FROM issues WHERE id=1').fetchone()[0] == 'done'
+
+
+def test_retry_generation_increments_for_same_issue(tmp_path):
+    store = TaskStore(tmp_path / 'x.db')
+    store.upsert_issue(1, 'generation')
+    runner = Runner(RunnerConfig(db=tmp_path / 'x.db'), store, worker=lambda issue: 1)
+    assert runner.run_once() == 'failed'
+    assert runner.run_once() == 'failed'
+    generations = [row[0] for row in store.conn.execute('SELECT generation FROM runs ORDER BY started_at')]
+    assert generations == [1, 2]
+
+
 def test_worktree_contract_rejects_wrong_branch(tmp_path):
     contract = WorktreeContract(tmp_path / 'assigned', tmp_path, 'feature/118')
     with pytest.raises(WorktreeContractError):

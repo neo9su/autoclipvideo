@@ -27,6 +27,15 @@ class WorktreeContract:
         if branch != self.branch:
             raise WorktreeContractError("worker branch does not match the contract")
 
+    def validate_allowlist(self, cwd: str | Path, repo_root: str | Path, branch: str) -> None:
+        """Reject the main checkout and unrelated sibling worktrees."""
+        self.validate(cwd, repo_root, branch)
+        actual_worktree = Path(cwd).resolve()
+        if actual_worktree == self.repo_root.resolve():
+            raise WorktreeContractError("worker must not run in the main checkout")
+        if actual_worktree != self.worktree.resolve() and self.worktree.resolve() not in actual_worktree.parents:
+            raise WorktreeContractError("worker worktree is outside the assigned allowlist")
+
     def bootstrap_payload(self, run_id: str, generation: int, cwd: str | Path | None = None) -> dict[str, object]:
         actual_cwd = Path(cwd or self.worktree).resolve()
         return {
