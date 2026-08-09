@@ -646,6 +646,7 @@ async def lifespan(app: FastAPI):
             "DEPLOYMENT_ROLE=gpu-backend: media workers enabled "
             "(capture, transcription, backfill, publish, enhance, creative/director, and room monitors)"
         )
+        await monitor.start_all()
         tasks.extend([
             asyncio.create_task(poll_transcriptions(broadcast_fn=broadcast)),
             asyncio.create_task(backfill_auto_merge()),
