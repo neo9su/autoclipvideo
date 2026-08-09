@@ -195,3 +195,37 @@ def test_recovery_reclaims_accepted_idle_and_fences_late_finish(tmp_path):
     assert store.recover()['interrupted_runs'] == 1
     assert not store.finish_run('run-1', 1, 'succeeded')
     assert store.conn.execute('SELECT state FROM issues WHERE id=1').fetchone()[0] == 'retryable'
+
+
+def test_claim_run_is_transactional_and_creates_session(tmp_path):
+    store = TaskStore(tmp_path / 'x.db')
+    store.upsert_issue(1, 'atomic')
+    assert store.claim_run(1, 'owner', 60, 'run-1', 1, 'session-1')
+    assert store.conn.execute('SELECT state FROM issues WHERE id=1').fetchone()[0] == 'accepted_idle'
+    assert store.conn.execute('SELECT state FROM sessions WHERE run_id="run-1"').fetchone()[0] == 'requested'
+
+
+def test_evidence_and_outbox_are_idempotent_and_fenced(tmp_path):
+    store = TaskStore(tmp_path / 'x.db')
+    store.upsert_issue(1, 'evidence')
+    assert store.claim_run(1, 'owner', 60, 'run-1', 1, 'session-1')
+    assert store.record_evidence('run-1', 1, 'pr', 'pr:1', {'head': 'abc'})
+    assert store.record_gate('run-1', 1, 'qa', 'passed')
+    assert store.enqueue('issue:1:merge', 'merge', {'run_id': 'run-1'})
+    assert not store.enqueue('issue:1:merge', 'merge', {'run_id': 'run-1'})
+    assert not store.record_gate('run-1', 2, 'qa', 'passed')
+
+
+def test_reconcile_quarantines_missing_remote_issue(tmp_path):
+    store = TaskStore(tmp_path / 'x.db')
+    store.upsert_issue(8, 'ambiguous')
+    report = store.reconcile([])
+    assert report[0]['status'] == 'quarantine'
+    assert store.conn.execute('SELECT count(*) FROM alerts').fetchone()[0] == 1
+
+
+def test_worktree_preflight_reports_structured_failure(tmp_path):
+    contract = WorktreeContract(tmp_path / 'assigned', tmp_path, 'feature/121')
+    evidence = contract.preflight(tmp_path)
+    assert not evidence.ok
+    assert any(check['name'] == 'main_checkout_rejected' for check in evidence.checks)
