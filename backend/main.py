@@ -649,7 +649,6 @@ async def lifespan(app: FastAPI):
         # application startup so enabled rooms are actually polled.
         await monitor.start_all()
         tasks.extend([
-            asyncio.create_task(monitor.start_all()),
             asyncio.create_task(poll_transcriptions(broadcast_fn=broadcast)),
             asyncio.create_task(backfill_auto_merge()),
             asyncio.create_task(poll_publish_tasks(broadcast_fn=broadcast)),
@@ -660,9 +659,6 @@ async def lifespan(app: FastAPI):
             asyncio.create_task(_periodic_director_dispatch()),
             asyncio.create_task(_periodic_qianchuan_dispatch()),
         ])
-        # Room monitors are owned by the GPU backend. Start them during
-        # application startup so enabled rooms are actually polled.
-        await monitor.start_all()
     yield
     for task in tasks:
         task.cancel()
