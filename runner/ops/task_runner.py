@@ -14,11 +14,15 @@ from typing import Callable
 
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS issues (id INTEGER PRIMARY KEY, title TEXT NOT NULL, state TEXT NOT NULL, payload TEXT NOT NULL DEFAULT '{}', updated_at REAL NOT NULL);
-CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, issue_id INTEGER NOT NULL, state TEXT NOT NULL, started_at REAL NOT NULL, finished_at REAL, error TEXT, generation INTEGER NOT NULL DEFAULT 1, lease_epoch INTEGER NOT NULL DEFAULT 1, session_key TEXT, retry_count INTEGER NOT NULL DEFAULT 0, error_class TEXT, last_seq INTEGER NOT NULL DEFAULT 0, UNIQUE(issue_id, id));
-CREATE TABLE IF NOT EXISTS leases (issue_id INTEGER PRIMARY KEY, owner TEXT NOT NULL, expires_at REAL NOT NULL, run_id TEXT, generation INTEGER NOT NULL DEFAULT 1, lease_epoch INTEGER NOT NULL DEFAULT 1);
-CREATE TABLE IF NOT EXISTS sessions (run_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, session_key TEXT NOT NULL UNIQUE, state TEXT NOT NULL, confirmed_at REAL, last_activity_at REAL);
-CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_uuid TEXT NOT NULL UNIQUE, seq INTEGER, kind TEXT NOT NULL, issue_id INTEGER, run_id TEXT, generation INTEGER, lease_epoch INTEGER, payload TEXT NOT NULL DEFAULT '{}', created_at REAL NOT NULL);
-CREATE TABLE IF NOT EXISTS alerts (id INTEGER PRIMARY KEY AUTOINCREMENT, alert_key TEXT NOT NULL UNIQUE, issue_id INTEGER, run_id TEXT, kind TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'open', created_at REAL NOT NULL, payload TEXT NOT NULL DEFAULT '{}');
+CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, issue_id INTEGER NOT NULL, state TEXT NOT NULL, started_at REAL NOT NULL, finished_at REAL, error TEXT, generation INTEGER NOT NULL DEFAULT 1, session_key TEXT, retry_count INTEGER NOT NULL DEFAULT 0, error_class TEXT, protocol_version TEXT NOT NULL DEFAULT '1', nonce TEXT, lease_epoch INTEGER NOT NULL DEFAULT 1, accepted_at REAL, first_activity_at REAL, UNIQUE(issue_id, id));
+CREATE TABLE IF NOT EXISTS leases (issue_id INTEGER PRIMARY KEY, owner TEXT NOT NULL, expires_at REAL NOT NULL, run_id TEXT, generation INTEGER NOT NULL DEFAULT 1, epoch INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS sessions (run_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, session_key TEXT NOT NULL UNIQUE, state TEXT NOT NULL, confirmed_at REAL, last_activity_at REAL, nonce TEXT, protocol_version TEXT NOT NULL DEFAULT '1', last_sequence INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_uuid TEXT NOT NULL UNIQUE, sequence INTEGER NOT NULL, kind TEXT NOT NULL, issue_id INTEGER, run_id TEXT, generation INTEGER, payload TEXT NOT NULL DEFAULT '{}', created_at REAL NOT NULL, UNIQUE(run_id, sequence));
+CREATE TABLE IF NOT EXISTS artifacts (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, generation INTEGER NOT NULL, kind TEXT NOT NULL, value TEXT NOT NULL, sha256 TEXT, verified INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL, UNIQUE(run_id, generation, kind, value));
+CREATE TABLE IF NOT EXISTS qa_records (run_id TEXT NOT NULL, generation INTEGER NOT NULL, evidence TEXT NOT NULL, passed INTEGER NOT NULL, created_at REAL NOT NULL, PRIMARY KEY(run_id, generation));
+CREATE TABLE IF NOT EXISTS deploy_records (run_id TEXT NOT NULL, generation INTEGER NOT NULL, evidence TEXT NOT NULL, verified INTEGER NOT NULL, policy TEXT NOT NULL, created_at REAL NOT NULL, PRIMARY KEY(run_id, generation));
+CREATE TABLE IF NOT EXISTS outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', created_at REAL NOT NULL, delivered_at REAL);
+CREATE TABLE IF NOT EXISTS alerts (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'open', payload TEXT NOT NULL DEFAULT '{}', created_at REAL NOT NULL, updated_at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS coordinator_lock (name TEXT PRIMARY KEY, owner TEXT NOT NULL, acquired_at REAL NOT NULL);
 '''
 
@@ -34,8 +38,9 @@ class RunnerConfig:
     confirm_timeout: float = float(os.getenv("TASK_RUNNER_CONFIRM_TIMEOUT", "60"))
     bootstrap_timeout: float = float(os.getenv("TASK_RUNNER_BOOTSTRAP_TIMEOUT", "120"))
     max_retries: int = int(os.getenv("TASK_RUNNER_MAX_RETRIES", "3"))
-    accepted_idle_alert_after: float = float(os.getenv("TASK_RUNNER_ACCEPTED_IDLE_ALERT", "120"))
-    accepted_idle_fence_after: float = float(os.getenv("TASK_RUNNER_ACCEPTED_IDLE_FENCE", "180"))
+    accepted_idle_alert_after: float = float(os.getenv("TASK_RUNNER_ACCEPTED_IDLE_ALERT_AFTER", "120"))
+    accepted_idle_fence_after: float = float(os.getenv("TASK_RUNNER_ACCEPTED_IDLE_FENCE_AFTER", "180"))
+    accepted_idle_retries: int = int(os.getenv("TASK_RUNNER_ACCEPTED_IDLE_RETRIES", "1"))
 
 class TaskStore:
     def __init__(self, db: str | Path, readonly=False):
@@ -60,96 +65,134 @@ class TaskStore:
     def _migrate_schema(self):
         """Add durable run/session fields when upgrading an earlier runner DB."""
         columns = {row[1] for row in self.conn.execute("PRAGMA table_info(runs)")}
-        for name, definition in (("generation", "INTEGER NOT NULL DEFAULT 1"), ("lease_epoch", "INTEGER NOT NULL DEFAULT 1"), ("session_key", "TEXT"), ("retry_count", "INTEGER NOT NULL DEFAULT 0"), ("error_class", "TEXT"), ("last_seq", "INTEGER NOT NULL DEFAULT 0")):
+        for name, definition in (("generation", "INTEGER NOT NULL DEFAULT 1"), ("session_key", "TEXT"), ("retry_count", "INTEGER NOT NULL DEFAULT 0"), ("error_class", "TEXT"), ("lease_epoch", "INTEGER NOT NULL DEFAULT 1"), ("accepted_at", "REAL"), ("first_activity_at", "REAL")):
             if name not in columns:
                 self.conn.execute(f"ALTER TABLE runs ADD COLUMN {name} {definition}")
         event_columns = {row[1] for row in self.conn.execute("PRAGMA table_info(events)")}
-        for name, definition in (("event_uuid", "TEXT"), ("seq", "INTEGER"), ("generation", "INTEGER"), ("lease_epoch", "INTEGER")):
-            if name not in event_columns:
-                self.conn.execute(f"ALTER TABLE events ADD COLUMN {name} {definition}")
-        self.conn.execute("UPDATE events SET event_uuid=lower(hex(randomblob(16))) WHERE event_uuid IS NULL")
-        self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS events_event_uuid_idx ON events(event_uuid)")
-        self.conn.execute("CREATE TABLE IF NOT EXISTS alerts (id INTEGER PRIMARY KEY AUTOINCREMENT, alert_key TEXT NOT NULL UNIQUE, issue_id INTEGER, run_id TEXT, kind TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'open', created_at REAL NOT NULL, payload TEXT NOT NULL DEFAULT '{}')")
-        self.conn.execute("CREATE TABLE IF NOT EXISTS coordinator_lock (name TEXT PRIMARY KEY, owner TEXT NOT NULL, acquired_at REAL NOT NULL)")
-
+        if "generation" not in event_columns:
+            self.conn.execute("ALTER TABLE events ADD COLUMN generation INTEGER")
+        self.conn.execute("CREATE TABLE IF NOT EXISTS sessions (run_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, session_key TEXT NOT NULL UNIQUE, state TEXT NOT NULL, confirmed_at REAL, last_activity_at REAL)")
         lease_columns = {row[1] for row in self.conn.execute("PRAGMA table_info(leases)")}
         for name, definition in (("run_id", "TEXT"), ("generation", "INTEGER NOT NULL DEFAULT 1")):
             if name not in lease_columns:
                 self.conn.execute(f"ALTER TABLE leases ADD COLUMN {name} {definition}")
+        for name, definition in (("epoch", "INTEGER NOT NULL DEFAULT 1"),):
+            if name not in lease_columns:
+                self.conn.execute(f"ALTER TABLE leases ADD COLUMN {name} {definition}")
+        run_columns = {row[1] for row in self.conn.execute("PRAGMA table_info(runs)")}
+        for name, definition in (("protocol_version", "TEXT NOT NULL DEFAULT '1'"), ("nonce", "TEXT")):
+            if name not in run_columns:
+                self.conn.execute(f"ALTER TABLE runs ADD COLUMN {name} {definition}")
+        session_columns = {row[1] for row in self.conn.execute("PRAGMA table_info(sessions)")}
+        for name, definition in (("nonce", "TEXT"), ("protocol_version", "TEXT NOT NULL DEFAULT '1'"), ("last_sequence", "INTEGER NOT NULL DEFAULT 0")):
+            if name not in session_columns:
+                self.conn.execute(f"ALTER TABLE sessions ADD COLUMN {name} {definition}")
+        # Older databases have an integer-only event identity. Preserve them and
+        # add the idempotency fields without rewriting historical audit data.
+        event_columns = {row[1] for row in self.conn.execute("PRAGMA table_info(events)")}
+        if "event_uuid" not in event_columns:
+            self.conn.execute("ALTER TABLE events ADD COLUMN event_uuid TEXT")
+            rows = self.conn.execute("SELECT id FROM events WHERE event_uuid IS NULL").fetchall()
+            for row in rows:
+                self.conn.execute("UPDATE events SET event_uuid=?, sequence=? WHERE id=?", (str(uuid.uuid4()), row[0], row[0]))
+        if "sequence" not in event_columns:
+            self.conn.execute("ALTER TABLE events ADD COLUMN sequence INTEGER")
+            self.conn.execute("UPDATE events SET sequence=id WHERE sequence IS NULL")
+        self.conn.executescript('''
+            CREATE TABLE IF NOT EXISTS artifacts (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, generation INTEGER NOT NULL, kind TEXT NOT NULL, value TEXT NOT NULL, sha256 TEXT, verified INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL, UNIQUE(run_id, generation, kind, value));
+            CREATE TABLE IF NOT EXISTS qa_records (run_id TEXT NOT NULL, generation INTEGER NOT NULL, evidence TEXT NOT NULL, passed INTEGER NOT NULL, created_at REAL NOT NULL, PRIMARY KEY(run_id, generation));
+            CREATE TABLE IF NOT EXISTS deploy_records (run_id TEXT NOT NULL, generation INTEGER NOT NULL, evidence TEXT NOT NULL, verified INTEGER NOT NULL, policy TEXT NOT NULL, created_at REAL NOT NULL, PRIMARY KEY(run_id, generation));
+            CREATE TABLE IF NOT EXISTS outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', created_at REAL NOT NULL, delivered_at REAL);
+            CREATE TABLE IF NOT EXISTS alerts (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'open', payload TEXT NOT NULL DEFAULT '{}', created_at REAL NOT NULL, updated_at REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS coordinator_lock (name TEXT PRIMARY KEY, owner TEXT NOT NULL, acquired_at REAL NOT NULL);
+        ''')
 
     def close(self): self.conn.close()
-
-    def preflight(self) -> dict[str, object]:
-        """Require writable persistent state and a single coordinator owner."""
-        if self.readonly or not os.access(self.db.parent, os.W_OK):
-            raise RuntimeError("coordinator state is not writable")
-        if not self.acquire_single_flight(self.db.stem):
-            raise RuntimeError("another coordinator is already active")
-        return {"ok": True, "single_flight": True}
-
-
-    def acquire_single_flight(self, owner: str) -> bool:
+    def event(self, kind, issue_id=None, run_id=None, generation=None, payload=None, event_uuid=None, sequence=None):
+        event_uuid = event_uuid or str(uuid.uuid4())
+        if sequence is None:
+            sequence = self.conn.execute("SELECT COALESCE(MAX(sequence), 0) + 1 FROM events WHERE run_id IS ?", (run_id,)).fetchone()[0]
         try:
-            self.conn.execute("BEGIN IMMEDIATE")
-            self.conn.execute("INSERT INTO coordinator_lock(name,owner,acquired_at) VALUES('coordinator',?,?)", (owner, time.time()))
-            self.conn.execute("COMMIT")
+            self.conn.execute("INSERT INTO events(event_uuid,sequence,kind,issue_id,run_id,generation,payload,created_at) VALUES(?,?,?,?,?,?,?,?)", (event_uuid, sequence, kind, issue_id, run_id, generation, json.dumps(payload or {}), time.time()))
+        except sqlite3.IntegrityError:
+            # Replaying the same envelope is deliberately a no-op. A run may
+            # already have lifecycle events at the worker's sequence number;
+            # preserve both records with the next durable audit sequence.
+            if self.conn.execute("SELECT 1 FROM events WHERE event_uuid=?", (event_uuid,)).fetchone():
+                return
+            sequence = self.conn.execute("SELECT COALESCE(MAX(sequence), 0) + 1 FROM events WHERE run_id IS ?", (run_id,)).fetchone()[0]
+            self.conn.execute("INSERT INTO events(event_uuid,sequence,kind,issue_id,run_id,generation,payload,created_at) VALUES(?,?,?,?,?,?,?,?)", (event_uuid, sequence, kind, issue_id, run_id, generation, json.dumps(payload or {}), time.time()))
+
+    def acquire_coordinator(self, owner: str) -> bool:
+        now = time.time()
+        try:
+            self.conn.execute("INSERT INTO coordinator_lock(name,owner,acquired_at) VALUES('heartbeat',?,?)", (owner, now))
             return True
         except sqlite3.IntegrityError:
-            if self.conn.in_transaction: self.conn.execute("ROLLBACK")
             return False
 
-    def release_single_flight(self, owner: str) -> None:
-        self.conn.execute("DELETE FROM coordinator_lock WHERE name='coordinator' AND owner=?", (owner,))
+    def release_coordinator(self, owner: str) -> bool:
+        return bool(self.conn.execute("DELETE FROM coordinator_lock WHERE name='heartbeat' AND owner=?", (owner,)).rowcount)
 
-    def acquire_single_flight(self, owner: str) -> bool:
-        try:
-            self.conn.execute("BEGIN IMMEDIATE")
-            self.conn.execute("INSERT INTO coordinator_lock(name,owner,acquired_at) VALUES('coordinator',?,?)", (owner, time.time()))
-            self.conn.execute("COMMIT")
-            return True
-        except sqlite3.IntegrityError:
-            if self.conn.in_transaction: self.conn.execute("ROLLBACK")
+    def add_artifact(self, run_id, generation, kind, value, sha256=None, verified=False) -> bool:
+        if not self.is_current(run_id, generation):
+            self.event("late_event_ignored", run_id=run_id, generation=generation, payload={"kind": "artifact"})
             return False
+        self.conn.execute("INSERT OR IGNORE INTO artifacts(run_id,generation,kind,value,sha256,verified,created_at) VALUES(?,?,?,?,?,?,?)", (run_id, generation, kind, value, sha256, int(verified), time.time()))
+        return True
 
-    def release_single_flight(self, owner: str) -> None:
-        self.conn.execute("DELETE FROM coordinator_lock WHERE name='coordinator' AND owner=?", (owner,))
+    def record_evidence(self, run_id, generation, qa=None, deploy=None) -> bool:
+        if not self.is_current(run_id, generation):
+            self.event("late_event_ignored", run_id=run_id, generation=generation, payload={"kind": "evidence"})
+            return False
+        if qa is not None:
+            self.conn.execute("INSERT OR REPLACE INTO qa_records VALUES(?,?,?,?,?)", (run_id, generation, json.dumps(qa), int(bool(qa.get("passed"))), time.time()))
+        if deploy is not None:
+            self.conn.execute("INSERT OR REPLACE INTO deploy_records VALUES(?,?,?,?,?,?)", (run_id, generation, json.dumps(deploy), int(bool(deploy.get("verified"))), deploy.get("policy", "required"), time.time()))
+        return True
 
-    def reconcile(self, dry_run=False):
-        """Report local truth mismatches and quarantine ambiguous issues."""
-        report = []
-        for issue in self.conn.execute("SELECT id,state FROM issues WHERE state NOT IN ('done','closed')"):
-            run = self.conn.execute("SELECT id,generation,state FROM runs WHERE issue_id=? ORDER BY started_at DESC LIMIT 1", (issue[0],)).fetchone()
-            lease = self.conn.execute("SELECT run_id,generation FROM leases WHERE issue_id=?", (issue[0],)).fetchone()
-            ambiguous = bool(run and lease and (run[0] != lease[0] or run[1] != lease[1])) or (issue[1] in {'running','accepted_idle'} and not run)
-            item = {"issue_id": issue[0], "issue_state": issue[1], "run": dict(run) if run else None, "lease": dict(lease) if lease else None, "ambiguous": ambiguous}
-            report.append(item)
-            if ambiguous and not dry_run:
-                self.conn.execute("UPDATE issues SET state='recovery_needed',updated_at=? WHERE id=?", (time.time(), issue[0]))
-                self.event("quarantined", issue_id=issue[0], payload={"reason": "lifecycle truth mismatch"})
-        return {"issues": report, "dry_run": dry_run}
-    def reconcile_accepted_idle(self, now=None, alert_after=120, fence_after=180, max_retries=1, dry_run=False):
-        now = time.time() if now is None else now
-        rows = self.conn.execute("SELECT id,issue_id,generation,retry_count,started_at FROM runs WHERE state='accepted_idle'").fetchall()
-        alerts = fenced = 0
-        for run_id, issue_id, generation, retries, started_at in rows:
-            age = max(0.0, now - started_at)
-            if age >= alert_after and not dry_run:
-                key = f"accepted_idle:{run_id}:alert"
-                changed = self.conn.execute("INSERT OR IGNORE INTO alerts(alert_key,issue_id,run_id,kind,created_at,payload) VALUES(?,?,?,?,?,?)", (key, issue_id, run_id, "accepted_idle", now, json.dumps({"age_seconds": age}))).rowcount
-                alerts += int(changed)
-            if age >= fence_after:
-                fenced += 1
-                if not dry_run:
-                    next_state = "retryable" if retries < max_retries else "recovery_needed"
-                    self.conn.execute("UPDATE runs SET state=?,finished_at=?,error=?,error_class=?,retry_count=retry_count+1 WHERE id=? AND generation=? AND state='accepted_idle'", (next_state, now, "worker readiness was not verified", "accepted_idle_timeout", run_id, generation))
-                    self.conn.execute("UPDATE issues SET state=?,updated_at=? WHERE id=? AND state='accepted_idle'", (next_state, now, issue_id))
-                    self.conn.execute("DELETE FROM leases WHERE issue_id=? AND run_id=? AND generation=?", (issue_id, run_id, generation))
-                    self.event("accepted_idle_fenced", issue_id, run_id, generation, {"next_state": next_state})
-        return {"accepted_idle": len(rows), "alerts": alerts, "fenced": fenced, "dry_run": dry_run}
+    def enqueue_outbox(self, key, kind, payload) -> bool:
+        return bool(self.conn.execute("INSERT OR IGNORE INTO outbox(key,kind,payload,created_at) VALUES(?,?,?,?)", (key, kind, json.dumps(payload), time.time())).rowcount)
 
-    def event(self, kind, issue_id=None, run_id=None, generation=None, payload=None, lease_epoch=None, seq=None):
-        self.conn.execute("INSERT INTO events(event_uuid,seq,kind,issue_id,run_id,generation,lease_epoch,payload,created_at) VALUES(?,?,?,?,?,?,?,?,?)", (str(uuid.uuid4()), seq, kind, issue_id, run_id, generation, lease_epoch, json.dumps(payload or {}), time.time()))
+    def ingest_progress(self, run_id: str, generation: int, sequence: int,
+                        event_uuid: str, payload=None) -> bool:
+        """Accept a worker heartbeat exactly once and only in its fenced session."""
+        if not self.is_current(run_id, generation):
+            self.event("late_event_ignored", run_id=run_id, generation=generation,
+                       payload={"kind": "progress", "sequence": sequence})
+            return False
+        session = self.conn.execute(
+            "SELECT last_sequence,state FROM sessions WHERE run_id=? AND generation=?",
+            (run_id, generation),
+        ).fetchone()
+        if not session or session[1] not in {"bootstrapped", "active", "confirmed"} or sequence <= session[0]:
+            self.event("stale_event_ignored", run_id=run_id, generation=generation,
+                       payload={"kind": "progress", "sequence": sequence})
+            return False
+        self.conn.execute("UPDATE sessions SET state='active',last_sequence=?,last_activity_at=? WHERE run_id=? AND generation=? AND last_sequence<?", (sequence, time.time(), run_id, generation, sequence))
+        self.event("progress", run_id=run_id, generation=generation, payload=payload or {}, event_uuid=event_uuid, sequence=sequence)
+        return True
 
+    def reconcile(self, worktree=None) -> dict:
+        """Produce a conservative report; ambiguous records are quarantined, never closed."""
+        records = []
+        for row in self.conn.execute("SELECT i.id,i.state,r.id,r.state,r.generation,l.owner,s.state FROM issues i LEFT JOIN runs r ON r.issue_id=i.id AND r.started_at=(SELECT MAX(started_at) FROM runs WHERE issue_id=i.id) LEFT JOIN leases l ON l.issue_id=i.id LEFT JOIN sessions s ON s.run_id=r.id WHERE i.state NOT IN ('done','closed') ORDER BY i.id"):
+            issue_id, issue_state, run_id, run_state, generation, owner, session_state = row
+            problems = []
+            if run_id is None:
+                problems.append("missing_run")
+            if issue_state in {"accepted_idle", "running"} and not owner:
+                problems.append("missing_lease")
+            if run_id and not session_state:
+                problems.append("missing_session")
+            if worktree and run_id and not Path(worktree).exists():
+                problems.append("missing_worktree")
+            quarantined = bool(problems)
+            if quarantined:
+                self.conn.execute("UPDATE issues SET state='quarantined',updated_at=? WHERE id=? AND state NOT IN ('done','closed')", (time.time(), issue_id))
+                self.event("quarantined", issue_id, run_id, generation, {"reasons": problems})
+            records.append({"issue_id": issue_id, "issue_state": issue_state, "run_id": run_id, "run_state": run_state, "generation": generation, "session_state": session_state, "quarantined": quarantined, "reasons": problems})
+        return {"records": records, "quarantined": sum(item["quarantined"] for item in records)}
 
     def is_current(self, run_id: str, generation: int) -> bool:
         row = self.conn.execute("SELECT generation,state FROM runs WHERE id=?", (run_id,)).fetchone()
@@ -238,7 +281,7 @@ class TaskStore:
         try:
             row=self.conn.execute("SELECT owner,expires_at FROM leases WHERE issue_id=?",(issue_id,)).fetchone()
             if row and row[1] > now and row[0] != owner: self.conn.execute("ROLLBACK"); return False
-            self.conn.execute("INSERT INTO leases(issue_id,owner,expires_at,run_id,generation,lease_epoch) VALUES(?,?,?,?,?,?) ON CONFLICT(issue_id) DO UPDATE SET owner=excluded.owner,expires_at=excluded.expires_at,run_id=excluded.run_id,generation=excluded.generation,lease_epoch=excluded.lease_epoch",(issue_id,owner,now+ttl,run_id,generation,generation)); self.conn.execute("COMMIT"); self.event("lease_acquired",issue_id,run_id,generation,{"owner":owner}, lease_epoch=generation); return True
+            self.conn.execute("INSERT INTO leases(issue_id,owner,expires_at,run_id,generation) VALUES(?,?,?,?,?) ON CONFLICT(issue_id) DO UPDATE SET owner=excluded.owner,expires_at=excluded.expires_at,run_id=excluded.run_id,generation=excluded.generation",(issue_id,owner,now+ttl,run_id,generation)); self.conn.execute("COMMIT"); self.event("lease_acquired",issue_id,run_id,generation,{"owner":owner}); return True
         except Exception: self.conn.execute("ROLLBACK"); raise
     def release(self, issue_id, owner, run_id=None, generation=None):
         """Release only the lease owned by this run; late cleanup is a no-op."""
@@ -251,6 +294,18 @@ class TaskStore:
             query += " AND generation=?"
             values.append(generation)
         self.conn.execute(query, values)
+
+    def release_fenced(self, issue_id: int, owner: str, run_id: str,
+                       generation: int, lease_epoch: int) -> bool:
+        """Release only the exact lease epoch; late cleanup is audit-only."""
+        changed = self.conn.execute(
+            "DELETE FROM leases WHERE issue_id=? AND owner=? AND run_id=? AND generation=? AND epoch=?",
+            (issue_id, owner, run_id, generation, lease_epoch),
+        ).rowcount
+        if not changed:
+            self.event("late_event_ignored", issue_id, run_id, generation,
+                       {"kind": "lease_release", "lease_epoch": lease_epoch})
+        return bool(changed)
 
     def renew(self, issue_id, owner, ttl, run_id, generation) -> bool:
         """Renew only the lease fenced to the current run generation."""
@@ -270,8 +325,82 @@ class TaskStore:
                 self.conn.execute("UPDATE runs SET state='interrupted',finished_at=?,error=?,error_class=? WHERE id=? AND generation=?",(now,"runner restart recovery","gateway_restart",r[0],r[2])); self.conn.execute("UPDATE issues SET state='retryable',updated_at=? WHERE id=? AND state != 'done'",(now,r[1])); self.event("run_interrupted",r[1],r[0],r[2])
                 self.event("requeued", r[1], r[0], r[2], {"reason": "gateway_restart"})
         return {"expired_leases":len(expired),"interrupted_runs":len(running),"dry_run":dry_run}
+
+    def accepted_idle_recovery(self, now: float, alert_after: float = 120,
+                               fence_after: float = 180, retry_budget: int = 1,
+                               dry_run: bool = False) -> dict:
+        """Bound the gateway-accepted/worker-idle lane.
+
+        Acceptance is not readiness.  At the alert threshold this records a
+        deduplicated alert; at the fence threshold the run is fenced and
+        requeued once, then held for manual recovery.
+        """
+        alerts = fenced = requeued = held = 0
+        rows = self.conn.execute(
+            "SELECT r.id,r.issue_id,r.generation,r.retry_count,r.accepted_at,l.owner,l.epoch "
+            "FROM runs r LEFT JOIN leases l ON l.run_id=r.id AND l.generation=r.generation "
+            "WHERE r.state='accepted_idle'"
+        ).fetchall()
+        for row in rows:
+            run_id, issue_id, generation, retries, accepted_at, owner, epoch = row
+            age = now - (accepted_at or now)
+            if age >= alert_after:
+                key = f"accepted_idle:{run_id}:{generation}"
+                if not dry_run:
+                    inserted = self.conn.execute(
+                        "INSERT OR IGNORE INTO alerts(key,kind,payload,created_at,updated_at) VALUES(?,?,?,?,?)",
+                        (key, "accepted_idle", json.dumps({"issue_id": issue_id, "age": age}), now, now),
+                    ).rowcount
+                    alerts += int(inserted > 0)
+                    self.event("accepted_idle_alert", issue_id, run_id, generation,
+                               {"age_seconds": round(age)})
+                else:
+                    alerts += 1
+            if age < fence_after:
+                continue
+            fenced += 1
+            if dry_run:
+                continue
+            changed = self.conn.execute(
+                "UPDATE runs SET state='interrupted',finished_at=?,error=?,error_class=? "
+                "WHERE id=? AND generation=? AND state='accepted_idle'",
+                (now, "worker readiness was not verified", "accepted_idle_timeout", run_id, generation),
+            ).rowcount
+            if not changed:
+                continue
+            self.conn.execute("DELETE FROM leases WHERE issue_id=? AND run_id=? AND generation=? AND (? IS NULL OR epoch=?)",
+                              (issue_id, run_id, generation, epoch, epoch))
+            can_retry = retries < retry_budget
+            next_state = "retryable" if can_retry else "recovery_needed"
+            self.conn.execute("UPDATE issues SET state=?,updated_at=? WHERE id=? AND state IN ('accepted_idle','running')",
+                              (next_state, now, issue_id))
+            self.event("accepted_idle_fenced", issue_id, run_id, generation,
+                       {"retry": can_retry, "reason": "worker_readiness_timeout"})
+            if can_retry:
+                requeued += 1
+                self.event("requeued", issue_id, run_id, generation,
+                           {"reason": "accepted_idle_timeout", "automatic_retry": True})
+            else:
+                held += 1
+                self.event("recovery_needed", issue_id, run_id, generation,
+                           {"reason": "accepted_idle_retry_budget_exhausted"})
+        return {"alerts": alerts, "fenced": fenced, "requeued": requeued,
+                "recovery_needed": held, "dry_run": dry_run}
+
+    def startup_preflight(self, owner: str) -> dict:
+        """Fail closed unless this coordinator can own durable state."""
+        diagnostics = []
+        if self.readonly:
+            diagnostics.append("coordinator database is read-only")
+        if not self.db.parent.exists() or not os.access(self.db.parent, os.W_OK):
+            diagnostics.append("coordinator state directory is not writable")
+        acquired = self.acquire_coordinator(owner) if not diagnostics else False
+        if not acquired:
+            diagnostics.append("another coordinator owns the heartbeat lock")
+        return {"ok": not diagnostics, "owner": owner, "database": str(self.db),
+                "diagnostics": diagnostics}
     def status(self):
-        return {"issues": [dict(x) for x in self.conn.execute("SELECT * FROM issues ORDER BY id")], "runs": [dict(x) for x in self.conn.execute("SELECT * FROM runs ORDER BY started_at DESC")], "leases": [dict(x) for x in self.conn.execute("SELECT * FROM leases")], "sessions": [dict(x) for x in self.conn.execute("SELECT * FROM sessions")], "alerts": [dict(x) for x in self.conn.execute("SELECT * FROM alerts ORDER BY created_at DESC")], "events": self.conn.execute("SELECT count(*) FROM events").fetchone()[0]}
+        return {"issues": [dict(x) for x in self.conn.execute("SELECT * FROM issues ORDER BY id")], "runs": [dict(x) for x in self.conn.execute("SELECT * FROM runs ORDER BY started_at DESC")], "leases": [dict(x) for x in self.conn.execute("SELECT * FROM leases")], "sessions": [dict(x) for x in self.conn.execute("SELECT * FROM sessions")], "events": self.conn.execute("SELECT count(*) FROM events").fetchone()[0]}
 
     def pending_issue_ids(self):
         return [row[0] for row in self.conn.execute("SELECT id FROM issues WHERE state IN ('queued','retryable') ORDER BY id")]
@@ -301,9 +430,9 @@ class Runner:
                 if number is not None: self.store.upsert_issue(number, title, "queued", i)
         return issues
 
-    def preflight(self):
-        return self.store.preflight()
-
+    def status(self):
+        """Return the persisted runner state for the CLI and API callers."""
+        return self.store.status()
     def run_once(self, issue_id=None, dry_run=False):
         rows=self.store.conn.execute("SELECT id,title,payload FROM issues WHERE state IN ('queued','retryable') AND (? IS NULL OR id=?) ORDER BY id",(issue_id,issue_id)).fetchall()
         if dry_run:
@@ -319,14 +448,16 @@ class Runner:
         run_id=str(uuid.uuid4()); now=time.time(); session_key=f"issue:{iid}:run:{run_id}:generation:{generation}"
         if not self.store.claim(iid, owner, self.config.lease_seconds, run_id, generation):
             return None
-        self.store.conn.execute("INSERT INTO runs(id,issue_id,state,started_at,generation,session_key,retry_count) VALUES(?,?,?,?,?,?,?)",(run_id,iid,"running",now,generation,session_key,prior_failures)); self.store.conn.execute("INSERT INTO sessions(run_id,generation,session_key,state) VALUES(?,?,?,?)",(run_id,generation,session_key,"requested")); self.store.event("session_requested",iid,run_id,generation)
-        self.store.conn.execute("UPDATE issues SET state='accepted_idle',updated_at=? WHERE id=?",(now,iid))
+        lease_epoch = self.store.conn.execute("SELECT epoch FROM leases WHERE issue_id=? AND run_id=? AND generation=?", (iid, run_id, generation)).fetchone()[0]
+        self.store.conn.execute("INSERT INTO runs(id,issue_id,state,started_at,generation,session_key,retry_count,lease_epoch,accepted_at) VALUES(?,?,?,?,?,?,?,?,?)",(run_id,iid,"running",now,generation,session_key,prior_failures,lease_epoch,now)); self.store.conn.execute("INSERT INTO sessions(run_id,generation,session_key,state) VALUES(?,?,?,?)",(run_id,generation,session_key,"requested")); self.store.event("session_requested",iid,run_id,generation)
+        self.store.conn.execute("UPDATE runs SET state='accepted_idle',accepted_at=? WHERE id=? AND generation=?",(now,run_id,generation)); self.store.conn.execute("UPDATE issues SET state='accepted_idle',updated_at=? WHERE id=?",(now,iid))
         try:
             if not self.store.confirm_session(run_id, generation):
                 raise TimeoutError("session confirmation timeout")
             if not self.store.mark_bootstrap(run_id, generation):
                 raise TimeoutError("bootstrap timeout")
             self.store.record_activity(run_id, generation)
+            self.store.conn.execute("UPDATE runs SET first_activity_at=? WHERE id=? AND generation=? AND first_activity_at IS NULL", (time.time(), run_id, generation))
             if self.worker: result=self.worker(dict(issue))
             elif self.config.worker_command: result=self._execute(self.config.worker_command, iid)
             else: result=0
@@ -340,7 +471,7 @@ class Runner:
             error_class = "retry_budget_exhausted"
         self.store.conn.execute("UPDATE runs SET retry_count=? WHERE id=? AND generation=?", (retry_count + (state != "succeeded"), run_id, generation))
         self.store.finish_run(run_id, generation, state, err, error_class)
-        self.store.release(iid, owner, run_id, generation)
+        self.store.release_fenced(iid, owner, run_id, generation, lease_epoch)
         if state == "retryable":
             self.store.event("requeued", iid, run_id, generation, {"error_class": error_class})
         return state
@@ -351,6 +482,18 @@ class Runner:
 
     def recover(self, dry_run=False):
         return self.store.recover(dry_run=dry_run)
+
+    def startup_preflight(self):
+        return self.store.startup_preflight(self.owner)
+
+    def recover_accepted_idle(self, now=None, dry_run=False):
+        return self.store.accepted_idle_recovery(
+            time.time() if now is None else now,
+            self.config.accepted_idle_alert_after,
+            self.config.accepted_idle_fence_after,
+            self.config.accepted_idle_retries,
+            dry_run,
+        )
 
     def _execute(self, command, issue_id):
         formatted_command = command.format(issue_id=issue_id)
@@ -373,15 +516,23 @@ def main(argv=None):
     r.add_argument("--issue",type=int)
     r.add_argument("--dry-run",action="store_true", help="show selected candidates without claiming or running them")
     sub.add_parser("status")
-    idle=sub.add_parser("reconcile-accepted-idle")
-    idle.add_argument("--dry-run", action="store_true")
     rec=sub.add_parser("recover")
     rec.add_argument("--dry-run",action="store_true")
+    idle=sub.add_parser("recover-accepted-idle", help="alert and fence unready accepted runs")
+    idle.add_argument("--dry-run",action="store_true")
+    sub.add_parser("preflight", help="fail-closed coordinator startup checks")
+    reconcile=sub.add_parser("reconcile", help="report and quarantine ambiguous non-terminal records")
+    reconcile.add_argument("--worktree", type=Path)
     args=p.parse_args(argv); dry_run=args.command == "run-once" and args.dry_run; cfg=RunnerConfig(db=args.db or RunnerConfig().db); store=TaskStore(cfg.db, readonly=dry_run); runner=Runner(cfg, store=store)
     if args.command == "run-once": result=runner.run_once(args.issue, dry_run=dry_run)
     elif args.command == "recover": result=runner.recover(dry_run=args.dry_run)
+    elif args.command == "recover-accepted-idle": result=runner.recover_accepted_idle(dry_run=args.dry_run)
+    elif args.command == "preflight":
+        result=runner.startup_preflight()
+        if not result["ok"]:
+            print(json.dumps(result, indent=2, default=str)); return 2
     elif args.command == "scan": result=runner.scan(dry_run=args.dry_run)
-    elif args.command == "reconcile-accepted-idle": result=runner.store.reconcile_accepted_idle(alert_after=cfg.accepted_idle_alert_after, fence_after=cfg.accepted_idle_fence_after, max_retries=1, dry_run=args.dry_run)
+    elif args.command == "reconcile": result=store.reconcile(args.worktree)
     else: result=getattr(runner,args.command)()
     print(json.dumps(result,indent=2,default=str)); return 0
 if __name__ == "__main__": raise SystemExit(main())

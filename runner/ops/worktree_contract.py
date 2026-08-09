@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,21 +18,6 @@ class WorktreeContract:
     branch: str
     profile: str = "trusted-developer"
 
-    def preflight(self, cwd: str | Path | None = None) -> dict[str, object]:
-        """Fail closed with structured evidence before worker bootstrap."""
-        actual = Path(cwd or self.worktree).resolve()
-        try:
-            root, branch = discover_git_identity(actual)
-            self.validate_allowlist(actual, root, branch)
-            if not os.access(actual, os.W_OK) or not self.profile.strip():
-                raise WorktreeContractError("worktree preflight check failed")
-            probe = actual / ".runner-write-probe"
-            probe.write_text("preflight", encoding="utf-8")
-            probe.unlink()
-            return {"cwd": str(actual), "repo_root": root, "branch": branch, "profile": self.profile, "checks": {"git_identity": True, "allowlist": True, "writable": True, "tool_profile": True}}
-        except (OSError, WorktreeContractError) as exc:
-            raise WorktreeContractError("worktree preflight failed") from exc
-
     def validate(self, cwd: str | Path, repo_root: str | Path, branch: str) -> None:
         actual_cwd = Path(cwd).resolve()
         expected = self.worktree.resolve()
@@ -41,6 +27,32 @@ class WorktreeContract:
             raise WorktreeContractError("worker repo root does not match the contract")
         if branch != self.branch:
             raise WorktreeContractError("worker branch does not match the contract")
+
+    def preflight(self, cwd: str | Path, repo_root: str | Path, branch: str,
+                  expected_base: str | None = None) -> dict[str, object]:
+        """Return sanitized evidence and fail closed on contract violations."""
+        self.validate_allowlist(cwd, repo_root, branch)
+        actual = Path(cwd).resolve()
+        if actual.is_symlink() or any(part.is_symlink() for part in [actual, *actual.parents]):
+            raise WorktreeContractError("worker worktree contains a symlink escape")
+        if not os.access(actual, os.W_OK):
+            raise WorktreeContractError("worker worktree is not writable")
+        if expected_base:
+            current = subprocess.check_output(["git", "-C", str(actual), "merge-base", "HEAD", expected_base], text=True).strip()
+            if not current:
+                raise WorktreeContractError("worker base cannot be verified")
+            status = subprocess.check_output(["git", "-C", str(actual), "status", "--porcelain", "--untracked-files=no"], text=True)
+            if status.strip():
+                raise WorktreeContractError("worker worktree has unexpected dirty tracked files")
+        if not self.profile.strip() or self.profile == "unavailable":
+            raise WorktreeContractError("worker tool profile is unavailable")
+        marker = actual / ".fabrica-preflight"
+        try:
+            marker.write_text("ok\n", encoding="utf-8")
+            marker.unlink()
+        except OSError as exc:
+            raise WorktreeContractError("worker worktree cannot create temporary evidence") from exc
+        return {"ok": True, "repo_root": str(self.repo_root), "worktree": str(actual), "branch": self.branch, "tool_profile": self.profile, "base_verified": bool(expected_base), "dirty_tracked_files": False}
 
     def validate_allowlist(self, cwd: str | Path, repo_root: str | Path, branch: str) -> None:
         """Reject the main checkout and unrelated sibling worktrees."""
@@ -60,6 +72,9 @@ class WorktreeContract:
             "repo_root": str(self.repo_root.resolve()),
             "branch": self.branch,
             "tool_profile": self.profile,
+            "protocol_version": "1",
+            "nonce": __import__("secrets").token_hex(16),
+            "expected_branch": self.branch,
         }
 
 
