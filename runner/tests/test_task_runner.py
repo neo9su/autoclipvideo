@@ -228,3 +228,32 @@ def test_reconcile_quarantines_missing_run(tmp_path):
     report = store.reconcile()
     assert report['quarantined'] == 1
     assert store.conn.execute('SELECT state FROM issues WHERE id=1').fetchone()[0] == 'quarantined'
+
+
+def test_accepted_idle_is_alerted_then_fenced_and_requeued_once(tmp_path):
+    store = TaskStore(tmp_path / 'x.db')
+    store.upsert_issue(1, 'accepted idle', 'accepted_idle')
+    store.claim(1, 'owner', 60, 'run-1', 1)
+    store.conn.execute("INSERT INTO runs(id,issue_id,state,started_at,generation,accepted_at,retry_count,lease_epoch) VALUES(?,?,?,?,?,?,?,?)", ('run-1', 1, 'accepted_idle', 1, 1, 1, 0, 1))
+    assert store.accepted_idle_recovery(121, 120, 180, 1)['alerts'] == 1
+    assert store.conn.execute("SELECT count(*) FROM alerts").fetchone()[0] == 1
+    report = store.accepted_idle_recovery(181, 120, 180, 1)
+    assert report['fenced'] == 1 and report['requeued'] == 1
+    assert store.conn.execute("SELECT state FROM issues WHERE id=1").fetchone()[0] == 'retryable'
+
+
+def test_accepted_idle_exhaustion_enters_recovery_needed(tmp_path):
+    store = TaskStore(tmp_path / 'x.db')
+    store.upsert_issue(1, 'accepted idle', 'accepted_idle')
+    store.claim(1, 'owner', 60, 'run-1', 1)
+    store.conn.execute("INSERT INTO runs(id,issue_id,state,started_at,generation,accepted_at,retry_count,lease_epoch) VALUES(?,?,?,?,?,?,?,?)", ('run-1', 1, 'accepted_idle', 1, 1, 1, 1, 1))
+    report = store.accepted_idle_recovery(181, 120, 180, 1)
+    assert report['recovery_needed'] == 1
+    assert store.conn.execute("SELECT state FROM issues WHERE id=1").fetchone()[0] == 'recovery_needed'
+
+
+def test_preflight_single_flight(tmp_path):
+    first = TaskStore(tmp_path / 'x.db')
+    second = TaskStore(tmp_path / 'x.db')
+    assert first.startup_preflight('first')['ok']
+    assert not second.startup_preflight('second')['ok']

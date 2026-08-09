@@ -14,7 +14,7 @@ from typing import Callable
 
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS issues (id INTEGER PRIMARY KEY, title TEXT NOT NULL, state TEXT NOT NULL, payload TEXT NOT NULL DEFAULT '{}', updated_at REAL NOT NULL);
-CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, issue_id INTEGER NOT NULL, state TEXT NOT NULL, started_at REAL NOT NULL, finished_at REAL, error TEXT, generation INTEGER NOT NULL DEFAULT 1, session_key TEXT, retry_count INTEGER NOT NULL DEFAULT 0, error_class TEXT, protocol_version TEXT NOT NULL DEFAULT '1', nonce TEXT, UNIQUE(issue_id, id));
+CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, issue_id INTEGER NOT NULL, state TEXT NOT NULL, started_at REAL NOT NULL, finished_at REAL, error TEXT, generation INTEGER NOT NULL DEFAULT 1, session_key TEXT, retry_count INTEGER NOT NULL DEFAULT 0, error_class TEXT, protocol_version TEXT NOT NULL DEFAULT '1', nonce TEXT, lease_epoch INTEGER NOT NULL DEFAULT 1, accepted_at REAL, first_activity_at REAL, UNIQUE(issue_id, id));
 CREATE TABLE IF NOT EXISTS leases (issue_id INTEGER PRIMARY KEY, owner TEXT NOT NULL, expires_at REAL NOT NULL, run_id TEXT, generation INTEGER NOT NULL DEFAULT 1, epoch INTEGER NOT NULL DEFAULT 1);
 CREATE TABLE IF NOT EXISTS sessions (run_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, session_key TEXT NOT NULL UNIQUE, state TEXT NOT NULL, confirmed_at REAL, last_activity_at REAL, nonce TEXT, protocol_version TEXT NOT NULL DEFAULT '1', last_sequence INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, event_uuid TEXT NOT NULL UNIQUE, sequence INTEGER NOT NULL, kind TEXT NOT NULL, issue_id INTEGER, run_id TEXT, generation INTEGER, payload TEXT NOT NULL DEFAULT '{}', created_at REAL NOT NULL, UNIQUE(run_id, sequence));
@@ -38,6 +38,9 @@ class RunnerConfig:
     confirm_timeout: float = float(os.getenv("TASK_RUNNER_CONFIRM_TIMEOUT", "60"))
     bootstrap_timeout: float = float(os.getenv("TASK_RUNNER_BOOTSTRAP_TIMEOUT", "120"))
     max_retries: int = int(os.getenv("TASK_RUNNER_MAX_RETRIES", "3"))
+    accepted_idle_alert_after: float = float(os.getenv("TASK_RUNNER_ACCEPTED_IDLE_ALERT_AFTER", "120"))
+    accepted_idle_fence_after: float = float(os.getenv("TASK_RUNNER_ACCEPTED_IDLE_FENCE_AFTER", "180"))
+    accepted_idle_retries: int = int(os.getenv("TASK_RUNNER_ACCEPTED_IDLE_RETRIES", "1"))
 
 class TaskStore:
     def __init__(self, db: str | Path, readonly=False):
@@ -62,7 +65,7 @@ class TaskStore:
     def _migrate_schema(self):
         """Add durable run/session fields when upgrading an earlier runner DB."""
         columns = {row[1] for row in self.conn.execute("PRAGMA table_info(runs)")}
-        for name, definition in (("generation", "INTEGER NOT NULL DEFAULT 1"), ("session_key", "TEXT"), ("retry_count", "INTEGER NOT NULL DEFAULT 0"), ("error_class", "TEXT")):
+        for name, definition in (("generation", "INTEGER NOT NULL DEFAULT 1"), ("session_key", "TEXT"), ("retry_count", "INTEGER NOT NULL DEFAULT 0"), ("error_class", "TEXT"), ("lease_epoch", "INTEGER NOT NULL DEFAULT 1"), ("accepted_at", "REAL"), ("first_activity_at", "REAL")):
             if name not in columns:
                 self.conn.execute(f"ALTER TABLE runs ADD COLUMN {name} {definition}")
         event_columns = {row[1] for row in self.conn.execute("PRAGMA table_info(events)")}
@@ -292,6 +295,18 @@ class TaskStore:
             values.append(generation)
         self.conn.execute(query, values)
 
+    def release_fenced(self, issue_id: int, owner: str, run_id: str,
+                       generation: int, lease_epoch: int) -> bool:
+        """Release only the exact lease epoch; late cleanup is audit-only."""
+        changed = self.conn.execute(
+            "DELETE FROM leases WHERE issue_id=? AND owner=? AND run_id=? AND generation=? AND epoch=?",
+            (issue_id, owner, run_id, generation, lease_epoch),
+        ).rowcount
+        if not changed:
+            self.event("late_event_ignored", issue_id, run_id, generation,
+                       {"kind": "lease_release", "lease_epoch": lease_epoch})
+        return bool(changed)
+
     def renew(self, issue_id, owner, ttl, run_id, generation) -> bool:
         """Renew only the lease fenced to the current run generation."""
         expires_at = time.time() + ttl
@@ -310,6 +325,80 @@ class TaskStore:
                 self.conn.execute("UPDATE runs SET state='interrupted',finished_at=?,error=?,error_class=? WHERE id=? AND generation=?",(now,"runner restart recovery","gateway_restart",r[0],r[2])); self.conn.execute("UPDATE issues SET state='retryable',updated_at=? WHERE id=? AND state != 'done'",(now,r[1])); self.event("run_interrupted",r[1],r[0],r[2])
                 self.event("requeued", r[1], r[0], r[2], {"reason": "gateway_restart"})
         return {"expired_leases":len(expired),"interrupted_runs":len(running),"dry_run":dry_run}
+
+    def accepted_idle_recovery(self, now: float, alert_after: float = 120,
+                               fence_after: float = 180, retry_budget: int = 1,
+                               dry_run: bool = False) -> dict:
+        """Bound the gateway-accepted/worker-idle lane.
+
+        Acceptance is not readiness.  At the alert threshold this records a
+        deduplicated alert; at the fence threshold the run is fenced and
+        requeued once, then held for manual recovery.
+        """
+        alerts = fenced = requeued = held = 0
+        rows = self.conn.execute(
+            "SELECT r.id,r.issue_id,r.generation,r.retry_count,r.accepted_at,l.owner,l.epoch "
+            "FROM runs r LEFT JOIN leases l ON l.run_id=r.id AND l.generation=r.generation "
+            "WHERE r.state='accepted_idle'"
+        ).fetchall()
+        for row in rows:
+            run_id, issue_id, generation, retries, accepted_at, owner, epoch = row
+            age = now - (accepted_at or now)
+            if age >= alert_after:
+                key = f"accepted_idle:{run_id}:{generation}"
+                if not dry_run:
+                    inserted = self.conn.execute(
+                        "INSERT OR IGNORE INTO alerts(key,kind,payload,created_at,updated_at) VALUES(?,?,?,?,?)",
+                        (key, "accepted_idle", json.dumps({"issue_id": issue_id, "age": age}), now, now),
+                    ).rowcount
+                    alerts += int(inserted > 0)
+                    self.event("accepted_idle_alert", issue_id, run_id, generation,
+                               {"age_seconds": round(age)})
+                else:
+                    alerts += 1
+            if age < fence_after:
+                continue
+            fenced += 1
+            if dry_run:
+                continue
+            changed = self.conn.execute(
+                "UPDATE runs SET state='interrupted',finished_at=?,error=?,error_class=? "
+                "WHERE id=? AND generation=? AND state='accepted_idle'",
+                (now, "worker readiness was not verified", "accepted_idle_timeout", run_id, generation),
+            ).rowcount
+            if not changed:
+                continue
+            self.conn.execute("DELETE FROM leases WHERE issue_id=? AND run_id=? AND generation=? AND (? IS NULL OR epoch=?)",
+                              (issue_id, run_id, generation, epoch, epoch))
+            can_retry = retries < retry_budget
+            next_state = "retryable" if can_retry else "recovery_needed"
+            self.conn.execute("UPDATE issues SET state=?,updated_at=? WHERE id=? AND state IN ('accepted_idle','running')",
+                              (next_state, now, issue_id))
+            self.event("accepted_idle_fenced", issue_id, run_id, generation,
+                       {"retry": can_retry, "reason": "worker_readiness_timeout"})
+            if can_retry:
+                requeued += 1
+                self.event("requeued", issue_id, run_id, generation,
+                           {"reason": "accepted_idle_timeout", "automatic_retry": True})
+            else:
+                held += 1
+                self.event("recovery_needed", issue_id, run_id, generation,
+                           {"reason": "accepted_idle_retry_budget_exhausted"})
+        return {"alerts": alerts, "fenced": fenced, "requeued": requeued,
+                "recovery_needed": held, "dry_run": dry_run}
+
+    def startup_preflight(self, owner: str) -> dict:
+        """Fail closed unless this coordinator can own durable state."""
+        diagnostics = []
+        if self.readonly:
+            diagnostics.append("coordinator database is read-only")
+        if not self.db.parent.exists() or not os.access(self.db.parent, os.W_OK):
+            diagnostics.append("coordinator state directory is not writable")
+        acquired = self.acquire_coordinator(owner) if not diagnostics else False
+        if not acquired:
+            diagnostics.append("another coordinator owns the heartbeat lock")
+        return {"ok": not diagnostics, "owner": owner, "database": str(self.db),
+                "diagnostics": diagnostics}
     def status(self):
         return {"issues": [dict(x) for x in self.conn.execute("SELECT * FROM issues ORDER BY id")], "runs": [dict(x) for x in self.conn.execute("SELECT * FROM runs ORDER BY started_at DESC")], "leases": [dict(x) for x in self.conn.execute("SELECT * FROM leases")], "sessions": [dict(x) for x in self.conn.execute("SELECT * FROM sessions")], "events": self.conn.execute("SELECT count(*) FROM events").fetchone()[0]}
 
@@ -359,14 +448,16 @@ class Runner:
         run_id=str(uuid.uuid4()); now=time.time(); session_key=f"issue:{iid}:run:{run_id}:generation:{generation}"
         if not self.store.claim(iid, owner, self.config.lease_seconds, run_id, generation):
             return None
-        self.store.conn.execute("INSERT INTO runs(id,issue_id,state,started_at,generation,session_key,retry_count) VALUES(?,?,?,?,?,?,?)",(run_id,iid,"running",now,generation,session_key,prior_failures)); self.store.conn.execute("INSERT INTO sessions(run_id,generation,session_key,state) VALUES(?,?,?,?)",(run_id,generation,session_key,"requested")); self.store.event("session_requested",iid,run_id,generation)
-        self.store.conn.execute("UPDATE issues SET state='accepted_idle',updated_at=? WHERE id=?",(now,iid))
+        lease_epoch = self.store.conn.execute("SELECT epoch FROM leases WHERE issue_id=? AND run_id=? AND generation=?", (iid, run_id, generation)).fetchone()[0]
+        self.store.conn.execute("INSERT INTO runs(id,issue_id,state,started_at,generation,session_key,retry_count,lease_epoch,accepted_at) VALUES(?,?,?,?,?,?,?,?,?)",(run_id,iid,"running",now,generation,session_key,prior_failures,lease_epoch,now)); self.store.conn.execute("INSERT INTO sessions(run_id,generation,session_key,state) VALUES(?,?,?,?)",(run_id,generation,session_key,"requested")); self.store.event("session_requested",iid,run_id,generation)
+        self.store.conn.execute("UPDATE runs SET state='accepted_idle',accepted_at=? WHERE id=? AND generation=?",(now,run_id,generation)); self.store.conn.execute("UPDATE issues SET state='accepted_idle',updated_at=? WHERE id=?",(now,iid))
         try:
             if not self.store.confirm_session(run_id, generation):
                 raise TimeoutError("session confirmation timeout")
             if not self.store.mark_bootstrap(run_id, generation):
                 raise TimeoutError("bootstrap timeout")
             self.store.record_activity(run_id, generation)
+            self.store.conn.execute("UPDATE runs SET first_activity_at=? WHERE id=? AND generation=? AND first_activity_at IS NULL", (time.time(), run_id, generation))
             if self.worker: result=self.worker(dict(issue))
             elif self.config.worker_command: result=self._execute(self.config.worker_command, iid)
             else: result=0
@@ -380,7 +471,7 @@ class Runner:
             error_class = "retry_budget_exhausted"
         self.store.conn.execute("UPDATE runs SET retry_count=? WHERE id=? AND generation=?", (retry_count + (state != "succeeded"), run_id, generation))
         self.store.finish_run(run_id, generation, state, err, error_class)
-        self.store.release(iid, owner, run_id, generation)
+        self.store.release_fenced(iid, owner, run_id, generation, lease_epoch)
         if state == "retryable":
             self.store.event("requeued", iid, run_id, generation, {"error_class": error_class})
         return state
@@ -391,6 +482,18 @@ class Runner:
 
     def recover(self, dry_run=False):
         return self.store.recover(dry_run=dry_run)
+
+    def startup_preflight(self):
+        return self.store.startup_preflight(self.owner)
+
+    def recover_accepted_idle(self, now=None, dry_run=False):
+        return self.store.accepted_idle_recovery(
+            time.time() if now is None else now,
+            self.config.accepted_idle_alert_after,
+            self.config.accepted_idle_fence_after,
+            self.config.accepted_idle_retries,
+            dry_run,
+        )
 
     def _execute(self, command, issue_id):
         formatted_command = command.format(issue_id=issue_id)
@@ -415,11 +518,19 @@ def main(argv=None):
     sub.add_parser("status")
     rec=sub.add_parser("recover")
     rec.add_argument("--dry-run",action="store_true")
+    idle=sub.add_parser("recover-accepted-idle", help="alert and fence unready accepted runs")
+    idle.add_argument("--dry-run",action="store_true")
+    sub.add_parser("preflight", help="fail-closed coordinator startup checks")
     reconcile=sub.add_parser("reconcile", help="report and quarantine ambiguous non-terminal records")
     reconcile.add_argument("--worktree", type=Path)
     args=p.parse_args(argv); dry_run=args.command == "run-once" and args.dry_run; cfg=RunnerConfig(db=args.db or RunnerConfig().db); store=TaskStore(cfg.db, readonly=dry_run); runner=Runner(cfg, store=store)
     if args.command == "run-once": result=runner.run_once(args.issue, dry_run=dry_run)
     elif args.command == "recover": result=runner.recover(dry_run=args.dry_run)
+    elif args.command == "recover-accepted-idle": result=runner.recover_accepted_idle(dry_run=args.dry_run)
+    elif args.command == "preflight":
+        result=runner.startup_preflight()
+        if not result["ok"]:
+            print(json.dumps(result, indent=2, default=str)); return 2
     elif args.command == "scan": result=runner.scan(dry_run=args.dry_run)
     elif args.command == "reconcile": result=store.reconcile(args.worktree)
     else: result=getattr(runner,args.command)()

@@ -41,13 +41,18 @@ class WorktreeContract:
             current = subprocess.check_output(["git", "-C", str(actual), "merge-base", "HEAD", expected_base], text=True).strip()
             if not current:
                 raise WorktreeContractError("worker base cannot be verified")
+            status = subprocess.check_output(["git", "-C", str(actual), "status", "--porcelain", "--untracked-files=no"], text=True)
+            if status.strip():
+                raise WorktreeContractError("worker worktree has unexpected dirty tracked files")
+        if not self.profile.strip() or self.profile == "unavailable":
+            raise WorktreeContractError("worker tool profile is unavailable")
         marker = actual / ".fabrica-preflight"
         try:
             marker.write_text("ok\n", encoding="utf-8")
             marker.unlink()
         except OSError as exc:
             raise WorktreeContractError("worker worktree cannot create temporary evidence") from exc
-        return {"ok": True, "repo_root": str(self.repo_root), "worktree": str(actual), "branch": self.branch, "tool_profile": self.profile}
+        return {"ok": True, "repo_root": str(self.repo_root), "worktree": str(actual), "branch": self.branch, "tool_profile": self.profile, "base_verified": bool(expected_base), "dirty_tracked_files": False}
 
     def validate_allowlist(self, cwd: str | Path, repo_root: str | Path, branch: str) -> None:
         """Reject the main checkout and unrelated sibling worktrees."""

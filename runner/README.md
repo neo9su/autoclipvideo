@@ -9,6 +9,8 @@ python -m runner.ops.task_runner --db .runner/runner.sqlite3 scan
 python -m runner.ops.task_runner --db .runner/runner.sqlite3 run-once --dry-run
 python -m runner.ops.task_runner --db .runner/runner.sqlite3 status
 python -m runner.ops.task_runner --db .runner/runner.sqlite3 recover --dry-run
+python -m runner.ops.task_runner --db .runner/runner.sqlite3 preflight
+python -m runner.ops.task_runner --db .runner/runner.sqlite3 recover-accepted-idle --dry-run
 python -m runner.ops.task_runner --db .runner/runner.sqlite3 scan --dry-run  # fetch without persisting
 ```
 
@@ -20,6 +22,17 @@ ambiguous records instead of closing or force-requeueing them:
 ```bash
 python -m runner.ops.task_runner --db .runner/runner.sqlite3 reconcile
 ```
+
+`preflight` is a fail-closed single-flight check. It verifies that the state
+directory is writable and that this coordinator can acquire the durable lock;
+it never disables the host sandbox or expands the worktree allowlist. Run it
+before starting a dispatcher and release the lock during controlled shutdown.
+
+`recover-accepted-idle` bounds the emergency lane that previously caused
+accepted-idle deadlocks. It records one deduplicated alert after 120 seconds,
+fences the run at 180 seconds, releases its exact lease epoch, and requeues it
+once. A second failure enters `recovery_needed` for manual hold rather than
+waiting indefinitely. Use the dry-run mode before applying the action.
 
 Set `TASK_RUNNER_WORKER` to a trusted command template (supports `{issue_id}`), `TASK_RUNNER_HARD_TIMEOUT`, `TASK_RUNNER_NO_PROGRESS_TIMEOUT`, `TASK_RUNNER_CONFIRM_TIMEOUT`, `TASK_RUNNER_BOOTSTRAP_TIMEOUT`, `TASK_RUNNER_LEASE_SECONDS`, `TASK_RUNNER_MAX_RETRIES`, `TASK_RUNNER_CONCURRENCY`, and `TASK_RUNNER_GH`. The default worker concurrency is one. Workers run in their own process group and are terminated (then killed) on timeout. GitHub scanning uses configurable `gh`; unavailable/invalid output safely yields no issues.
 SQLite tables persist issues, runs, leases, sessions, and lifecycle events. Every run has an immutable `run_id`, `generation`, and session key. A run enters `accepted_idle` only while its session is being confirmed; lifecycle events distinguish session request/confirmation/bootstrap/activity and late events are fenced as audit-only. Startup recovery removes expired leases and moves running runs to `interrupted` with the `gateway_restart` error class and their issue `retryable`. `run-once` only selects queued/retryable work, so completed work is idempotent.
@@ -50,6 +63,15 @@ Trusted workers should validate the assigned worktree before writing. `runner.op
    canonical QA evidence. Deployment evidence is required when policy says so;
    otherwise record the explicit policy decision. Notifications are asynchronous
    and are never the source of truth.
+
+## Controlled direct lane
+
+The direct lane is an emergency fallback only. It must use a separate managed
+worktree, an explicit available tool profile, and the same run/generation/lease
+epoch envelope as the normal adapter. Run preflight and reconciliation first;
+record remediation in the coordinator audit log, preserve the original run,
+and stop the lane after its single bounded retry. Never mark an issue Done from
+a direct-lane notification alone.
 
 ## launchd guidance (macOS)
 
