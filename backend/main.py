@@ -37,6 +37,7 @@ from thumbnail import generate_thumbnail
 from meta_generator import generate_meta, match_product
 from publish_scheduler import poll_publish_tasks
 from video_path_resolver import resolve_artifact_path
+from srt_resolver import resolve_srt_path
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -472,8 +473,8 @@ async def _on_gpu_online():
         queued = []
         for rec in rows:
             mp4_path = os.path.join(recordings_dir, rec["filename"])
-            srt_path = os.path.splitext(mp4_path)[0] + ".srt"
-            if not (os.path.exists(mp4_path) and os.path.exists(srt_path)):
+            srt_path = resolve_srt_path(mp4_path)
+            if not (os.path.exists(mp4_path) and srt_path):
                 continue
             async with aio_connect() as db:
                 await db.execute(
@@ -1260,7 +1261,9 @@ async def reclip_recording(recording_id: int, body: dict = Body({})):
 
     # Re-trigger the editor with feedback
     mp4_path = os.path.join(os.path.dirname(__file__), "..", "recordings", rec["filename"])
-    srt_path = os.path.splitext(mp4_path)[0] + ".srt"
+    srt_path = resolve_srt_path(mp4_path)
+    if not srt_path:
+        raise HTTPException(status_code=404, detail="Non-empty SRT file missing")
     asyncio.create_task(
         _run_editor(recording_id, mp4_path, srt_path,
                     clip_count=rec["clip_count"] or 1,
@@ -1296,11 +1299,10 @@ async def download_srt(recording_id: int):
         raise HTTPException(status_code=404, detail="Recording not found")
     if rec["transcribed"] != 2:
         raise HTTPException(status_code=404, detail="Subtitle not ready")
-    srt_filename = os.path.splitext(rec["filename"])[0] + ".srt"
-    srt_path = os.path.join(os.path.dirname(__file__), "..", "recordings", srt_filename)
-    if not os.path.exists(srt_path):
+    srt_path = resolve_srt_path(os.path.join(os.path.dirname(__file__), "..", "recordings", rec["filename"]))
+    if not srt_path:
         raise HTTPException(status_code=404, detail="SRT file missing")
-    return FileResponse(srt_path, media_type="text/plain", filename=srt_filename)
+    return FileResponse(srt_path, media_type="text/plain", filename=os.path.basename(srt_path))
 
 
 # ── Human Review & Learning System ───────────────────────────────────────────
@@ -1324,9 +1326,8 @@ async def get_review_candidates(recording_id: int):
         raise HTTPException(status_code=409, detail="Transcription not ready")
 
     # Build segments (recompute fresh each call to reflect latest _SCORES_EFFECTIVE)
-    srt_filename = os.path.splitext(rec["filename"])[0] + ".srt"
-    srt_path = os.path.join(os.path.dirname(__file__), "..", "recordings", srt_filename)
-    if not os.path.exists(srt_path):
+    srt_path = resolve_srt_path(os.path.join(os.path.dirname(__file__), "..", "recordings", rec["filename"]))
+    if not srt_path:
         raise HTTPException(status_code=404, detail="SRT file missing")
 
     raw_segs = parse_srt(srt_path)
@@ -1856,8 +1857,8 @@ async def clip_missing():
     base = os.path.join(os.path.dirname(__file__), "..", "recordings")
     for rec in rows:
         mp4_path = os.path.join(base, rec["filename"])
-        srt_path = os.path.join(base, os.path.splitext(rec["filename"])[0] + ".srt")
-        if not os.path.exists(mp4_path) or not os.path.exists(srt_path):
+        srt_path = resolve_srt_path(os.path.join(base, rec["filename"]))
+        if not os.path.exists(mp4_path) or not srt_path:
             skipped.append(rec["id"])
             continue
         clip_count = rec["clip_count"] if rec["clip_count"] else 1
@@ -1877,13 +1878,10 @@ async def retry_clip(recording_id: int):
     if rec["transcribed"] != 2:
         raise HTTPException(status_code=409, detail="Transcription not complete")
     mp4_path = os.path.join(os.path.dirname(__file__), "..", "recordings", rec["filename"])
-    srt_path = os.path.join(
-        os.path.dirname(__file__), "..", "recordings",
-        os.path.splitext(rec["filename"])[0] + ".srt"
-    )
+    srt_path = resolve_srt_path(os.path.join(os.path.dirname(__file__), "..", "recordings", rec["filename"]))
     if not os.path.exists(mp4_path):
         raise HTTPException(status_code=404, detail="Recording file missing")
-    if not os.path.exists(srt_path):
+    if not srt_path:
         raise HTTPException(status_code=404, detail="SRT file missing")
     clip_count = rec["clip_count"] if rec["clip_count"] else 1
     asyncio.create_task(_run_editor(recording_id, mp4_path, srt_path, clip_count=clip_count, broadcast_fn=broadcast))

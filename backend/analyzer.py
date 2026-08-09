@@ -108,10 +108,8 @@ async def _get_or_create_group(room_id: int, wig_model: Optional[str], wig_color
 
 async def analyze_recording(recording_id: int, filename: str, room_id: int):
     """Analyze SRT with LLM and assign recording to a clip group."""
-    srt_filename = os.path.splitext(filename)[0] + ".srt"
-    srt_path = os.path.join(RECORDINGS_DIR, srt_filename)
-
-    if not os.path.exists(srt_path):
+    srt_path = resolve_srt_path(os.path.join(RECORDINGS_DIR, filename))
+    if not srt_path:
         logger.warning(f"SRT missing for analysis: {srt_path}")
         return
 

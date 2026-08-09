@@ -605,15 +605,10 @@ class SemanticMatcher:
                     except Exception:
                         pass
 
-<<<<<<< HEAD
-                from media_contract import resolve_srt_file
-                srt_path = resolve_srt_file(source_filename)
-=======
                 srt_path = resolve_srt_path(os.path.join(recordings_dir, source_filename))
                 if not srt_path:
                     logger.warning("Skipping recording %s: missing or empty SRT", source_filename)
                     continue
->>>>>>> 642ae0d (fix: resolve non-empty recording subtitles safely (#126))
                 
                 # 解析 SRT 为结构化段落（保留时间戳）
                 srt_entries = _parse_srt_entries(str(srt_path)) if srt_path else []
