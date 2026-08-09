@@ -126,3 +126,33 @@ def test_worktree_contract_rejects_main_checkout(tmp_path):
     subprocess.run(['git', '-C', str(repo), 'commit', '-qm', 'initial'], check=True)
     with __import__('pytest').raises(WorktreeContractError):
         WorktreeProfile(repo, repo).validate()
+
+
+def test_worktree_contract_accepts_canonical_sibling_worktree(tmp_path):
+    repo = tmp_path / 'repo'
+    worktree = tmp_path / 'repo.worktrees' / 'feature'
+    repo.mkdir()
+    subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+    subprocess.run(['git', '-C', str(repo), 'config', 'user.email', 'test@example.invalid'], check=True)
+    subprocess.run(['git', '-C', str(repo), 'config', 'user.name', 'Test'], check=True)
+    (repo / 'README').write_text('test')
+    subprocess.run(['git', '-C', str(repo), 'add', 'README'], check=True)
+    subprocess.run(['git', '-C', str(repo), 'commit', '-qm', 'initial'], check=True)
+    subprocess.run(['git', '-C', str(repo), 'worktree', 'add', '-q', '-b', 'feature', str(worktree)], check=True)
+
+    metadata = WorktreeProfile(worktree, repo).validate()
+
+    assert metadata['cwd'] == str(worktree.resolve())
+    assert metadata['repo_root'] == str(worktree.resolve())
+    assert metadata['branch'] == 'feature'
+    assert len(metadata['head_sha']) == 40
+
+
+def test_worktree_contract_rejects_unrelated_sibling(tmp_path):
+    repo = tmp_path / 'repo'
+    unrelated = tmp_path / 'other.worktrees' / 'feature'
+    repo.mkdir()
+    unrelated.mkdir(parents=True)
+
+    with __import__('pytest').raises(WorktreeContractError):
+        WorktreeProfile(unrelated, repo).validate()

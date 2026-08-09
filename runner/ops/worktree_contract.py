@@ -26,7 +26,12 @@ class WorktreeProfile:
         candidate = Path(cwd or worktree).resolve()
         if candidate != worktree:
             raise WorktreeContractError("worker cwd is not the assigned worktree")
-        if worktree == repo_root or repo_root not in worktree.parents:
+        # Fabrica worktrees deliberately live beside the checkout rather than
+        # inside it.  Accept only that canonical sibling directory; accepting
+        # an arbitrary descendant of the repository's parent would turn this
+        # profile into a host-path allowlist bypass.
+        expected_worktree_root = repo_root.parent / f"{repo_root.name}.worktrees"
+        if worktree == repo_root or expected_worktree_root not in worktree.parents:
             raise WorktreeContractError("assigned worktree is outside the repository allowlist")
         if not worktree.is_dir():
             raise WorktreeContractError("assigned worktree does not exist")
