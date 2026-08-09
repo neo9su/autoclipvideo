@@ -11,18 +11,16 @@ GPU backend (`http://10.190.0.203:8899`) and `VITE_WS_BASE` defaults to its
 WebSocket endpoint. Do not start the repository backend, worker, model, or
 media-processing services on the Mac.
 
-Use the existing production bundle for the smallest local footprint:
+Use the idempotent launchd installer for a supervised production bundle:
 
 ```bash
-cd frontend
-npm ci                 # first time only
-npm run build          # first time or after source changes
-npm run preview -- --host 127.0.0.1 --port 5173
+./scripts/install_frontend_launchd.sh
 ```
 
-Open `http://127.0.0.1:5173`. Stop the preview with `Ctrl-C`; it has no worker
-or model child process. If it was backgrounded, stop only that preview process,
-for example `pkill -f 'vite preview.*5173'`.
+The installer rebuilds from the current checkout, replaces the existing
+`com.douyin-recorder.frontend-preview` user service, and enables `KeepAlive`.
+Open `http://127.0.0.1:5173`; the preview has no worker or model child process.
+To inspect the service, use `launchctl print gui/$UID/com.douyin-recorder.frontend-preview`.
 
 Verification from the Mac:
 

@@ -641,6 +641,10 @@ async def lifespan(app: FastAPI):
         )
     else:
         register_online_callback(_on_gpu_online)
+        logger.info(
+            "DEPLOYMENT_ROLE=gpu-backend: media workers enabled "
+            "(capture, transcription, backfill, publish, enhance, creative/director, and room monitors)"
+        )
         tasks.extend([
             asyncio.create_task(poll_transcriptions(broadcast_fn=broadcast)),
             asyncio.create_task(backfill_auto_merge()),
@@ -706,6 +710,11 @@ async def health():
             result["remote_backend_reachable"] = False
     else:
         # GPU backend: add qianchuan queue depth for operational visibility
+        result["media_workers_enabled"] = True
+        result["worker_services"] = [
+            "transcription", "backfill", "publish", "enhance",
+            "creative", "director", "qianchuan", "room-monitors",
+        ]
         result["qianchuan_api_loaded"] = _api_v2_loaded if "_api_v2_loaded" in dir() else False
         try:
             async with aio_connect() as db:
