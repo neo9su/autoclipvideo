@@ -70,7 +70,7 @@ async def broadcast(message: dict):
     _ws_clients.difference_update(dead)
 
 
-monitor = MonitorManager(broadcast_fn=broadcast, media_enabled=not IS_CONTROL_PLANE)
+monitor = MonitorManager(broadcast_fn=broadcast)
 
 
 def _recording_file_path(filename: str | None) -> str | None:
@@ -645,6 +645,9 @@ async def lifespan(app: FastAPI):
             "DEPLOYMENT_ROLE=gpu-backend: media workers enabled "
             "(capture, transcription, backfill, publish, enhance, creative/director, and room monitors)"
         )
+        # Restore persisted room monitors after every GPU-backend restart. The
+        # room rows remain enabled in SQLite, but the in-memory manager starts
+        # empty unless these polling tasks are explicitly recreated.
         await monitor.start_all()
         tasks.extend([
             asyncio.create_task(poll_transcriptions(broadcast_fn=broadcast)),
