@@ -16,7 +16,8 @@ services:
       COMFYUI_URL: ${COMFYUI_URL:?COMFYUI_URL must point to the GPU vision service}
       WATCHDOG_URL: ${WATCHDOG_URL:?WATCHDOG_URL must point to the remote watchdog}
       GPU_EXECUTION_NODE: ${GPU_EXECUTION_NODE:-remote-gpu}
-      DEPLOYMENT_ROLE: gpu-backend
+      DEPLOYMENT_ROLE: ${DEPLOYMENT_ROLE:-gpu-backend}
+      REMOTE_BACKEND_URL: ${REMOTE_BACKEND_URL:-http://127.0.0.1:8899}
       MAX_CONCURRENT_CLIPS: ${MAX_CONCURRENT_CLIPS:-1}
       MEM_WARN_GB: ${MEM_WARN_GB:-5}
       AWS_BEARER_TOKEN_BEDROCK: ${AWS_BEARER_TOKEN_BEDROCK:?AWS_BEARER_TOKEN_BEDROCK must be supplied at deploy time}
