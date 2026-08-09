@@ -30,7 +30,8 @@ def test_manifest_uses_supported_sidecars_and_preserves_sources(tmp_path: Path) 
 
 def test_checkpoint_seeds_idempotently_and_tracks_failures(tmp_path: Path) -> None:
     checkpoint = Checkpoint(tmp_path / "checkpoint.db")
-    record = {"job_key": "key", "source": "/source.mp4", "srt": "/source.srt", "source_sha256": "a", "source_size": 7}
+    record = {"job_key": "key", "source": "/source.mp4", "srt": "/source.srt",
+              "source_sha256": "a", "source_size": 7, "srt_sha256": "b", "srt_size": 3}
     checkpoint.seed(iter([record]))
     checkpoint.seed(iter([record]))
     assert checkpoint.counts() == {"pending": 1}

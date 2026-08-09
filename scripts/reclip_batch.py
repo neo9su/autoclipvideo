@@ -66,7 +66,14 @@ def scan_pairs(source_dir: Path) -> Iterator[MediaPair]:
 
 
 def stable_job_key(pair: MediaPair) -> str:
-    return hashlib.sha256(f"{pair.source_sha256}:{pair.srt_sha256}:{pair.source_size}".encode()).hexdigest()
+    # Include the canonical paths as well as content fingerprints. Two
+    # different recordings can legitimately have identical bytes; collapsing
+    # them would silently skip one of the inputs.
+    material = (
+        f"{pair.source.resolve()}:{pair.srt.resolve()}:"
+        f"{pair.source_sha256}:{pair.srt_sha256}:{pair.source_size}:{pair.srt_size}"
+    )
+    return hashlib.sha256(material.encode()).hexdigest()
 
 
 def create_manifest(source_dir: Path, manifest_path: Path) -> int:
@@ -97,18 +104,25 @@ class Checkpoint:
         self.db.execute("""CREATE TABLE IF NOT EXISTS jobs (
             job_key TEXT PRIMARY KEY, source TEXT NOT NULL, srt TEXT NOT NULL,
             source_sha256 TEXT NOT NULL, source_size INTEGER NOT NULL,
+            srt_sha256 TEXT NOT NULL, srt_size INTEGER NOT NULL,
             status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
             remote_job_id TEXT, output_mp4 TEXT, output_srt TEXT,
             failure_class TEXT, failure_reason TEXT, updated_at REAL NOT NULL,
             evidence_json TEXT NOT NULL DEFAULT '{}')""")
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(jobs)")}
+        for name, definition in (("srt_sha256", "TEXT NOT NULL DEFAULT ''"),
+                                 ("srt_size", "INTEGER NOT NULL DEFAULT 0")):
+            if name not in columns:
+                self.db.execute(f"ALTER TABLE jobs ADD COLUMN {name} {definition}")
         self.db.commit()
 
     def seed(self, records: Iterator[dict[str, Any]]) -> None:
         now = time.time()
         self.db.executemany("""INSERT OR IGNORE INTO jobs
-            (job_key,source,srt,source_sha256,source_size,status,updated_at)
-            VALUES (?,?,?,?,?,'pending',?)""",
-            ((r["job_key"], r["source"], r["srt"], r["source_sha256"], r["source_size"], now) for r in records))
+            (job_key,source,srt,source_sha256,source_size,srt_sha256,srt_size,status,updated_at)
+            VALUES (?,?,?,?,?,?,?,'pending',?)""",
+            ((r["job_key"], r["source"], r["srt"], r["source_sha256"], r["source_size"],
+              r.get("srt_sha256", ""), r.get("srt_size", 0), now) for r in records))
         self.db.commit()
 
     def next_job(self, retries: int = DEFAULT_RETRIES) -> dict[str, Any] | None:
@@ -216,8 +230,13 @@ def run_one(job: dict[str, Any], checkpoint: Checkpoint, args: argparse.Namespac
     checkpoint.update(key, status="processing", attempts=attempts)
     started = time.time()
     try:
-        if source.stat().st_size != job["source_size"] or sha256_file(source) != job["source_sha256"]:
+        sidecar = Path(job["srt"])
+        if (source.stat().st_size != job["source_size"]
+                or sha256_file(source) != job["source_sha256"]):
             raise ValueError("source_changed_since_manifest")
+        if (sidecar.stat().st_size != job["srt_size"]
+                or sha256_file(sidecar) != job["srt_sha256"]):
+            raise ValueError("srt_changed_since_manifest")
         response = multipart_upload(f"{args.gpu_url.rstrip('/')}/jobs", source, args.room_id, key, args.timeout)
         remote_id = response.get("job_id")
         if not remote_id:
@@ -239,10 +258,24 @@ def run_one(job: dict[str, Any], checkpoint: Checkpoint, args: argparse.Namespac
         destination_srt = output_dir / f"{source.stem}.srt"
         shutil.copy2(source, destination_mp4)
         download(f"{args.gpu_url.rstrip('/')}/jobs/{remote_id}/srt", destination_srt, args.timeout)
-        evidence = {"job_id": remote_id, "response": response, "source_size": source.stat().st_size,
-                    "output_mp4_size": destination_mp4.stat().st_size, "output_srt_size": destination_srt.stat().st_size,
-                    "ffprobe": ffprobe(destination_mp4), "output_srt_sha256": sha256_file(destination_srt),
-                    "elapsed_s": round(time.time() - started, 3)}
+        output_probe = ffprobe(destination_mp4)
+        evidence = {
+            "job_id": remote_id,
+            "request": {"method": "POST", "path": "/jobs", "idempotency_key": key},
+            "response": response,
+            "gpu_consumed": True,
+            "exit_code": 0,
+            "output_mp4": str(destination_mp4),
+            "output_srt": str(destination_srt),
+            "mp4_readable": destination_mp4.is_file() and destination_mp4.stat().st_size > 0,
+            "srt_readable": destination_srt.is_file() and destination_srt.stat().st_size > 0,
+            "mp4_size_bytes": destination_mp4.stat().st_size,
+            "srt_size_bytes": destination_srt.stat().st_size,
+            "source_size": source.stat().st_size,
+            "ffprobe": output_probe,
+            "output_srt_sha256": sha256_file(destination_srt),
+            "elapsed_s": round(time.time() - started, 3),
+        }
         checkpoint.update(key, status="success", output_mp4=str(destination_mp4), output_srt=str(destination_srt), evidence_json=json.dumps(evidence, ensure_ascii=False))
     except Exception as exc:
         category = classify_failure(exc)
