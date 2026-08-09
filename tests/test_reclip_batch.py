@@ -1,129 +1,50 @@
+"""Tests for the resumable batch control plane."""
+from __future__ import annotations
+
+import json
 from pathlib import Path
-import sys
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parents[1] / "backend"))
-
-from reclip_batch import (Manifest, classify_error, discover_candidates,
-                          sha256_file, validate_success_evidence,
-                          validate_output_root, verify_immutable)
+from scripts.reclip_batch import Checkpoint, create_manifest, lease, scan_pairs, stable_job_key
 
 
-def test_manifest_discovers_pairs_and_rejects_changed_input(tmp_path):
-    source = tmp_path / "recordings"
-    source.mkdir()
-    mp4 = source / "sample.mp4"
-    srt = source / "sample.srt"
-    mp4.write_bytes(b"immutable video")
-    srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nhello\n", encoding="utf-8")
+def test_manifest_uses_supported_sidecars_and_preserves_sources(tmp_path: Path) -> None:
+    source_dir = tmp_path / "recordings"
+    source_dir.mkdir()
+    source = source_dir / "demo.mp4"
+    sidecar = source_dir / "demo.mp4.srt"
+    source.write_bytes(b"mp4-data")
+    sidecar.write_text("1\n00:00:00,000 --> 00:00:01,000\nhello\n", encoding="utf-8")
+    original_source = source.read_bytes()
+    original_sidecar = sidecar.read_bytes()
 
-    candidates = discover_candidates(source)
-    assert len(candidates) == 1
-    assert candidates[0].mp4_sha256 == sha256_file(mp4)
-
-    manifest = Manifest(tmp_path / "checkpoint.db")
-    try:
-        assert manifest.import_candidates(candidates) == 1
-        row = manifest.claim("worker-a", lease_seconds=60, max_attempts=3)
-        assert row["status"] == "running"
-        verify_immutable(row)
-        mp4.write_bytes(b"modified")
-        with pytest.raises(RuntimeError, match="immutable input"):
-            verify_immutable(row)
-    finally:
-        manifest.close()
+    manifest = tmp_path / "run" / "manifest.jsonl"
+    assert create_manifest(source_dir, manifest) == 1
+    record = json.loads(manifest.read_text(encoding="utf-8").splitlines()[0])
+    assert record["job_key"] == stable_job_key(next(scan_pairs(source_dir)))
+    assert record["source_size"] == len(original_source)
+    assert source.read_bytes() == original_source
+    assert sidecar.read_bytes() == original_sidecar
 
 
-def test_manifest_reclaims_expired_lease_and_caps_attempts(tmp_path):
-    source = tmp_path / "recordings"
-    source.mkdir()
-    (source / "sample.mp4").write_bytes(b"video")
-    (source / "sample.srt").write_text("subtitle", encoding="utf-8")
-    manifest = Manifest(tmp_path / "checkpoint.db")
-    try:
-        item = discover_candidates(source)[0]
-        manifest.import_candidates([item])
-        first = manifest.claim("worker-a", lease_seconds=0, max_attempts=2)
-        second = manifest.claim("worker-b", lease_seconds=60, max_attempts=2)
-        assert first["key"] == second["key"]
-        manifest.record(item.key, "permanent_failed", last_error="bounded")
-        assert manifest.claim("worker-c", lease_seconds=60, max_attempts=2) is None
-    finally:
-        manifest.close()
+def test_checkpoint_seeds_idempotently_and_tracks_failures(tmp_path: Path) -> None:
+    checkpoint = Checkpoint(tmp_path / "checkpoint.db")
+    record = {"job_key": "key", "source": "/source.mp4", "srt": "/source.srt", "source_sha256": "a", "source_size": 7}
+    checkpoint.seed(iter([record]))
+    checkpoint.seed(iter([record]))
+    assert checkpoint.counts() == {"pending": 1}
+    job = checkpoint.next_job(retries=2)
+    assert job and job["job_key"] == "key"
+    checkpoint.update("key", status="permanent_failure", failure_class="input", failure_reason="bad input")
+    assert checkpoint.counts() == {"permanent_failure": 1}
+    checkpoint.close()
 
 
-def test_error_classification_is_explicit():
-    assert classify_error(TimeoutError()) == "timeout"
-    assert classify_error(ConnectionError()) == "network"
-    assert classify_error(RuntimeError("ffprobe artifact invalid")) == "artifact"
-    assert classify_error(RuntimeError("bad request")) == "permanent"
-    assert classify_error(RuntimeError("remote"), status_code=503) == "remote_5xx"
-
-
-def test_discovery_accepts_mp4_srt_sidecar_and_success_requires_evidence(tmp_path):
-    source = tmp_path / "recordings"
-    source.mkdir()
-    (source / "sample.mp4").write_bytes(b"video")
-    (source / "sample.mp4.srt").write_text("subtitle", encoding="utf-8")
-    assert len(discover_candidates(source)) == 1
-
-    with pytest.raises(ValueError, match="incomplete success evidence"):
-        validate_success_evidence({})
-
-    evidence = {
-        "job_id": "gpu-job-1", "request": {"method": "POST"},
-        "response": {"status": 201}, "gpu_consumed": True,
-        "exit_code": 0, "output_mp4": "out.mp4", "output_srt": "out.srt",
-        "mp4_readable": True, "srt_readable": True,
-        "mp4_size_bytes": 10, "srt_size_bytes": 3, "ffprobe": {"duration": 1},
-    }
-    validate_success_evidence(evidence)
-
-
-def test_manifest_preserves_terminal_rows_and_bounds_retry(tmp_path):
-    source = tmp_path / "recordings"
-    source.mkdir()
-    media = source / "sample.mp4"
-    sidecar = source / "sample.srt"
-    media.write_bytes(b"video")
-    sidecar.write_text("subtitle", encoding="utf-8")
-    candidate = discover_candidates(source)[0]
-    manifest = Manifest(tmp_path / "checkpoint.db")
-    try:
-        manifest.import_candidates([candidate])
-        manifest.record(candidate.key, "skipped", last_error="not eligible")
-        manifest.import_candidates([candidate])
-        assert manifest.counts() == {"skipped": 1}
-        with pytest.raises(ValueError, match="unknown manifest status"):
-            manifest.record(candidate.key, "bogus")
-    finally:
-        manifest.close()
-
-
-def test_retry_classification_and_lease_ownership(tmp_path):
-    source = tmp_path / "recordings"
-    source.mkdir()
-    (source / "sample.mp4").write_bytes(b"video")
-    (source / "sample.srt").write_text("subtitle", encoding="utf-8")
-    candidate = discover_candidates(source)[0]
-    manifest = Manifest(tmp_path / "checkpoint.db")
-    try:
-        manifest.import_candidates([candidate])
-        claimed = manifest.claim("worker-a", lease_seconds=60, max_attempts=2)
-        with pytest.raises(PermissionError):
-            manifest.renew(candidate.key, "worker-b", 60)
-        manifest.renew(candidate.key, "worker-a", 60)
-        assert manifest.fail(candidate.key, TimeoutError("timeout"), max_attempts=2, lease_owner="worker-a") == "pending"
-        claimed = manifest.claim("worker-a", lease_seconds=60, max_attempts=2)
-        assert manifest.fail(candidate.key, RuntimeError("bad request"), max_attempts=2, lease_owner="worker-a") == "permanent_failed"
-    finally:
-        manifest.close()
-
-
-def test_output_root_must_be_sibling_or_above_source(tmp_path):
-    source = tmp_path / "recordings"
-    source.mkdir()
-    with pytest.raises(ValueError):
-        validate_output_root(source, source / "outputs")
-    validate_output_root(source, tmp_path / "reclip-output")
+def test_lease_rejects_second_runner_and_cleans_up(tmp_path: Path) -> None:
+    lock = tmp_path / "run.lease"
+    with lease(lock):
+        with pytest.raises(FileExistsError):
+            with lease(lock):
+                pass
+    assert not lock.exists()
