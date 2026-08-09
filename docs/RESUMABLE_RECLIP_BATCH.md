@@ -55,11 +55,7 @@ remain, and `75` when another runner owns the lease.
 - The runner copies the source into an isolated output job directory only after
   the remote job is done, and downloads the generated SRT through the job route.
   It never deletes, overwrites, or edits files below `--source-dir`.
-- The current GPU service accepts uploaded files and has no authentication
-  contract in this revision. Do not expose it outside a private allowlisted
-  network. A future remote-read API must add authentication, client/network
-  allowlisting, basename/path traversal rejection, read-only source semantics,
-  and request audit logging before deployment.
+- The current GPU service requires a configured bearer token for job upload, polling, and artifact routes when `RECLIP_REQUIRE_AUTH=1` (the secure default). Keep it on the private allowlisted network as defense in depth. A future remote-read API must add authentication, client/network allowlisting, basename/path traversal rejection, read-only source semantics, and request audit logging before deployment.
 
 The remote SSH/deployment permission limitation remains an external blocker;
 this workflow provides the minimum safe alternative: push-only upload over the

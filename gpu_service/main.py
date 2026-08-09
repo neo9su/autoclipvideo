@@ -19,6 +19,7 @@ os.environ.setdefault("MS_OFFLINE", "1")
 
 import asyncio
 import hashlib
+import hmac
 import logging
 import os as _os
 import sqlite3
@@ -55,7 +56,7 @@ os.makedirs(STORAGE_DIR, exist_ok=True)
 # making enforcement opt-in until the operator provisions a token; a missing
 # token is never treated as an empty credential when enforcement is enabled.
 GPU_API_TOKEN = os.environ.get("GPU_API_TOKEN", "")
-RECLIP_REQUIRE_AUTH = os.environ.get("RECLIP_REQUIRE_AUTH", "0") == "1"
+RECLIP_REQUIRE_AUTH = os.environ.get("RECLIP_REQUIRE_AUTH", "1") == "1"
 
 
 def _require_api_auth(request: Request) -> None:
@@ -65,7 +66,7 @@ def _require_api_auth(request: Request) -> None:
     if not GPU_API_TOKEN:
         raise HTTPException(status_code=503, detail="GPU API authentication is not configured")
     authorization = request.headers.get("Authorization", "")
-    if authorization != f"Bearer {GPU_API_TOKEN}":
+    if not hmac.compare_digest(authorization, f"Bearer {GPU_API_TOKEN}"):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 DB_PATH = os.path.join(STORAGE_DIR, "jobs.db")
