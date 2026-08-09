@@ -17,6 +17,21 @@ class WorktreeContract:
     branch: str
     profile: str = "trusted-developer"
 
+    def preflight(self, cwd: str | Path | None = None) -> dict[str, object]:
+        """Fail closed with structured evidence before worker bootstrap."""
+        actual = Path(cwd or self.worktree).resolve()
+        try:
+            root, branch = discover_git_identity(actual)
+            self.validate_allowlist(actual, root, branch)
+            if not os.access(actual, os.W_OK) or not self.profile.strip():
+                raise WorktreeContractError("worktree preflight check failed")
+            probe = actual / ".runner-write-probe"
+            probe.write_text("preflight", encoding="utf-8")
+            probe.unlink()
+            return {"cwd": str(actual), "repo_root": root, "branch": branch, "profile": self.profile, "checks": {"git_identity": True, "allowlist": True, "writable": True, "tool_profile": True}}
+        except (OSError, WorktreeContractError) as exc:
+            raise WorktreeContractError("worktree preflight failed") from exc
+
     def validate(self, cwd: str | Path, repo_root: str | Path, branch: str) -> None:
         actual_cwd = Path(cwd).resolve()
         expected = self.worktree.resolve()
