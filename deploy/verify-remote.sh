@@ -57,7 +57,20 @@ import json, sys
 payload = json.load(open(sys.argv[1]))
 assert payload.get('qianchuan_available') is True, payload
 assert payload.get('version'), payload
+assert any(route['method'] == 'POST' and route['path'].endswith('/generate') for route in payload['routes']), payload
+assert payload['media_contract']['path_namespace'] == 'container-only', payload
 print(f"PASS /api/v2/qianchuan/status: available (version {payload['version']})")
+print('PASS qianchuan route contract and container-only media contract')
+PY
+
+curl --silent --show-error "$BASE_URL/api/v2/director/status" > "$TMP_DIR/director.json"
+python - "$TMP_DIR/director.json" <<'PY'
+import json, sys
+payload = json.load(open(sys.argv[1]))
+assert payload.get('director_mode_available') is True, payload
+assert payload.get('version'), payload
+assert any(route['method'] == 'POST' and route['path'].endswith('/generate-script') for route in payload['routes']), payload
+print(f"PASS /api/v2/director/status: available (version {payload['version']})")
 PY
 
 curl --silent --show-error "$BASE_URL/api/groups" > "$TMP_DIR/groups.json"

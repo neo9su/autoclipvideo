@@ -7,7 +7,7 @@ import json
 import logging
 from typing import Dict, List, Optional, Any
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 
 from director_script import DirectorScriptGenerator
@@ -126,18 +126,49 @@ async def get_director_status():
             for k, v in VIBE_CONFIGS.items()
         },
         "version": "2.0.1",
+        "routes": [
+            {"method": "GET", "path": "/api/v2/director/status"},
+            {"method": "POST", "path": "/api/v2/director/generate-script"},
+            {"method": "POST", "path": "/api/v2/director/compose-video"},
+        ],
     }
 
 
 @qianchuan_router.get("/status")
 async def get_qianchuan_status():
+    import aiosqlite
+    from db import DB_PATH
+    from media_contract import STORAGE_DIR, storage_contract
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT COUNT(*) FROM recordings") as cur:
+            local_files = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM recordings WHERE local_deleted = 0") as cur:
+            active_files = (await cur.fetchone())[0]
     return {
         "qianchuan_available": True,
         "default_duration": 22,
         "duration_range": "18-25s recommended, 35s hard max",
         "structure": "0-3s结果钩子 / 3-7s痛点 / 7-13s产品证据 / 13-19s上脸效果 / 19-23s CTA",
         "version": "1.0.0",
+        "routes": [
+            {"method": "GET", "path": "/api/v2/qianchuan/status"},
+            {"method": "POST", "path": "/api/v2/qianchuan/generate"},
+            {"method": "POST", "path": "/api/v2/qianchuan/compose"},
+            {"method": "GET", "path": "/api/v2/qianchuan/media/audit?filename={basename}"},
+        ],
+        "media_contract": storage_contract(),
+        "media_records": {"local_files": local_files, "active_files": active_files, "storage_dir": str(STORAGE_DIR.resolve())},
     }
+
+
+@qianchuan_router.get("/media/audit")
+async def audit_qianchuan_media(filename: str = Query(min_length=1, max_length=255)):
+    """Audit one mounted source and its non-empty SRT sidecar."""
+    from media_contract import audit_media_file
+    evidence = audit_media_file(filename)
+    if not evidence["valid_filename"]:
+        raise HTTPException(status_code=400, detail="filename must be a basename inside STORAGE_DIR")
+    return {"ok": evidence["mp4"]["readable"] and evidence["srt"]["readable"], "evidence": evidence}
 
 
 @qianchuan_router.post("/generate", response_model=QianchuanGenerateResponse)
