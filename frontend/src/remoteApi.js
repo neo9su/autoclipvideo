@@ -11,6 +11,7 @@ export const REMOTE_WS_BASE = (
 ).replace(/\/$/, '')
 
 const REMOTE_FETCH_TIMEOUT_MS = 15000
+const inFlightRequests = new Map()
 
 export function remoteUrl(path) {
   return `${REMOTE_API_BASE}${path.startsWith('/') ? path : `/${path}`}`
@@ -21,11 +22,22 @@ export function remoteUrl(path) {
  * hang the UI.  Pass `timeout: 0` to disable the timeout for one call.
  */
 export function remoteFetch(path, options = {}, timeout = REMOTE_FETCH_TIMEOUT_MS) {
-  const controller = new AbortController()
-  const timeoutId = timeout > 0 ? setTimeout(() => controller.abort(), timeout) : null
-  const signal = controller.signal
-
-  return fetch(remoteUrl(path), { ...options, signal }).finally(() => {
-    if (timeoutId !== null) clearTimeout(timeoutId)
-  })
+  const url = remoteUrl(path)
+  const method = (options.method || 'GET').toUpperCase()
+  const key = method === 'GET' ? `${method}:${url}` : null
+  if (key && inFlightRequests.has(key)) return inFlightRequests.get(key)
+  const request = (async () => {
+    window.dispatchEvent(new CustomEvent('app:loading', { detail: 1 }))
+    try {
+      const controller = new AbortController()
+      const timeoutId = timeout > 0 ? setTimeout(() => controller.abort(), timeout) : null
+      try { return await fetch(url, { ...options, signal: controller.signal }) }
+      finally { if (timeoutId !== null) clearTimeout(timeoutId) }
+    } finally { window.dispatchEvent(new CustomEvent('app:loading', { detail: -1 })) }
+  })()
+  if (key) {
+    inFlightRequests.set(key, request)
+    request.finally(() => inFlightRequests.delete(key))
+  }
+  return request
 }
