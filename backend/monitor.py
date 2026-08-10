@@ -39,8 +39,14 @@ class MonitorManager:
             self._require_media_worker("room monitoring/recording")
             try:
                 async with aio_connect() as db:
+                    await db.execute(
+                        "UPDATE rooms SET enabled = 1 WHERE url != '__custom__' AND enabled != 1"
+                    )
+                    await db.commit()
                     db.row_factory = aiosqlite.Row
-                    async with db.execute("SELECT * FROM rooms WHERE enabled = 1") as cursor:
+                    async with db.execute(
+                        "SELECT * FROM rooms WHERE enabled = 1 AND url != '__custom__'"
+                    ) as cursor:
                         rooms = await cursor.fetchall()
                 for room in rooms:
                     await self.add_room(room["id"], room["name"], room["url"])
@@ -62,7 +68,9 @@ class MonitorManager:
             self._require_media_worker("room monitoring/recording")
             async with aio_connect() as db:
                 db.row_factory = aiosqlite.Row
-                async with db.execute("SELECT * FROM rooms WHERE enabled = 1") as cursor:
+                async with db.execute(
+                    "SELECT * FROM rooms WHERE enabled = 1 AND url != '__custom__'"
+                ) as cursor:
                     rooms = await cursor.fetchall()
             for room in rooms:
                 await self.add_room(room["id"], room["name"], room["url"])
@@ -89,7 +97,11 @@ class MonitorManager:
             1 for recorder in self._recorders.values() if recorder.recording
         )
         cookie_dir = os.path.expanduser("~/.douyin-publisher/cookies")
-        login_files = [name for name in os.listdir(cookie_dir)] if os.path.isdir(cookie_dir) else []
+        try:
+            login_files = os.listdir(cookie_dir) if os.path.isdir(cookie_dir) else []
+        except OSError as exc:
+            logger.warning("Unable to inspect publisher login state: %s", type(exc).__name__)
+            login_files = []
         logged_in = any(name.startswith("douyin_") and name.endswith(".json") for name in login_files)
         return {
             "running": task_count > 0 or self._started_at is not None,
