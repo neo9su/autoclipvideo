@@ -108,7 +108,6 @@ const newName = ref('')
 const newUrl = ref('')
 const addError = ref('')
 const uploadingRooms = ref(new Set())
-const loading = ref(false)
 const srtInputs = ref({})
 let pendingUpload = null  // { room, file }
 let wsCleanup = null

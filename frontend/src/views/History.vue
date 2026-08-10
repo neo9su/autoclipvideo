@@ -217,7 +217,6 @@ const stats = ref({ transcribe_pending: 0, transcribe_running: 0, transcribe_fai
 const clipJobs = ref({})        // { recording_id: { pct, msg } }
 const clipVariants = ref({})    // { recording_id: [clips] }
 const clipVariantsLoading = reactive(new Set())
-const loading = ref(false)
 
 const sortField = ref('start_time')
 const sortOrder = ref('desc')
