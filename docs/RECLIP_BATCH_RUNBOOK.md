@@ -15,10 +15,11 @@ This command only scans and checkpoints; it does not submit GPU work:
 
 ```bash
 python scripts/reclip_batch.py \
-  --input /path/to/recordings \
-  --output /path/to/reclip-output \
-  --manifest /path/to/reclip-output/manifest.sqlite \
-  --max-items 3
+  --source-dir /path/to/recordings \
+  --output-dir /path/to/reclip-output \
+  --manifest /path/to/reclip-output/manifest.jsonl \
+  --checkpoint /path/to/reclip-output/checkpoint.sqlite3 \
+  --gpu-url http://gpu-host:8877 --scan
 ```
 
 The output directory must not be the source directory or a child of it. Start with three real MP4/SRT pairs, including the known 7080 failure if its immutable source pair is present. Preserve the JSON output and manifest event rows as the audit record. Only after the proof has three complete evidence chains should an operator add a reviewed remote-GPU adapter.
