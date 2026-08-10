@@ -76,6 +76,22 @@ def test_checkpoint_renews_only_the_active_worker_lease(tmp_path: Path) -> None:
     checkpoint.close()
 
 
+def test_backend_manifest_persists_failure_classification(tmp_path: Path) -> None:
+    from backend.reclip_batch import Candidate, Manifest
+
+    checkpoint = Manifest(tmp_path / "backend-checkpoint.db")
+    checkpoint.import_candidates([Candidate("/source.mp4", "/source.srt", 7, 3, "a", "b", "key")])
+    claimed = checkpoint.claim("worker", 60, 2)
+    assert claimed
+    checkpoint.record("key", "permanent_failed", lease_owner="worker",
+                      failure_class="input", failure_reason="source missing")
+    row = checkpoint.db.execute(
+        "SELECT status, failure_class, failure_reason FROM items WHERE key='key'"
+    ).fetchone()
+    assert tuple(row) == ("permanent_failed", "input", "source missing")
+    checkpoint.close()
+
+
 def test_lease_rejects_second_runner_and_cleans_up(tmp_path: Path) -> None:
     lock = tmp_path / "run.lease"
     with lease(lock):

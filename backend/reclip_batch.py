@@ -79,6 +79,7 @@ class Manifest:
           status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
           lease_owner TEXT, lease_until REAL, job_id TEXT, output_mp4 TEXT,
           output_srt TEXT, evidence_json TEXT, last_error TEXT,
+          failure_class TEXT, failure_reason TEXT,
           updated_at REAL NOT NULL
         );
         CREATE TABLE IF NOT EXISTS events (
@@ -87,6 +88,10 @@ class Manifest:
         );
         CREATE INDEX IF NOT EXISTS idx_items_status ON items(status);
         """)
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(items)")}
+        for name in ("failure_class", "failure_reason"):
+            if name not in columns:
+                self.db.execute(f"ALTER TABLE items ADD COLUMN {name} TEXT")
         self.db.commit()
 
     def close(self) -> None:
@@ -150,7 +155,7 @@ class Manifest:
                 raise PermissionError("running item must be recorded by its lease owner")
         elif requested_owner is not None and current_owner not in (None, requested_owner):
             raise PermissionError("lease owner does not match manifest item")
-        allowed = {"job_id", "output_mp4", "output_srt", "evidence_json", "last_error", "lease_owner", "lease_until"}
+        allowed = {"job_id", "output_mp4", "output_srt", "evidence_json", "last_error", "failure_class", "failure_reason", "lease_owner", "lease_until"}
         updates = {name: value for name, value in fields.items() if name in allowed}
         if status != "running":
             # A retry or terminal transition releases the exact worker lease.
