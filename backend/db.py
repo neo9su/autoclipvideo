@@ -239,6 +239,15 @@ async def init_db():
             "CREATE INDEX IF NOT EXISTS idx_publish_tasks_group_id ON publish_tasks(group_id)",
             # recording_clips lookup by recording_id
             "CREATE INDEX IF NOT EXISTS idx_recording_clips_recording_id ON recording_clips(recording_id)",
+            # Composite indexes used by the paginated history and queue APIs.
+            "CREATE INDEX IF NOT EXISTS idx_recordings_room_start ON recordings(room_id, start_time DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_recordings_status_queue ON recordings(transcribed, synced, local_deleted, end_time)",
+            "CREATE INDEX IF NOT EXISTS idx_recordings_clip_queue ON recordings(transcribed, clipped, local_deleted, end_time)",
+            "CREATE INDEX IF NOT EXISTS idx_recordings_group_start ON recordings(group_id, start_time)",
+            "CREATE INDEX IF NOT EXISTS idx_clip_groups_created ON clip_groups(created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_clip_groups_room_created ON clip_groups(room_id, created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_publish_tasks_group_status ON publish_tasks(group_id, status)",
+            "CREATE INDEX IF NOT EXISTS idx_products_room_enabled ON products(room_id, enabled)",
         ]:
             try:
                 await db.execute(idx_sql)

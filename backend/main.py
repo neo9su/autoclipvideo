@@ -20,7 +20,7 @@ import aiosqlite
 import httpx
 from datetime import datetime, timedelta
 
-from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, StreamingResponse
@@ -59,12 +59,17 @@ STALE_OPEN_RECORDING_HOURS = 6
 # WebSocket connections
 _ws_clients: Set[WebSocket] = set()
 
+_API_CACHE_TTL_SECONDS = 5.0
+_rooms_cache: tuple[float, list[dict]] | None = None
+_groups_cache: tuple[float, list[dict]] | None = None
+
 
 async def broadcast(message: dict):
+    payload = json.dumps(message, ensure_ascii=False, separators=(",", ":"))
     dead = set()
     for ws in _ws_clients:
         try:
-            await ws.send_text(json.dumps(message))
+            await ws.send_text(payload)
         except Exception:
             dead.add(ws)
     _ws_clients.difference_update(dead)
@@ -835,12 +840,19 @@ else:
 
 @app.get("/api/rooms")
 async def list_rooms():
-    async with aio_connect() as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM rooms ORDER BY created_at DESC") as cur:
-            rows = await cur.fetchall()
+    global _rooms_cache
+    import time
+    now = time.monotonic()
+    if _rooms_cache and now - _rooms_cache[0] < _API_CACHE_TTL_SECONDS:
+        rows_data = _rooms_cache[1]
+    else:
+        async with aio_connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM rooms ORDER BY created_at DESC") as cur:
+                rows_data = [dict(row) for row in await cur.fetchall()]
+        _rooms_cache = (now, rows_data)
     result = []
-    for r in rows:
+    for r in rows_data:
         status = monitor.get_status(r["id"])
         result.append({
             "id": r["id"],
@@ -855,6 +867,7 @@ async def list_rooms():
 
 @app.post("/api/rooms", status_code=201)
 async def add_room(body: RoomCreate):
+    global _rooms_cache
     try:
         async with aio_connect() as db:
             cur = await db.execute(
@@ -864,6 +877,7 @@ async def add_room(body: RoomCreate):
             await db.commit()
             room_id = cur.lastrowid
         await monitor.add_room(room_id, body.name, body.url)
+        _rooms_cache = None
         return {"id": room_id, "name": body.name, "url": body.url, "enabled": True}
     except aiosqlite.IntegrityError:
         raise HTTPException(status_code=409, detail="Room URL already exists")
@@ -871,14 +885,17 @@ async def add_room(body: RoomCreate):
 
 @app.delete("/api/rooms/{room_id}", status_code=204)
 async def delete_room(room_id: int):
+    global _rooms_cache
     async with aio_connect() as db:
         await db.execute("DELETE FROM rooms WHERE id = ?", (room_id,))
         await db.commit()
     await monitor.remove_room(room_id)
+    _rooms_cache = None
 
 
 @app.patch("/api/rooms/{room_id}/toggle")
 async def toggle_room(room_id: int):
+    global _rooms_cache
     async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM rooms WHERE id = ?", (room_id,)) as cur:
@@ -897,6 +914,8 @@ async def toggle_room(room_id: int):
         await monitor.add_room(room["id"], room["name"], room["url"])
     else:
         await monitor.remove_room(room_id)
+
+    _rooms_cache = None
 
     return {"id": room_id, "enabled": bool(new_enabled)}
 
@@ -1000,7 +1019,7 @@ async def list_recordings(room_id: int):
     async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT * FROM recordings WHERE room_id = ? ORDER BY start_time DESC",
+            "SELECT * FROM recordings WHERE room_id = ? ORDER BY start_time DESC LIMIT 500",
             (room_id,)
         ) as cur:
             rows = await cur.fetchall()
@@ -1031,11 +1050,12 @@ _SORT_COLS = {
 @app.get("/api/recordings")
 async def list_all_recordings(
     page: int = 1,
-    limit: int = 50,
+    limit: int = Query(default=50, ge=1, le=500),
     status: Optional[str] = None,
     sort: str = "start_time",
     order: str = "desc",
 ):
+    page = max(1, page)
     offset = (page - 1) * limit
     where = f"WHERE {_STATUS_WHERE[status]}" if status in _STATUS_WHERE else ""
     col = _SORT_COLS.get(sort, "r.start_time")
@@ -1430,6 +1450,11 @@ async def reject_rule_suggestion(suggestion_id: int):
 
 @app.get("/api/groups")
 async def list_groups():
+    global _groups_cache
+    import time
+    now = time.monotonic()
+    if _groups_cache and now - _groups_cache[0] < _API_CACHE_TTL_SECONDS:
+        return _groups_cache[1]
     async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("""
@@ -1446,7 +1471,9 @@ async def list_groups():
             ORDER BY g.created_at DESC
         """) as cur:
             rows = await cur.fetchall()
-    return [dict(r) | _artifact_statuses(dict(r)) for r in rows]
+    result = [dict(r) | _artifact_statuses(dict(r)) for r in rows]
+    _groups_cache = (now, result)
+    return result
 
 
 def _artifact_statuses(group: dict) -> dict:
@@ -2510,10 +2537,11 @@ async def get_clip_jobs():
 
 
 @app.get("/api/transcribe-queue")
-async def get_transcribe_queue():
+async def get_transcribe_queue(limit: int = Query(default=100, ge=1, le=500)):
     """Return pending/running transcription jobs for the queue view."""
     import time as _time
     from transcribe import transcribe_timing
+    limit = limit if isinstance(limit, int) else 100
     timing = transcribe_timing()
     now = _time.time()
 
@@ -2531,7 +2559,7 @@ async def get_transcribe_queue():
                       AND r.end_time IS NOT NULL
                       AND r.end_time != r.start_time)
                ORDER BY r.id ASC
-               LIMIT 100"""
+               LIMIT ?""", (limit,)
         ) as cur:
             rows = await cur.fetchall()
 
@@ -2585,8 +2613,13 @@ async def get_transcribe_queue():
             "size_bytes": row["size_bytes"],
         })
 
+    waiting_jobs = sum(1 for job in jobs if job["level"] != "running")
+    running_remaining = sum(
+        max(0.0, avg_s - (job["elapsed_s"] or 0))
+        for job in jobs if job["level"] == "running"
+    )
+    eta_s = int(running_remaining + avg_s * waiting_jobs) if avg_s > 0 else None
     total = len(jobs) + timing["session_done"]
-    eta_s = int(avg_s * len(jobs)) if avg_s > 0 else None
     return {
         "jobs": jobs,
         "avg_duration_s": avg_s,
@@ -2597,9 +2630,14 @@ async def get_transcribe_queue():
 
 
 @app.get("/api/clip-queue")
-async def get_clip_queue_api():
+async def get_clip_queue_api(limit: int = Query(default=200, ge=1, le=500)):
     """Return running + queued clip jobs with priority info."""
-    return get_clip_queue()
+    limit = limit if isinstance(limit, int) else 200
+    queue = get_clip_queue()
+    queue["queued"] = queue["queued"][:limit]
+    queue["paused"] = queue["paused"][:limit]
+    queue["total_queued"] = len(queue["queued"]) + len(queue["paused"])
+    return queue
 
 
 @app.post("/api/clip-queue/{recording_id}/priority")
