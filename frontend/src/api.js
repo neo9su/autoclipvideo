@@ -2,16 +2,17 @@ const BASE = (import.meta.env.VITE_API_BASE || 'http://10.190.0.203:8899').repla
 const FETCH_TIMEOUT_MS = 15000
 const inFlightRequests = new Map()
 const MAX_RETRIES = 2
+const RETRYABLE_STATUS_MIN = 500
 
 function notifyLoading(delta) {
   window.dispatchEvent(new CustomEvent('app:loading', { detail: delta }))
 }
 
 /** Wrapper that aborts fetch after timeout so an unreachable backend does not hang the UI. */
-function fetchWithTimeout(url, options = {}, timeout = FETCH_TIMEOUT_MS) {
+export function fetchWithTimeout(url, options = {}, timeout = FETCH_TIMEOUT_MS) {
   const method = (options.method || 'GET').toUpperCase()
   const key = method === 'GET' ? `${method}:${url}` : null
-  if (key && inFlightRequests.has(key)) return inFlightRequests.get(key).then(response => response.clone())
+  if (key && inFlightRequests.has(key)) return inFlightRequests.get(key)
 
   const request = (async () => {
     notifyLoading(1)
@@ -21,7 +22,7 @@ function fetchWithTimeout(url, options = {}, timeout = FETCH_TIMEOUT_MS) {
         const timeoutId = timeout > 0 ? setTimeout(() => controller.abort(), timeout) : null
         try {
           const response = await fetch(url, { ...options, signal: controller.signal })
-          if (response.ok || response.status < 500 || attempt === MAX_RETRIES) return response
+          if (response.ok || response.status < RETRYABLE_STATUS_MIN || attempt === MAX_RETRIES) return response
         } catch (error) {
           if (attempt === MAX_RETRIES) throw error
         } finally {
@@ -36,12 +37,12 @@ function fetchWithTimeout(url, options = {}, timeout = FETCH_TIMEOUT_MS) {
   })()
   if (key) {
     inFlightRequests.set(key, request)
-    // Each consumer must receive its own body stream. Returning the same
-    // Response object makes concurrent JSON readers consume one another's
-    // body and can look like an intermittent freeze to the user.
-    request.finally(() => inFlightRequests.delete(key)).catch(() => {})
+    request.then(
+      () => inFlightRequests.delete(key),
+      () => inFlightRequests.delete(key),
+    )
   }
-  return request.then(response => response.clone())
+  return request
 }
 
 async function readErrorMessage(response, fallback = '请求失败') {

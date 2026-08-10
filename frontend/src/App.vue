@@ -1,6 +1,6 @@
 <template>
   <div class="app">
-    <div v-if="loadingCount > 0" class="global-loading" role="status" aria-live="polite">
+    <div v-if="loadingCount > 0" class="global-loading" role="status" aria-live="polite" aria-busy="true">
       <span class="global-spinner"></span><span>正在加载…</span>
     </div>
     <header class="header">
@@ -98,7 +98,10 @@ const loginStatus = ref({ logged_in: false, quality: 'LD1', file_age_hours: null
 const showLoginPopup = ref(false)
 const loginRefreshing = ref(false)
 const loadingCount = ref(0)
-function updateLoading(event) { loadingCount.value = Math.max(0, loadingCount.value + event.detail) }
+function updateLoading(event) {
+  const delta = Number(event.detail) || 0
+  loadingCount.value = Math.max(0, loadingCount.value + delta)
+}
 
 const loginStatusTitle = computed(() => {
   if (loginStatus.value.logged_in) {
@@ -205,7 +208,7 @@ nav { display: flex; gap: 8px; }
 .login-refresh-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .login-close-btn { padding: 8px 14px; background: #333; color: #ccc; border: none; border-radius: 6px; cursor: pointer; font-size: 13px; }
 .main { max-width: 1200px; margin: 0 auto; padding: 24px; }
-.global-loading { position: fixed; inset: 0; z-index: 500; display:flex; align-items:flex-start; justify-content:center; padding-top:72px; pointer-events:none; }
+.global-loading { position: fixed; inset: 0; z-index: 500; display:flex; align-items:flex-start; justify-content:center; padding-top:72px; background:rgba(0,0,0,.12); pointer-events:auto; cursor:wait; }
 .global-loading > span:last-child { background:rgba(20,20,20,.92); color:#ddd; border:1px solid #444; border-radius:8px; padding:8px 14px 8px 8px; font-size:13px; box-shadow:0 4px 20px rgba(0,0,0,.35); }
 .global-spinner { width:18px; height:18px; margin:8px 8px 0 0; border:2px solid #555; border-top-color:#fe2c55; border-radius:50%; animation:spin .8s linear infinite; }
 @keyframes spin { to { transform:rotate(360deg); } }
