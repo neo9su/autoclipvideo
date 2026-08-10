@@ -1,5 +1,8 @@
 <template>
   <div class="app">
+    <div v-if="loadingCount > 0" class="global-loading" role="status" aria-live="polite">
+      <span class="global-spinner"></span><span>正在加载…</span>
+    </div>
     <header class="header">
       <div class="header-inner">
         <h1>抖音直播录制系统</h1>
@@ -57,9 +60,6 @@
       </div>
     </header>
     <GpuBanner />
-    <div v-if="isLoading" class="global-loading" role="status" aria-live="polite">
-      <span class="loading-spinner"></span><span>正在加载…</span>
-    </div>
     <main class="main">
       <Dashboard v-if="page === 'dashboard'" />
       <History v-else-if="page === 'history'" />
@@ -89,7 +89,6 @@ import ClipQueue from './views/ClipQueue.vue'
 import GpuBanner from './components/GpuBanner.vue'
 import { useToast } from './composables/toast.js'
 import { remoteFetch } from './remoteApi.js'
-import { isLoading } from './composables/requestState.js'
 
 const page = ref('dashboard')
 const { toasts } = useToast()
@@ -98,6 +97,8 @@ const { toasts } = useToast()
 const loginStatus = ref({ logged_in: false, quality: 'LD1', file_age_hours: null, refreshing: false, launch_status: 'idle', msg: '', detail: '', diagnostics: null })
 const showLoginPopup = ref(false)
 const loginRefreshing = ref(false)
+const loadingCount = ref(0)
+function updateLoading(event) { loadingCount.value = Math.max(0, loadingCount.value + event.detail) }
 
 const loginStatusTitle = computed(() => {
   if (loginStatus.value.logged_in) {
@@ -134,17 +135,22 @@ async function doLogin() {
       return
     }
     await fetchLoginStatus()
-    const poll = setInterval(async () => {
+    loginPollTimer = setInterval(async () => {
       await fetchLoginStatus()
       if (!loginStatus.value.refreshing) {
-        clearInterval(poll)
+        clearInterval(loginPollTimer)
+        loginPollTimer = null
         loginRefreshing.value = false
         if (loginStatus.value.launch_status === 'failed' || loginStatus.value.launch_status === 'timed_out') {
           alert(loginStatus.value.msg || loginStatus.value.detail || '登录未完成')
         }
       }
     }, 3000)
-    setTimeout(() => { clearInterval(poll); loginRefreshing.value = false }, 310000)
+    loginTimeoutTimer = setTimeout(() => {
+      if (loginPollTimer) clearInterval(loginPollTimer)
+      loginPollTimer = null
+      loginRefreshing.value = false
+    }, 310000)
   } catch (e) {
     loginRefreshing.value = false
     alert(`登录请求失败：${e?.message || '网络错误'}`)
@@ -152,11 +158,19 @@ async function doLogin() {
 }
 
 let loginTimer
+let loginPollTimer = null
+let loginTimeoutTimer = null
 onMounted(() => {
+  window.addEventListener('app:loading', updateLoading)
   fetchLoginStatus()
   loginTimer = setInterval(fetchLoginStatus, 60000)
 })
-onUnmounted(() => clearInterval(loginTimer))
+onUnmounted(() => {
+  clearInterval(loginTimer)
+  if (loginPollTimer) clearInterval(loginPollTimer)
+  if (loginTimeoutTimer) clearTimeout(loginTimeoutTimer)
+  window.removeEventListener('app:loading', updateLoading)
+})
 </script>
 
 <style>
@@ -191,9 +205,10 @@ nav { display: flex; gap: 8px; }
 .login-refresh-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .login-close-btn { padding: 8px 14px; background: #333; color: #ccc; border: none; border-radius: 6px; cursor: pointer; font-size: 13px; }
 .main { max-width: 1200px; margin: 0 auto; padding: 24px; }
-.global-loading { position: fixed; inset: 0; z-index: 250; display: flex; align-items: center; justify-content: center; gap: 10px; background: rgba(15,15,15,.42); color: #fff; pointer-events: none; font-size: 14px; }
-.loading-spinner { width: 22px; height: 22px; border: 3px solid rgba(255,255,255,.25); border-top-color: #fe2c55; border-radius: 50%; animation: spin .8s linear infinite; }
-@keyframes spin { to { transform: rotate(360deg); } }
+.global-loading { position: fixed; inset: 0; z-index: 500; display:flex; align-items:flex-start; justify-content:center; padding-top:72px; pointer-events:none; }
+.global-loading > span:last-child { background:rgba(20,20,20,.92); color:#ddd; border:1px solid #444; border-radius:8px; padding:8px 14px 8px 8px; font-size:13px; box-shadow:0 4px 20px rgba(0,0,0,.35); }
+.global-spinner { width:18px; height:18px; margin:8px 8px 0 0; border:2px solid #555; border-top-color:#fe2c55; border-radius:50%; animation:spin .8s linear infinite; }
+@keyframes spin { to { transform:rotate(360deg); } }
 .toast-container { position: fixed; bottom: 24px; right: 24px; display: flex; flex-direction: column; gap: 8px; z-index: 200; }
 .toast { padding: 10px 18px; border-radius: 8px; font-size: 13px; color: #fff; max-width: 320px; animation: toast-in 0.2s ease; }
 .toast.info    { background: #2a2a2a; border: 1px solid #444; }

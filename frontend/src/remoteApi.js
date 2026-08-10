@@ -12,6 +12,7 @@ export const REMOTE_WS_BASE = (
 
 const REMOTE_FETCH_TIMEOUT_MS = 15000
 const inFlightRequests = new Map()
+const MAX_RETRIES = 2
 
 export function remoteUrl(path) {
   return `${REMOTE_API_BASE}${path.startsWith('/') ? path : `/${path}`}`
@@ -25,19 +26,29 @@ export function remoteFetch(path, options = {}, timeout = REMOTE_FETCH_TIMEOUT_M
   const url = remoteUrl(path)
   const method = (options.method || 'GET').toUpperCase()
   const key = method === 'GET' ? `${method}:${url}` : null
-  if (key && inFlightRequests.has(key)) return inFlightRequests.get(key)
+  if (key && inFlightRequests.has(key)) return inFlightRequests.get(key).then(response => response.clone())
   const request = (async () => {
     window.dispatchEvent(new CustomEvent('app:loading', { detail: 1 }))
     try {
-      const controller = new AbortController()
-      const timeoutId = timeout > 0 ? setTimeout(() => controller.abort(), timeout) : null
-      try { return await fetch(url, { ...options, signal: controller.signal }) }
-      finally { if (timeoutId !== null) clearTimeout(timeoutId) }
+      for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
+        const controller = new AbortController()
+        const timeoutId = timeout > 0 ? setTimeout(() => controller.abort(), timeout) : null
+        try {
+          const response = await fetch(url, { ...options, signal: controller.signal })
+          if (response.ok || response.status < 500 || attempt === MAX_RETRIES) return response
+        } catch (error) {
+          if (attempt === MAX_RETRIES) throw error
+        } finally {
+          if (timeoutId !== null) clearTimeout(timeoutId)
+        }
+        await new Promise(resolve => setTimeout(resolve, 300 * (attempt + 1)))
+      }
+      throw new Error('请求失败')
     } finally { window.dispatchEvent(new CustomEvent('app:loading', { detail: -1 })) }
   })()
   if (key) {
     inFlightRequests.set(key, request)
-    request.finally(() => inFlightRequests.delete(key))
+    request.finally(() => inFlightRequests.delete(key)).catch(() => {})
   }
-  return request
+  return request.then(response => response.clone())
 }
