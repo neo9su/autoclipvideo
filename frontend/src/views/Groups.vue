@@ -16,7 +16,7 @@
     </div>
 
     <div class="groups-list">
-      <div v-for="g in groups" :key="g.id" :class="['group-card', g.is_custom && 'group-card-custom']">
+      <div v-for="g in visibleGroups" :key="g.id" :class="['group-card', g.is_custom && 'group-card-custom']">
         <!-- Group header -->
         <div class="group-header">
           <div class="group-meta">
@@ -313,6 +313,7 @@
         </div>
       </div>
     </div>
+    <div v-if="visibleGroups.length < groups.length" ref="groupsSentinel" class="virtual-list-sentinel">加载更多分组…</div>
   </div>
 
   <!-- Group Create / Edit Modal -->
@@ -697,7 +698,10 @@ import QianchuanUpload from '../components/QianchuanUpload.vue'
 import { useToast } from '../composables/toast.js'
 
 const groups = ref([])
-const rooms = ref([])
+const visibleGroupCount = ref(50)
+const groupsSentinel = ref(null)
+const visibleGroups = computed(() => groups.value.slice(0, visibleGroupCount.value))
+let groupsObserver = null
 const openId = ref(null)
 const detail = ref(null)
 const detailLoading = ref(false)
@@ -992,7 +996,7 @@ const importPreviewCount = computed(() => {
 async function load() {
   try {
     ;[groups.value, rooms.value] = await Promise.all([getGroups(), getRooms()])
-    if (openId.value) detail.value = await getGroup(openId.value)
+    visibleGroupCount.value = Math.min(50, groups.value.length)
   } catch (error) {
     show(error.message || '分组加载失败', 'error')
   }
@@ -1296,8 +1300,11 @@ async function doReassign(recordingId, newGroupId) {
 }
 
 onMounted(() => {
+  groupsObserver = new IntersectionObserver(entries => {
+    if (entries[0]?.isIntersecting) visibleGroupCount.value = Math.min(groups.value.length, visibleGroupCount.value + 25)
+  }, { rootMargin: '400px' })
+  if (groupsSentinel.value) groupsObserver.observe(groupsSentinel.value)
   load()
-  loadSuggestions()
   wsCleanup = createWS((msg) => {
     if (msg.type === 'merged') {
       show('视频合并完成', 'success')
@@ -1466,7 +1473,7 @@ async function rejectSuggestion(id) {
   } catch (e) { show(e.message || '操作失败', 'error') }
 }
 
-onUnmounted(() => { wsCleanup?.(); stopProgressPolling() })
+onUnmounted(() => { wsCleanup?.(); stopProgressPolling(); groupsObserver?.disconnect() })
 </script>
 
 <style scoped>
@@ -1485,6 +1492,7 @@ onUnmounted(() => { wsCleanup?.(); stopProgressPolling() })
 .group-card-custom .btn-del:hover { color: #c0392b; }
 .empty-tip { color: #444; text-align: center; padding: 60px; }
 .groups-list { display: flex; flex-direction: column; gap: 12px; }
+.virtual-list-sentinel { min-height: 32px; padding: 8px; text-align: center; color: #666; font-size: 12px; }
 .group-card { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 12px; padding: 18px; }
 .group-card-custom { background: #f5f3ef; border: 2px solid #fb923c; color: #1a1a1a; }
 .group-card-custom .group-label { color: #111; }
