@@ -31,12 +31,25 @@ class MonitorManager:
         self._allow_local_media = allow_local_media
 
     async def start_all(self):
-        """Start enabled room monitors on a media-enabled deployment."""
+        """Enable and start monitors for every recordable room on a media worker.
+
+        Room enablement is deliberately repaired at startup because the room list is
+        the deployment configuration for this single-recorder service. The special
+        ``__custom__`` room is upload-only and must never be monitored.
+        """
         self._require_media_worker("room monitoring/recording")
         async with aio_connect() as db:
+            await db.execute(
+                "UPDATE rooms SET enabled = 1 "
+                "WHERE url != '__custom__' AND enabled != 1"
+            )
+            await db.commit()
             db.row_factory = aiosqlite.Row
-            async with db.execute("SELECT * FROM rooms WHERE enabled = 1") as cursor:
+            async with db.execute(
+                "SELECT * FROM rooms WHERE enabled = 1 AND url != '__custom__'"
+            ) as cursor:
                 rooms = await cursor.fetchall()
+        logger.info("Starting monitors for %d enabled recording room(s)", len(rooms))
         for room in rooms:
             await self.add_room(room["id"], room["name"], room["url"])
 
