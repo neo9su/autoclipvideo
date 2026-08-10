@@ -28,6 +28,7 @@ from typing import Any, Iterator
 
 DEFAULT_RETRIES = 3
 RETRYABLE_HTTP = {408, 425, 429, 500, 502, 503, 504}
+PROOF_REQUIRED_COUNT = 3
 
 
 @dataclass(frozen=True)
@@ -145,6 +146,36 @@ def validate_manifest_item(source_dir: Path, item: dict[str, Any]) -> None:
         path = Path(item[field]).resolve()
         if path == root or root not in path.parents:
             raise ValueError(f"manifest_{field}_outside_source_dir")
+
+
+def validate_proof_evidence(path: Path) -> dict[str, Any]:
+    """Validate an operator-supplied proof before permitting an unbounded run.
+
+    The proof is deliberately external to the checkpoint: an operator must
+    inspect and archive three real end-to-end results before converting a
+    sample runner into a full-library runner.  A known 7080 case may be a
+    documented failure, but it still needs complete failure evidence.
+    """
+    try:
+        proof = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("proof evidence must be readable JSON") from exc
+    records = proof.get("records") if isinstance(proof, dict) else None
+    if not isinstance(records, list) or len(records) < PROOF_REQUIRED_COUNT:
+        raise ValueError("proof evidence must contain at least three records")
+    for record in records[:PROOF_REQUIRED_COUNT]:
+        if not isinstance(record, dict) or not record.get("input") or not record.get("job_id"):
+            raise ValueError("each proof record needs input and job_id")
+        if record.get("status") == "success":
+            evidence = record.get("evidence")
+            if not isinstance(evidence, dict) or not evidence.get("gpu_consumed"):
+                raise ValueError("successful proof records need GPU evidence")
+        elif record.get("status") in {"failed", "permanent_failure"}:
+            if not record.get("failure_reason") or not record.get("response"):
+                raise ValueError("failed proof records need response and failure_reason")
+        else:
+            raise ValueError("proof records must be success or documented failure")
+    return proof
 
 
 class Checkpoint:
@@ -431,6 +462,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--lease-seconds", type=float, default=7200.0)
     parser.add_argument("--worker-id", default=f"reclip-{os.getpid()}-{uuid.uuid4().hex[:8]}")
     parser.add_argument("--scan", action="store_true", help="create manifest and exit")
+    parser.add_argument("--proof-evidence", type=Path,
+                        help="JSON proof for three real recordings; required for full runs")
     args = parser.parse_args(argv)
     if not args.source_dir.is_dir() or args.retries < 1 or args.rate_limit < 0:
         parser.error("source directory, retry limit, and rate limit are invalid")
@@ -446,6 +479,13 @@ def main(argv: list[str] | None = None) -> int:
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
         print(json.dumps({**summary, "manifest": str(args.manifest)}, ensure_ascii=False))
         return 0
+    if args.sample == 0:
+        if args.proof_evidence is None:
+            parser.error("full run requires --proof-evidence from a reviewed three-recording proof")
+        try:
+            validate_proof_evidence(args.proof_evidence)
+        except ValueError as exc:
+            parser.error(str(exc))
     if not args.manifest.is_file():
         parser.error("manifest does not exist; run with --scan first")
     checkpoint = Checkpoint(args.checkpoint)

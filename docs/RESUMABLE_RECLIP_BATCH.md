@@ -35,6 +35,12 @@ touch audit/reclip.pause
 rm audit/reclip.pause
 ```
 
+The first three-recording proof must be archived as JSON before an unbounded
+run is allowed. It must contain three real inputs, remote job IDs, and complete
+success evidence; a known 7080 failure is acceptable only when its response and
+failure reason are recorded. Pass it with `--proof-evidence audit/proof.json`
+on the full run. Omitting that option is a deliberate fail-closed error.
+
 A sample run must be checked with `ffprobe` and the checkpoint's `evidence_json`:
 its evidence includes source/output sizes, remote response, job ID, SRT hash,
 ffprobe output, elapsed time, and failure classification. A `success` status is

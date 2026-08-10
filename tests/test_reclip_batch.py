@@ -8,7 +8,8 @@ import pytest
 
 from scripts.reclip_batch import (Checkpoint, create_manifest, lease, scan_pairs,
                                   stable_job_key, validate_control_paths,
-                                  validate_manifest_item, validate_output_root)
+                                  validate_manifest_item, validate_output_root,
+                                  validate_proof_evidence)
 
 
 def test_manifest_uses_supported_sidecars_and_preserves_sources(tmp_path: Path) -> None:
@@ -88,3 +89,20 @@ def test_control_plane_artifacts_and_manifest_inputs_are_isolated(tmp_path: Path
     validate_manifest_item(source_dir, valid)
     with pytest.raises(ValueError):
         validate_manifest_item(source_dir, {"source": str(tmp_path / "outside.mp4"), "srt": str(source_dir / "a.srt")})
+
+
+def test_full_run_proof_requires_three_auditable_records(tmp_path: Path) -> None:
+    proof = tmp_path / "proof.json"
+    proof.write_text(json.dumps({"records": [
+        {"input": "a.mp4", "job_id": "job-a", "status": "success",
+         "evidence": {"gpu_consumed": True}},
+        {"input": "b.mp4", "job_id": "job-b", "status": "success",
+         "evidence": {"gpu_consumed": True}},
+        {"input": "7080.mp4", "job_id": "job-7080", "status": "failed",
+         "response": {"status": 500}, "failure_reason": "remote encoder failure"},
+    ]}), encoding="utf-8")
+    assert len(validate_proof_evidence(proof)["records"]) == 3
+
+    proof.write_text(json.dumps({"records": [{"input": "only.mp4", "job_id": "job"}]}), encoding="utf-8")
+    with pytest.raises(ValueError, match="at least three"):
+        validate_proof_evidence(proof)
