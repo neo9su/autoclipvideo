@@ -277,6 +277,20 @@ class Checkpoint:
         self._event(key, str(fields.get("status", "updated")), fields)
         self.db.commit()
 
+    def renew(self, key: str, owner: str, lease_seconds: float) -> None:
+        """Extend an active job lease without changing its checkpoint state."""
+        if not owner or lease_seconds <= 0:
+            raise ValueError("owner and lease_seconds must be positive")
+        updated = self.db.execute(
+            """UPDATE jobs SET lease_until=?, updated_at=?
+               WHERE job_key=? AND status='processing' AND lease_owner=?""",
+            (time.time() + lease_seconds, time.time(), key, owner),
+        )
+        if updated.rowcount != 1:
+            raise PermissionError("cannot renew an unowned or non-processing job")
+        self._event(key, "lease_renewed", {"owner": owner, "lease_seconds": lease_seconds})
+        self.db.commit()
+
     def _event(self, key: str, event: str, detail: dict[str, Any]) -> None:
         self.db.execute("INSERT INTO events(job_key,event,detail_json,at) VALUES(?,?,?,?)",
                         (key, event, json.dumps(detail, ensure_ascii=False, default=str), time.time()))
@@ -430,6 +444,10 @@ def run_one(job: dict[str, Any], checkpoint: Checkpoint, args: argparse.Namespac
         while True:
             if args.pause_file.exists():
                 raise RuntimeError("paused_by_operator")
+            # A long-running remote job must retain ownership of its row.  The
+            # lease is intentionally renewed only by the worker that claimed
+            # it, so an interrupted process remains reclaimable.
+            checkpoint.renew(key, owner, args.lease_seconds)
             status = get_json(f"{args.gpu_url.rstrip('/')}/jobs/{remote_id}", args.timeout, args.headers)
             if status.get("status") == "done":
                 validate_reclip_completion(status)
@@ -488,7 +506,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--gpu-url", required=True)
-    parser.add_argument("--auth-token", default="", help="Bearer token for the private GPU API")
+    parser.add_argument("--auth-token-env", default="GPU_API_TOKEN",
+                        help="environment variable containing the private GPU API bearer token")
     parser.add_argument("--room-id", type=int, default=0)
     parser.add_argument("--sample", type=int, default=0, help="process at most N manifest entries")
     parser.add_argument("--retries", type=int, default=DEFAULT_RETRIES)
@@ -510,7 +529,8 @@ def main(argv: list[str] | None = None) -> int:
         validate_control_paths(args.source_dir, args.manifest, args.checkpoint, args.output_dir)
     except ValueError as exc:
         parser.error(str(exc))
-    args.headers = {"Authorization": f"Bearer {args.auth_token}"} if args.auth_token else {}
+    auth_token = os.environ.get(args.auth_token_env, "")
+    args.headers = {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
     if args.scan:
         candidates = create_manifest(args.source_dir, args.manifest)
         summary_path = args.manifest.with_suffix(args.manifest.suffix + ".summary.json")

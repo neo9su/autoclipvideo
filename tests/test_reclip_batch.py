@@ -61,6 +61,21 @@ def test_checkpoint_claims_with_lease_and_requires_owner_for_success(tmp_path: P
     checkpoint.close()
 
 
+def test_checkpoint_renews_only_the_active_worker_lease(tmp_path: Path) -> None:
+    checkpoint = Checkpoint(tmp_path / "checkpoint.db")
+    checkpoint.seed(iter([{"job_key": "key", "source": "/source.mp4", "srt": "/source.srt",
+                          "source_sha256": "a", "source_size": 7, "srt_sha256": "b", "srt_size": 3}]))
+    claimed = checkpoint.claim("worker-a", 1, 2)
+    assert claimed
+    old_deadline = claimed["lease_until"]
+    checkpoint.renew("key", "worker-a", 60)
+    renewed = checkpoint.db.execute("SELECT lease_owner, lease_until FROM jobs WHERE job_key='key'").fetchone()
+    assert renewed[0] == "worker-a" and renewed[1] > old_deadline
+    with pytest.raises(PermissionError):
+        checkpoint.renew("key", "worker-b", 60)
+    checkpoint.close()
+
+
 def test_lease_rejects_second_runner_and_cleans_up(tmp_path: Path) -> None:
     lock = tmp_path / "run.lease"
     with lease(lock):
