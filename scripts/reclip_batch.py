@@ -341,19 +341,54 @@ def multipart_upload(url: str, source: Path, room_id: int, idempotency_key: str,
         response = connection.getresponse()
         payload = response.read()
         if response.status >= 400:
-            raise urllib.error.HTTPError(url, response.status, response.reason, response.headers, None)
+            error = urllib.error.HTTPError(url, response.status, response.reason, response.headers, None)
+            error.response_body = payload[:4096].decode("utf-8", errors="replace")
+            raise error
         return json.loads(payload)
     finally:
         connection.close()
 
 
 def get_json(url: str, timeout: float, headers: dict[str, str] | None = None) -> dict[str, Any]:
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("gpu_url_must_be_http")
     request = urllib.request.Request(url, headers=headers or {})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read())
 
 
+def validate_reclip_completion(status: dict[str, Any]) -> None:
+    """Reject transcription/copy jobs masquerading as completed reclips.
+
+    The legacy ``/jobs`` endpoint only transcribes an uploaded recording and
+    returns the original MP4.  Treating that artifact as a re-edit would make
+    the checkpoint claim work that never happened, so the controlled adapter
+    must explicitly identify the reclip operation and its generated outputs.
+    """
+    required = ("operation", "output_mp4_url", "output_srt_url", "gpu_consumed", "exit_code")
+    missing = [field for field in required if field not in status]
+    if missing:
+        raise ValueError(f"reclip_contract_missing:{','.join(missing)}")
+    if status["operation"] != "reclip":
+        raise ValueError("reclip_contract_operation_mismatch")
+    if not status["output_mp4_url"] or not status["output_srt_url"]:
+        raise ValueError("reclip_contract_missing_outputs")
+    if not status["gpu_consumed"] or status["exit_code"] != 0:
+        raise ValueError("reclip_contract_gpu_or_exit_failure")
+
+
+def validate_srt_file(path: Path) -> None:
+    """Require a non-empty UTF-8 SRT with at least one timed cue."""
+    text = path.read_text(encoding="utf-8-sig")
+    if not text.strip() or "-->" not in text:
+        raise ValueError("srt_artifact_unreadable")
+
+
 def download(url: str, destination: Path, timeout: float, headers: dict[str, str] | None = None) -> dict[str, Any]:
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("artifact_url_must_be_http")
     temporary = destination.with_suffix(destination.suffix + ".part")
     request = urllib.request.Request(url, headers=headers or {})
     with urllib.request.urlopen(request, timeout=timeout) as response, temporary.open("wb") as stream:
@@ -386,7 +421,7 @@ def run_one(job: dict[str, Any], checkpoint: Checkpoint, args: argparse.Namespac
         if (sidecar.stat().st_size != job["srt_size"]
                 or sha256_file(sidecar) != job["srt_sha256"]):
             raise ValueError("srt_changed_since_manifest")
-        response = multipart_upload(f"{args.gpu_url.rstrip('/')}/jobs", source, args.room_id, key, args.timeout, args.headers)
+        response = multipart_upload(f"{args.gpu_url.rstrip('/')}/reclip-jobs", source, args.room_id, key, args.timeout, args.headers)
         remote_id = response.get("job_id")
         if not remote_id:
             raise ValueError("missing_remote_job_id")
@@ -397,6 +432,7 @@ def run_one(job: dict[str, Any], checkpoint: Checkpoint, args: argparse.Namespac
                 raise RuntimeError("paused_by_operator")
             status = get_json(f"{args.gpu_url.rstrip('/')}/jobs/{remote_id}", args.timeout, args.headers)
             if status.get("status") == "done":
+                validate_reclip_completion(status)
                 break
             if status.get("status") in {"error", "failed"}:
                 raise RuntimeError(status.get("error") or "remote_job_failed")
@@ -407,13 +443,15 @@ def run_one(job: dict[str, Any], checkpoint: Checkpoint, args: argparse.Namespac
         # expose the generated MP4; fail closed when it does not.
         destination_mp4 = output_dir / source.name
         destination_srt = output_dir / f"{source.stem}.srt"
-        mp4_response = download(f"{args.gpu_url.rstrip('/')}/jobs/{remote_id}/mp4", destination_mp4, args.timeout, args.headers)
-        srt_response = download(f"{args.gpu_url.rstrip('/')}/jobs/{remote_id}/srt", destination_srt, args.timeout, args.headers)
+        mp4_response = download(status["output_mp4_url"], destination_mp4, args.timeout, args.headers)
+        srt_response = download(status["output_srt_url"], destination_srt, args.timeout, args.headers)
         output_probe = ffprobe(destination_mp4)
+        validate_srt_file(destination_srt)
         evidence = {
             "job_id": remote_id,
-            "request": {"method": "POST", "path": "/jobs", "idempotency_key": key},
+            "request": {"method": "POST", "path": "/reclip-jobs", "idempotency_key": key},
             "response": response,
+            "completion": status,
             "mp4_response": mp4_response,
             "srt_response": srt_response,
             "gpu_consumed": True,
@@ -433,7 +471,7 @@ def run_one(job: dict[str, Any], checkpoint: Checkpoint, args: argparse.Namespac
     except Exception as exc:
         category = classify_failure(exc)
         status = "retry" if str(exc) == "paused_by_operator" or (attempts < args.retries and category in {"remote_transient", "transport", "unknown"}) else "permanent_failure"
-        checkpoint.update(key, status=status, failure_class=category, failure_reason=str(exc)[:500], evidence_json=json.dumps({"job_id": job.get("remote_job_id"), "elapsed_s": round(time.time() - started, 3)}), lease_owner=owner)
+        checkpoint.update(key, status=status, failure_class=category, failure_reason=str(exc)[:500], evidence_json=json.dumps({"job_id": job.get("remote_job_id"), "failure_class": category, "http_status": getattr(exc, "code", None), "response": getattr(exc, "response_body", None), "exit_code": getattr(exc, "returncode", None), "elapsed_s": round(time.time() - started, 3)}), lease_owner=owner)
 
 
 def load_manifest(path: Path) -> Iterator[dict[str, Any]]:

@@ -9,7 +9,8 @@ import pytest
 from scripts.reclip_batch import (Checkpoint, create_manifest, lease, scan_pairs,
                                   stable_job_key, validate_control_paths,
                                   validate_manifest_item, validate_output_root,
-                                  validate_proof_evidence)
+                                  validate_proof_evidence, validate_reclip_completion,
+                                  validate_srt_file)
 
 
 def test_manifest_uses_supported_sidecars_and_preserves_sources(tmp_path: Path) -> None:
@@ -106,3 +107,25 @@ def test_full_run_proof_requires_three_auditable_records(tmp_path: Path) -> None
     proof.write_text(json.dumps({"records": [{"input": "only.mp4", "job_id": "job"}]}), encoding="utf-8")
     with pytest.raises(ValueError, match="at least three"):
         validate_proof_evidence(proof)
+
+
+def test_completion_contract_rejects_legacy_transcription_status() -> None:
+    with pytest.raises(ValueError, match="reclip_contract_missing"):
+        validate_reclip_completion({"status": "done", "gpu_consumed": True})
+
+    with pytest.raises(ValueError, match="operation_mismatch"):
+        validate_reclip_completion({
+            "operation": "transcribe", "output_mp4_url": "/mp4", "output_srt_url": "/srt",
+            "gpu_consumed": True, "exit_code": 0,
+        })
+
+
+def test_srt_artifact_requires_timed_cue(tmp_path: Path) -> None:
+    invalid = tmp_path / "invalid.srt"
+    invalid.write_text("subtitle only", encoding="utf-8")
+    with pytest.raises(ValueError, match="srt_artifact_unreadable"):
+        validate_srt_file(invalid)
+
+    valid = tmp_path / "valid.srt"
+    valid.write_text("1\n00:00:00,000 --> 00:00:01,000\nhello\n", encoding="utf-8")
+    validate_srt_file(valid)
