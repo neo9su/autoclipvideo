@@ -4055,19 +4055,49 @@ def _stream_login_diagnostics() -> dict:
             # Keep the raw lines as well as parsed fields: quser formatting varies
             # slightly between Windows versions and RDP/console sessions.
             detail["interactive_sessions_raw"] = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-            for line in detail["interactive_sessions_raw"][1:]:
-                fields = line.lstrip("> ").split()
-                if len(fields) < 4 or not fields[2].isdigit():
-                    continue
-                detail["interactive_sessions"].append({
-                    "user": fields[0], "session_name": fields[1],
-                    "session_id": int(fields[2]), "state": fields[3],
-                })
+            detail["interactive_sessions"] = _parse_quser_sessions(
+                detail["interactive_sessions_raw"]
+            )
             if result.returncode:
                 detail["interactive_sessions_error"] = result.stderr.strip() or f"quser exited {result.returncode}"
         except Exception as exc:
             detail["interactive_sessions_error"] = str(exc)
     return detail
+
+
+def _parse_quser_sessions(lines: list[str]) -> list[dict]:
+    """Parse the stable columns from ``quser`` without relying on padding.
+
+    ``quser`` prefixes the current user with ``>`` and can omit SESSIONNAME
+    for disconnected sessions.  Keeping this parser separate makes the
+    session decision testable and prevents a formatting variation from
+    incorrectly treating session 0 as interactive.
+    """
+    sessions = []
+    for line in lines[1:]:
+        fields = line.lstrip("> ").split()
+        numeric_index = next(
+            (index for index, field in enumerate(fields[:4]) if field.isdigit()),
+            None,
+        )
+        if numeric_index is None or numeric_index == 0 or len(fields) <= numeric_index + 1:
+            continue
+        session_id = int(fields[numeric_index])
+        sessions.append({
+            "user": fields[0],
+            "session_name": fields[1] if numeric_index >= 2 else None,
+            "session_id": session_id,
+            "state": fields[numeric_index + 1],
+        })
+    return sessions
+
+
+def _stream_login_active_sessions(diagnostics: dict) -> list[dict]:
+    """Return sessions where Windows can display a headed browser window."""
+    return [
+        session for session in diagnostics.get("interactive_sessions", [])
+        if str(session.get("state", "")).casefold() in {"active", "运行中"}
+    ]
 
 
 def _stream_login_interactive_session_guard() -> Optional[dict]:
@@ -4077,10 +4107,7 @@ def _stream_login_interactive_session_guard() -> Optional[dict]:
     diagnostics = _stream_login_diagnostics()
     process_session_id = diagnostics.get("session_id")
     process_user = (diagnostics.get("process_user") or "").casefold()
-    active_sessions = [
-        session for session in diagnostics.get("interactive_sessions", [])
-        if str(session.get("state", "")).casefold() in {"active", "运行中"}
-    ]
+    active_sessions = _stream_login_active_sessions(diagnostics)
     matching = [
         session for session in active_sessions
         if session.get("session_id") == process_session_id
@@ -4090,7 +4117,8 @@ def _stream_login_interactive_session_guard() -> Optional[dict]:
         return None
     return {
         "msg": "无法打开登录浏览器：后端不在当前可见的 Windows 交互会话中",
-        "detail": "请在与 RDP/桌面登录用户相同的 Windows 会话中运行后端；不会跨会话启动浏览器",
+        "detail": "请运行 backend\\start_windows_backend.ps1，或在当前 RDP/桌面会话中启动后端；该启动器会在重新连接时迁移后端",
+        "active_sessions": active_sessions,
         "diagnostics": diagnostics,
     }
 
