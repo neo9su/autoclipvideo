@@ -345,6 +345,12 @@ def health():
     return {"status": "ok", "services": list(SERVICES.keys())}
 
 
+@app.get("/ping")
+def ping():
+    """Small, side-effect-free liveness endpoint for backend probes."""
+    return {"ok": True, "status": "ok", "services": list(SERVICES.keys())}
+
+
 @app.get("/status")
 async def status():
     result = {}
