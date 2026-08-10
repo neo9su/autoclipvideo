@@ -29,7 +29,24 @@ assert payload.get('deployment_role') == 'gpu-backend', payload
 assert payload.get('media_workers_enabled') is True, payload
 required = {'transcription', 'backfill', 'publish', 'enhance', 'creative', 'director', 'qianchuan', 'room-monitors'}
 assert required <= set(payload.get('worker_services', [])), payload
+assert payload.get('qianchuan_api_loaded') is True, payload
 print('PASS /health: gpu-backend media workers enabled')
+print('PASS /health: Qianchuan API router loaded')
+PY
+
+curl --silent --show-error --location "$BASE_URL/openapi.json" > "$TMP_DIR/openapi.json"
+python - "$TMP_DIR/openapi.json" <<'PY'
+import json, sys
+paths = set(json.load(open(sys.argv[1])).get('paths', {}))
+required = {
+    '/api/v2/qianchuan/status',
+    '/api/v2/qianchuan/generate',
+    '/api/v2/qianchuan/compose',
+    '/api/v2/qianchuan/group/{group_id}/result',
+}
+missing = sorted(required - paths)
+assert not missing, f'missing Qianchuan OpenAPI routes: {missing}'
+print('PASS /openapi.json: Qianchuan status/generate/compose/result routes exposed')
 PY
 
 curl --silent --show-error --location "$BASE_URL/frontend/" > "$TMP_DIR/frontend.html"
