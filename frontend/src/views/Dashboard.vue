@@ -29,6 +29,8 @@
     <!-- Room Cards -->
     <div class="rooms-grid" :class="{ 'is-loading': loading }">
       <div v-if="loading" v-for="slot in 3" :key="`skeleton-${slot}`" class="room-card room-skeleton" aria-label="加载中"></div>
+      <div v-if="loading" class="loading-state" aria-live="polite">正在加载房间…</div>
+
       <div v-for="room in rooms" :key="room.id" class="room-card">
         <div class="room-header">
           <div>
@@ -106,6 +108,7 @@ const newName = ref('')
 const newUrl = ref('')
 const addError = ref('')
 const uploadingRooms = ref(new Set())
+const loading = ref(false)
 const srtInputs = ref({})
 let pendingUpload = null  // { room, file }
 let wsCleanup = null
@@ -195,6 +198,7 @@ onMounted(() => {
     if (Date.now() - lastWsMessage > 30000) load()
   }, 300)
   timer = setInterval(fallbackRefresh, 30000)
+
 })
 
 onUnmounted(() => {
@@ -242,6 +246,7 @@ onUnmounted(() => {
 .upload-btn { cursor: pointer; }
 .upload-btn.uploading { opacity: 0.5; cursor: not-allowed; }
 .empty { color: #444; text-align: center; padding: 60px; grid-column: 1/-1; }
+.loading-state { color: #888; padding: 18px; text-align: center; }
 .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 100; }
 .modal { background: #1e1e1e; border: 1px solid #333; border-radius: 14px; padding: 28px; width: 440px; }
 .modal h3 { margin-bottom: 20px; font-size: 16px; }

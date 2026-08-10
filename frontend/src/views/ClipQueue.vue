@@ -207,6 +207,7 @@ const transcribeMeta = ref({ total: 0, session_done: 0, avg_duration_s: 0, eta_s
 const loading = ref(false)
 const maxConcurrent = ref(2)
 let timer = null
+let lastQueueSignature = ''
 
 const overallPct = computed(() => {
   const { total, session_done } = transcribeMeta.value
@@ -228,7 +229,12 @@ async function load() {
   if (clipResult.status === 'fulfilled' && clipResult.value.ok) {
     try {
       const data = await clipResult.value.json()
-      queue.value = { running: data.running || [], queued: data.queued || [], paused: data.paused || [] }
+      const nextQueue = { running: data.running || [], queued: data.queued || [], paused: data.paused || [] }
+      const nextSignature = JSON.stringify(nextQueue)
+      if (nextSignature !== lastQueueSignature) {
+        queue.value = nextQueue
+        lastQueueSignature = nextSignature
+      }
     } catch { /* stale response — keep previous queue state */ }
   }
 
@@ -325,7 +331,10 @@ function formatEta(secs) {
 
 onMounted(() => {
   load()
-  timer = setInterval(load, 20000)
+  timer = setInterval(() => {
+    if (!loading.value) load()
+  }, 20000)
+
 })
 onUnmounted(() => clearInterval(timer))
 </script>

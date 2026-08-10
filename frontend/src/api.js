@@ -128,6 +128,7 @@ export function createWS(onMessage) {
   let reconnectAttempts = 0
   const MAX_RECONNECT_ATTEMPTS = 5
 
+
   function connect() {
     if (closed) return
     if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) return
@@ -142,6 +143,7 @@ export function createWS(onMessage) {
     }
     ws.onclose = () => {
       if (closed || reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) return
+
       reconnectTimer = setTimeout(connect, reconnectDelay)
       reconnectDelay = Math.min(reconnectDelay * 2, 30000)
     }

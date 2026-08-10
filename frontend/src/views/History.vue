@@ -101,7 +101,8 @@
         </tr>
       </thead>
       <tbody>
-        <tr v-for="rec in filtered" :key="rec.id" :class="{ selected: selectedIds.has(rec.id) }">
+        <tr v-if="loading"><td colspan="10" class="empty">正在加载录像…</td></tr>
+        <tr v-for="rec in filtered" :key="rec.id" :class="{ selected: selectedIds.has(rec.id) }" @mouseenter="loadClipVariants(rec)">
           <td class="check-col">
             <input type="checkbox" :checked="selectedIds.has(rec.id)" @change="toggleSelect(rec.id)" class="row-check" />
           </td>
@@ -216,6 +217,8 @@ const stats = ref({ transcribe_pending: 0, transcribe_running: 0, transcribe_fai
 const clipJobs = ref({})        // { recording_id: { pct, msg } }
 const clipVariants = ref({})    // { recording_id: [clips] }
 const clipVariantsLoading = reactive(new Set())
+const loading = ref(false)
+
 const sortField = ref('start_time')
 const sortOrder = ref('desc')
 let wsCleanup = null
@@ -339,6 +342,7 @@ async function load() {
     await Promise.all([loadStats(), loadClipJobs()])
     const visibleIds = new Set(data.items.map(recording => recording.id))
     clipVariants.value = Object.fromEntries(Object.entries(clipVariants.value).filter(([id]) => visibleIds.has(Number(id))))
+
   } finally {
     loading.value = false
   }
@@ -357,6 +361,7 @@ async function loadVariants(recordingId) {
 }
 
 const debouncedLoad = debounce(load, 250)
+
 
 watch(filterRoom, () => {
   page.value = 1
@@ -455,10 +460,9 @@ onMounted(async () => {
   })
 })
 
-onUnmounted(() => {
-  wsCleanup?.()
-  debouncedLoad.cancel()
-})
+onUnmounted(() => wsCleanup?.())
+onUnmounted(() => { if (loadTimer) clearTimeout(loadTimer) })
+
 </script>
 
 <style scoped>
