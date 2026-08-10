@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 import aiosqlite
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Dict, Optional
 
 from recorder import RoomRecorder, get_stream_url
@@ -29,78 +29,29 @@ class MonitorManager:
         self._consecutive_errors: Dict[int, int] = {}
         self._broadcast = broadcast_fn  # WebSocket broadcast callback
         self._allow_local_media = allow_local_media
-        self._started_at: Optional[datetime] = None
-        self._last_start_error: Optional[str] = None
-        self._lifecycle_lock = asyncio.Lock()
 
     async def start_all(self):
-        """Start enabled room monitors on a media-enabled deployment."""
-        async with self._lifecycle_lock:
-            self._require_media_worker("room monitoring/recording")
-            try:
-                async with aio_connect() as db:
-                    db.row_factory = aiosqlite.Row
-                    async with db.execute("SELECT * FROM rooms WHERE enabled = 1") as cursor:
-                        rooms = await cursor.fetchall()
-                for room in rooms:
-                    await self.add_room(room["id"], room["name"], room["url"])
-                self._started_at = datetime.now(timezone.utc)
-                self._last_start_error = None
-            except Exception as exc:
-                self._last_start_error = str(exc)[:500]
-                raise
+        """Enable and start monitors for every recordable room on a media worker.
 
-    async def stop_all(self) -> None:
-        """Stop every room task and recorder managed by this service."""
-        for room_id in list(self._tasks):
-            await self.remove_room(room_id)
-
-    async def restart(self) -> None:
-        """Restart the room monitor service without losing persisted room config."""
-        async with self._lifecycle_lock:
-            await self.stop_all()
-            self._require_media_worker("room monitoring/recording")
-            async with aio_connect() as db:
-                db.row_factory = aiosqlite.Row
-                async with db.execute("SELECT * FROM rooms WHERE enabled = 1") as cursor:
-                    rooms = await cursor.fetchall()
-            for room in rooms:
-                await self.add_room(room["id"], room["name"], room["url"])
-            self._started_at = datetime.now(timezone.utc)
-            self._last_start_error = None
-
-    async def get_overall_status(self) -> dict:
-        """Return service lifecycle, room, login, and queue health for operators."""
+        Room enablement is deliberately repaired at startup because the room list is
+        the deployment configuration for this single-recorder service. The special
+        ``__custom__`` room is upload-only and must never be monitored.
+        """
+        self._require_media_worker("room monitoring/recording")
         async with aio_connect() as db:
+            await db.execute(
+                "UPDATE rooms SET enabled = 1 "
+                "WHERE url != '__custom__' AND enabled != 1"
+            )
+            await db.commit()
             db.row_factory = aiosqlite.Row
-            async with db.execute("SELECT COUNT(*) AS count FROM rooms WHERE enabled = 1") as cursor:
-                enabled_rooms = (await cursor.fetchone())["count"]
             async with db.execute(
-                """SELECT COUNT(*) AS count FROM recordings
-                   WHERE transcribed IN (0, 1) AND local_deleted = 0
-                     AND end_time IS NOT NULL AND end_time != start_time"""
+                "SELECT * FROM rooms WHERE enabled = 1 AND url != '__custom__'"
             ) as cursor:
-                pending_recordings = (await cursor.fetchone())["count"]
-            async with db.execute("SELECT COUNT(*) AS count FROM publish_tasks WHERE status IN ('pending', 'publishing', 'scheduled')") as cursor:
-                pending_publish = (await cursor.fetchone())["count"]
-
-        task_count = len(self._tasks)
-        active_recordings = sum(
-            1 for recorder in self._recorders.values() if recorder.recording
-        )
-        cookie_dir = os.path.expanduser("~/.douyin-publisher/cookies")
-        login_files = [name for name in os.listdir(cookie_dir)] if os.path.isdir(cookie_dir) else []
-        logged_in = any(name.startswith("douyin_") and name.endswith(".json") for name in login_files)
-        return {
-            "running": task_count > 0 or self._started_at is not None,
-            "started_at": self._started_at.isoformat() if self._started_at else None,
-            "last_start_error": self._last_start_error,
-            "deployment_media_enabled": self._allow_local_media,
-            "rooms": {"enabled": enabled_rooms, "monitored": task_count, "recording": active_recordings},
-            "login": {"logged_in": logged_in},
-            "queue": {"pending_recordings": pending_recordings, "pending_publish": pending_publish},
-            "room_status": {str(room_id): self.get_status(room_id) for room_id in self._tasks},
-        }
+                rooms = await cursor.fetchall()
+        logger.info("Starting monitors for %d enabled recording room(s)", len(rooms))
+        for room in rooms:
+            await self.add_room(room["id"], room["name"], room["url"])
 
     async def add_room(self, room_id: int, name: str, url: str):
         self._require_media_worker("room monitoring/recording")
