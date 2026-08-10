@@ -11,11 +11,12 @@
       </div>
     </div>
 
-    <div v-if="groups.length === 0" class="empty-tip">
+    <div v-if="!loading && groups.length === 0" class="empty-tip">
       暂无分组。录像完成转录和剪辑后，系统会自动按款式/颜色分组。
     </div>
 
-    <div class="groups-list">
+    <div class="groups-list" :class="{ 'is-loading': loading }">
+      <div v-if="loading" v-for="slot in 4" :key="`group-skeleton-${slot}`" class="group-card group-skeleton" aria-label="加载中"></div>
       <div v-for="g in groups" :key="g.id" :class="['group-card', g.is_custom && 'group-card-custom']">
         <!-- Group header -->
         <div class="group-header">
@@ -697,6 +698,7 @@ import QianchuanUpload from '../components/QianchuanUpload.vue'
 import { useToast } from '../composables/toast.js'
 
 const groups = ref([])
+const loading = ref(true)
 const rooms = ref([])
 const openId = ref(null)
 const detail = ref(null)
@@ -990,11 +992,13 @@ const importPreviewCount = computed(() => {
 })
 
 async function load() {
+  loading.value = true
   try {
     ;[groups.value, rooms.value] = await Promise.all([getGroups(), getRooms()])
-    if (openId.value) detail.value = await getGroup(openId.value)
   } catch (error) {
     show(error.message || '分组加载失败', 'error')
+  } finally {
+    loading.value = false
   }
 }
 
@@ -1025,7 +1029,7 @@ function startProgressPolling() {
     progressMap.value = await getProcessingProgress()
   }
   poll()
-  progressTimer = setInterval(poll, 8000)
+  progressTimer = setInterval(poll, 20000)
 }
 
 function stopProgressPolling() {
@@ -1485,6 +1489,9 @@ onUnmounted(() => { wsCleanup?.(); stopProgressPolling() })
 .group-card-custom .btn-del:hover { color: #c0392b; }
 .empty-tip { color: #444; text-align: center; padding: 60px; }
 .groups-list { display: flex; flex-direction: column; gap: 12px; }
+.groups-list > .group-card { content-visibility: auto; contain-intrinsic-size: 420px; }
+.group-skeleton { min-height: 230px; background: linear-gradient(90deg, #1a1a1a 25%, #242424 50%, #1a1a1a 75%); background-size: 200% 100%; animation: group-shimmer 1.4s infinite; }
+@keyframes group-shimmer { to { background-position: -200% 0; } }
 .group-card { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 12px; padding: 18px; }
 .group-card-custom { background: #f5f3ef; border: 2px solid #fb923c; color: #1a1a1a; }
 .group-card-custom .group-label { color: #111; }

@@ -94,18 +94,23 @@ export function createWS(onMessage) {
   let reconnectTimer = null
   let closed = false
   let reconnectDelay = 2000  // start at 2s, exponential backoff to 30s max
+  let reconnectAttempts = 0
+  const MAX_RECONNECT_ATTEMPTS = 5
 
   function connect() {
     if (closed) return
+    if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) return
+    reconnectAttempts += 1
     ws = new WebSocket(`${wsBase}/ws/events`)
     ws.onopen = () => {
+      reconnectAttempts = 0
       reconnectDelay = 2000  // reset backoff on successful connection
     }
     ws.onmessage = (e) => {
       try { onMessage(JSON.parse(e.data)) } catch {}
     }
     ws.onclose = () => {
-      if (closed) return
+      if (closed || reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) return
       reconnectTimer = setTimeout(connect, reconnectDelay)
       reconnectDelay = Math.min(reconnectDelay * 2, 30000)
     }
