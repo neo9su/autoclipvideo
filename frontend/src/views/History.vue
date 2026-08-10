@@ -82,6 +82,9 @@
       </button>
     </div>
 
+    <div v-if="loadError" class="load-error" role="alert">
+      <span>{{ loadError }}</span><button class="btn-retry-load" @click="load">重试</button>
+    </div>
     <div v-if="loading" class="history-skeleton" aria-label="加载中"></div>
     <table v-else class="recordings-table">
       <thead>
@@ -218,6 +221,8 @@ const clipVariants = ref({})    // { recording_id: [clips] }
 const clipVariantsLoading = reactive(new Set())
 const sortField = ref('start_time')
 const sortOrder = ref('desc')
+const loadError = ref('')
+const loading = ref(false)
 let wsCleanup = null
 
 const shortError = (msg) => msg && msg.length > 40 ? msg.slice(0, 40) + '…' : msg
@@ -326,7 +331,9 @@ const fmtTime = (s) => s ? new Date(s).toLocaleString('zh-CN') : '—'
 
 
 async function load() {
+  if (loading.value) return
   loading.value = true
+  loadError.value = ''
   try {
     const [data, r] = await Promise.all([
       getAllRecordings(page.value, filterStatus.value, sortField.value, sortOrder.value),
@@ -339,6 +346,8 @@ async function load() {
     await Promise.all([loadStats(), loadClipJobs()])
     const visibleIds = new Set(data.items.map(recording => recording.id))
     clipVariants.value = Object.fromEntries(Object.entries(clipVariants.value).filter(([id]) => visibleIds.has(Number(id))))
+  } catch (error) {
+    loadError.value = error.message || '录像加载失败'
   } finally {
     loading.value = false
   }
@@ -463,6 +472,8 @@ onUnmounted(() => {
 
 <style scoped>
 .transcribe-fail-cell { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.load-error { display:flex; align-items:center; justify-content:center; gap:12px; padding:32px; color:#fe2c55; border:1px solid rgba(254,44,85,.25); border-radius:8px; }
+.btn-retry-load { padding:6px 14px; border:1px solid rgba(254,44,85,.4); border-radius:6px; background:rgba(254,44,85,.15); color:#fe2c55; cursor:pointer; }
 .error-tip { font-size: 11px; color: #e07060; background: rgba(200,60,30,0.12); border: 1px solid rgba(200,60,30,0.25); border-radius: 4px; padding: 2px 6px; cursor: help; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
 .toolbar h2 { font-size: 16px; font-weight: 600; }

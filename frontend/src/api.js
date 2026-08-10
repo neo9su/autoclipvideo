@@ -1,44 +1,16 @@
 const BASE = (import.meta.env.VITE_API_BASE || 'http://10.190.0.203:8899').replace(/\/$/, '')
 const FETCH_TIMEOUT_MS = 15000
-const inFlightRequests = new Map()
-const MAX_RETRIES = 2
-
-function notifyLoading(delta) {
-  window.dispatchEvent(new CustomEvent('app:loading', { detail: delta }))
-}
+import { beginRequest, endRequest, dedupeRequest } from './composables/requestState.js'
 
 /** Wrapper that aborts fetch after timeout so an unreachable backend does not hang the UI. */
 function fetchWithTimeout(url, options = {}, timeout = FETCH_TIMEOUT_MS) {
-  const method = (options.method || 'GET').toUpperCase()
-  const key = method === 'GET' ? `${method}:${url}` : null
-  if (key && inFlightRequests.has(key)) return inFlightRequests.get(key)
-
-  const request = (async () => {
-    notifyLoading(1)
-    try {
-      for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
-        const controller = new AbortController()
-        const timeoutId = timeout > 0 ? setTimeout(() => controller.abort(), timeout) : null
-        try {
-          const response = await fetch(url, { ...options, signal: controller.signal })
-          if (response.ok || response.status < 500 || attempt === MAX_RETRIES) return response
-        } catch (error) {
-          if (attempt === MAX_RETRIES) throw error
-        } finally {
-          if (timeoutId !== null) clearTimeout(timeoutId)
-        }
-        await new Promise(resolve => setTimeout(resolve, 300 * (attempt + 1)))
-      }
-      throw new Error('请求失败')
-    } finally {
-      notifyLoading(-1)
-    }
-  })()
-  if (key) {
-    inFlightRequests.set(key, request)
-    request.finally(() => inFlightRequests.delete(key))
-  }
-  return request
+  const controller = new AbortController()
+  const timeoutId = timeout > 0 ? setTimeout(() => controller.abort(), timeout) : null
+  beginRequest()
+  return fetch(url, { ...options, signal: controller.signal }).finally(() => {
+    if (timeoutId !== null) clearTimeout(timeoutId)
+    endRequest()
+  })
 }
 
 async function readErrorMessage(response, fallback = '请求失败') {
@@ -74,7 +46,7 @@ async function requestJson(url, options, fallback = '请求失败') {
 }
 
 export async function getRooms() {
-  return requestJson(`${BASE}/api/rooms`, undefined, '直播间加载失败')
+  return dedupeRequest('GET:/api/rooms', () => requestJson(`${BASE}/api/rooms`, undefined, '直播间加载失败'))
 }
 
 export async function addRoom(name, url) {
@@ -157,7 +129,7 @@ export function createWS(onMessage) {
 }
 
 export async function getGroups() {
-  return requestJson(`${BASE}/api/groups`, undefined, '分组加载失败')
+  return dedupeRequest('GET:/api/groups', () => requestJson(`${BASE}/api/groups`, undefined, '分组加载失败'))
 }
 
 export async function getGroup(id) {
