@@ -1138,19 +1138,44 @@ async def list_clips():
         db.row_factory = aiosqlite.Row
         async with db.execute("""
             SELECT r.id, r.filename, r.clip_filename, r.start_time, r.end_time,
-                   r.room_id, rm.name as room_name
+                   r.room_id, rm.name as room_name, rc.gpu_clip_job_id
             FROM recordings r
             JOIN rooms rm ON r.room_id = rm.id
+            LEFT JOIN recording_clips rc ON rc.recording_id = r.id AND rc.variant_idx = 0
             WHERE r.clipped = 2 AND r.clip_filename IS NOT NULL
             ORDER BY r.start_time DESC
         """) as cur:
             rows = await cur.fetchall()
+    
+    # Fetch clip sizes from GPU service
+    clip_size_map = {}
+    try:
+        gpu_url = os.environ.get("GPU_SERVICE_URL", "http://10.190.0.203:8877")
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(f"{gpu_url}/clip-jobs")
+            if resp.status_code == 200:
+                gpu_jobs = resp.json()
+                for gj in gpu_jobs:
+                    clip_size_map[gj["filename"]] = gj["size"]
+                    clip_size_map[gj["job_id"]] = gj["size"]
+    except Exception as e:
+        logger.warning(f"Failed to fetch clip sizes from GPU service: {e}")
+    
     items = []
     for r in rows:
-        clip_path = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "..", "recordings", r["clip_filename"])
-        )
-        size = os.path.getsize(clip_path) if os.path.exists(clip_path) else None
+        clip_filename = r["clip_filename"]
+        gpu_job_id = r["gpu_clip_job_id"]
+        
+        # Try to get size from GPU service
+        size = clip_size_map.get(clip_filename) or clip_size_map.get(gpu_job_id)
+        
+        # Fallback: check local path
+        if size is None:
+            clip_path = os.path.abspath(
+                os.path.join(os.path.dirname(__file__), "..", "recordings", clip_filename)
+            )
+            size = os.path.getsize(clip_path) if os.path.exists(clip_path) else None
+        
         items.append({**dict(r), "clip_size": size})
     return items
 

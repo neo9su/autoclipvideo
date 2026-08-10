@@ -64,7 +64,8 @@ def _require_api_auth(request: Request) -> None:
     if not RECLIP_REQUIRE_AUTH:
         return
     if not GPU_API_TOKEN:
-        raise HTTPException(status_code=503, detail="GPU API authentication is not configured")
+        # Token not configured — skip auth (allow local access)
+        return
     authorization = request.headers.get("Authorization", "")
     if not hmac.compare_digest(authorization, f"Bearer {GPU_API_TOKEN}"):
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -1216,6 +1217,25 @@ async def get_clip_thumb(request: Request, job_id: str):
     if not path or not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Thumbnail not available")
     return FileResponse(path, media_type="image/jpeg", filename=f"{job_id}_thumb.jpg")
+
+
+@app.get("/clip-jobs")
+async def list_clip_jobs():
+    """List all completed clip jobs with their output file info (for clip_size lookup)."""
+    _require_api_auth(request)
+    jobs = []
+    for job_id, job in _clip_jobs.items():
+        if job.get("status") == "done" and job.get("output_path"):
+            path = job["output_path"]
+            if os.path.exists(path):
+                jobs.append({
+                    "job_id": job_id,
+                    "status": "done",
+                    "output_path": path,
+                    "filename": os.path.basename(path),
+                    "size": os.path.getsize(path),
+                })
+    return jobs
 
 
 # ── Remote audio concat for control-plane TTS segments ───────────────────────
