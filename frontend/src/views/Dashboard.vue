@@ -27,7 +27,8 @@
     </div>
 
     <!-- Room Cards -->
-    <div class="rooms-grid">
+    <div class="rooms-grid" :class="{ 'is-loading': loading }">
+      <div v-if="loading" v-for="slot in 3" :key="`skeleton-${slot}`" class="room-card room-skeleton" aria-label="加载中"></div>
       <div v-for="room in rooms" :key="room.id" class="room-card">
         <div class="room-header">
           <div>
@@ -69,7 +70,7 @@
         </div>
       </div>
 
-      <div v-if="rooms.length === 0" class="empty">
+      <div v-if="!loading && rooms.length === 0" class="empty">
         暂无房间，点击「添加房间」开始监控
       </div>
     </div>
@@ -95,9 +96,11 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
 import { getRooms, addRoom, deleteRoom, toggleRoom, getStatus, createWS, formatBytes, formatDuration, uploadRecording } from '../api.js'
+import { debounce } from '../composables/debounce.js'
 
 const rooms = ref([])
 const status = ref({})
+const loading = ref(true)
 const showAdd = ref(false)
 const newName = ref('')
 const newUrl = ref('')
@@ -107,11 +110,17 @@ const srtInputs = ref({})
 let pendingUpload = null  // { room, file }
 let wsCleanup = null
 let timer = null
+let fallbackRefresh = null
 
 const statusLabel = (s) => ({ live: '直播中', offline: '离线', unknown: '检测中' }[s] || '未知')
 
 async function load() {
-  [rooms.value, status.value] = await Promise.all([getRooms(), getStatus()])
+  loading.value = true
+  try {
+    [rooms.value, status.value] = await Promise.all([getRooms(), getStatus()])
+  } finally {
+    loading.value = false
+  }
 }
 
 async function submit() {
@@ -182,16 +191,17 @@ onMounted(() => {
   // Fallback polling only activates when WebSocket is silent/unavailable.
   // When WebSocket is delivering events the poll is skipped, avoiding
   // duplicate API requests that double-load the backend.
-  timer = setInterval(() => {
-    if (Date.now() - lastWsMessage > 30000) {
-      load()
-    }
-  }, 10000)
+  fallbackRefresh = debounce(() => {
+    if (Date.now() - lastWsMessage > 30000) load()
+  }, 300)
+  timer = setInterval(fallbackRefresh, 30000)
 })
 
 onUnmounted(() => {
   wsCleanup?.()
   clearInterval(timer)
+  fallbackRefresh?.cancel()
+  fallbackRefresh = null
 })
 </script>
 
@@ -207,6 +217,8 @@ onUnmounted(() => {
 .btn-primary:hover { background: #e0203d; }
 .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
 .rooms-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; }
+.room-skeleton { min-height: 180px; background: linear-gradient(90deg, #1a1a1a 25%, #242424 50%, #1a1a1a 75%); background-size: 200% 100%; animation: skeleton-shimmer 1.4s infinite; }
+@keyframes skeleton-shimmer { to { background-position: -200% 0; } }
 .room-card { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 12px; padding: 18px; }
 .room-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 14px; }
 .room-name { font-weight: 600; font-size: 15px; margin-bottom: 4px; }

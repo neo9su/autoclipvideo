@@ -82,7 +82,8 @@
       </button>
     </div>
 
-    <table class="recordings-table">
+    <div v-if="loading" class="history-skeleton" aria-label="加载中"></div>
+    <table v-else class="recordings-table">
       <thead>
         <tr>
           <th class="check-col">
@@ -136,6 +137,8 @@
           </td>
           <td>
             <div v-if="rec.clipped === 2" class="clip-actions">
+              <button v-if="!clipVariants[rec.id] && !clipVariantsLoading.has(rec.id)" class="badge dim btn-load-variants" @click="loadVariants(rec.id)">加载版本</button>
+              <span v-else-if="clipVariantsLoading.has(rec.id)" class="badge dim">加载中…</span>
               <template v-if="clipVariants[rec.id]?.length > 1">
                 <a v-for="v in clipVariants[rec.id]" :key="v.id"
                    :href="`${apiBase}/api/recording-clips/${v.id}/download`"
@@ -185,16 +188,18 @@
 </template>
 
 <script setup>
-import { ref, computed, reactive, onMounted, onUnmounted } from 'vue'
+import { ref, computed, reactive, onMounted, onUnmounted, watch } from 'vue'
 import { getAllRecordings, getRooms, retryTranscribe, retryClip, revealClip,
          reclip, formatBytes, formatDuration, createWS, getThumbnailUrl, getStats, clipMissing, getClipJobs,
-         getRecordingClipsBulk } from '../api.js'
+         getRecordingClips } from '../api.js'
 import { useToast } from '../composables/toast.js'
+import { debounce } from '../composables/debounce.js'
 
 const { show } = useToast()
 const selectedIds = reactive(new Set())
 
 const recordings = ref([])
+const loading = ref(true)
 const rooms = ref([])
 const filterRoom = ref('')
 const filterStatus = ref('')
@@ -210,6 +215,7 @@ const stats = ref({ transcribe_pending: 0, transcribe_running: 0, transcribe_fai
                     clip_pending: 0, clip_running: 0, clip_failed: 0 })
 const clipJobs = ref({})        // { recording_id: { pct, msg } }
 const clipVariants = ref({})    // { recording_id: [clips] }
+const clipVariantsLoading = reactive(new Set())
 const sortField = ref('start_time')
 const sortOrder = ref('desc')
 let wsCleanup = null
@@ -299,7 +305,7 @@ function toggleFilter(val) {
   filterStatus.value = filterStatus.value === val ? '' : val
   page.value = 1
   selectedIds.clear()
-  load()
+  debouncedLoad()
 }
 
 const filtered = computed(() =>
@@ -320,24 +326,43 @@ const fmtTime = (s) => s ? new Date(s).toLocaleString('zh-CN') : '—'
 
 
 async function load() {
-  const [data, r] = await Promise.all([
-    getAllRecordings(page.value, filterStatus.value, sortField.value, sortOrder.value),
-    getRooms(),
-  ])
-  recordings.value = data.items
-  total.value = data.total
-  totalPages.value = data.pages
-  rooms.value = r
-  await Promise.all([loadStats(), loadClipJobs()])
-  // Fetch clip variants for all completed recordings on this page
-  const doneIds = data.items.filter(r => r.clipped === 2).map(r => r.id)
-  if (doneIds.length) {
-    try {
-      const variants = await getRecordingClipsBulk(doneIds)
-      clipVariants.value = { ...clipVariants.value, ...variants }
-    } catch {}
+  loading.value = true
+  try {
+    const [data, r] = await Promise.all([
+      getAllRecordings(page.value, filterStatus.value, sortField.value, sortOrder.value),
+      getRooms(),
+    ])
+    recordings.value = data.items
+    total.value = data.total
+    totalPages.value = data.pages
+    rooms.value = r
+    await Promise.all([loadStats(), loadClipJobs()])
+    const visibleIds = new Set(data.items.map(recording => recording.id))
+    clipVariants.value = Object.fromEntries(Object.entries(clipVariants.value).filter(([id]) => visibleIds.has(Number(id))))
+  } finally {
+    loading.value = false
   }
 }
+
+async function loadVariants(recordingId) {
+  if (clipVariantsLoading.has(recordingId)) return
+  clipVariantsLoading.add(recordingId)
+  try {
+    clipVariants.value = { ...clipVariants.value, [recordingId]: await getRecordingClips(recordingId) }
+  } catch (error) {
+    show(error.message || '剪辑版本加载失败', 'error')
+  } finally {
+    clipVariantsLoading.delete(recordingId)
+  }
+}
+
+const debouncedLoad = debounce(load, 250)
+
+watch(filterRoom, () => {
+  page.value = 1
+  selectedIds.clear()
+  debouncedLoad()
+})
 
 function cycleSort(field) {
   if (sortField.value === field) {
@@ -347,7 +372,7 @@ function cycleSort(field) {
     sortOrder.value = 'desc'
   }
   page.value = 1
-  load()
+  debouncedLoad()
 }
 
 async function goPage(p) {
@@ -409,7 +434,7 @@ onMounted(async () => {
     const jobs = await getClipJobs()
     if (Object.keys(jobs).length > 0) filterStatus.value = 'active'
   } catch {}
-  load()
+  debouncedLoad()
   wsCleanup = createWS((msg) => {
     if (msg.type === 'transcribed') {
       show('转录完成', 'success')
@@ -430,7 +455,10 @@ onMounted(async () => {
   })
 })
 
-onUnmounted(() => wsCleanup?.())
+onUnmounted(() => {
+  wsCleanup?.()
+  debouncedLoad.cancel()
+})
 </script>
 
 <style scoped>
@@ -450,6 +478,8 @@ onUnmounted(() => wsCleanup?.())
 .btn-reclip:hover:not(:disabled) { background: rgba(254,44,85,0.25); color: #fe2c55; }
 .btn-reclip:disabled { opacity: 0.4; cursor: not-allowed; }
 .recordings-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.history-skeleton { height: 520px; border-radius: 8px; background: linear-gradient(90deg, #111 25%, #1d1d1d 50%, #111 75%); background-size: 200% 100%; animation: history-shimmer 1.4s infinite; }
+@keyframes history-shimmer { to { background-position: -200% 0; } }
 .recordings-table th { text-align: left; padding: 10px 14px; color: #666; font-weight: 500; border-bottom: 1px solid #222; }
 .recordings-table td { padding: 12px 14px; border-bottom: 1px solid #1e1e1e; }
 .recordings-table tr:hover td { background: #1a1a1a; }
