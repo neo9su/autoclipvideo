@@ -719,7 +719,9 @@ async def health():
             "transcription", "backfill", "publish", "enhance",
             "creative", "director", "qianchuan", "room-monitors",
         ]
-        result["qianchuan_api_loaded"] = _api_v2_loaded if "_api_v2_loaded" in dir() else False
+        result["qianchuan_api_loaded"] = _qianchuan_api_loaded if "_qianchuan_api_loaded" in dir() else False
+        if "_qianchuan_api_error" in globals() and _qianchuan_api_error:
+            result["qianchuan_api_error"] = _qianchuan_api_error
         try:
             async with aio_connect() as db:
                 db.row_factory = aiosqlite.Row
@@ -769,18 +771,32 @@ else:
     # GPU backend: full api_v2 routes for media pipelines.
     # Each import is isolated so a single missing dependency doesn't cascade.
     _api_v2_loaded = False
+    _qianchuan_api_loaded = False
+    _qianchuan_api_error = None
     _qianchuan_upload_loaded = False
 
     # ── api_v2 (director + qianchuan generate/pipeline) ──
     try:
-        from api_v2 import director_router, qianchuan_router, set_broadcast_fn
+        from api_v2 import director_router, set_broadcast_fn
         app.include_router(director_router)
-        app.include_router(qianchuan_router)
         set_broadcast_fn(broadcast)
         _api_v2_loaded = True
-        logger.info("导演模式/千川投流版API路由已加载")
+        logger.info("导演模式API路由已加载")
     except Exception as exc:
-        logger.warning(f"导演模式/千川投流版API加载失败: {exc}")
+        logger.warning(f"导演模式API加载失败: {exc}")
+
+    # Keep Qianchuan registration independent from the director stack.  A
+    # director-only dependency failure must not silently remove the remote
+    # GPU backend's Qianchuan API.
+    try:
+        from api_v2 import qianchuan_router, set_broadcast_fn
+        app.include_router(qianchuan_router)
+        set_broadcast_fn(broadcast)
+        _qianchuan_api_loaded = True
+        logger.info("千川投流版API路由已加载")
+    except Exception as exc:
+        _qianchuan_api_error = f"{type(exc).__name__}: {exc}"
+        logger.warning(f"千川投流版API加载失败: {_qianchuan_api_error}")
 
     # ── qianchuan_upload (learning material upload) ──
     try:
@@ -793,24 +809,25 @@ else:
 
     # ── Fallback status endpoints when modules are unavailable ──
     if not _api_v2_loaded:
-        @app.get("/api/v2/qianchuan/status")
-        async def _fallback_qianchuan_status():
-            return {
-                "qianchuan_available": False,
-                "deployment_role": "gpu-backend",
-                "error": "千川投流版API模块加载失败 — 检查 backend/api_v2.py 及其依赖项",
-                "queue_depth": 0,
-                "running": 0,
-                "done": 0,
-                "failed": 0,
-            }
-
         @app.get("/api/v2/director/status")
         async def _fallback_director_status():
             return {
                 "director_available": False,
                 "deployment_role": "gpu-backend",
                 "error": "导演模式API模块加载失败 — 检查 backend/api_v2.py 及其依赖项",
+            }
+
+    if not _qianchuan_api_loaded:
+        @app.get("/api/v2/qianchuan/status")
+        async def _fallback_qianchuan_status():
+            return {
+                "qianchuan_available": False,
+                "deployment_role": "gpu-backend",
+                "error": _qianchuan_api_error or "千川投流版API模块加载失败 — 检查 backend/api_v2.py 及其依赖项",
+                "queue_depth": 0,
+                "running": 0,
+                "done": 0,
+                "failed": 0,
             }
 
 
