@@ -838,6 +838,29 @@ else:
 
 # ── Rooms ────────────────────────────────────────────────────────────────────
 
+@app.get("/api/monitor/status")
+async def monitor_status():
+    """Return room monitor lifecycle and operational health."""
+    return await monitor.get_overall_status()
+
+
+@app.post("/api/monitor/start")
+async def monitor_start():
+    """Start enabled room monitors. Idempotent for already-running rooms."""
+    if IS_CONTROL_PLANE:
+        return {"ok": False, "running": False, "reason": "media monitors run on the GPU backend"}
+    await monitor.start_all()
+    return {"ok": True, "status": await monitor.get_overall_status()}
+
+
+@app.post("/api/monitor/restart")
+async def monitor_restart():
+    """Stop and start the room monitor service."""
+    if IS_CONTROL_PLANE:
+        return {"ok": False, "running": False, "reason": "media monitors run on the GPU backend"}
+    await monitor.restart()
+    return {"ok": True, "status": await monitor.get_overall_status()}
+
 @app.get("/api/rooms")
 async def list_rooms():
     global _rooms_cache
@@ -2387,6 +2410,18 @@ async def get_watchdog_status():
     except Exception:
         pass
     return watchdog_status().get("services", {})
+
+
+@app.get("/api/watchdog/ping")
+async def watchdog_ping():
+    """Check remote watchdog availability without turning an outage into a 500."""
+    from gpu_state import WATCHDOG_URL, watchdog_status
+    from watchdog import ping_watchdog
+    result = await ping_watchdog(WATCHDOG_URL)
+    cached = watchdog_status()
+    result["cached"] = cached
+    result["available"] = result["reachable"]
+    return result
 
 
 @app.post("/api/watchdog/start/{service}")
