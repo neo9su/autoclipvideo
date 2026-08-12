@@ -16,7 +16,7 @@ from gpu_execution import require_remote_gpu
 logger = logging.getLogger(__name__)
 GPU_SERVICE_URL = os.environ.get("GPU_SERVICE_URL", "http://10.190.0.203:8877").rstrip("/")
 _UPLOAD_RETRIES = 3
-_UPLOAD_TIMEOUT = aiohttp.ClientTimeout(total=300)
+_UPLOAD_TIMEOUT = aiohttp.ClientTimeout(total=1800)  # 30 minutes for large files
 
 
 @dataclass(frozen=True)

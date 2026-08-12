@@ -1,14 +1,16 @@
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import re
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 # Load .env file if present (before any module reads os.environ)
 _env_path = os.path.join(os.path.dirname(__file__), ".env")
 if os.path.exists(_env_path):
-    with open(_env_path) as _f:
+    with open(_env_path, encoding='utf-8') as _f:
         for _line in _f:
             _line = _line.strip()
             if _line and not _line.startswith("#") and "=" in _line:
@@ -664,6 +666,7 @@ async def lifespan(app: FastAPI):
             asyncio.create_task(_periodic_creative_dispatch()),
             asyncio.create_task(_periodic_director_dispatch()),
             asyncio.create_task(_periodic_qianchuan_dispatch()),
+            asyncio.create_task(_periodic_clip_dispatch()),
         ])
         await monitor.start_all()
     yield
@@ -1148,8 +1151,10 @@ async def list_clips():
         """) as cur:
             rows = await cur.fetchall()
     
-    # Fetch clip sizes from GPU service
+    # Fetch clip sizes from GPU service and scan local clips directory
     clip_size_map = {}
+    
+    # Try GPU service API first
     try:
         gpu_url = os.environ.get("GPU_SERVICE_URL", "http://10.190.0.203:8877")
         async with httpx.AsyncClient(timeout=10) as client:
@@ -1157,26 +1162,81 @@ async def list_clips():
             if resp.status_code == 200:
                 gpu_jobs = resp.json()
                 for gj in gpu_jobs:
-                    clip_size_map[gj["filename"]] = gj["size"]
-                    clip_size_map[gj["job_id"]] = gj["size"]
+                    # Map by job_id (which is the hash)
+                    if gj.get("job_id"):
+                        clip_size_map[gj["job_id"]] = gj.get("size")
+                    # Map by output_path hash
+                    if gj.get("output_path"):
+                        parts = gj["output_path"].replace("\\", "/").split("/")
+                        if len(parts) >= 3:
+                            clip_size_map[parts[-2]] = gj.get("size")  # hash dir name
     except Exception as e:
         logger.warning(f"Failed to fetch clip sizes from GPU service: {e}")
     
+    # Also scan local clips directory as fallback
+    # Try multiple possible locations for Windows
+    _script_dir = os.path.dirname(__file__)
+    _base_dirs = [
+        os.path.join(_script_dir, "..", "douyin_recordings", "clips"),
+        r"C:\Users\neo\douyin_recordings\clips",
+        r"C:\douyin_recordings\clips",
+    ]
+    clips_dir = os.environ.get("CLIPS_DIR", _base_dirs[0])
+    if not os.path.exists(clips_dir):
+        for d in _base_dirs:
+            if os.path.exists(d):
+                clips_dir = d
+                break
+    try:
+        if os.path.exists(clips_dir):
+            for clip_file in Path(clips_dir).rglob("clip.mp4"):
+                if clip_file.is_file():
+                    hash_dir = clip_file.parent.name
+                    clip_size_map[hash_dir] = clip_file.stat().st_size
+    except Exception as e:
+        logger.warning(f"Failed to scan clips directory: {e}")
+    
+    # Build filename→size mapping from GPU jobs (match by basename)
+    basename_size_map = {}
+    for gj in gpu_jobs:
+        out = gj.get("output_path", "")
+        size = gj.get("size")
+        if size and out:
+            bn = os.path.basename(out)  # e.g. "clip.mp4"
+            if bn not in basename_size_map:
+                basename_size_map[bn] = size
+
     items = []
     for r in rows:
         clip_filename = r["clip_filename"]
         gpu_job_id = r["gpu_clip_job_id"]
-        
-        # Try to get size from GPU service
+        size = None
+
+        # 1. Direct hash-dir match from GPU jobs
         size = clip_size_map.get(clip_filename) or clip_size_map.get(gpu_job_id)
-        
-        # Fallback: check local path
-        if size is None:
+
+        # 2. MD5 hash of clip_filename → clips/<hash>/clip.mp4
+        if size is None and clip_filename:
+            _hash = hashlib.md5(clip_filename.encode()).hexdigest()[:12]
+            for sep in ["/", "\\"]:
+                hash_path = f"clips{sep}{_hash}{sep}clip.mp4"
+                if hash_path in clip_size_map:
+                    size = clip_size_map[hash_path]
+                    break
+
+        # 3. Match by basename (GPU stores clips/<md5>/clip.mp4, DB stores room/date/filename_clip.mp4)
+        if size is None and clip_filename:
+            bn = os.path.basename(clip_filename)
+            if bn in basename_size_map:
+                size = basename_size_map[bn]
+
+        # 4. Fallback: check local path
+        if size is None and clip_filename:
             clip_path = os.path.abspath(
                 os.path.join(os.path.dirname(__file__), "..", "recordings", clip_filename)
             )
             size = os.path.getsize(clip_path) if os.path.exists(clip_path) else None
-        
+
         items.append({**dict(r), "clip_size": size})
     return items
 
@@ -4480,6 +4540,82 @@ async def _periodic_qianchuan_dispatch():
             logger.warning("Periodic qianchuan dispatch failed: %s", e)
 
         await asyncio.sleep(180)  # Check every 3 minutes
+
+
+async def _periodic_clip_dispatch():
+    """Periodically check and dispatch pending clip jobs.
+    
+    Dispatches recordings with transcribed=2 and clipped=0 that have valid files.
+    Only dispatches when GPU service is online.
+    """
+    from transcribe import _run_editor, get_clip_queue, _pending_heap
+    BATCH_LIMIT = 10
+    while True:
+        try:
+            # Check current queue size
+            queue_info = get_clip_queue()
+            queued_count = len(queue_info.get('queued', []))
+            running_count = len(queue_info.get('running', []))
+            
+            # If queue has many jobs but nothing running, we need to dispatch
+            if queued_count > 0 and running_count == 0:
+                logger.info(f"Clip dispatch: {queued_count} queued, {running_count} running - checking for new jobs")
+            
+            if queued_count < 5:  # Only check if queue is nearly empty
+                async with aio_connect() as db:
+                    db.row_factory = aiosqlite.Row
+                    # Get recordings ready for clipping: transcribed=2, clipped=0, not deleted
+                    async with db.execute(
+                        """SELECT id, filename, clip_count, room_id FROM recordings 
+                           WHERE transcribed = 2 AND clipped = 0 
+                           AND local_deleted = 0 AND synced = 1
+                           ORDER BY end_time ASC
+                           LIMIT ?""",
+                        (BATCH_LIMIT,),
+                    ) as cur:
+                        pending_clips = list(await cur.fetchall())
+                
+                if pending_clips:
+                    logger.info(f"Periodic clip dispatch: found {len(pending_clips)} pending clips")
+                    for rec in pending_clips:
+                        rec_id = rec["id"]
+                        filename = rec["filename"]
+                        if not filename:
+                            continue
+                        
+                        # Build paths
+                        mp4_path = os.path.join(RECORDINGS_DIR, filename)
+                        srt_path = os.path.join(RECORDINGS_DIR, 
+                            os.path.splitext(filename)[0] + ".srt")
+                        
+                        # Check files exist
+                        if not os.path.exists(mp4_path):
+                            logger.debug(f"Clip dispatch: skipping {rec_id}, MP4 missing")
+                            continue
+                        if not os.path.exists(srt_path):
+                            logger.debug(f"Clip dispatch: skipping {rec_id}, SRT missing")
+                            continue
+                        
+                        clip_count = rec.get("clip_count") or 1
+                        logger.info(f"Clip dispatch: queuing recording {rec_id} ({filename})")
+                        
+                        # Create broadcast function for this job
+                        async def broadcast(msg):
+                            pass  # Silent for background dispatch
+                        
+                        # Enqueue the job
+                        await _run_editor(
+                            rec_id, mp4_path, srt_path,
+                            clip_count=clip_count,
+                            broadcast_fn=broadcast
+                        )
+                        await asyncio.sleep(0.5)  # Small delay between dispatches
+                else:
+                    logger.debug("Periodic clip dispatch: no pending clips found")
+        except Exception as e:
+            logger.warning(f"Periodic clip dispatch failed: {e}")
+        
+        await asyncio.sleep(60)  # Check every minute
 
 
 # Add this to the main function

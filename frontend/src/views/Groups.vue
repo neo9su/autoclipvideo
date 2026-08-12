@@ -699,13 +699,12 @@ import QianchuanUpload from '../components/QianchuanUpload.vue'
 import { useToast } from '../composables/toast.js'
 
 const groups = ref([])
+const loading = ref(true)
 const rooms = ref([])
 const visibleGroupCount = ref(50)
 const groupsSentinel = ref(null)
 const visibleGroups = computed(() => groups.value.slice(0, visibleGroupCount.value))
 let groupsObserver = null
-const loading = ref(true)
-const rooms = ref([])
 const openId = ref(null)
 const detail = ref(null)
 const detailLoading = ref(false)

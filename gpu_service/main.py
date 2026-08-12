@@ -25,10 +25,14 @@ import os as _os
 import sqlite3
 import subprocess
 import sys as _sys
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
+
+# Add the gpu_service directory to sys.path for imports
+_sys.path.insert(0, str(Path(__file__).parent))
 
 try:
     from logging_setup import configure_rotating_logging
@@ -392,8 +396,15 @@ def _do_transcribe(job_id: str):
 
 
 async def _run_with_lock(job_id: str):
-    async with _gpu_sem:
-        await asyncio.to_thread(_do_transcribe, job_id)
+    try:
+        async with _gpu_sem:
+            await asyncio.wait_for(
+                asyncio.to_thread(_do_transcribe, job_id),
+                timeout=_TRANSCRIBE_TIMEOUT,
+            )
+    except asyncio.TimeoutError:
+        _log.error(f"Transcription job {job_id} TIMED OUT after {_TRANSCRIBE_TIMEOUT}s — releasing semaphore")
+        _db_update_job(job_id, "error", f"Timed out after {_TRANSCRIBE_TIMEOUT}s")
 
 
 # ── NVENC clip pipeline ───────────────────────────────────────────────────────
@@ -877,7 +888,10 @@ async def _do_tts_job(job_id: str, text: str, emotion: str, ref_audio_path: str,
 
     try:
         async with _tts_sem:
-            await asyncio.to_thread(_synth_audio, text, emotion, ref_audio_path, out_path, prompt_text, sft_spk)
+            await asyncio.wait_for(
+                asyncio.to_thread(_synth_audio, text, emotion, ref_audio_path, out_path, prompt_text, sft_spk),
+                timeout=_TTS_TIMEOUT,
+            )
 
         if not os.path.isfile(out_path) or os.path.getsize(out_path) == 0:
             raise RuntimeError("TTS output file empty or missing")
@@ -902,6 +916,11 @@ async def _do_tts_job(job_id: str, text: str, emotion: str, ref_audio_path: str,
         _tts_jobs[job_id].update({"status": "done", "output_path": out_path})
         _db_update_tts_job(job_id, status="done", output_path=out_path)
         _log.info(f"TTS job {job_id} done ({os.path.getsize(out_path)//1024} KB)")
+    except asyncio.TimeoutError:
+        err = f"TTS TIMED OUT after {_TTS_TIMEOUT}s"
+        _log.error(f"TTS job {job_id} {err}")
+        _tts_jobs[job_id].update({"status": "error", "error": err})
+        _db_update_tts_job(job_id, status="error", error=err)
     except Exception as e:
         err = str(e)[:300]
         _log.error(f"TTS job {job_id} failed: {err}")
@@ -918,10 +937,14 @@ _tts_jobs = _load_tts_jobs()
 _voice_refs = _load_voice_refs()
 
 _JOB_TTL_SECONDS = 24 * 3600  # 24 hours
+_STALE_JOB_SECONDS = 3600  # 1 hour — evict stuck processing jobs
+_TTS_TIMEOUT = 1800  # 30 min — CosyVoice2 synthesis timeout
+_TRANSCRIBE_TIMEOUT = 900  # 15 min — Whisper transcription timeout
 
 
 async def _auto_cleanup_loop():
-    """Periodically evict terminal jobs from in-memory dicts (prevent unbounded growth)."""
+    """Periodically evict terminal jobs from in-memory dicts (prevent unbounded growth).
+    Also evicts stale 'processing' jobs that have been stuck for >1 hour."""
     import time
     while True:
         await asyncio.sleep(3600)  # run every hour
@@ -934,6 +957,18 @@ async def _auto_cleanup_loop():
             ]
             for jid in expired:
                 store.pop(jid, None)
+            # Evict stale processing jobs — stuck for >1 hour
+            stale = [
+                jid for jid, j in list(store.items())
+                if j.get("status") == "processing"
+                and now - j.get("_created_at", now) > _STALE_JOB_SECONDS
+            ]
+            for jid in stale:
+                job = store.pop(jid, None)
+                if job:
+                    job["status"] = "error"
+                    job["error"] = f"Stale job evicted after {_STALE_JOB_SECONDS//60}min"
+                    _log.error(f"Evicted stale {store is _tts_jobs and 'TTS' or 'job'} {jid}: {job.get('error')}")
 
 
 @asynccontextmanager
@@ -947,6 +982,67 @@ app = FastAPI(title="Douyin GPU Service", lifespan=_lifespan)
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
+
+# ── Admin endpoints (HTTP-based service management) ──────────────────────────
+
+ADMIN_RESTART_TOKEN = os.environ.get("ADMIN_RESTART_TOKEN", "")
+
+
+@app.post("/admin/restart")
+async def admin_restart(request: Request):
+    """
+    Restart the GPU service via HTTP.
+    Optional auth: pass token via header or query param.
+    Usage:
+        curl -X POST http://host:8877/admin/restart
+        curl -X POST 'http://host:8877/admin/restart?token=SECRET'
+        curl -X POST http://host:8877/admin/restart -H 'Authorization: Bearer SECRET'
+    """
+    global ADMIN_RESTART_TOKEN
+    
+    # Check auth if token is configured
+    if ADMIN_RESTART_TOKEN:
+        auth_header = request.headers.get("Authorization", "")
+        token_param = request.query_params.get("token", "")
+        
+        if not hmac.compare_digest(auth_header, f"Bearer {ADMIN_RESTART_TOKEN}") and \
+           not hmac.compare_digest(token_param, ADMIN_RESTART_TOKEN):
+            raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    logger.info("Admin restart requested via HTTP")
+    
+    # Schedule restart after a brief delay (return response first)
+    def _restart():
+        time.sleep(2)
+        # Start new process
+        proc = subprocess.Popen(
+            [_sys.executable, "-m", "gpu_service.main"],
+            stdout=open(r"C:\Temp\gpu.out.log", "w") if os.name == "nt" else None,
+            stderr=open(r"C:\Temp\gpu.err.log", "w") if os.name == "nt" else None,
+            cwd=str(Path(__file__).parent),
+            detach=True if os.name == "nt" else False,
+        )
+        logger.info(f"New GPU service started with PID {proc.pid}")
+        # Exit current process
+        os._exit(0)
+    
+    threading.Thread(target=_restart, daemon=True).start()
+    return {"status": "restarting", "message": "Service will restart in 2 seconds"}
+
+
+@app.get("/admin/health")
+async def admin_health():
+    """
+    Detailed health check with process info.
+    """
+    return {
+        "pid": os.getpid(),
+        "started_at": _SERVICE_STARTED_AT,
+        "uptime_s": int(time.time() - _SERVICE_STARTED_AT),
+        "auth_configured": bool(ADMIN_RESTART_TOKEN),
+        "health": "healthy",
+    }
+
 
 @app.get("/health")
 async def health():
@@ -1169,6 +1265,7 @@ async def create_clip_job(request: Request, req: ClipJobRequest):
         "status": "queued", "phase": "queued", "pct": 0,
         "error": None, "output_path": None, "thumb_path": None,
         "idempotency_key": req.idempotency_key,
+        "input_filename": req.mp4_filename,
         "_created_at": time.time(),
     }
     _db_insert_clip_job(job_id)
@@ -1220,7 +1317,7 @@ async def get_clip_thumb(request: Request, job_id: str):
 
 
 @app.get("/clip-jobs")
-async def list_clip_jobs():
+async def list_clip_jobs(request: Request):
     """List all completed clip jobs with their output file info (for clip_size lookup)."""
     _require_api_auth(request)
     jobs = []
@@ -1234,6 +1331,7 @@ async def list_clip_jobs():
                     "output_path": path,
                     "filename": os.path.basename(path),
                     "size": os.path.getsize(path),
+                    "input_filename": job.get("input_filename"),
                 })
     return jobs
 
@@ -1755,6 +1853,7 @@ async def list_voice_refs(room_id: int = None):
             "room_id": ref.get("room_id"),
             "label": ref.get("label", ""),
             "transcript": ref.get("transcript", ""),
+            "wav_path": ref.get("wav_path", ""),
             "error": ref.get("error"),
         })
     refs.sort(key=lambda r: r["ref_id"], reverse=True)
@@ -1772,6 +1871,7 @@ async def get_voice_ref(ref_id: str):
         "room_id": ref.get("room_id"),
         "label": ref.get("label", ""),
         "transcript": ref.get("transcript", ""),
+        "wav_path": ref.get("wav_path", ""),
         "error": ref.get("error"),
     }
 

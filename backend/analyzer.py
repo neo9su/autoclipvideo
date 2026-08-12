@@ -85,6 +85,11 @@ def _srt_to_text(srt_path: str, max_chars: int = 4000) -> str:
 
 
 async def _get_or_create_group(room_id: int, wig_model: Optional[str], wig_color: Optional[str]) -> int:
+    # Convert lists to strings (LLM may return lists)
+    if isinstance(wig_model, list):
+        wig_model = ", ".join(str(x) for x in wig_model)
+    if isinstance(wig_color, list):
+        wig_color = ", ".join(str(x) for x in wig_color)
     label_parts = [p for p in [wig_model, wig_color] if p]
     label = " ".join(label_parts) if label_parts else "未分类"
     async with aio_connect() as db:

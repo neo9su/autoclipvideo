@@ -210,14 +210,28 @@ class MonitorManager:
             pass
 
         # Persist size and end_time; fetch the recording id
+        # Use retry logic to handle SQLite database locking
+        async def _update_with_retry(db, sql, params, max_retries=3):
+            for attempt in range(max_retries):
+                try:
+                    await db.execute(sql, params)
+                    await db.commit()
+                    return True
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(0.1 * (attempt + 1))
+                    else:
+                        logger.error(f"Database update failed after {max_retries} retries: {e}")
+                        return False
+        
         async with aio_connect() as db:
             db.row_factory = aiosqlite.Row
-            await db.execute(
+            await _update_with_retry(
+                db,
                 """UPDATE recordings SET end_time = ?, size_bytes = ?
                    WHERE room_id = ? AND filename = ?""",
                 (datetime.now().isoformat(), size, room_id, filename),
             )
-            await db.commit()
             async with db.execute(
                 "SELECT id FROM recordings WHERE room_id=? AND filename=?",
                 (room_id, filename),

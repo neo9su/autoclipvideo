@@ -1,15 +1,34 @@
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 
-// https://vite.dev/config/
 export default defineConfig({
   plugins: [vue()],
   server: {
-    host: '127.0.0.1',
     port: 5173,
+    host: '0.0.0.0',
     proxy: {
-      '/api': process.env.VITE_API_BASE || 'http://10.190.0.203:8899',
-      '/ws': { target: (process.env.VITE_WS_BASE || 'ws://10.190.0.203:8899'), ws: true },
-    },
+      '/api': {
+        target: 'http://localhost:8899',
+        changeOrigin: true
+      },
+      '/ws': {
+        target: 'ws://localhost:8899',
+        ws: true
+      }
+    }
   },
+  preview: {
+    port: 5173,
+    host: '0.0.0.0',
+    proxy: {
+      '/api': {
+        target: 'http://localhost:8899',
+        changeOrigin: true
+      },
+      '/ws': {
+        target: 'ws://localhost:8899',
+        ws: true
+      }
+    }
+  }
 })

@@ -61,7 +61,7 @@ def _extract_json_object(response_text: str) -> dict:
     for cand in candidates:
         cleaned = _re.sub(r",\s*([}\]])", r"\1", cand.strip())
         try:
-            obj = __extract_json_object(cleaned)
+            obj = _extract_json_object(cleaned)
             if isinstance(obj, dict):
                 return obj
         except Exception as e:

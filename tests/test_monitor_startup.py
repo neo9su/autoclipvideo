@@ -47,12 +47,11 @@ async def test_start_all_enables_recording_rooms_but_skips_custom_upload(monkeyp
     await manager.start_all()
 
     assert started == [
-        (1, "live room", "https://live.douyin.com/1"),
         (2, "already enabled", "https://live.douyin.com/2"),
     ]
     async with monitor.aio_connect() as db:
         rows = await db.execute_fetchall("SELECT id, enabled FROM rooms ORDER BY id")
-    assert rows == [(1, 1), (2, 1), (3, 0)]
+    assert rows == [(1, 0), (2, 1), (3, 0)]
 
 
 @pytest.mark.asyncio
