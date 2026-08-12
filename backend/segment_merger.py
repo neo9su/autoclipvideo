@@ -51,8 +51,8 @@ SMALL_THRESHOLD  = 50  * 1024 * 1024  # files smaller than this get merged
 STALE_WAIT_SECS  = 600                # force-upload small files after waiting this long
 MERGE_TARGET_DUR = 900                # target duration for merged file: 15 minutes (seconds)
 MERGE_MAX_DUR    = 1200               # hard cap: never merge beyond 20 minutes total duration
-SPLIT_THRESHOLD  = 200 * 1024 * 1024  # standalone files larger than this get split before upload
-SPLIT_CHUNK_SIZE = 150 * 1024 * 1024  # target chunk size when splitting large files
+SPLIT_THRESHOLD  = 8 * 1024 * 1024   # files larger than this get split before upload (GPU service limit ~10MB)
+SPLIT_CHUNK_SIZE = 6 * 1024 * 1024   # target chunk size when splitting large files (below GPU limit)
 
 RECORDINGS_DIR = os.path.join(os.path.dirname(__file__), "..", "recordings")
 
