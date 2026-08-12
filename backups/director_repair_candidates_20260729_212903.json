@@ -1,0 +1,340 @@
+{
+  "generated_at": "20260729_212903",
+  "summary": {
+    "director_done_path_exists": 407,
+    "director_done_path_missing": 2790,
+    "director_done_no_path": 3,
+    "director_not_done_but_file_exists": 2
+  },
+  "recommended_actions": {
+    "safe_db_flag_candidates": "director_done_path_missing should not be shown as usable unless file restored; prefer UI/API computed file_exists or mark with error after backup if user approves",
+    "manual_business_decision": "director_not_done_but_file_exists are short-duration failed outputs; only mark usable if short videos are acceptable",
+    "not_safe_to_auto_attach_orphans": "director_outputs basenames do not contain group_id; auto matching risks wrong content"
+  },
+  "done_no_path": [
+    {
+      "id": 2901,
+      "label": "卷发（外翻卷）",
+      "room_id": 1,
+      "editing_mode": "director",
+      "classic_status": -2,
+      "director_status": 2,
+      "director_error": "导演版视频时长 30.0s < 30s 最低要求",
+      "director_final_video": null,
+      "creative_status": 2,
+      "creative_final_video": "/Users/claw/work/douyin-recorder/backend/../recordings/director_outputs/director_output_1779135094.mp4",
+      "created_at": "2026-05-15 13:31:39"
+    },
+    {
+      "id": 2904,
+      "label": "中分刘海款式",
+      "room_id": 1,
+      "editing_mode": "director",
+      "classic_status": -2,
+      "director_status": 2,
+      "director_error": "导演版视频时长 30.0s < 30s 最低要求",
+      "director_final_video": null,
+      "creative_status": 2,
+      "creative_final_video": "/Users/claw/work/douyin-recorder/backend/../recordings/director_outputs/director_output_1779134636.mp4",
+      "created_at": "2026-05-15 13:32:58"
+    },
+    {
+      "id": 2911,
+      "label": "卷发",
+      "room_id": 1,
+      "editing_mode": "director",
+      "classic_status": -2,
+      "director_status": 2,
+      "director_error": "导演版视频时长 30.0s < 30s 最低要求",
+      "director_final_video": null,
+      "creative_status": 2,
+      "creative_final_video": "/Users/claw/work/douyin-recorder/backend/../recordings/director_outputs/director_output_1779134620.mp4",
+      "created_at": "2026-05-15 13:33:46"
+    }
+  ],
+  "not_done_but_file_exists": [
+    {
+      "id": 4696,
+      "label": "微卷发/中分 蜜茶棕",
+      "room_id": 2,
+      "editing_mode": "director",
+      "classic_status": 2,
+      "director_status": -1,
+      "director_error": "合成失败: 导演版视频时长 21.9s < 28s 最低要求",
+      "director_final_video": "/Users/claw/work/douyin-recorder/backend/../recordings/director_outputs/director_output_1783539316.mp4",
+      "creative_status": 2,
+      "creative_final_video": "/Users/claw/work/douyin-recorder/backend/../recordings/director_outputs/director_output_1783539348_padded.mp4",
+      "created_at": "2026-07-08 19:32:45",
+      "director_file_exists": true
+    },
+    {
+      "id": 4805,
+      "label": "海盐奶咖 亚麻冷棕",
+      "room_id": 1,
+      "editing_mode": "director",
+      "classic_status": 2,
+      "director_status": -1,
+      "director_error": "导演版视频时长 25.9s < 28s 最低要求",
+      "director_final_video": "/Users/claw/work/douyin-recorder/backend/../recordings/director_outputs/director_output_1784297343_2160x3840_50fps.mp4",
+      "creative_status": 2,
+      "creative_final_video": "/Users/claw/work/douyin-recorder/backend/../recordings/director_outputs/director_output_1784297373_padded_2160x3840_50fps.mp4",
+      "created_at": "2026-07-17 14:05:08",
+      "director_file_exists": true
+    }
+  ],
+  "unfinished_error_top50": [
+    {
+      "director_status": -1,
+      "director_error": "recording files missing (317): 346:1_20260322_234107_000.mp4, 349:1_20260322_234632_000.mp4, 369:1_20260323_000544_000.mp4, 372:1_20260323_000613_000.mp4, 805:1_20260323_205330_000.mp4",
+      "c": 669
+    },
+    {
+      "director_status": -1,
+      "director_error": "recording files missing (280): 345:2_20260322_234107_000.mp4, 348:2_20260322_234401_000.mp4, 350:2_20260322_234632_000.mp4, 352:2_20260322_235131_000.mp4, 356:2_20260322_235220_000.mp4",
+      "c": 380
+    },
+    {
+      "director_status": -1,
+      "director_error": "无录像文件，跳过",
+      "c": 121
+    },
+    {
+      "director_status": -1,
+      "director_error": "permanently_failed: no recordings (crash cleanup)",
+      "c": 97
+    },
+    {
+      "director_status": -2,
+      "director_error": "no SRT content available",
+      "c": 90
+    },
+    {
+      "director_status": -1,
+      "director_error": "recording files missing (1): 1270:5_20260327_141046_001_chunk004.mp4",
+      "c": 33
+    },
+    {
+      "director_status": -1,
+      "director_error": "no recordings in group",
+      "c": 29
+    },
+    {
+      "director_status": -1,
+      "director_error": "no SRT content available",
+      "c": 14
+    },
+    {
+      "director_status": -1,
+      "director_error": "permanently_failed: source recordings deleted",
+      "c": 14
+    },
+    {
+      "director_status": -1,
+      "director_error": "无合并素材，无法处理",
+      "c": 6
+    },
+    {
+      "director_status": -1,
+      "director_error": "recording files physically deleted (local_deleted=1)",
+      "c": 4
+    },
+    {
+      "director_status": 0,
+      "director_error": null,
+      "c": 3
+    },
+    {
+      "director_status": -1,
+      "director_error": "video composition returned no output",
+      "c": 2
+    },
+    {
+      "director_status": -2,
+      "director_error": "recording files missing (86): 345:2_20260322_234107_000.mp4, 348:2_20260322_234401_000.mp4, 350:2_20260322_234632_000.mp4, 352:2_20260322_235131_000.mp4, 356:2_20260322_235220_000.mp4",
+      "c": 1
+    },
+    {
+      "director_status": -1,
+      "director_error": "no valid JSON found in response: Invalid control character at: line 2 column 6 (char 7)",
+      "c": 1
+    },
+    {
+      "director_status": -1,
+      "director_error": "permanently_failed: (null)",
+      "c": 1
+    },
+    {
+      "director_status": -1,
+      "director_error": "permanently_failed: recording files missing (1): 1695:2_20260401_000118_004.mp4",
+      "c": 1
+    },
+    {
+      "director_status": -1,
+      "director_error": "permanently_failed: recording files missing (1): 1697:2_20260401_000316_005.mp4",
+      "c": 1
+    },
+    {
+      "director_status": -1,
+      "director_error": "permanently_failed: recording files missing (1): 3024:1_20260508_224219_000_chunk001.mp4",
+      "c": 1
+    },
+    {
+      "director_status": -1,
+      "director_error": "permanently_failed: recording files missing (1): 3027:2_20260508_231016_001_chunk000.mp4",
+      "c": 1
+    },
+    {
+      "director_status": -1,
+      "director_error": "permanently_failed: recording files missing (1): 3028:2_20260508_224516_000_chunk001.mp4",
+      "c": 1
+    },
+    {
+      "director_status": -1,
+      "director_error": "permanently_failed: recording files missing (1): 3029:2_20260508_224516_000_chunk002.mp4",
+      "c": 1
+    },
+    {
+      "director_status": -1,
+      "director_error": "permanently_failed: recording files missing (1): 3036:2_20260508_231016_001_chunk001.mp4",
+      "c": 1
+    },
+    {
+      "director_status": -1,
+      "director_error": "permanently_failed: recording files missing (1): 3037:2_20260508_231016_001_chunk002.mp4",
+      "c": 1
+    },
+    {
+      "director_status": -1,
+      "director_error": "permanently_failed: recording files missing (1): 3038:2_20260508_231016_001_chunk003.mp4",
+      "c": 1
+    },
+    {
+      "director_status": -1,
+      "director_error": "permanently_failed: recording files missing (1): 3039:1_20260508_235720_003_chunk000.mp4",
+      "c": 1
+    },
+    {
+      "director_status": -1,
+      "director_error": "permanently_failed: 无合并素材，无法处理",
+      "c": 1
+    },
+    {
+      "director_status": -1,
+      "director_error": "recording files missing (1): 1028:merged_2_003_004.mp4",
+      "c": 1
+    },
+    {
+      "director_status": -1,
+      "director_error": "recording files missing (1): 1034:2_20260326_013336_003_chunk003.mp4",
+      "c": 1
+    },
+    {
+      "director_status": -1,
+      "director_error": "recording files missing (1): 1170:20260328_103956_小圆圆不圆_2026-03-24_21-09-02_001_chunk002.mp4",
+      "c": 1
+    },
+    {
+      "director_status": -1,
+      "director_error": "recording files missing (1): 1176:20260328_104217_小圆圆不圆_2026-03-24_21-09-02_007_chunk000.mp4",
+      "c": 1
+    },
+    {
+      "director_status": -1,
+      "director_error": "recording files missing (1): 1177:20260328_104149_小圆圆不圆_2026-03-24_21-09-02_006_chunk001.mp4",
+      "c": 1
+    },
+    {
+      "director_status": -1,
+      "director_error": "recording files missing (1): 1178:20260328_104149_小圆圆不圆_2026-03-24_21-09-02_006_chunk002.mp4",
+      "c": 1
+    },
+    {
+      "director_status": -1,
+      "director_error": "recording files missing (1): 1197:20260322_012958_小圆圆不圆_2026-02-09_21-51-06_001_chunk001.mp4",
+      "c": 1
+    },
+    {
+      "director_status": -1,
+      "director_error": "recording files missing (1): 1328:20260328_101625_小圆圆不圆_2026-03-25_20-56-24_003_chunk001.mp4",
+      "c": 1
+    },
+    {
+      "director_status": -1,
+      "director_error": "recording files missing (1): 1389:20260329_053758_小圆圆不圆_2026-03-20_21-12-07_007.mp4",
+      "c": 1
+    },
+    {
+      "director_status": -1,
+      "director_error": "recording files missing (1): 1485:1_20260330_223803_004.mp4",
+      "c": 1
+    },
+    {
+      "director_status": -1,
+      "director_error": "recording files missing (1): 1565:1_20260330_212257_001_chunk003.mp4",
+      "c": 1
+    },
+    {
+      "director_status": -1,
+      "director_error": "recording files missing (1): 1586:1_20260330_221301_003_chunk004.mp4",
+      "c": 1
+    },
+    {
+      "director_status": -1,
+      "director_error": "recording files missing (1): 1706:merged_2_004_005.mp4",
+      "c": 1
+    },
+    {
+      "director_status": -1,
+      "director_error": "recording files missing (1): 1725:2_20260331_233834_002_chunk002.mp4",
+      "c": 1
+    },
+    {
+      "director_status": -1,
+      "director_error": "recording files missing (1): 1871:1_20260405_001509_002.mp4",
+      "c": 1
+    },
+    {
+      "director_status": -1,
+      "director_error": "recording files missing (1): 1972:1_20260407_223947_004_chunk001.mp4",
+      "c": 1
+    },
+    {
+      "director_status": -1,
+      "director_error": "recording files missing (1): 2066:1_20260413_210342_000_chunk003.mp4",
+      "c": 1
+    },
+    {
+      "director_status": -1,
+      "director_error": "recording files missing (1): 2299:1_20260421_142842_002.mp4",
+      "c": 1
+    },
+    {
+      "director_status": -1,
+      "director_error": "recording files missing (1): 2302:1_20260421_154338_005.mp4",
+      "c": 1
+    },
+    {
+      "director_status": -1,
+      "director_error": "recording files missing (1): 2317:1_20260422_000449_007.mp4",
+      "c": 1
+    },
+    {
+      "director_status": -1,
+      "director_error": "recording files missing (1): 2410:1_20260425_150448_032.mp4",
+      "c": 1
+    },
+    {
+      "director_status": -1,
+      "director_error": "recording files missing (1): 2465:1_20260426_145113_003.mp4",
+      "c": 1
+    },
+    {
+      "director_status": -1,
+      "director_error": "recording files missing (1): 2467:1_20260426_154111_005.mp4",
+      "c": 1
+    }
+  ],
+  "files": {
+    "missing_csv": "/Users/claw/work/douyin-recorder/backups/director_done_path_missing_20260729_212903.csv"
+  }
+}

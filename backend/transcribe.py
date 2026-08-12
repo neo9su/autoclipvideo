@@ -1,1748 +1,2040 @@
-<template>
-  <div>
-    <div class="toolbar">
-      <h2>分组管理</h2>
-      <div class="toolbar-actions">
-        <button class="btn-primary" @click="openCreateGroupModal">+ 新建分组</button>
-        <button class="btn-custom" @click="openCustomGroupModal">+ 自定义分组</button>
-        <button v-if="suggestions.length > 0" class="btn-action orange btn-sm" @click="showSuggestions = true">
-          规则建议 ({{ suggestions.length }})
-        </button>
-      </div>
-    </div>
+from gpu_execution import reject_local_media
+import asyncio
+import heapq
+import logging
+import os
+import time
+from pathlib import Path
+from typing import Optional
 
-    <div v-if="!loading && groups.length === 0" class="empty-tip">
-      暂无分组。录像完成转录和剪辑后，系统会自动按款式/颜色分组。
-    </div>
+import aiohttp
+import aiosqlite
+import httpx
 
-    <div class="groups-list" :class="{ 'is-loading': loading }">
-      <div v-if="loading" v-for="slot in 4" :key="`group-skeleton-${slot}`" class="group-card group-skeleton" aria-label="加载中"></div>
-      <div v-for="g in visibleGroups" :key="g.id" :class="['group-card', g.is_custom && 'group-card-custom']">
-        <!-- Group header -->
-        <div class="group-header">
-          <div class="group-meta">
-            <div class="group-label">{{ g.label }}</div>
-            <div class="group-id-tag">{{ formatGroupId(g.id) }}</div>
-            <div class="group-sub">
-              <span v-if="!g.is_custom" class="tag">{{ g.room_name }}</span>
-              <span v-else class="tag" style="background:rgba(251,146,60,0.15);color:#c2540a;">自定义</span>
-              <span class="tag date-tag">{{ g.created_at ? g.created_at.slice(0, 10) : '' }}</span>
-              <span class="tag" v-if="g.wig_model">{{ g.wig_model }}</span>
-              <span class="tag color" v-if="g.wig_color">{{ g.wig_color }}</span>
-              <span v-if="g.published_count > 0" class="tag published-tag">已发布 {{ g.published_count }} 次</span>
-              
-              <!-- 发布版本选择器 -->
-              <div class="mode-selector">
-                <select
-                  :value="g.publish_versions || 'both'"
-                  @change="setPublishVersions(g, $event.target.value)"
-                  class="mode-select"
-                  title="发布时使用哪个版本"
-                >
-                  <option value="both">📤 全部版本</option>
-                  <option value="director">🎬 导演版</option>
-                  <option value="classic">📹 经典版</option>
-                  <option value="creative">✍️ 自编版</option>
-                  <option value="qianchuan">📣 千川投流</option>
-                </select>
-              </div>
-            </div>
-          </div>
-          <div class="group-stats">
-            <span class="stat-item">{{ g.ready_count }} / {{ g.clip_count }} 条剪辑</span>
-            <button class="btn-edit" @click="openEditGroupModal(g)" title="编辑分组">✎</button>
-            <button class="btn-del" @click="doDeleteGroup(g)" title="删除分组">✕</button>
-          </div>
-          <div class="group-actions">
-            <!-- 三模式触发按钮 -->
-            <button
-              v-if="g.classic_status !== 1 && g.director_status !== 1 && (g.creative_status || 0) !== 1 && (g.qianchuan_status || 0) !== 1"
-              class="btn-action"
-              :disabled="g.ready_count === 0"
-              @click="doMerge(g)">
-              {{ (g.classic_status === 2 || g.director_status === 2 || g.creative_status === 2 || g.qianchuan_status === 2) ? '↺ 重新合并' : '剪辑并合并' }}
-            </button>
-            <button v-else class="btn-action yellow" disabled>处理中…</button>
-            <!-- 经典版结果 -->
-            <template v-if="g.classic_status === 2 && g.classic_available">
-              <button class="btn-action teal" style="margin-right:2px" @click="openClassicPreview(g)">▶ 经典版</button>
-              <a :href="`${apiBase}/api/groups/${g.id}/download`" class="btn-action teal" title="经典版下载" download>↓</a>
-            </template>
-            <span v-else-if="g.classic_status === 1" class="badge yellow">经典版处理中…</span>
-            <span v-else-if="g.classic_status === 2 && g.classic_file_status !== 'ready'" class="badge red">经典版文件缺失，请重新生成</span>
-            <span v-else-if="g.classic_status === -1" class="badge red">经典版失败</span>
-            <!-- 自编版结果 -->
-            <template v-if="g.creative_status === 2 && g.creative_available">
-              <button class="btn-action green" style="margin-right:2px" @click="openCreativePreview(g)">▶ 自编版</button>
-              <a :href="`${apiBase}/api/groups/${g.id}/creative-download`" class="btn-action green" title="自编版下载" download>↓</a>
-            </template>
-            <span v-else-if="(g.creative_status || 0) === 1" class="badge yellow">自编版处理中…</span>
-            <span v-else-if="g.creative_status === 2 && g.creative_file_status !== 'ready'" class="badge red">自编版文件缺失，请重新生成</span>
-            <span v-else-if="g.creative_status === -1" class="badge red">自编版失败</span>
-            <!-- 重剪 -->
-            <button
-              v-if="g.clip_count > 0"
-              class="btn-action orange"
-              :disabled="reclipAllId === g.id"
-              @click="doReclipAll(g)"
-              title="重置所有剪辑并重新生成">
-              {{ reclipAllId === g.id ? '重剪中…' : '↺ 全部重剪' }}
-            </button>
-            <button class="btn-sm" @click="toggleDetail(g.id)">
-              {{ openId === g.id ? '收起' : '查看详情' }}
-            </button>
-          </div>
-        </div>
+from db import DB_PATH, aio_connect
+from editor import edit_recording, edit_recording_multi
+from analyzer import analyze_recording
+from thumbnail import generate_thumbnail
+from final_video import postprocess_final_video
+from gpu_execution import reject_local_media
 
-        <!-- 导演模式操作面板（始终显示） -->
-        <div class="director-panel">
-          <!-- Vibe 选择器 -->
-          <div class="vibe-selector">
-            <span class="vibe-label">风格</span>
-            <select :value="g.vibe || 'trendy'" @change="setVibe(g, $event.target.value)" class="vibe-select">
-              <option value="trendy">🔥 爆款型</option>
-              <option value="emotional">💛 情感型</option>
-              <option value="lifestyle">☕ 生活型</option>
-              <option value="luxury">✨ 高端型</option>
-              <option value="contrast">⚡ 反差型</option>
-              <option value="creative">✍️ 自编文案</option>
-            </select>
-            <span class="vibe-hint">{{ vibeHints[g.vibe || 'trendy'] }}</span>
-          </div>
-          <div class="director-steps">
-            <div class="director-step">
-              <span class="step-num">1</span>
-              <button
-                class="btn-director"
-                :disabled="directorBusy[g.id] === 'script'"
-                @click="generateDirectorScript(g)">
-                {{ directorBusy[g.id] === 'script' ? '生成中…' : (g.director_script ? '↺ 重新生成脚本' : '生成脚本') }}
-              </button>
-              <span v-if="g.director_script" class="step-done">✓ 脚本已生成</span>
-              <button v-if="g.director_script" class="btn-action purple" style="margin-left:8px" @click="openScriptReview(g)">✏ 审核文案</button>
-            </div>
-            <div class="director-step">
-              <span class="step-num">2</span>
-              <button
-                class="btn-director"
-                :disabled="directorBusy[g.id] === 'voice'"
-                @click="generateVoiceover(g)">
-                {{ directorBusy[g.id] === 'voice' ? '合成中…' : (g.director_audio_path ? '↺ 重新生成配音' : '生成配音') }}
-              </button>
-              <span v-if="g.director_audio_path" class="step-done">✓ 配音已生成</span>
-            </div>
-            <div class="director-step">
-              <span class="step-num">3</span>
-              <button
-                class="btn-director"
-                :disabled="directorBusy[g.id] === 'video'"
-                @click="composeDirectorVideo(g)">
-                {{ directorBusy[g.id] === 'video' ? '合成中…' : (g.director_final_video ? '↺ 重新合成' : '合成视频') }}
-              </button>
-              <span v-if="g.director_final_video" class="step-done">✓ 视频已生成</span>
-              <button v-if="g.director_status === 2 && g.director_available" class="btn-action purple" style="margin-left:8px" @click="openDirectorPreview(g)">▶ 预览</button>
-              <a v-if="g.director_status === 2 && g.director_available" :href="`${apiBase}/api/groups/${g.id}/director-download`" class="btn-action purple" style="margin-left:4px" download>↓ 下载</a>
-            </div>
-          </div>
-          <div v-if="g.director_status === 2 && g.director_file_status !== 'ready'" class="director-error">⚠ 导演版文件缺失（stale_path），请重新生成</div>
-          <div v-if="g.director_error" class="director-error">⚠ {{ g.director_error }}</div>
-        </div>
+logger = logging.getLogger(__name__)
 
-        <!-- 千川投流版操作面板 -->
-        <div class="qianchuan-panel">
-          <div class="qianchuan-header">
-            <div class="qianchuan-title-row">
-              <span class="qianchuan-title">千川投流版</span>
-              <span :class="['qianchuan-status', qianchuanStatusMeta(g).className]">{{ qianchuanStatusMeta(g).label }}</span>
-              <span v-if="g.qianchuan_score !== null && g.qianchuan_score !== undefined" class="qianchuan-score">匹配/质量分 {{ formatQianchuanScore(g.qianchuan_score) }}</span>
-            </div>
-            <div class="qianchuan-actions">
-              <button
-                class="btn-action teal btn-sm"
-                @click="openUploadModal"
-                title="上传参考视频进行学习分析">
-                📤 学习素材
-              </button>
-              <button
-                v-if="g.qianchuan_status !== 2"
-                class="btn-qianchuan"
-                :disabled="qianchuanBusy[g.id] || g.qianchuan_status === 1"
-                @click="generateQianchuan(g)">
-                {{ qianchuanBusy[g.id] || g.qianchuan_status === 1 ? '生成中…' : (isQianchuanFailure(g.qianchuan_status) ? '↺ 重试千川版' : '生成千川版') }}
-              </button>
-              <template v-if="g.qianchuan_status === 2 && g.qianchuan_available">
-                <button class="btn-action cyan" @click="openQianchuanPreview(g)">▶ 预览</button>
-                <a :href="`${apiBase}/api/groups/${g.id}/qianchuan-download`" class="btn-action cyan" download>↓ 下载</a>
-                <button
-                  class="btn-action orange"
-                  :disabled="qianchuanBusy[g.id]"
-                  @click="generateQianchuan(g)">
-                  {{ qianchuanBusy[g.id] ? '生成中…' : '↺ 重新生成' }}
-                </button>
-              </template>
-            </div>
-          </div>
-          <div class="qianchuan-hint">{{ qianchuanStatusMeta(g).hint }}</div>
-          <div v-if="g.qianchuan_status === 2 && g.qianchuan_file_status !== 'ready'" class="qianchuan-error">⚠ 千川结果文件缺失（stale_path），请重新生成</div>
-          <div v-if="g.qianchuan_error" class="qianchuan-error">⚠ {{ summarizeQianchuanError(g.qianchuan_error) }}</div>
-        </div>
+GPU_SERVICE_URL = os.environ.get("GPU_SERVICE_URL", "http://10.190.0.203:8877")
 
-        <!-- 封面生成面板 -->
-        <div class="cover-panel" v-if="g.classic_status === 2 || g.director_status === 2 || g.creative_status === 2 || g.qianchuan_status === 2">
-          <div class="cover-panel-header">
-            <span class="cover-panel-title">封面</span>
-            <button
-              class="btn-sm btn-cover-gen"
-              :disabled="coverGenerating[g.id]"
-              @click="generateCovers(g)">
-              {{ coverGenerating[g.id] ? '生成中…' : (g.cover_candidates ? '↺ 重新生成' : '生成封面') }}
-            </button>
-            <span v-if="g.selected_cover" class="cover-selected-hint">✓ 已选封面</span>
-          </div>
-          <!-- 3张候选图 -->
-          <div v-if="g.cover_candidates" class="cover-candidates">
-            <div
-              v-for="(cv, idx) in parseCandidates(g.cover_candidates)"
-              :key="idx"
-              :class="['cover-candidate', g.selected_cover === cv && 'cover-candidate-selected']"
-              @click="selectCover(g, cv)">
-              <img :src="`${apiBase}/api/groups/${g.id}/cover/${cv}?t=${coverBust[g.id] || pageLoadTs}`"
-                   class="cover-img"
-                   @error="e => e.target.src=''" />
-              <div class="cover-scheme-label">{{ coverSchemeLabel(idx) }}</div>
-              <div v-if="g.selected_cover === cv" class="cover-check">✓</div>
-              <button class="cover-preview-btn" @click.stop="openCoverPreview(g, cv, idx)" title="预览大图">⤢</button>
-            </div>
-          </div>
-        </div>
+MIN_RECORDING_HEIGHT = 720  # recordings below this height are skipped from clip jobs
+MIN_RECORDING_DURATION = 28  # recordings shorter than this (seconds) are skipped
+MIN_FINAL_VIDEO_DURATION = 28.0  # director/creative final clips below this are not worth rescuing
+TARGET_PUBLISH_DURATION = 30.5  # pad near-threshold clips above Douyin's 30s boundary
 
-        <!-- Custom group upload -->
-        <div v-if="g.is_custom" class="custom-upload-row">
-          <label :for="`upload-${g.id}`" class="btn-upload-label">+ 上传视频</label>
-          <input :id="`upload-${g.id}`" type="file" accept="video/mp4,video/*" class="hidden-file-input"
-                 @change="e => doUploadVideo(g.id, e)" />
-          <span v-if="uploadingId === g.id" class="uploading-hint">上传中…</span>
-        </div>
 
-        <!-- Merge status -->
-        <div v-if="g.merge_status === -1" class="merge-error">
-          上次合并失败
-          <button v-if="g.merge_error" class="btn-error-detail" @click.stop="showMergeError(g)">查看原因</button>
-        </div>
+async def _get_video_duration(mp4_path: str) -> float:
+    """Remote GPU must provide media metadata; local probing is forbidden."""
+    reject_local_media("local video duration probe")
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            mp4_path,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await proc.communicate()
+        return float(stdout.strip())
+    except Exception:
+        return 0.0
 
-        <!-- Quality issue warning -->
-        <div v-if="g.quality_issue" class="quality-issue-bar">
-          <span class="quality-issue-icon">⚠️</span>
-          <span class="quality-issue-text">发布质量检测不通过：{{ g.quality_issue }}</span>
-          <button class="btn-action red btn-sm" style="margin-left:auto" @click="doMerge(g)">↺ 重新剪辑后合并</button>
-        </div>
 
-        <!-- Detail: recordings in group -->
-        <div v-if="openId === g.id && detail">
-          <div class="detail-loading" v-if="detailLoading">加载中…</div>
-          <table v-else class="detail-table">
-            <thead>
-              <tr>
-                <th></th>
-                <th>文件名</th>
-                <th>内容摘要</th>
-                <th>标签</th>
-                <th>处理状态</th>
-                <th>移至分组</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="r in detail.recordings" :key="r.id">
-                <td class="thumb-cell">
-                  <img v-if="r.clipped === 2"
-                       :src="getThumbnailUrl(r.id)"
-                       class="thumb-img"
-                       @error="e => e.target.style.display='none'" />
-                  <div v-else class="thumb-placeholder"></div>
-                </td>
-                <td class="filename">{{ r.filename }}</td>
-                <td>{{ r.session_label || '—' }}</td>
-                <td>
-                  <span v-if="r.has_tryon" class="tag">试戴</span>
-                  <span v-if="r.has_promotion" class="tag promo">促销</span>
-                </td>
-                <td class="status-cell">
-                  <!-- failed states -->
-                  <span v-if="r.transcribed === -1" class="badge red" :title="r.transcribe_error || ''">转录失败</span>
-                  <span v-else-if="r.clipped === -1" class="badge red">剪辑失败</span>
-                  <!-- done -->
-                  <span v-else-if="r.clipped === 2" class="clip-done-row">
-                    <button class="badge-btn purple" @click="openPreview(r)">▶ 预览</button>
-                    <a :href="`${apiBase}/api/recordings/${r.id}/clip`" class="badge purple">↓</a>
-                    <button class="badge-btn orange" @click="openReclip(r)">↺ 重剪</button>
-                    <button class="badge-btn teal" @click="openReview(r)" :title="r.review_status ? '已审核（再次审核）' : '人工审核片段'">{{ r.review_status ? '✓审' : '审核' }}</button>
-                  </span>
-                  <!-- pending (no active progress) -->
-                  <span v-else-if="r.transcribed === 0 && !progressMap[r.id]" class="badge dim">待转录</span>
-                  <span v-else-if="r.transcribed === 2 && r.clipped === 0 && !progressMap[r.id]" class="badge dim">待剪辑</span>
-                  <!-- in-progress with progress bar -->
-                  <div v-else-if="progressMap[r.id]" class="progress-wrap">
-                    <div class="progress-label">
-                      <span class="progress-msg">{{ progressMap[r.id].msg }}</span>
-                      <span class="progress-pct">{{ progressMap[r.id].pct }}%</span>
-                    </div>
-                    <div class="progress-bar-bg">
-                      <div class="progress-bar-fill" :style="{ width: progressMap[r.id].pct + '%' }"></div>
-                    </div>
-                    <div v-if="progressMap[r.id].eta_seconds != null" class="progress-eta">
-                      {{ formatEta(progressMap[r.id].eta_seconds) }}
-                    </div>
-                  </div>
-                  <!-- fallback in-progress without data yet -->
-                  <span v-else-if="r.transcribed === 1" class="badge yellow">转录中…</span>
-                  <span v-else-if="r.clipped === 1" class="badge yellow">剪辑中…</span>
-                </td>
-                <td>
-                  <select class="reassign-select"
-                          :value="r.group_id"
-                          @change="doReassign(r.id, $event.target.value)">
-                    <option value="">— 不分组 —</option>
-                    <option v-for="g in groups" :key="g.id" :value="g.id">{{ g.label }}</option>
-                  </select>
-                </td>
-              </tr>
-              <tr v-if="detail.recordings.length === 0">
-                <td colspan="6" class="empty">此分组暂无录像</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-    <div v-if="visibleGroups.length < groups.length" ref="groupsSentinel" class="virtual-list-sentinel">加载更多分组…</div>
-  </div>
+async def _get_video_height(mp4_path: str) -> int:
+    """Remote GPU must provide media metadata; local probing is forbidden."""
+    reject_local_media("local video height probe")
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=height",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            mp4_path,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await proc.communicate()
+        return int(stdout.strip())
+    except Exception:
+        return 0
 
-  <!-- Group Create / Edit Modal -->
-  <div v-if="groupModal" class="modal-backdrop" @click.self="groupModal = null">
-    <div class="modal">
-      <div class="modal-header">
-        <span>{{ groupModal.mode === 'create' ? '新建分组' : '编辑分组' }}</span>
-        <button class="modal-close" @click="groupModal = null">✕</button>
-      </div>
-      <div class="modal-field" v-if="groupModal.mode === 'create'">
-        <label>直播间</label>
-        <select v-model="groupModal.room_id" class="modal-input">
-          <option v-for="r in rooms" :key="r.id" :value="r.id">{{ r.name }}</option>
-        </select>
-      </div>
-      <div class="modal-field">
-        <label>分组标签</label>
-        <input v-model="groupModal.label" class="modal-input" placeholder="例：大波浪 自然黑" />
-      </div>
-      <div class="modal-field">
-        <label>款式 <span class="field-hint">可留空</span></label>
-        <input v-model="groupModal.wig_model" class="modal-input" placeholder="例：大波浪卷发" />
-      </div>
-      <div class="modal-field">
-        <label>颜色 <span class="field-hint">可留空</span></label>
-        <input v-model="groupModal.wig_color" class="modal-input" placeholder="例：自然黑" />
-      </div>
-      <div class="modal-field">
-        <label>批量导入视频 <span class="field-hint">可选 — 每行一个 .mp4 文件路径</span></label>
-        <textarea
-          v-model="groupModal.importPaths"
-          class="modal-input"
-          rows="4"
-          placeholder="/path/to/recordings/video1.mp4&#10;/path/to/recordings/video2.mp4"
-        ></textarea>
-        <div v-if="importPreviewCount > 0" class="import-preview">已填入 {{ importPreviewCount }} 个路径</div>
-      </div>
-      <div class="modal-footer">
-        <button class="btn-action" @click="groupModal = null">取消</button>
-        <button class="btn-action purple" :disabled="groupModalSaving || !groupModal.label.trim()" @click="saveGroupModal">
-          {{ groupModalSaving ? '保存中…' : '保存' }}
-        </button>
-      </div>
-    </div>
-  </div>
 
-  <!-- Video Preview Modal -->
-  <div v-if="previewRec" class="modal-backdrop" @click.self="closePreview">
-    <div class="preview-modal">
-      <div class="preview-header">
-        <span class="preview-title">{{ previewRec.filename }}</span>
-        <button class="modal-close" @click="closePreview">✕</button>
-      </div>
-      <video
-        :src="`${apiBase}/api/recordings/${previewRec.id}/clip`"
-        controls
-        autoplay
-        class="preview-video"
-        @error="previewError = true"
-      ></video>
-      <div v-if="previewError" class="preview-err">视频加载失败</div>
-      <div class="preview-footer">
-        <a :href="`${apiBase}/api/recordings/${previewRec.id}/clip`" class="btn-action purple" download>下载</a>
-      </div>
-    </div>
-  </div>
+# In-memory clip job progress: {recording_id: {"phase": str, "step": int, "total": int, "pct": int, "msg": str}}
+_clip_progress: dict = {}
 
-  <!-- Classic Video Preview Modal -->
-  <div v-if="classicPreviewGroup" class="modal-backdrop" @click.self="closeClassicPreview">
-    <div class="preview-modal">
-      <div class="preview-header">
-        <span class="preview-title">经典版 · {{ classicPreviewGroup.label }}</span>
-        <button class="modal-close" @click="closeClassicPreview">✕</button>
-      </div>
-      <video
-        :src="`${apiBase}/api/groups/${classicPreviewGroup.id}/download`"
-        controls
-        autoplay
-        class="preview-video"
-        @error="classicPreviewError = true"
-      ></video>
-      <div v-if="classicPreviewError" class="preview-err">视频加载失败</div>
-      <div class="preview-footer">
-        <a :href="`${apiBase}/api/groups/${classicPreviewGroup.id}/download`" class="btn-action teal" download>↓ 下载</a>
-      </div>
-    </div>
-  </div>
-
-  <!-- Script Review Modal -->
-  <div v-if="scriptReviewGroup" class="modal-backdrop" @click.self="closeScriptReview">
-    <div class="script-review-modal">
-      <div class="preview-header">
-        <span class="preview-title">文案审核 · {{ scriptReviewGroup.label }}</span>
-        <button class="modal-close" @click="closeScriptReview">✕</button>
-      </div>
-      <div class="script-review-body">
-        <div v-for="(scene, idx) in reviewScenes" :key="idx" class="script-scene">
-          <div class="scene-header">
-            <span class="scene-badge">{{ scene.scene_type || `场景${idx+1}` }}</span>
-            <span class="scene-time">{{ scene.timestamp_start }}s - {{ scene.timestamp_end }}s</span>
-          </div>
-          <textarea
-            v-model="scene.voiceover_text"
-            class="scene-textarea"
-            rows="2"
-            :placeholder="`场景${idx+1}文案`"
-          ></textarea>
-        </div>
-      </div>
-      <div class="script-review-footer">
-        <button class="btn-action" @click="closeScriptReview">取消</button>
-        <button class="btn-action purple" :disabled="scriptSaving" @click="saveReviewedScript">
-          {{ scriptSaving ? '保存中…' : '✓ 确认保存' }}
-        </button>
-        <button class="btn-director" @click="regenerateScript">↺ 重新生成</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Director Video Preview Modal -->
-  <div v-if="directorPreviewGroup" class="modal-backdrop" @click.self="closeDirectorPreview">
-    <div class="preview-modal">
-      <div class="preview-header">
-        <span class="preview-title">导演模式 · {{ directorPreviewGroup.label }}</span>
-        <button class="modal-close" @click="closeDirectorPreview">✕</button>
-      </div>
-      <video
-        :src="`${apiBase}/api/groups/${directorPreviewGroup.id}/director-download`"
-        controls
-        autoplay
-        class="preview-video"
-        @error="directorPreviewError = true"
-      ></video>
-      <div v-if="directorPreviewError" class="preview-err">视频加载失败</div>
-      <div class="preview-footer">
-        <a :href="`${apiBase}/api/groups/${directorPreviewGroup.id}/director-download`" class="btn-action purple" download>↓ 下载</a>
-      </div>
-    </div>
-  </div>
-
-  <!-- Creative Video Preview Modal -->
-  <div v-if="creativePreviewGroup" class="modal-backdrop" @click.self="closeCreativePreview">
-    <div class="preview-modal">
-      <div class="preview-header">
-        <span class="preview-title">自编版 · {{ creativePreviewGroup.label }}</span>
-        <button class="modal-close" @click="closeCreativePreview">✕</button>
-      </div>
-      <video
-        :src="`${apiBase}/api/groups/${creativePreviewGroup.id}/creative-download`"
-        controls
-        autoplay
-        class="preview-video"
-        @error="creativePreviewError = true"
-      ></video>
-      <div v-if="creativePreviewError" class="preview-err">视频加载失败</div>
-      <div class="preview-footer">
-        <a :href="`${apiBase}/api/groups/${creativePreviewGroup.id}/creative-download`" class="btn-action green" download>↓ 下载</a>
-      </div>
-    </div>
-  </div>
-
-  <!-- Qianchuan Video Preview Modal -->
-  <div v-if="qianchuanPreviewGroup" class="modal-backdrop" @click.self="closeQianchuanPreview">
-    <div class="preview-modal">
-      <div class="preview-header">
-        <span class="preview-title">千川投流版 · {{ qianchuanPreviewGroup.label }}</span>
-        <button class="modal-close" @click="closeQianchuanPreview">✕</button>
-      </div>
-      <video
-        :src="`${apiBase}/api/groups/${qianchuanPreviewGroup.id}/qianchuan-download`"
-        controls
-        autoplay
-        class="preview-video"
-        @error="qianchuanPreviewError = true"
-      ></video>
-      <div v-if="qianchuanPreviewError" class="preview-err">视频加载失败</div>
-      <div class="preview-footer">
-        <a :href="`${apiBase}/api/groups/${qianchuanPreviewGroup.id}/qianchuan-download`" class="btn-action cyan" download>↓ 下载</a>
-      </div>
-    </div>
-  </div>
-
-  <!-- Cover Preview Modal -->
-  <div v-if="coverPreview" class="modal-backdrop" @click.self="coverPreview = null">
-    <div class="cover-preview-modal">
-      <div class="cover-preview-header">
-        <span class="cover-preview-title">{{ coverPreview.label }} · {{ coverSchemeLabel(coverPreview.idx) }}</span>
-        <div class="cover-preview-actions">
-          <button
-            :class="['btn-action', coverPreview.selected ? 'teal' : 'yellow']"
-            @click="selectCoverFromPreview">
-            {{ coverPreview.selected ? '✓ 已选定' : '选用此封面' }}
-          </button>
-          <a :href="`${apiBase}/api/groups/${coverPreview.groupId}/cover/${coverPreview.cv}?t=${coverBust[coverPreview.groupId] || pageLoadTs}`"
-             class="btn-action purple" download title="下载封面图">↓ 下载</a>
-          <button class="modal-close" @click="coverPreview = null">✕</button>
-        </div>
-      </div>
-      <div class="cover-preview-body">
-        <button class="cover-nav cover-nav-prev" @click="coverNavStep(-1)" :disabled="coverPreview.idx === 0">‹</button>
-        <img
-          :src="`${apiBase}/api/groups/${coverPreview.groupId}/cover/${coverPreview.cv}?t=${coverBust[coverPreview.groupId] || pageLoadTs}`"
-          class="cover-preview-img"
-        />
-        <button class="cover-nav cover-nav-next" @click="coverNavStep(1)" :disabled="coverPreview.idx === coverPreview.total - 1">›</button>
-      </div>
-      <div class="cover-preview-dots">
-        <span
-          v-for="i in coverPreview.total" :key="i"
-          :class="['cover-dot', i - 1 === coverPreview.idx && 'cover-dot-active']"
-          @click="coverNavTo(i - 1)">
-        </span>
-      </div>
-    </div>
-  </div>
-
-  <!-- Re-clip Feedback Modal -->
-  <div v-if="reclipModal" class="modal-backdrop" @click.self="!reclipSaving && (reclipModal = null)">
-    <div class="modal">
-      <!-- Success state -->
-      <template v-if="reclipModal.submitted">
-        <div class="reclip-success">
-          <div class="reclip-success-icon">✓</div>
-          <div class="reclip-success-title">视频重剪已加入队列</div>
-          <div class="reclip-success-sub">
-            {{ reclipModal.feedback.trim() ? 'AI 正在分析你的反馈，将优化片段选取策略' : '将使用不同片段组合重新生成' }}
-          </div>
-        </div>
-        <div class="modal-footer" style="justify-content:center">
-          <button class="btn-action purple" @click="reclipModal = null">知道了</button>
-        </div>
-      </template>
-      <!-- Input state -->
-      <template v-else>
-        <div class="modal-header">
-          <span>↺ 重新剪辑</span>
-          <button class="modal-close" @click="reclipModal = null">✕</button>
-        </div>
-        <div class="modal-field">
-          <label>不满意的原因 <span class="field-hint">可留空，填写后 AI 会针对性优化</span></label>
-          <textarea
-            v-model="reclipModal.feedback"
-            class="modal-input"
-            rows="4"
-            placeholder="例：选的片段太短，没有突出促销信息；或：视频内容跳跃太厉害，希望更连贯…"
-          ></textarea>
-        </div>
-        <div class="reclip-hint">
-          <span v-if="reclipModal.feedback.trim()">✦ AI 将根据你的反馈调整片段选取策略</span>
-          <span v-else>留空则直接重新生成（使用不同的片段组合）</span>
-        </div>
-        <div class="modal-footer">
-          <button class="btn-action" @click="reclipModal = null">取消</button>
-          <button class="btn-action purple" :disabled="reclipSaving" @click="doReclip">
-            {{ reclipSaving ? '提交中…' : '确认重新剪辑' }}
-          </button>
-        </div>
-      </template>
-    </div>
-  </div>
-
-  <!-- Custom Group Create Modal -->
-  <div v-if="customModal" class="modal-backdrop" @click.self="customModal = null">
-    <div class="modal modal-custom">
-      <div class="modal-header">
-        <span>新建自定义分组</span>
-        <button class="modal-close" @click="customModal = null">✕</button>
-      </div>
-      <div class="modal-field">
-        <label>分组标签 *</label>
-        <input v-model="customModal.label" class="modal-input" placeholder="例：大波浪 自然黑" />
-      </div>
-      <div class="modal-field">
-        <label>款式 <span class="field-hint">可留空</span></label>
-        <input v-model="customModal.wig_model" class="modal-input" placeholder="例：大波浪卷发" />
-      </div>
-      <div class="modal-field">
-        <label>颜色 <span class="field-hint">可留空</span></label>
-        <input v-model="customModal.wig_color" class="modal-input" placeholder="例：自然黑" />
-      </div>
-      <div class="modal-footer">
-        <button class="btn-action" @click="customModal = null">取消</button>
-        <button class="btn-action orange" :disabled="customModalSaving || !customModal.label.trim()" @click="saveCustomModal">
-          {{ customModalSaving ? '创建中…' : '创建' }}
-        </button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Merge error detail modal -->
-  <div v-if="mergeErrorGroup" class="modal-overlay" @click.self="mergeErrorGroup = null">
-    <div class="modal-box">
-      <div class="modal-title">合并失败原因 — {{ mergeErrorGroup.label }}</div>
-      <pre class="error-pre">{{ mergeErrorGroup.merge_error || '无详细信息' }}</pre>
-      <button class="btn-action" style="margin-top:12px" @click="mergeErrorGroup = null">关闭</button>
-    </div>
-  </div>
-
-  <!-- Human Review Modal -->
-  <div v-if="reviewModal" class="modal-backdrop" @click.self="!reviewSaving && (reviewModal = null)">
-    <div class="modal review-modal">
-      <div class="modal-header">
-        <span>审核片段 · {{ reviewModal.rec.filename }}</span>
-        <button class="modal-close" @click="reviewModal = null">✕</button>
-      </div>
-      <div v-if="reviewLoading" class="review-loading">加载中…</div>
-      <template v-else-if="reviewModal.segs">
-        <div class="review-hint">
-          勾选要保留的片段（算法选中的已预选）。取消勾选 = 告诉系统该关键词不重要；手动勾选未选中片段 = 告诉系统遗漏了。
-        </div>
-        <div class="review-segments">
-          <div
-            v-for="seg in reviewModal.segs"
-            :key="seg.idx"
-            :class="['review-seg', reviewModal.selected.has(seg.idx) && 'review-seg-selected', !seg.valid && 'review-seg-invalid']"
-            @click="toggleSeg(seg.idx)"
-          >
-            <div class="review-seg-check">{{ reviewModal.selected.has(seg.idx) ? '☑' : '☐' }}</div>
-            <div class="review-seg-body">
-              <div class="review-seg-time">{{ fmtSec(seg.start) }} – {{ fmtSec(seg.end) }}</div>
-              <div class="review-seg-text">{{ seg.text }}</div>
-              <div class="review-seg-meta">
-                <span class="review-score">{{ seg.score > 0 ? '+' + seg.score : seg.score }}</span>
-                <span v-if="seg.category" class="review-cat">{{ seg.category }}</span>
-                <span v-if="!seg.valid" class="review-invalid-mark">过滤</span>
-              </div>
-            </div>
-          </div>
-        </div>
-        <div class="review-summary">
-          已选 {{ reviewModal.selected.size }} / {{ reviewModal.segs.length }} 段
-          <span v-if="reviewModal.algoIdxs.size">
-            （算法选 {{ reviewModal.algoIdxs.size }} 段，
-            你新增 {{ reviewModal_added.length }}，删除 {{ reviewModal_removed.length }}）
-          </span>
-        </div>
-      </template>
-      <div class="modal-footer">
-        <button class="btn-action" @click="reviewModal = null">取消</button>
-        <button class="btn-action purple" :disabled="reviewSaving || reviewLoading || !reviewModal.segs" @click="submitReview">
-          {{ reviewSaving ? '提交中…' : '提交审核' }}
-        </button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Rule Suggestions Panel (shown when there are pending suggestions) -->
-  <div v-if="showSuggestions" class="modal-backdrop" @click.self="showSuggestions = false">
-    <div class="modal suggestions-modal">
-      <div class="modal-header">
-        <span>规则建议审核</span>
-        <button class="modal-close" @click="showSuggestions = false">✕</button>
-      </div>
-      <div v-if="suggestions.length === 0" class="review-hint">暂无待审核建议</div>
-      <div v-else class="suggestions-list">
-        <div v-for="s in suggestions" :key="s.id" class="suggestion-item">
-          <div class="sug-kw">{{ s.keyword }}</div>
-          <div class="sug-reason">{{ s.reason }}</div>
-          <div class="sug-score">{{ s.current_score }} → {{ s.suggested_score }}</div>
-          <div class="sug-actions">
-            <button class="btn-action purple btn-sm" @click="acceptSuggestion(s.id)">接受</button>
-            <button class="btn-action btn-sm" @click="rejectSuggestion(s.id)">忽略</button>
-          </div>
-        </div>
-      </div>
-      <div class="modal-footer">
-        <button class="btn-action" @click="showSuggestions = false">关闭</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Qianchuan Learning Upload Modal -->
-  <QianchuanUpload v-if="showUploadModal" @close="showUploadModal = false" />
-
-</template>
-
-<script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { REMOTE_API_BASE } from '../remoteApi.js'
-import { getGroups, getGroup, getRooms, mergeGroup, retryModes, createGroup, updateGroup, reassignRecording, importGroupVideos, createWS, getThumbnailUrl, createCustomGroup, uploadCustomGroupVideo, deleteGroup, getProcessingProgress, reclipRecording, reclipGroupAll, generateQianchuanGroup } from '../api.js'
-import QianchuanUpload from '../components/QianchuanUpload.vue'
-import { useToast } from '../composables/toast.js'
-
-const groups = ref([])
-const loading = ref(true)
-const rooms = ref([])
-const visibleGroupCount = ref(50)
-const groupsSentinel = ref(null)
-const visibleGroups = computed(() => groups.value.slice(0, visibleGroupCount.value))
-let groupsObserver = null
-const openId = ref(null)
-const detail = ref(null)
-const detailLoading = ref(false)
-const apiBase = REMOTE_API_BASE
-let wsCleanup = null
-
-async function readResponseError(response, fallback) {
-  const contentType = response.headers.get('content-type') || ''
-  if (contentType.includes('application/json')) {
-    try {
-      const payload = await response.json()
-      if (payload?.detail) return Array.isArray(payload.detail) ? payload.detail.map(item => item.msg || item).join('; ') : String(payload.detail)
-      if (payload?.error) return String(payload.error)
-      if (payload?.message) return String(payload.message)
-    } catch {
-      // Fall through to text for malformed JSON responses.
-    }
-  }
-  try {
-    const text = (await response.text()).trim()
-    if (text) return text.slice(0, 500)
-  } catch {
-    // Keep the user-facing fallback when the response body is unavailable.
-  }
-  return fallback
+# Poll loop health state — exposed via /api/gpu/status
+_poll_state: dict = {
+    "last_poll_at": None,       # epoch float
+    "last_submit_at": None,     # epoch float: last time a job was sent to GPU
+    "last_complete_at": None,   # epoch float: last transcription finished
+    "blocked_count": 0,         # items blocked by merger on last poll
+    "active_job_id": None,      # gpu_job_id currently running on GPU
 }
 
-// Group create/edit modal: { mode: 'create'|'edit', id?, room_id, label, wig_model, wig_color, importPaths }
-const groupModal = ref(null)
-const groupModalSaving = ref(false)
+# Event to wake the poll loop immediately (used by the flush endpoint)
+_flush_event: asyncio.Event = asyncio.Event()
+RECORDINGS_DIR = os.path.join(os.path.dirname(__file__), "..", "recordings")
+POLL_INTERVAL = 60  # seconds
 
-// Custom group modal
-const customModal = ref(null)
-const customModalSaving = ref(false)
-const uploadingId = ref(null)
+# Pipeline concurrency: GPU has headroom (RTX 4080S 16GB), LLM semaphore is separate (=3).
+# Director and creative use independent semaphores to maximize throughput.
+# Increased to 4 to reduce backlog (515 jobs pending, GPU idle ~70h).
+_DIRECTOR_SEM = asyncio.Semaphore(4)
+_CREATIVE_SEM = asyncio.Semaphore(4)
 
-// Processing progress: { [recording_id]: { pct, msg, eta_seconds, phase } }
-const progressMap = ref({})
-let progressTimer = null
+# ── Transcription timing tracker ─────────────────────────────────────────────
+_job_submit_times: dict[str, float] = {}   # gpu_job_id → time.time() when submitted
+_job_durations: list[float] = []           # recent completed job durations (last 20)
+_session_done: int = 0                     # jobs completed since backend start
 
-// Merge error detail
-const mergeErrorGroup = ref(null)
-function showMergeError(g) { mergeErrorGroup.value = g }
 
-// ID formatting
-function formatGroupId(id) {
-  return 'GP' + String(id).padStart(7, '0')
-}
-
-const previewRec = ref(null)
-const previewError = ref(false)
-function openPreview(r) { previewRec.value = r; previewError.value = false }
-function closePreview() { previewRec.value = null }
-
-// Classic video preview
-const classicPreviewGroup = ref(null)
-const classicPreviewError = ref(false)
-function openClassicPreview(g) { classicPreviewGroup.value = g; classicPreviewError.value = false }
-function closeClassicPreview() { classicPreviewGroup.value = null }
-
-// Director video preview
-const directorPreviewGroup = ref(null)
-const directorPreviewError = ref(false)
-function openDirectorPreview(g) { directorPreviewGroup.value = g; directorPreviewError.value = false }
-function closeDirectorPreview() { directorPreviewGroup.value = null }
-
-// Script review modal
-const scriptReviewGroup = ref(null)
-const reviewScenes = ref([])
-const scriptSaving = ref(false)
-function openScriptReview(g) {
-  try {
-    const script = typeof g.director_script === 'string' ? JSON.parse(g.director_script) : g.director_script
-    reviewScenes.value = (script.scenes || []).map(s => ({ ...s }))
-    scriptReviewGroup.value = g
-  } catch (e) {
-    alert('脚本解析失败')
-  }
-}
-function closeScriptReview() { scriptReviewGroup.value = null; reviewScenes.value = [] }
-async function saveReviewedScript() {
-  scriptSaving.value = true
-  try {
-    const g = scriptReviewGroup.value
-    const script = typeof g.director_script === 'string' ? JSON.parse(g.director_script) : { ...g.director_script }
-    script.scenes = reviewScenes.value
-    const response = await fetch(`${apiBase}/api/v2/director/update-script`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ group_id: g.id, script }),
-    })
-    if (!response.ok) throw new Error(await readResponseError(response, '文案保存失败'))
-    g.director_script = JSON.stringify(script)
-    g.director_audio_path = null
-    g.director_final_video = null
-    closeScriptReview()
-    alert('文案已保存，请重新生成配音')
-  } catch (e) {
-    alert('保存失败: ' + e.message)
-  } finally {
-    scriptSaving.value = false
-  }
-}
-function regenerateScript() {
-  const g = scriptReviewGroup.value
-  closeScriptReview()
-  generateDirectorScript(g)
-}
-
-// Creative video preview
-const creativePreviewGroup = ref(null)
-const creativePreviewError = ref(false)
-function openCreativePreview(g) { creativePreviewGroup.value = g; creativePreviewError.value = false }
-function closeCreativePreview() { creativePreviewGroup.value = null }
-
-// Qianchuan video preview
-const qianchuanPreviewGroup = ref(null)
-const qianchuanPreviewError = ref(false)
-function openQianchuanPreview(g) { qianchuanPreviewGroup.value = g; qianchuanPreviewError.value = false }
-function closeQianchuanPreview() { qianchuanPreviewGroup.value = null }
-
-// Re-clip (single recording)
-const reclipModal = ref(null)
-const reclipSaving = ref(false)
-function openReclip(r) { reclipModal.value = { rec: r, feedback: '' } }
-
-// Director mode busy state: { [groupId]: 'script' | 'voice' | 'video' | null }
-const directorBusy = ref({})
-const qianchuanBusy = ref({})
-const showUploadModal = ref(false)
-
-function openUploadModal() {
-  showUploadModal.value = true
-}
-
-const vibeHints = {
-  trendy:    '快节奏·强钩子·追热点',
-  emotional: '情感共鸣·讲故事·引共情',
-  lifestyle: 'GRWM·日常感·接地气',
-  luxury:    '品质感·精致·仪式感',
-  contrast:  '反差感·意外·强对比',
-  creative:  '自由创作·编造卖点·催单节奏',
-}
-
-const qianchuanStatusMap = {
-  0: { label: '未生成', className: 'idle', hint: '千川结果尚未生成，请先生成/重试千川版。' },
-  1: { label: '生成中', className: 'running', hint: '正在生成千川投流版，请勿重复提交。' },
-  2: { label: '已完成', className: 'done', hint: '千川投流版已生成，可预览或下载。' },
-  '-1': { label: '普通失败', className: 'failed', hint: '生成失败，可查看错误摘要后重试。' },
-  '-2': { label: '商品不匹配', className: 'blocked', hint: '商品/颜色/镜头匹配不足，已拒绝生成。' },
-  '-3': { label: '质量失败', className: 'failed', hint: '质量检测不通过，请调整素材后重试。' },
-  '-4': { label: '编码/探测失败', className: 'failed', hint: '视频编码或质量探测失败，可重试或检查素材。' },
-}
-
-function qianchuanStatusMeta(group) {
-  const status = group.qianchuan_status ?? 0
-  return qianchuanStatusMap[status] || { label: `状态 ${status}`, className: 'failed', hint: '千川投流版状态异常，请查看错误摘要。' }
-}
-
-function isQianchuanFailure(status) {
-  return Number(status) < 0
-}
-
-function formatQianchuanScore(score) {
-  const value = Number(score)
-  if (!Number.isFinite(value)) return '—'
-  return value <= 1 ? `${Math.round(value * 100)}%` : value.toFixed(1)
-}
-
-function summarizeQianchuanError(error) {
-  if (!error) return ''
-  return String(error).replace(/\s+/g, ' ').slice(0, 160)
-}
-
-// Cover generation
-const pageLoadTs = Date.now()           // bust cover URLs on every page load
-const coverGenerating = ref({})
-const coverBust = ref({})   // per-group cache-bust timestamp
-const coverPreview = ref(null)   // { groupId, cv, idx, total, candidates, label, selected }
-const COVER_SCHEME_LABELS = ['发量直接翻倍', '换个发型像换脸', '细软塌救星']
-
-function parseCandidates(json) {
-  try { return JSON.parse(json) } catch { return [] }
-}
-
-function coverSchemeLabel(idx) {
-  return COVER_SCHEME_LABELS[idx] ?? `方案${idx + 1}`
-}
-
-function openCoverPreview(g, cv, idx) {
-  const candidates = parseCandidates(g.cover_candidates)
-  coverPreview.value = {
-    groupId: g.id,
-    cv,
-    idx,
-    total: candidates.length,
-    candidates,
-    label: g.label,
-    selected: g.selected_cover === cv,
-    _group: g,
-  }
-}
-
-function coverNavStep(delta) {
-  const p = coverPreview.value
-  if (!p) return
-  const newIdx = Math.max(0, Math.min(p.total - 1, p.idx + delta))
-  const newCv = p.candidates[newIdx]
-  coverPreview.value = { ...p, idx: newIdx, cv: newCv, selected: p._group.selected_cover === newCv }
-}
-
-function coverNavTo(idx) {
-  const p = coverPreview.value
-  if (!p) return
-  const newCv = p.candidates[idx]
-  coverPreview.value = { ...p, idx, cv: newCv, selected: p._group.selected_cover === newCv }
-}
-
-async function selectCoverFromPreview() {
-  const p = coverPreview.value
-  if (!p) return
-  await selectCover(p._group, p.cv)
-  coverPreview.value = { ...p, selected: true }
-}
-
-async function generateCovers(g) {
-  coverGenerating.value[g.id] = true
-  try {
-    const resp = await fetch(`${apiBase}/api/groups/${g.id}/generate-covers`, { method: 'POST' })
-    if (!resp.ok) throw new Error(await readResponseError(resp, '封面生成失败'))
-    const result = await resp.json()
-    if (!Array.isArray(result.covers)) throw new Error('服务器返回的封面数据无效')
-    show(`已生成 ${result.covers.length} 张封面候选`, 'success')
-    await load()
-  } catch (e) {
-    show(e.message || '封面生成失败', 'error')
-  } finally {
-    coverGenerating.value[g.id] = false
-  }
-}
-
-async function selectCover(g, coverPath) {
-  try {
-    const resp = await fetch(`${apiBase}/api/groups/${g.id}/select-cover`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cover: coverPath }),
-    })
-    if (!resp.ok) throw new Error(await readResponseError(resp, '操作失败'))
-    show('封面已选定', 'success')
-  } catch (e) {
-    show(e.message || '封面选择失败', 'error')
-  }
-}
-
-// Re-clip all recordings in a group
-const reclipAllId = ref(null)
-async function doReclipAll(g) {
-  if (!confirm(`将重置「${g.label}」分组内所有剪辑并重新生成（共 ${g.clip_count} 条录像）。确认吗？`)) return
-  reclipAllId.value = g.id
-  try {
-    const result = await reclipGroupAll(g.id)
-    show(`已提交 ${result.queued.length} / ${result.total} 条录像重新剪辑`, 'success')
-    await load()
-    if (openId.value === g.id) detail.value = await getGroup(g.id)
-  } catch (e) {
-    show(e.message || '全部重剪失败', 'error')
-  } finally {
-    reclipAllId.value = null
-  }
-}
-async function doReclip() {
-  if (!reclipModal.value) return
-  reclipSaving.value = true
-  const { rec, feedback } = reclipModal.value
-  try {
-    await reclipRecording(rec.id, feedback)
-    reclipModal.value.submitted = true  // switch to success state
-    if (openId.value) getGroup(openId.value).then(d => { detail.value = d })
-  } catch (e) {
-    show(e.message || '操作失败', 'error')
-  } finally {
-    reclipSaving.value = false
-  }
-}
-
-const importPreviewCount = computed(() => {
-  const txt = groupModal.value?.importPaths || ''
-  return txt.split('\n').map(p => p.trim()).filter(p => p.endsWith('.mp4')).length
-})
-
-async function load() {
-  loading.value = true
-  try {
-    ;[groups.value, rooms.value] = await Promise.all([getGroups(), getRooms()])
-    visibleGroupCount.value = Math.min(50, groups.value.length)
-  } catch (error) {
-    show(error.message || '分组加载失败', 'error')
-  } finally {
-    loading.value = false
-  }
-}
-
-async function toggleDetail(id) {
-  if (openId.value === id) {
-    openId.value = null
-    detail.value = null
-    stopProgressPolling()
-    return
-  }
-  openId.value = id
-  detailLoading.value = true
-  detail.value = null
-  try {
-    detail.value = await getGroup(id)
-  } catch (error) {
-    show(error.message || '分组详情加载失败', 'error')
-    openId.value = null
-  } finally {
-    detailLoading.value = false
-  }
-  startProgressPolling()
-}
-
-function startProgressPolling() {
-  stopProgressPolling()
-  const poll = async () => {
-    progressMap.value = await getProcessingProgress()
-  }
-  poll()
-  progressTimer = setInterval(poll, 20000)
-}
-
-function stopProgressPolling() {
-  if (progressTimer) { clearInterval(progressTimer); progressTimer = null }
-}
-
-function formatEta(seconds) {
-  if (seconds == null || seconds < 0) return ''
-  if (seconds < 60) return `约 ${seconds}秒`
-  const m = Math.floor(seconds / 60)
-  const s = seconds % 60
-  return `约 ${m}分${s > 0 ? s + '秒' : ''}`
-}
-
-async function doMerge(g) {
-  try {
-    await mergeGroup(g.id)
-    show('合并任务已提交', 'info')
-    await load()
-  } catch (e) {
-    show(e.message || '合并失败', 'error')
-  }
-}
-
-async function doRetryModes(g) {
-  try {
-    await retryModes(g.id)
-    show('导演+自编任务已提交', 'info')
-    await load()
-  } catch (e) {
-    show(e.message || '任务提交失败', 'error')
-  }
-}
-
-function openCreateGroupModal() {
-  groupModal.value = {
-    mode: 'create',
-    room_id: rooms.value[0]?.id ?? '',
-    label: '',
-    wig_model: '',
-    wig_color: '',
-    importPaths: '',
-  }
-}
-
-function openEditGroupModal(g) {
-  groupModal.value = {
-    mode: 'edit',
-    id: g.id,
-    room_id: g.room_id,
-    label: g.label,
-    wig_model: g.wig_model || '',
-    wig_color: g.wig_color || '',
-    importPaths: '',
-  }
-}
-
-async function saveGroupModal() {
-  const m = groupModal.value
-  if (!m || !m.label.trim()) return
-  groupModalSaving.value = true
-  try {
-    const body = { label: m.label.trim(), wig_model: m.wig_model.trim() || null, wig_color: m.wig_color.trim() || null }
-    let groupId
-    if (m.mode === 'create') {
-      const created = await createGroup({ ...body, room_id: Number(m.room_id) })
-      groupId = created.id
-    } else {
-      await updateGroup(m.id, body)
-      groupId = m.id
-    }
-    if (m.importPaths?.trim()) {
-      const paths = m.importPaths.split('\n').map(p => p.trim()).filter(Boolean)
-      const result = await importGroupVideos(groupId, paths)
-      show(`已导入 ${result.imported} 个视频${result.skipped.length ? `，${result.skipped.length} 个跳过` : ''}`, 'success')
-    }
-    groupModal.value = null
-    await load()
-  } catch (e) {
-    show(e.message || '保存失败', 'error')
-  } finally {
-    groupModalSaving.value = false
-  }
-}
-
-async function doDeleteGroup(g) {
-  if (!confirm(`删除分组「${g.label}」？录像文件不会被删除，仅解除关联。`)) return
-  try {
-    await deleteGroup(g.id)
-    if (openId.value === g.id) { openId.value = null; detail.value = null }
-    await load()
-    show('分组已删除', 'info')
-  } catch (e) {
-    show(e.message || '删除失败', 'error')
-  }
-}
-
-async function setPublishVersions(group, versions) {
-  group.publish_versions = versions
-  try {
-    const response = await fetch(`${apiBase}/api/groups/${group.id}/publish-versions`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ publish_versions: versions })
-    })
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({}))
-      throw new Error(error.detail || '设置失败')
-    }
-    const labels = { both: '全部版本', director: '导演版', classic: '经典版', creative: '自编版', qianchuan: '千川投流' }
-    show(`发布版本已设为：${labels[versions] || versions}`, 'success')
-  } catch (e) {
-    show(e.message || '设置发布版本失败', 'error')
-    await load()
-  }
-}
-
-async function setVibe(group, vibe) {
-  group.vibe = vibe
-  try {
-    await fetch(`${apiBase}/api/v2/director/set-vibe`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ group_id: group.id, vibe })
-    })
-  } catch (e) {
-    // best-effort — vibe is still held in local group object for current session
-  }
-}
-
-async function generateDirectorScript(group) {
-  directorBusy.value[group.id] = 'script'
-  group.director_error = null
-  try {
-    const response = await fetch(`${apiBase}/api/v2/director/generate-script`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ group_id: group.id, script_type: 'balanced', vibe: group.vibe || 'trendy' })
-    })
-    if (!response.ok) {
-      const err = await response.json().catch(() => ({}))
-      throw new Error(err.detail || '脚本生成失败')
-    }
-    const result = await response.json()
-    if (!result.success) throw new Error('脚本生成返回失败状态')
-    show(result.fallback ? '已生成备用脚本（Claude暂时不可用）' : '脚本生成成功', result.fallback ? 'warning' : 'success')
-    await load()
-  } catch (e) {
-    group.director_error = e.message || '脚本生成失败'
-    show(group.director_error, 'error')
-  } finally {
-    directorBusy.value[group.id] = null
-  }
-}
-
-async function generateVoiceover(group) {
-  directorBusy.value[group.id] = 'voice'
-  group.director_error = null
-  try {
-    const response = await fetch(`${apiBase}/api/v2/director/generate-voiceover?group_id=${group.id}`, {
-      method: 'POST'
-    })
-    if (!response.ok) {
-      const err = await response.json().catch(() => ({}))
-      throw new Error(err.detail || '配音生成失败')
-    }
-    const result = await response.json()
-    if (!result.success) throw new Error(result.error || '配音生成失败')
-    show(`配音生成成功，时长 ${Math.round(result.total_duration)} 秒`, 'success')
-    await load()
-  } catch (e) {
-    group.director_error = e.message || '配音生成失败'
-    show(group.director_error, 'error')
-  } finally {
-    directorBusy.value[group.id] = null
-  }
-}
-
-async function generateQianchuan(group) {
-  qianchuanBusy.value[group.id] = true
-  group.qianchuan_error = null
-  group.qianchuan_status = 1
-  try {
-    const result = await generateQianchuanGroup(group.id)
-    if (!result.success && result.status !== 1) {
-      group.qianchuan_status = result.status
-      group.qianchuan_score = result.score
-      group.qianchuan_error = result.error || '千川投流版生成失败'
-      throw new Error(group.qianchuan_error)
-    }
-    show(result.started ? '千川投流版生成已启动' : '千川投流版脚本已生成', 'info')
-    await load()
-  } catch (e) {
-    if (group.qianchuan_status === 1) group.qianchuan_status = -1
-    group.qianchuan_error = e.message || '千川投流版生成失败'
-    show(group.qianchuan_error, 'error')
-    await load().catch(() => {})
-  } finally {
-    qianchuanBusy.value[group.id] = false
-  }
-}
-
-async function composeDirectorVideo(group) {
-  directorBusy.value[group.id] = 'video'
-  group.director_error = null
-  const style = group.vibe || 'trendy'
-  try {
-    const response = await fetch(`${apiBase}/api/v2/director/compose-video?group_id=${group.id}&video_style=${style}`, {
-      method: 'POST'
-    })
-    if (!response.ok) {
-      const err = await response.json().catch(() => ({}))
-      throw new Error(err.detail || '合成失败')
-    }
-    // 后台任务已启动，busy 状态由 director_done / director_error WS 事件清除
-    show('合成已启动，完成后自动通知', 'info')
-  } catch (e) {
-    // 校验失败（同步错误），立刻清除 busy
-    directorBusy.value[group.id] = null
-    group.director_error = e.message || '视频合成失败'
-    show(group.director_error, 'error')
-  }
-}
-
-function openCustomGroupModal() {
-  customModal.value = { label: '', wig_model: '', wig_color: '' }
-}
-
-async function saveCustomModal() {
-  const m = customModal.value
-  if (!m || !m.label.trim()) return
-  customModalSaving.value = true
-  try {
-    await createCustomGroup({ label: m.label.trim(), wig_model: m.wig_model.trim() || null, wig_color: m.wig_color.trim() || null })
-    customModal.value = null
-    show('自定义分组已创建', 'success')
-    await load()
-  } catch (e) {
-    show(e.message || '创建失败', 'error')
-  } finally {
-    customModalSaving.value = false
-  }
-}
-
-async function doUploadVideo(groupId, event) {
-  const file = event.target.files?.[0]
-  if (!file) return
-  uploadingId.value = groupId
-  try {
-    await uploadCustomGroupVideo(groupId, file)
-    show(`已上传 ${file.name}，正在处理…`, 'success')
-    await load()
-  } catch (e) {
-    show(e.message || '上传失败', 'error')
-  } finally {
-    uploadingId.value = null
-    event.target.value = ''
-  }
-}
-
-async function doReassign(recordingId, newGroupId) {
-  try {
-    await reassignRecording(recordingId, newGroupId ? Number(newGroupId) : null)
-    await load()
-  } catch (e) {
-    show(e.message || '移动失败', 'error')
-  }
-}
-
-onMounted(() => {
-  groupsObserver = new IntersectionObserver(entries => {
-    if (entries[0]?.isIntersecting) visibleGroupCount.value = Math.min(groups.value.length, visibleGroupCount.value + 25)
-  }, { rootMargin: '400px' })
-  if (groupsSentinel.value) groupsObserver.observe(groupsSentinel.value)
-  load()
-  wsCleanup = createWS((msg) => {
-    if (msg.type === 'merged') {
-      show('视频合并完成', 'success')
-      load()
-    } else if (['transcribed', 'clipped'].includes(msg.type)) {
-      load()
-      if (openId.value) getProcessingProgress().then(p => { progressMap.value = p })
-    } else if (msg.type === 'clip_progress' && msg.recording_id != null) {
-      progressMap.value = {
-        ...progressMap.value,
-        [msg.recording_id]: { pct: msg.pct, msg: msg.msg, eta_seconds: msg.eta_seconds, phase: msg.phase ?? '' }
-      }
-    } else if (msg.type === 'director_done') {
-      directorBusy.value[msg.group_id] = null
-      const n = msg.matched_count ? `，匹配 ${msg.matched_count} 个片段` : ''
-      show(`导演视频合成完成${n}`, 'success')
-      load()
-    } else if (msg.type === 'director_error') {
-      directorBusy.value[msg.group_id] = null
-      show(msg.error || '合成失败', 'error')
-      load()
-    } else if (msg.type === 'director_voice_done') {
-      show('配音生成完成', 'success')
-      load()
-    } else if (msg.type === 'qianchuan_done') {
-      qianchuanBusy.value[msg.group_id] = false
-      show('千川投流版生成完成', 'success')
-      load()
-    } else if (msg.type === 'qianchuan_error') {
-      qianchuanBusy.value[msg.group_id] = false
-      show(msg.error || '千川投流版生成失败', 'error')
-      load()
-    }
-  })
-  // Poll every 15s for merge status updates
-  const t = setInterval(load, 15000)
-  onUnmounted(() => clearInterval(t))
-})
-
-// ── Human Review ─────────────────────────────────────────────────────────────
-
-const reviewModal = ref(null)  // { rec, segs, selected: Set, algoIdxs: Set }
-const reviewLoading = ref(false)
-const reviewSaving = ref(false)
-const suggestions = ref([])
-const showSuggestions = ref(false)
-
-function fmtSec(sec) {
-  const m = Math.floor(sec / 60)
-  const s = (sec % 60).toFixed(1).padStart(4, '0')
-  return `${m}:${s}`
-}
-
-async function openReview(r) {
-  reviewModal.value = { rec: r, segs: null, selected: new Set(), algoIdxs: new Set() }
-  reviewLoading.value = true
-  try {
-    const res = await fetch(`${apiBase}/api/recordings/${r.id}/review-candidates`)
-    if (!res.ok) throw new Error(await res.text())
-    const data = await res.json()
-    const segs = data.all_segs || []
-
-    // Pre-select algo-selected segments from prev_review if available
-    let algoIdxs = new Set()
-    let prevSelected = new Set()
-    if (data.prev_review) {
-      algoIdxs = new Set(data.prev_review.algo_segments || [])
-      prevSelected = new Set(data.prev_review.user_segments || [])
-    } else {
-      // No prior review — pre-select top-scored valid segments (algo's likely picks)
-      // We sort by score descending and take top ~30%
-      const valid = segs.filter(s => s.valid && s.score > 0).sort((a, b) => b.score - a.score)
-      const topN = Math.max(1, Math.ceil(valid.length * 0.3))
-      algoIdxs = new Set(valid.slice(0, topN).map(s => s.idx))
-      prevSelected = new Set(algoIdxs)
+def transcribe_timing() -> dict:
+    recent = _job_durations[-10:] if _job_durations else []
+    avg = sum(recent) / len(recent) if recent else 0.0
+    return {
+        "submit_times": dict(_job_submit_times),
+        "avg_duration_s": avg,
+        "session_done": _session_done,
     }
 
-    reviewModal.value = { rec: r, segs, selected: new Set(prevSelected), algoIdxs }
-  } catch (e) {
-    show(e.message || '加载失败', 'error')
-    reviewModal.value = null
-  } finally {
-    reviewLoading.value = false
-  }
-}
+# ── Clip Job Priority Queue ───────────────────────────────────────────────────
+# Jobs are dispatched up to MAX_CONCURRENT_CLIPS at a time, ordered by priority.
+# Lower priority number = runs first. Default priority = 50.
 
-function toggleSeg(idx) {
-  const m = reviewModal.value
-  if (!m) return
-  if (m.selected.has(idx)) m.selected.delete(idx)
-  else m.selected.add(idx)
-  // Trigger reactivity
-  reviewModal.value = { ...m, selected: new Set(m.selected) }
-}
+MAX_CONCURRENT_CLIPS = int(os.environ.get("MAX_CONCURRENT_CLIPS", "1"))
 
-const reviewModal_added = computed(() => {
-  const m = reviewModal.value
-  if (!m || !m.algoIdxs) return []
-  return [...m.selected].filter(i => !m.algoIdxs.has(i))
-})
+_pending_heap: list = []          # heapq of [priority, seq, recording_id]
+_pending_meta: dict = {}          # recording_id -> job metadata dict
+_running_ids: set = set()         # recording_ids currently executing
+_paused_ids: set = set()          # recording_ids paused (stay in heap, skip dispatch)
+_job_seq: int = 0                 # monotonic tie-breaker for same-priority jobs
+_dispatch_lock: Optional[asyncio.Lock] = None
+_memory_pressure: bool = False    # set True to pause new clip dispatches when RAM > threshold
 
-const reviewModal_removed = computed(() => {
-  const m = reviewModal.value
-  if (!m || !m.algoIdxs) return []
-  return [...m.algoIdxs].filter(i => !m.selected.has(i))
-})
 
-async function submitReview() {
-  const m = reviewModal.value
-  if (!m || !m.segs) return
-  reviewSaving.value = true
-  try {
-    const algoArr = [...m.algoIdxs]
-    const userArr = [...m.selected]
-    const added = userArr.filter(i => !m.algoIdxs.has(i))
-    const removed = algoArr.filter(i => !m.selected.has(i))
-    const userSegsFull = m.segs.filter(s => added.includes(s.idx))
+def set_memory_pressure(v: bool) -> None:
+    global _memory_pressure
+    _memory_pressure = v
 
-    const res = await fetch(`${apiBase}/api/recordings/${m.rec.id}/review`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        algo_segments: algoArr,
-        user_segments: userArr,
-        user_added: added,
-        user_removed: removed,
-        user_segments_full: userSegsFull,
-      })
-    })
-    if (!res.ok) throw new Error(await readResponseError(res, '提交失败'))
-    show('审核已提交，系统正在学习', 'success')
-    reviewModal.value = null
-    // Refresh suggestions after submit
-    await loadSuggestions()
-    // Update the recording's review_status in detail
-    if (openId.value) detail.value = await getGroup(openId.value)
-  } catch (e) {
-    show(e.message || '提交失败', 'error')
-  } finally {
-    reviewSaving.value = false
-  }
-}
 
-async function loadSuggestions() {
-  try {
-    const res = await fetch(`${apiBase}/api/rule-suggestions`)
-    if (res.ok) suggestions.value = await res.json()
-  } catch (e) { /* best effort */ }
-}
+def _dispatch_lk() -> asyncio.Lock:
+    global _dispatch_lock
+    if _dispatch_lock is None:
+        _dispatch_lock = asyncio.Lock()
+    return _dispatch_lock
 
-async function acceptSuggestion(id) {
-  try {
-    const res = await fetch(`${apiBase}/api/rule-suggestions/${id}/accept`, { method: 'POST' })
-    if (!res.ok) throw new Error(await readResponseError(res, '操作失败'))
-    show('规则已接受并生效', 'success')
-    await loadSuggestions()
-  } catch (e) { show(e.message || '操作失败', 'error') }
-}
 
-async function rejectSuggestion(id) {
-  try {
-    const res = await fetch(`${apiBase}/api/rule-suggestions/${id}/reject`, { method: 'POST' })
-    if (!res.ok) throw new Error(await readResponseError(res, '操作失败'))
-    show('建议已忽略', 'info')
-    await loadSuggestions()
-  } catch (e) { show(e.message || '操作失败', 'error') }
-}
+async def _try_dispatch():
+    """Start queued jobs if slots are available. Called after enqueue and after job completion."""
+    to_start = []
+    async with _dispatch_lk():
+        skipped = []
+        while _pending_heap and len(_running_ids) < MAX_CONCURRENT_CLIPS and not _memory_pressure:
+            entry = heapq.heappop(_pending_heap)
+            recording_id = entry[2]
+            if recording_id in _paused_ids:
+                skipped.append(entry)
+                continue
+            meta = _pending_meta.pop(recording_id, None)
+            if meta is None:
+                continue  # was cancelled/removed
+            _running_ids.add(recording_id)
+            to_start.append((recording_id, meta))
+        for entry in skipped:
+            heapq.heappush(_pending_heap, entry)
 
-onUnmounted(() => { wsCleanup?.(); stopProgressPolling(); groupsObserver?.disconnect() })
-</script>
+    for recording_id, meta in to_start:
+        asyncio.create_task(_run_job_from_queue(recording_id, meta))
 
-<style scoped>
-.toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
-.toolbar h2 { font-size: 16px; font-weight: 600; }
-.toolbar-actions { display: flex; gap: 8px; }
-.btn-primary { background: #fe2c55; color: #fff; border: none; padding: 7px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; }
-.btn-primary:hover { background: #e0203d; }
-.btn-custom { background: rgba(251,146,60,0.15); color: #fb923c; border: 1px solid rgba(251,146,60,0.4); padding: 7px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; }
-.btn-custom:hover { background: rgba(251,146,60,0.25); }
-.btn-edit { background: none; border: none; color: #555; cursor: pointer; font-size: 15px; padding: 0 4px; margin-left: 8px; }
-.btn-edit:hover { color: #ccc; }
-.btn-del { background: none; border: none; color: #555; cursor: pointer; font-size: 13px; padding: 0 4px; margin-left: 2px; }
-.btn-del:hover { color: #fe2c55; }
-.group-card-custom .btn-del { color: #aaa; }
-.group-card-custom .btn-del:hover { color: #c0392b; }
-.empty-tip { color: #444; text-align: center; padding: 60px; }
-.groups-list { display: flex; flex-direction: column; gap: 12px; }
-.virtual-list-sentinel { min-height: 32px; padding: 8px; text-align: center; color: #666; font-size: 12px; }
-.groups-list > .group-card { content-visibility: auto; contain-intrinsic-size: 420px; }
-.group-skeleton { min-height: 230px; background: linear-gradient(90deg, #1a1a1a 25%, #242424 50%, #1a1a1a 75%); background-size: 200% 100%; animation: group-shimmer 1.4s infinite; }
-@keyframes group-shimmer { to { background-position: -200% 0; } }
-.group-card { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 12px; padding: 18px; }
-.group-card-custom { background: #f5f3ef; border: 2px solid #fb923c; color: #1a1a1a; }
-.group-card-custom .group-label { color: #111; }
-.group-card-custom .group-stats { color: #555; }
-.group-card-custom .tag { background: #e8e4dc; color: #555; }
-.group-card-custom .btn-sm { background: #e8e4dc; border-color: #ccc; color: #333; }
-.group-card-custom .btn-sm:hover { background: #ddd; }
-.group-card-custom .merge-error { color: #c0392b; }
-.group-card-custom .detail-table th { color: #777; }
-.group-card-custom .detail-table td { border-color: #e0dbd0; }
-.group-card-custom .filename { color: #666; }
-.group-card-custom .reassign-select { background: #f0ece4; border-color: #ccc; color: #333; }
-.custom-upload-row { display: flex; align-items: center; gap: 8px; padding: 8px 0 0; }
-.btn-upload-label { background: rgba(251,146,60,0.12); color: #c2540a; border: 1px solid rgba(251,146,60,0.4); padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
-.btn-upload-label:hover { background: rgba(251,146,60,0.22); }
-.hidden-file-input { display: none; }
-.uploading-hint { font-size: 12px; color: #fb923c; }
-.group-header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
-.group-meta { flex: 1; }
-.group-label { font-size: 16px; font-weight: 600; margin-bottom: 4px; }
-.group-id-tag { font-size: 10px; font-family: 'SF Mono', 'Fira Code', monospace; color: #555; letter-spacing: 0.5px; margin-bottom: 6px; user-select: all; }
-.group-sub { display: flex; gap: 6px; flex-wrap: wrap; }
-.tag { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: #2a2a2a; color: #999; }
-.tag.color { background: rgba(251,191,36,0.12); color: #fbbf24; }
-.tag.promo { background: rgba(254,44,85,0.12); color: #fe2c55; }
-.tag.date-tag { background: rgba(148,163,184,0.2); color: #cbd5e1; }
 
-/* 模式选择器样式 */
-.mode-selector { margin-top: 4px; }
-.mode-select {
-  background: #1a1a1a;
-  border: 1px solid #444;
-  color: #ccc;
-  padding: 3px 8px;
-  border-radius: 6px;
-  font-size: 11px;
-  cursor: pointer;
-  min-width: 120px;
-}
-.mode-select:hover {
-  border-color: #666;
-}
-.mode-select:focus {
-  outline: none;
-  border-color: #8b5cf6;
-  box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.1);
-}
-.group-stats { font-size: 13px; color: #666; white-space: nowrap; }
-.stat-item { margin-right: 12px; }
-.group-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-.btn-action { background: #2a2a2a; border: 1px solid #444; color: #ccc; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; text-decoration: none; display: inline-block; }
-.btn-action:hover:not(:disabled) { background: #333; color: #fff; }
-.btn-action:disabled { opacity: 0.4; cursor: not-allowed; }
-.btn-action.purple { background: rgba(168,85,247,0.15); color: #c084fc; border-color: rgba(168,85,247,0.3); }
-.btn-action.yellow { background: rgba(251,191,36,0.12); color: #fbbf24; border-color: transparent; }
-.btn-action.teal { background: rgba(45,212,191,0.12); color: #2dd4bf; border-color: rgba(45,212,191,0.3); }
-.btn-action.green { background: rgba(34,197,94,0.12); color: #22c55e; border-color: rgba(34,197,94,0.3); }
-.btn-action.cyan { background: rgba(6,182,212,0.12); color: #22d3ee; border-color: rgba(6,182,212,0.3); }
-.btn-action.red { background: rgba(254,44,85,0.12); color: #fe2c55; border-color: rgba(254,44,85,0.3); }
-.btn-action.orange { background: rgba(251,146,60,0.15); color: #c2540a; border-color: rgba(251,146,60,0.4); }
-.btn-action.rose { background: rgba(251,113,133,0.12); color: #fb7185; border-color: rgba(251,113,133,0.3); }
-.btn-sm { background: #222; border: 1px solid #333; color: #888; padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
-.btn-sm:hover { background: #2a2a2a; color: #ccc; }
-.merge-error { font-size: 12px; color: #fe2c55; margin-top: 8px; display: flex; align-items: center; gap: 8px; }
-.btn-error-detail { background: none; border: 1px solid rgba(254,44,85,0.4); color: #fe2c55; border-radius: 4px; padding: 1px 7px; font-size: 11px; cursor: pointer; }
-.btn-error-detail:hover { background: rgba(254,44,85,0.1); }
-.modal-box { background: #1a1a1a; border: 1px solid #333; border-radius: 12px; padding: 20px; max-width: 560px; width: 90%; }
-.modal-title { font-size: 14px; font-weight: 600; margin-bottom: 12px; color: #fe2c55; }
-.error-pre { background: #111; border: 1px solid #2a2a2a; border-radius: 6px; padding: 12px; font-size: 11px; color: #f87171; white-space: pre-wrap; word-break: break-all; max-height: 300px; overflow-y: auto; margin: 0; }
-.quality-issue-bar { display: flex; align-items: center; gap: 8px; margin-top: 10px; background: rgba(251,146,60,0.08); border: 1px solid rgba(251,146,60,0.3); border-radius: 8px; padding: 8px 12px; }
-.quality-issue-icon { font-size: 14px; flex-shrink: 0; }
-.quality-issue-text { font-size: 12px; color: #fb923c; flex: 1; line-height: 1.4; }
-.detail-loading { text-align: center; color: #555; padding: 20px; }
-.detail-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 16px; }
-.detail-table th { text-align: left; padding: 8px 12px; color: #555; border-bottom: 1px solid #222; }
-.detail-table td { padding: 10px 12px; border-bottom: 1px solid #1e1e1e; }
-.filename { font-family: monospace; color: #888; }
-.badge { font-size: 11px; padding: 2px 8px; border-radius: 10px; text-decoration: none; display: inline-block; }
-.badge.purple { background: rgba(168,85,247,0.15); color: #c084fc; }
-.badge.yellow { background: rgba(251,191,36,0.12); color: #fbbf24; }
-.badge.dim { background: #2a2a2a; color: #555; }
-.badge.red { background: rgba(254,44,85,0.15); color: #fe2c55; }
-.status-cell { min-width: 140px; }
-.progress-wrap { display: flex; flex-direction: column; gap: 3px; }
-.progress-label { display: flex; justify-content: space-between; font-size: 11px; }
-.progress-msg { color: #aaa; }
-.progress-pct { color: #ccc; font-weight: 600; }
-.progress-bar-bg { height: 5px; background: #2a2a2a; border-radius: 3px; overflow: hidden; }
-.progress-bar-fill { height: 100%; background: linear-gradient(90deg, #a855f7, #7c3aed); border-radius: 3px; transition: width 0.4s ease; }
-.progress-eta { font-size: 10px; color: #666; }
-.group-card-custom .progress-bar-bg { background: #ddd; }
-.group-card-custom .progress-msg { color: #666; }
-.group-card-custom .progress-pct { color: #333; }
-.group-card-custom .progress-eta { color: #999; }
-.empty { text-align: center; color: #444; padding: 20px; }
-.reassign-select { background: #1a1a1a; border: 1px solid #333; color: #888; padding: 3px 6px; border-radius: 4px; font-size: 11px; cursor: pointer; max-width: 130px; }
-.reassign-select:focus { outline: none; border-color: #555; }
-.thumb-cell { width: 70px; padding: 6px 12px; }
-.thumb-img { width: 60px; height: 34px; object-fit: cover; border-radius: 4px; display: block; }
-.thumb-placeholder { width: 60px; height: 34px; background: #111; border-radius: 4px; }
-/* Publish Modal */
-.modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 100; }
-.modal { background: #1a1a1a; border: 1px solid #333; border-radius: 12px; padding: 24px; width: 480px; max-width: 92vw; }
-.modal-header { display: flex; justify-content: space-between; align-items: center; font-size: 15px; font-weight: 600; margin-bottom: 20px; }
-.modal-close { background: none; border: none; color: #666; font-size: 16px; cursor: pointer; padding: 0; }
-.modal-close:hover { color: #ccc; }
-.modal-loading { text-align: center; color: #666; padding: 30px 0; }
-.modal-field { margin-bottom: 16px; }
-.modal-field label { display: block; font-size: 12px; color: #888; margin-bottom: 6px; }
-.field-hint { color: #555; margin-left: 4px; }
-.modal-input { width: 100%; background: #111; border: 1px solid #333; color: #ccc; border-radius: 6px; padding: 8px 10px; font-size: 13px; box-sizing: border-box; resize: vertical; font-family: inherit; }
-.modal-input:focus { outline: none; border-color: #555; }
-.modal-footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
-.import-preview { font-size: 11px; color: #34d399; margin-top: 4px; }
-.modal-custom { background: #f5f3ef; border-color: #fb923c; color: #1a1a1a; }
-.modal-custom .modal-header { color: #1a1a1a; }
-.modal-custom .modal-field label { color: #555; }
-.modal-custom .modal-input { background: #fff; border-color: #ccc; color: #1a1a1a; }
-.modal-custom .modal-input:focus { border-color: #fb923c; }
-.modal-custom .modal-close { color: #888; }
-.published-tag { background: rgba(52,211,153,0.12); color: #34d399; }
-.clip-done-row { display: inline-flex; align-items: center; gap: 4px; }
-.badge-btn { font-size: 11px; padding: 2px 8px; border-radius: 10px; cursor: pointer; border: none; background: rgba(168,85,247,0.15); color: #c084fc; }
-.badge-btn:hover { background: rgba(168,85,247,0.28); }
-.badge-btn.purple { background: rgba(168,85,247,0.15); color: #c084fc; }
-.badge-btn.orange { background: rgba(251,146,60,0.15); color: #fb923c; }
-.badge-btn.orange:hover { background: rgba(251,146,60,0.28); }
-.reclip-hint { font-size: 11px; color: #666; margin: -8px 0 12px; padding: 0 2px; }
-.reclip-success { text-align: center; padding: 28px 16px 20px; }
-.reclip-success-icon { font-size: 36px; color: #34d399; margin-bottom: 12px; }
-.reclip-success-title { font-size: 16px; font-weight: 600; color: #ccc; margin-bottom: 8px; }
-.reclip-success-sub { font-size: 13px; color: #666; line-height: 1.6; }
-.preview-modal { background: #111; border: 1px solid #333; border-radius: 12px; width: min(860px, 94vw); max-height: 90vh; display: flex; flex-direction: column; overflow: hidden; }
-.preview-header { display: flex; justify-content: space-between; align-items: center; padding: 14px 18px; border-bottom: 1px solid #222; font-size: 13px; color: #aaa; gap: 12px; }
-.preview-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: monospace; font-size: 12px; }
-.preview-video { width: 100%; max-height: 70vh; background: #000; display: block; }
-.preview-err { text-align: center; color: #fe2c55; padding: 20px; }
-.preview-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px; border-top: 1px solid #222; }
-.director-panel { padding: 10px 16px; background: rgba(99,102,241,0.07); border-top: 1px solid rgba(99,102,241,0.2); border-bottom: 1px solid rgba(99,102,241,0.2); }
-.retry-modes-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; padding: 8px 10px; background: rgba(99,102,241,0.12); border-radius: 6px; border: 1px solid rgba(99,102,241,0.3); }
-.btn-retry-modes { padding: 6px 14px; background: linear-gradient(135deg, #6366f1, #8b5cf6); color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; white-space: nowrap; }
-.btn-retry-modes:hover { opacity: 0.85; }
-.retry-hint { font-size: 11px; color: #a5b4fc; }
-.vibe-selector { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-.vibe-label { font-size: 11px; color: #a5b4fc; font-weight: 600; }
-.vibe-select { padding: 3px 8px; font-size: 12px; border-radius: 6px; border: 1px solid rgba(99,102,241,0.4); background: rgba(99,102,241,0.15); color: #e0e7ff; cursor: pointer; }
-.vibe-hint { font-size: 11px; color: #818cf8; font-style: italic; }
-.director-steps { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.director-step { display: flex; align-items: center; gap: 6px; }
-.step-num { width: 20px; height: 20px; border-radius: 50%; background: rgba(99,102,241,0.3); color: #a5b4fc; font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
-.btn-director { padding: 5px 12px; font-size: 12px; border-radius: 6px; border: 1px solid rgba(99,102,241,0.4); background: rgba(99,102,241,0.15); color: #a5b4fc; cursor: pointer; white-space: nowrap; }
-.btn-director:hover:not(:disabled) { background: rgba(99,102,241,0.3); }
-.btn-director:disabled { opacity: 0.4; cursor: not-allowed; }
-.step-done { font-size: 11px; color: #6ee7b7; white-space: nowrap; }
-.director-error { margin-top: 6px; font-size: 11px; color: #f87171; }
-.qianchuan-panel { padding: 12px 16px; background: rgba(6,182,212,0.07); border-top: 1px solid rgba(6,182,212,0.2); border-bottom: 1px solid rgba(6,182,212,0.18); }
-.qianchuan-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-.qianchuan-title-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.qianchuan-title { font-size: 12px; font-weight: 700; color: #22d3ee; }
-.qianchuan-status { font-size: 11px; padding: 2px 8px; border-radius: 999px; }
-.qianchuan-status.idle { background: rgba(148,163,184,0.16); color: #cbd5e1; }
-.qianchuan-status.running { background: rgba(251,191,36,0.14); color: #fbbf24; }
-.qianchuan-status.done { background: rgba(52,211,153,0.14); color: #6ee7b7; }
-.qianchuan-status.failed { background: rgba(254,44,85,0.14); color: #f87171; }
-.qianchuan-status.blocked { background: rgba(251,146,60,0.16); color: #fb923c; }
-.qianchuan-score { font-size: 11px; color: #a5f3fc; }
-.qianchuan-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.btn-qianchuan { padding: 6px 14px; font-size: 12px; border-radius: 6px; border: 1px solid rgba(6,182,212,0.4); background: rgba(6,182,212,0.15); color: #22d3ee; cursor: pointer; white-space: nowrap; }
-.btn-qianchuan:hover:not(:disabled) { background: rgba(6,182,212,0.28); }
-.btn-qianchuan:disabled { opacity: 0.45; cursor: not-allowed; }
-.qianchuan-hint { margin-top: 6px; font-size: 11px; color: #67e8f9; line-height: 1.5; }
-.qianchuan-error { margin-top: 6px; font-size: 11px; color: #f87171; line-height: 1.5; word-break: break-all; }
-/* Review modal */
-.review-modal { width: 680px; max-width: 95vw; max-height: 90vh; display: flex; flex-direction: column; }
-.review-loading { text-align: center; color: #666; padding: 30px 0; flex: 1; }
-.review-hint { font-size: 11px; color: #888; margin-bottom: 12px; line-height: 1.6; background: rgba(99,102,241,0.06); border-radius: 6px; padding: 8px 10px; border: 1px solid rgba(99,102,241,0.15); }
-.review-segments { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; max-height: 50vh; padding-right: 4px; }
-.review-seg { display: flex; gap: 10px; padding: 8px 10px; border-radius: 6px; border: 1px solid #2a2a2a; cursor: pointer; transition: border-color 0.15s, background 0.15s; }
-.review-seg:hover { border-color: #444; background: rgba(255,255,255,0.02); }
-.review-seg-selected { border-color: rgba(168,85,247,0.6); background: rgba(168,85,247,0.08); }
-.review-seg-invalid { opacity: 0.4; }
-.review-seg-check { font-size: 14px; color: #c084fc; width: 16px; flex-shrink: 0; padding-top: 1px; }
-.review-seg-body { flex: 1; min-width: 0; }
-.review-seg-time { font-size: 10px; color: #555; font-family: monospace; margin-bottom: 2px; }
-.review-seg-text { font-size: 12px; color: #ccc; line-height: 1.5; word-break: break-all; }
-.review-seg-meta { display: flex; gap: 6px; margin-top: 4px; flex-wrap: wrap; }
-.review-score { font-size: 10px; background: rgba(250,204,21,0.12); color: #fcd34d; border-radius: 4px; padding: 1px 5px; }
-.review-cat { font-size: 10px; background: rgba(99,102,241,0.12); color: #818cf8; border-radius: 4px; padding: 1px 5px; }
-.review-invalid-mark { font-size: 10px; background: rgba(254,44,85,0.12); color: #f87171; border-radius: 4px; padding: 1px 5px; }
-.review-summary { margin-top: 10px; font-size: 11px; color: #888; padding: 6px 10px; background: #111; border-radius: 6px; }
-.badge-btn.teal { background: rgba(20,184,166,0.15); color: #2dd4bf; }
-.badge-btn.teal:hover { background: rgba(20,184,166,0.28); }
-/* Rule suggestions panel */
-.suggestions-modal { width: 560px; max-width: 95vw; max-height: 85vh; display: flex; flex-direction: column; }
-.suggestions-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
-.suggestion-item { padding: 12px; border: 1px solid #2a2a2a; border-radius: 8px; background: #111; }
-.sug-kw { font-size: 13px; font-weight: 600; color: #a78bfa; margin-bottom: 4px; }
-.sug-reason { font-size: 11px; color: #888; margin-bottom: 6px; line-height: 1.5; }
-.sug-score { font-size: 11px; color: #fcd34d; margin-bottom: 8px; font-family: monospace; }
-.sug-actions { display: flex; gap: 8px; }
-/* Cover panel */
-.cover-panel { padding: 10px 16px; background: rgba(245,158,11,0.06); border-top: 1px solid rgba(245,158,11,0.18); }
-.cover-panel-header { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
-.cover-panel-title { font-size: 12px; font-weight: 700; color: #fbbf24; }
-.btn-cover-gen { padding: 4px 12px; font-size: 12px; border-radius: 6px; border: 1px solid rgba(245,158,11,0.4); background: rgba(245,158,11,0.15); color: #fbbf24; cursor: pointer; white-space: nowrap; }
-.btn-cover-gen:hover:not(:disabled) { background: rgba(245,158,11,0.3); }
-.btn-cover-gen:disabled { opacity: 0.4; cursor: not-allowed; }
-.cover-selected-hint { font-size: 11px; color: #6ee7b7; }
-.cover-candidates { display: flex; gap: 12px; flex-wrap: wrap; }
-.cover-candidate { position: relative; cursor: pointer; border: 2px solid #333; border-radius: 8px; overflow: hidden; transition: border-color 0.15s; }
-.cover-candidate:hover { border-color: #fbbf24; }
-.cover-candidate-selected { border-color: #fbbf24; box-shadow: 0 0 0 2px rgba(245,158,11,0.4); }
-.cover-img { width: 120px; height: 213px; object-fit: cover; display: block; image-rendering: -webkit-optimize-contrast; image-rendering: crisp-edges; }
-.cover-scheme-label { position: absolute; bottom: 0; left: 0; right: 0; background: rgba(0,0,0,0.7); color: #fbbf24; font-size: 10px; text-align: center; padding: 3px 4px; font-weight: 600; }
-.cover-check { position: absolute; top: 4px; right: 4px; width: 18px; height: 18px; border-radius: 50%; background: #fbbf24; color: #000; font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
-.cover-preview-btn { position: absolute; top: 4px; left: 4px; width: 20px; height: 20px; border-radius: 4px; background: rgba(0,0,0,0.6); color: #fff; border: none; cursor: pointer; font-size: 12px; display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity 0.15s; padding: 0; }
-.cover-candidate:hover .cover-preview-btn { opacity: 1; }
-/* Cover preview modal */
-.cover-preview-modal { background: #111; border: 1px solid #333; border-radius: 12px; width: min(480px, 95vw); display: flex; flex-direction: column; overflow: hidden; }
-.cover-preview-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #222; gap: 10px; }
-.cover-preview-title { font-size: 13px; color: #aaa; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
-.cover-preview-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-.cover-preview-body { display: flex; align-items: center; justify-content: center; background: #000; position: relative; padding: 0 40px; }
-.cover-preview-img { width: 100%; max-width: 360px; max-height: 70vh; object-fit: contain; display: block; }
-.cover-nav { position: absolute; top: 50%; transform: translateY(-50%); width: 36px; height: 36px; border-radius: 50%; background: rgba(255,255,255,0.12); border: none; color: #fff; font-size: 22px; cursor: pointer; display: flex; align-items: center; justify-content: center; z-index: 2; transition: background 0.15s; }
-.cover-nav:hover:not(:disabled) { background: rgba(255,255,255,0.25); }
-.cover-nav:disabled { opacity: 0.2; cursor: default; }
-.cover-nav-prev { left: 6px; }
-.cover-nav-next { right: 6px; }
-.cover-preview-dots { display: flex; justify-content: center; gap: 8px; padding: 12px; }
-.cover-dot { width: 8px; height: 8px; border-radius: 50%; background: #444; cursor: pointer; transition: background 0.15s; }
-.cover-dot-active { background: #fbbf24; }
+async def _run_job_from_queue(recording_id: int, meta: dict):
+    """Execute a dequeued job, then trigger next dispatch."""
+    try:
+        await _do_edit(
+            recording_id,
+            meta["mp4_path"],
+            meta["srt_path"],
+            meta["clip_duration"],
+            meta["clip_count"],
+            meta["broadcast_fn"],
+            feedback=meta.get("feedback"),
+        )
+    finally:
+        async with _dispatch_lk():
+            _running_ids.discard(recording_id)
+        await _try_dispatch()
 
-/* Script review modal */
-.script-review-modal { background: #111; border: 1px solid #333; border-radius: 12px; width: min(700px, 94vw); max-height: 85vh; display: flex; flex-direction: column; overflow: hidden; }
-.script-review-body { padding: 16px; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 12px; }
-.script-scene { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 8px; padding: 12px; }
-.scene-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-.scene-badge { background: #7c3aed; color: white; padding: 2px 8px; border-radius: 4px; font-size: 12px; }
-.scene-time { color: #888; font-size: 12px; }
-.scene-textarea { width: 100%; background: #0a0a0a; border: 1px solid #333; border-radius: 6px; color: #eee; padding: 8px; font-size: 14px; resize: vertical; font-family: inherit; }
-.scene-textarea:focus { border-color: #7c3aed; outline: none; }
-.script-review-footer { padding: 12px 16px; border-top: 1px solid #2a2a2a; display: flex; gap: 8px; justify-content: flex-end; }
-</style>
+
+def get_clip_queue() -> dict:
+    """Return current queue state for the API."""
+    running = []
+    for rid in _running_ids:
+        p = _clip_progress.get(rid, {})
+        running.append({
+            "recording_id": rid,
+            "status": "running",
+            "priority": None,
+            "phase": p.get("phase"),
+            "pct": p.get("pct", 0),
+            "msg": p.get("msg", ""),
+            "eta_seconds": p.get("eta_seconds"),
+        })
+
+    # Build a sorted snapshot of the pending heap (doesn't modify the heap)
+    queued = []
+    paused = []
+    for entry in sorted(_pending_heap):
+        priority, seq, recording_id = entry
+        meta = _pending_meta.get(recording_id)
+        if meta:
+            p = _clip_progress.get(recording_id, {})
+            item = {
+                "recording_id": recording_id,
+                "status": "paused" if recording_id in _paused_ids else "queued",
+                "priority": meta["priority"],
+                "phase": p.get("phase", "queued"),
+                "pct": 0,
+                "msg": p.get("msg", "排队中"),
+                "eta_seconds": None,
+                "room_name": meta.get("room_name", ""),
+                "record_date": meta.get("record_date", ""),
+            }
+            if recording_id in _paused_ids:
+                paused.append(item)
+            else:
+                queued.append(item)
+
+    return {"running": running, "queued": queued, "paused": paused}
+
+
+async def update_job_priority(recording_id: int, priority: int) -> bool:
+    """Update priority for a queued (not yet running) job. Returns True if updated."""
+    async with _dispatch_lk():
+        if recording_id not in _pending_meta:
+            return False
+        meta = _pending_meta[recording_id]
+        old_seq = meta["seq"]
+        meta["priority"] = priority
+        # Remove old heap entry and re-insert with new priority
+        _pending_heap[:] = [e for e in _pending_heap if e[2] != recording_id]
+        heapq.heappush(_pending_heap, [priority, old_seq, recording_id])
+    return True
+
+
+async def cancel_clip_job(recording_id: int) -> bool:
+    """Remove a queued/paused job from the dispatch queue. Cannot cancel running jobs."""
+    async with _dispatch_lk():
+        if recording_id not in _pending_meta:
+            return False
+        _pending_meta.pop(recording_id, None)
+        _pending_heap[:] = [e for e in _pending_heap if e[2] != recording_id]
+        _paused_ids.discard(recording_id)
+    _clip_progress.pop(recording_id, None)
+    return True
+
+
+async def pause_clip_job(recording_id: int) -> bool:
+    """Pause a queued job so it won't be dispatched until resumed. Returns True if found."""
+    async with _dispatch_lk():
+        if recording_id not in _pending_meta or recording_id in _running_ids:
+            return False
+        _paused_ids.add(recording_id)
+    return True
+
+
+async def resume_clip_job(recording_id: int) -> bool:
+    """Resume a paused job. Returns True if it was paused."""
+    async with _dispatch_lk():
+        if recording_id not in _paused_ids:
+            return False
+        _paused_ids.discard(recording_id)
+    await _try_dispatch()
+    return True
+
+
+async def _validate_mp4(filepath: str) -> tuple[bool, str]:
+    """Validate media on the remote GPU; never invoke local ffprobe."""
+    reject_local_media("local MP4 validation")
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        filepath,
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=3.0)
+        if proc.returncode != 0:
+            err = stderr.decode(errors="replace").strip()[-200:]
+            return False, f"invalid mp4: {err}"
+        duration_str = stdout.decode().strip()
+        try:
+            if float(duration_str) <= 0:
+                return False, "invalid mp4: duration is 0"
+        except ValueError:
+            return False, f"invalid mp4: bad duration '{duration_str}'"
+        return True, ""
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        return False, "invalid mp4: ffprobe timeout (>3s)"
+    except Exception as e:
+        return False, f"invalid mp4: {e}"
+
+
+async def flush_poll() -> None:
+    """Wake the poll loop immediately (called by the flush API endpoint)."""
+    _flush_event.set()
+
+
+async def poll_transcriptions(broadcast_fn=None):
+    """
+    Background loop: poll GPU service for completed transcriptions and retry failed uploads.
+
+    Uses gpu_state.wait_until_online() so the loop wakes up immediately when the GPU
+    service comes back online instead of waiting out a fixed sleep interval.
+    """
+    from gpu_state import is_online, wait_until_online
+
+    # Startup recovery: re-trigger editor for recordings whose transcription completed
+    # but whose clip task was lost (e.g. backend restarted mid-flight).
+    # Also recovers "stuck" jobs where clipped=1 (clipping in progress) but
+    # clip_filename is NULL — meaning _do_edit crashed before writing the result.
+    # Throttled: at most 5 per batch, with a 2s pause between batches, to avoid
+    # flooding the queue with hundreds of tasks at startup and pegging local CPU.
+    _STARTUP_RECOVERY_BATCH = 5
+    try:
+        async with aio_connect() as db:
+            db.row_factory = aiosqlite.Row
+            # Case 1: normal pending (clipped=0)
+            async with db.execute(
+                "SELECT id, filename, clip_count FROM recordings "
+                "WHERE transcribed=2 AND clipped=0 AND local_deleted=0"
+            ) as cur:
+                pending = await cur.fetchall()
+            # Case 2: stuck mid-clipping (clipped=1, no clip_filename)
+            async with db.execute(
+                "SELECT id, filename, clip_count FROM recordings "
+                "WHERE transcribed=2 AND clipped=1 AND clip_filename IS NULL "
+                "AND local_deleted=0 AND clip_error IS NULL"
+            ) as cur:
+                stuck = await cur.fetchall()
+        # Reset stuck jobs back to pending
+        stuck_ids = []
+        if stuck:
+            async with aio_connect() as db:
+                placeholders = ",".join(["?"] * len(stuck))
+                await db.execute(
+                    f"UPDATE recordings SET clipped = 0 WHERE id IN ({placeholders})",
+                    [r["id"] for r in stuck],
+                )
+                await db.commit()
+            stuck_ids = [r["id"] for r in stuck]
+            logger.info(f"Startup recovery: reset {len(stuck_ids)} stuck clip job(s) from clipped=1 to clipped=0")
+        # Merge pending and stuck for recovery dispatch
+        orphaned = list(pending)
+        orphaned.extend(stuck)
+        recoverable = []
+        for rec in orphaned:
+            mp4_path = os.path.join(RECORDINGS_DIR, rec["filename"])
+            srt_path = os.path.splitext(mp4_path)[0] + ".srt"
+            if os.path.exists(mp4_path) and os.path.exists(srt_path):
+                recoverable.append((rec, mp4_path, srt_path))
+            else:
+                logger.warning(
+                    f"Startup recovery: recording {rec['id']} missing files, skipping "
+                    f"(mp4={os.path.exists(mp4_path)}, srt={os.path.exists(srt_path)})"
+                )
+        if recoverable:
+            logger.info(f"Startup recovery: {len(recoverable)} recordings to re-trigger (batch size {_STARTUP_RECOVERY_BATCH})")
+        for i in range(0, len(recoverable), _STARTUP_RECOVERY_BATCH):
+            batch = recoverable[i:i + _STARTUP_RECOVERY_BATCH]
+            for rec, mp4_path, srt_path in batch:
+                logger.info(f"Startup recovery: re-triggering editor for recording {rec['id']} ({rec['filename']})")
+                asyncio.create_task(
+                    _run_editor(rec["id"], mp4_path, srt_path,
+                                clip_count=rec["clip_count"] or 1,
+                                broadcast_fn=broadcast_fn)
+                )
+            if i + _STARTUP_RECOVERY_BATCH < len(recoverable):
+                await asyncio.sleep(2)  # pause between batches to avoid startup CPU spike
+    except Exception as e:
+        logger.error(f"Startup recovery error: {e}")
+
+    while True:
+        try:
+            async with aio_connect() as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute(
+                    "SELECT * FROM recordings WHERE transcribed = 1 AND gpu_job_id IS NOT NULL"
+                ) as cur:
+                    pending = await cur.fetchall()
+                async with db.execute(
+                    """SELECT * FROM recordings
+                       WHERE synced = 0 AND transcribed = 0 AND local_deleted = 0
+                         AND end_time IS NOT NULL AND end_time != start_time"""
+                ) as cur:
+                    unsynced = await cur.fetchall()
+
+            _poll_state["last_poll_at"] = time.time()
+            has_work = bool(pending or unsynced)
+
+            if has_work and not is_online():
+                # GPU is offline — wait for the watcher to signal it is back,
+                # but cap wait at POLL_INTERVAL so we re-check DB state periodically.
+                logger.debug("GPU offline, waiting for recovery before processing jobs")
+                try:
+                    await asyncio.wait_for(wait_until_online(), timeout=POLL_INTERVAL)
+                except asyncio.TimeoutError:
+                    pass
+                # Re-enter loop regardless (watcher may have flipped state)
+                continue
+
+            if pending and is_online():
+                for rec in pending:
+                    await _check_job(rec, broadcast_fn)
+
+            if is_online():
+                from segment_merger import maybe_merge_before_upload
+                from sync import sync_file
+                from comfyui_client import free_vram
+                blocked = 0
+                vram_freed = False  # freed at most once per poll cycle
+                for rec in unsynced:
+                    if not is_online():
+                        logger.debug("GPU went offline mid-upload loop, stopping")
+                        break
+                    filepath = os.path.join(RECORDINGS_DIR, rec["filename"])
+                    if not os.path.exists(filepath):
+                        continue
+                    result = await maybe_merge_before_upload(rec["room_id"], rec["id"])
+                    if result is None:
+                        blocked += 1
+                        continue
+                    upload_path, primary_id = result
+                    valid, err_msg = await _validate_mp4(upload_path)
+                    if not valid:
+                        logger.warning(f"Skipping corrupt file {os.path.basename(upload_path)}: {err_msg}")
+                        async with aio_connect() as db:
+                            await db.execute(
+                                "UPDATE recordings SET transcribed=-1, transcribe_error=? WHERE id=?",
+                                (err_msg, primary_id),
+                            )
+                            await db.commit()
+                        continue
+                    if not vram_freed:
+                        await free_vram()
+                        vram_freed = True
+                    logger.info(f"Uploading {os.path.basename(upload_path)} to GPU service")
+                    job_id = await sync_file(upload_path, rec["room_id"])
+                    if job_id:
+                        _job_submit_times[job_id] = time.time()
+                        _poll_state["last_submit_at"] = time.time()
+                        _poll_state["active_job_id"] = job_id
+                        async with aio_connect() as db:
+                            await db.execute(
+                                "UPDATE recordings SET synced = 1, transcribed = 1, gpu_job_id = ?, execution_node = ?, upload_bytes = ? WHERE id = ?",
+                                (job_id, "remote-gpu", os.path.getsize(upload_path), primary_id),
+                            )
+                            await db.commit()
+                _poll_state["blocked_count"] = blocked
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.exception(f"Transcription poll error: {e}")
+
+        # Sleep until next interval, but wake immediately if flush_poll() is called
+        try:
+            await asyncio.wait_for(_flush_event.wait(), timeout=POLL_INTERVAL)
+            _flush_event.clear()
+        except asyncio.TimeoutError:
+            pass
+
+
+async def _check_job(rec, broadcast_fn):
+    job_id = rec["gpu_job_id"]
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{GPU_SERVICE_URL}/jobs/{job_id}",
+                                   timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                _status_code = resp.status
+                _json = await resp.json() if _status_code in (200, 404) else None
+    except Exception as e:
+        logger.warning(f"Cannot reach GPU service for job {job_id}: {e}")
+        return
+
+    if _status_code == 404:
+        # GPU service restarted and lost this job — re-queue for upload
+        logger.warning(f"Job {job_id} not found on GPU service (restarted?), re-queuing")
+        async with aio_connect() as db:
+            await db.execute(
+                "UPDATE recordings SET transcribed=0, synced=0, gpu_job_id=NULL WHERE id=?",
+                (rec["id"],),
+            )
+            await db.commit()
+        return
+
+    if _status_code != 200:
+        return
+
+    job = _json
+    if job["status"] == "done":
+        global _session_done
+        if job_id in _job_submit_times:
+            dur = time.time() - _job_submit_times.pop(job_id)
+            _job_durations.append(dur)
+            if len(_job_durations) > 20:
+                _job_durations.pop(0)
+        _session_done += 1
+        _poll_state["last_complete_at"] = time.time()
+        _poll_state["active_job_id"] = None
+        await _fetch_srt(rec["id"], job_id, rec["filename"], clip_count=rec["clip_count"] if "clip_count" in rec else 1, broadcast_fn=broadcast_fn)
+        if broadcast_fn:
+            try:
+                await broadcast_fn({"type": "transcribed", "recording_id": rec["id"]})
+            except Exception:
+                pass
+        # Method A: wake poll loop immediately so next job is submitted without waiting
+        asyncio.create_task(flush_poll())
+    elif job["status"] == "error":
+        err_msg = (job.get("error") or "GPU 转录失败（未知错误）")[:300]
+        logger.error(f"GPU transcription error for {rec['filename']}: {err_msg}")
+        _job_submit_times.pop(job_id, None)  # prevent unbounded growth on errors
+        if _poll_state["active_job_id"] == job_id:
+            _poll_state["active_job_id"] = None
+        async with aio_connect() as db:
+            await db.execute(
+                "UPDATE recordings SET transcribed = -1, transcribe_error = ? WHERE id = ?",
+                (err_msg, rec["id"]),
+            )
+            await db.commit()
+
+
+async def _fetch_srt(recording_id: int, job_id: str, filename: str, clip_count: int = 1, broadcast_fn=None):
+    srt_filename = os.path.splitext(filename)[0] + ".srt"
+    local_srt = os.path.join(RECORDINGS_DIR, srt_filename)
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{GPU_SERVICE_URL}/jobs/{job_id}/srt",
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                _srt_status = resp.status
+                content = await resp.read() if _srt_status == 200 else b""
+                expected_len = resp.headers.get("content-length")
+        if _srt_status == 200:
+            # Verify completeness against Content-Length header if present
+            if expected_len and expected_len.isdigit() and len(content) != int(expected_len):
+                logger.error(
+                    f"SRT download truncated for {job_id}: "
+                    f"got {len(content)} B, expected {expected_len} B — skipping"
+                )
+                return
+            if not content.strip():
+                # Whisper produced 0 speech segments — no text in the video.
+                # Treat as terminal failure so the recording doesn't retry forever.
+                logger.warning(f"SRT empty for {job_id} — Whisper detected no speech, marking transcribe_error")
+                async with aio_connect() as db:
+                    await db.execute(
+                        "UPDATE recordings SET transcribed = -1, transcribe_error = ? WHERE id = ?",
+                        ("Whisper detected no speech segments (silent/music-only audio)", recording_id),
+                    )
+                    await db.commit()
+                return
+            with open(local_srt, "wb") as f:
+                f.write(content)
+            logger.info(f"SRT fetched: {srt_filename}")
+            async with aio_connect() as db:
+                await db.execute(
+                    "UPDATE recordings SET transcribed = 2 WHERE id = ?", (recording_id,)
+                )
+                await db.commit()
+            # Trigger smart editing in background
+            mp4_path = os.path.join(RECORDINGS_DIR, filename)
+            asyncio.create_task(_run_editor(recording_id, mp4_path, local_srt, clip_count=clip_count, broadcast_fn=broadcast_fn))
+        else:
+            logger.error(f"SRT download failed for {job_id}: {_srt_status}")
+    except Exception as e:
+        logger.error(f"SRT fetch error for {job_id}: {e}")
+
+
+async def _run_editor(recording_id: int, mp4_path: str, srt_path: str, clip_duration: Optional[float] = None, clip_count: int = 1, broadcast_fn=None, feedback: Optional[str] = None):
+    reject_local_media("local transcription editor")
+    """Enqueue a clip job into the priority queue and dispatch if a slot is free."""
+    global _job_seq
+
+    # ── Resolution guard ──────────────────────────────────────────────────────
+    height = await _get_video_height(mp4_path)
+    if 0 < height < MIN_RECORDING_HEIGHT:
+        reason = f"分辨率过低（{height}p < {MIN_RECORDING_HEIGHT}p）"
+        logger.warning(f"[skip] Recording {recording_id} ({os.path.basename(mp4_path)}): {reason}")
+        async with aio_connect() as db:
+            await db.execute(
+                "UPDATE recordings SET clipped = -1, skip_reason = ? WHERE id = ?",
+                (reason, recording_id),
+            )
+            await db.commit()
+        return
+
+    # ── Duration guard ────────────────────────────────────────────────────────
+    duration = await _get_video_duration(mp4_path)
+    if 0 < duration < MIN_RECORDING_DURATION:
+        reason = f"录像时长过短（{duration:.0f}秒 < {MIN_RECORDING_DURATION}秒）"
+        logger.warning(f"[skip] Recording {recording_id} ({os.path.basename(mp4_path)}): {reason}")
+        async with aio_connect() as db:
+            await db.execute(
+                "UPDATE recordings SET clipped = -1, skip_reason = ? WHERE id = ?",
+                (reason, recording_id),
+            )
+            await db.commit()
+        return
+
+    async with aio_connect() as db:
+        await db.execute(
+            "UPDATE recordings SET clipped = 1 WHERE id = ?", (recording_id,)
+        )
+        await db.commit()
+
+    # Fetch room info for display in queue
+    room_name, record_date = "unknown", ""
+    try:
+        async with aio_connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT r.start_time, rm.name as room_name "
+                "FROM recordings r JOIN rooms rm ON r.room_id = rm.id WHERE r.id = ?",
+                (recording_id,)
+            ) as cur:
+                info = await cur.fetchone()
+        if info:
+            room_name = info["room_name"] or "unknown"
+            record_date = (info["start_time"] or "")[:10].replace("-", "")
+    except Exception:
+        pass
+
+    # Enqueue with default priority=50
+    async with _dispatch_lk():
+        _job_seq += 1
+        seq = _job_seq
+        priority = 50
+        heapq.heappush(_pending_heap, [priority, seq, recording_id])
+        _pending_meta[recording_id] = {
+            "priority": priority,
+            "seq": seq,
+            "mp4_path": mp4_path,
+            "srt_path": srt_path,
+            "clip_duration": clip_duration,
+            "clip_count": clip_count,
+            "broadcast_fn": broadcast_fn,
+            "room_name": room_name,
+            "record_date": record_date,
+            "feedback": feedback,
+        }
+
+    _clip_progress[recording_id] = {
+        "phase": "queued", "step": 0, "total": 1, "pct": 0, "msg": "排队中",
+        "variant": 0, "eta_seconds": None, "started_at": time.time(),
+    }
+    if broadcast_fn:
+        try:
+            await broadcast_fn({"type": "clip_progress", "recording_id": recording_id, "pct": 0, "msg": "排队中", "eta_seconds": None})
+        except Exception:
+            pass
+
+    await _try_dispatch()
+
+
+async def _do_edit(recording_id: int, mp4_path: str, srt_path: str, clip_duration: Optional[float], clip_count: int, broadcast_fn, feedback: Optional[str] = None):
+    reject_local_media("local editor dispatch")
+    """Actual editing work, called after acquiring the concurrency semaphore."""
+    # ── Progress tracking ────────────────────────────────────────────────────
+    _PHASE_LABELS = {
+        "build":      "准备",
+        "preprocess": "预处理片段",
+        "merge":      "合并片段",
+        "final":      "字幕+音乐",
+        "thumbnail":  "生成封面",
+    }
+    # Weight allocation per phase (must sum to 100 across a single clip build)
+    # preprocess: 0-50%, merge: 50-75%, final: 75-85%, thumbnail: 85-100%
+    _clip_count_total = max(1, min(5, clip_count))
+
+    _job_started_at = time.time()
+
+    async def _on_progress(phase: str, step: int, total: int):
+        # Compute percentage within a single clip's phases
+        if phase == "preprocess":
+            pct_in_clip = int(10 + (step / max(total, 1)) * 40)   # 10→50%
+        elif phase == "merge":
+            pct_in_clip = int(50 + (step / max(total, 1)) * 25)   # 50→75%
+        elif phase == "final":
+            pct_in_clip = 80
+        elif phase == "thumbnail":
+            pct_in_clip = 92
+        elif phase == "build":
+            pct_in_clip = 5
+        else:
+            pct_in_clip = 0
+
+        current_variant = _clip_progress.get(recording_id, {}).get("variant", 0)
+        if phase == "build":
+            current_variant = step
+        base = int(current_variant / _clip_count_total * 100)
+        scale = 1.0 / _clip_count_total
+        pct = min(99, int(base + pct_in_clip * scale))
+
+        label = _PHASE_LABELS.get(phase, phase)
+        if total > 1 and phase in ("preprocess", "merge"):
+            msg = f"{label} {step}/{total}"
+        else:
+            msg = label
+
+        # ETA: estimate remaining seconds from elapsed time and progress
+        eta_seconds = None
+        if pct >= 3:
+            elapsed = time.time() - _job_started_at
+            eta_seconds = int(elapsed * (100 - pct) / pct)
+
+        _clip_progress[recording_id] = {
+            "phase": phase,
+            "step": step,
+            "total": total,
+            "pct": pct,
+            "msg": msg,
+            "variant": current_variant,
+            "eta_seconds": eta_seconds,
+            "started_at": _job_started_at,
+        }
+        if broadcast_fn:
+            try:
+                await broadcast_fn({
+                    "type": "clip_progress",
+                    "recording_id": recording_id,
+                    "pct": pct,
+                    "msg": msg,
+                    "eta_seconds": eta_seconds,
+                })
+            except Exception:
+                pass
+
+    _clip_progress[recording_id] = {
+        "phase": "start", "step": 0, "total": 1, "pct": 0, "msg": "分析中",
+        "variant": 0, "eta_seconds": None, "started_at": _job_started_at,
+    }
+
+    try:
+        # Fetch room name, room_id and recording date for organised output path
+        room_name = "unknown"
+        date_str = ""
+        rec_room_id = None
+        try:
+            async with aio_connect() as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute(
+                    "SELECT r.start_time, r.room_id, rm.name as room_name "
+                    "FROM recordings r JOIN rooms rm ON r.room_id = rm.id WHERE r.id = ?",
+                    (recording_id,)
+                ) as cur:
+                    info = await cur.fetchone()
+            if info:
+                room_name = info["room_name"] or "unknown"
+                date_str = (info["start_time"] or "")[:10].replace("-", "")
+                rec_room_id = info["room_id"]
+        except Exception as e:
+            logger.warning(f"Could not fetch room info for recording {recording_id}: {e}")
+
+        clip_count = max(1, min(5, clip_count))
+
+        # Read clip_engine from settings (default: "legacy")
+        clip_engine = "legacy"
+        try:
+            async with aio_connect() as db:
+                db.row_factory = aiosqlite.Row
+                async with db.execute(
+                    "SELECT value FROM settings WHERE key = 'clip_engine'"
+                ) as cur:
+                    row = await cur.fetchone()
+            if row and row["value"] in ("legacy", "v2"):
+                clip_engine = row["value"]
+        except Exception as e:
+            logger.warning(f"Could not read clip_engine setting: {e}")
+        logger.info(f"clip_engine={clip_engine} for recording {recording_id}")
+
+        if clip_count == 1:
+            clip_path = await edit_recording(mp4_path, srt_path, room_name=room_name, record_date=date_str, clip_duration=clip_duration, on_progress=_on_progress, feedback=feedback, room_id=rec_room_id, clip_engine=clip_engine)
+            clip_paths = [clip_path] if clip_path else []
+        else:
+            clip_paths = await edit_recording_multi(mp4_path, srt_path, count=clip_count, room_name=room_name, record_date=date_str, clip_duration=clip_duration, on_progress=_on_progress, feedback=feedback, room_id=rec_room_id, clip_engine=clip_engine)
+
+        if clip_paths:
+            c_dur = clip_duration or 30.0
+            from editor import _clip_job_id_cache
+            async with aio_connect() as db:
+                for k, clip_path in enumerate(clip_paths):
+                    clip_filename = os.path.relpath(clip_path, RECORDINGS_DIR)
+                    offset = max(3.0, c_dur * (0.2 + 0.3 * k))
+                    thumb = await generate_thumbnail(clip_path, offset=offset)
+                    thumb_basename = os.path.relpath(thumb, RECORDINGS_DIR) if thumb else None
+                    gpu_job_id = _clip_job_id_cache.pop(clip_path, None)
+
+                    if k == 0:
+                        await db.execute(
+                            "UPDATE recordings SET clipped = 2, clip_filename = ?, thumbnail = ? WHERE id = ?",
+                            (clip_filename, thumb_basename, recording_id),
+                        )
+
+                    await db.execute(
+                        "INSERT INTO recording_clips (recording_id, variant_idx, clip_filename, thumbnail, gpu_clip_job_id) VALUES (?, ?, ?, ?, ?)",
+                        (recording_id, k, clip_filename, thumb_basename, gpu_job_id),
+                    )
+
+                # Get room_id for analysis
+                db.row_factory = aiosqlite.Row
+                async with db.execute(
+                    "SELECT room_id, filename FROM recordings WHERE id = ?", (recording_id,)
+                ) as cur:
+                    rec = await cur.fetchone()
+                await db.commit()
+
+            logger.info(f"Clips saved: {len(clip_paths)} variant(s) for recording {recording_id}")
+            _clip_progress.pop(recording_id, None)
+            if rec:
+                asyncio.create_task(
+                    analyze_recording(recording_id, rec["filename"], rec["room_id"])
+                )
+                asyncio.create_task(_maybe_auto_merge(recording_id))
+        else:
+            logger.warning(f"Editor produced no clips for recording {recording_id}")
+            async with aio_connect() as db:
+                await db.execute(
+                    "UPDATE recordings SET clipped = -1, clip_error = ? WHERE id = ?",
+                    ("no clips selected", recording_id),
+                )
+                await db.commit()
+            _clip_progress.pop(recording_id, None)
+    except Exception as e:
+        import traceback
+        err_msg = traceback.format_exc()
+        logger.error(f"Editor failed for recording {recording_id}: {e}\n{err_msg}")
+        async with aio_connect() as db:
+            await db.execute(
+                "UPDATE recordings SET clipped = -1, clip_error = ? WHERE id = ?",
+                (str(e)[:500], recording_id),
+            )
+            await db.commit()
+        _clip_progress.pop(recording_id, None)
+
+
+async def _maybe_auto_merge(recording_id: int):
+    """After a clip finishes, auto-merge the group if all active recordings are clipped=2.
+
+    clipped=-1 (skipped: low-res / too-short) recordings are excluded from the
+    check so a group with some skipped files can still auto-merge.
+    """
+    try:
+        async with aio_connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT group_id FROM recordings WHERE id = ?", (recording_id,)
+            ) as cur:
+                row = await cur.fetchone()
+            if not row or not row["group_id"]:
+                return
+            group_id = row["group_id"]
+            await _auto_merge_group(db, group_id)
+    except Exception as e:
+        logger.error(f"Auto-merge failed for group of recording {recording_id}: {e}")
+
+
+async def _auto_merge_group(db, group_id: int) -> bool:
+    """Check readiness and trigger classic+director+creative pipelines for a group. Returns True if any triggered."""
+    from analyzer import merge_group as _merge_group
+
+    # Count active (non-skipped) recordings; all must be clipped=2
+    async with db.execute(
+        "SELECT "
+        "  COUNT(*) FILTER (WHERE clipped != -1) as active, "
+        "  COUNT(*) FILTER (WHERE clipped  =  2) as done "
+        "FROM recordings WHERE group_id = ?",
+        (group_id,),
+    ) as cur:
+        counts = await cur.fetchone()
+    if not counts or counts["active"] == 0 or counts["active"] != counts["done"]:
+        return False
+
+    # Check per-pipeline statuses (0=not started, 1=running, 2=done, -1=failed)
+    async with db.execute(
+        "SELECT classic_status, director_status, creative_status, qianchuan_status FROM clip_groups WHERE id = ?", (group_id,)
+    ) as cur:
+        grp = await cur.fetchone()
+    if not grp:
+        return False
+
+    triggered = False
+    if grp["classic_status"] == 0:
+        logger.info(f"Auto-triggering classic merge for group {group_id}")
+        asyncio.create_task(_merge_group(group_id))
+        triggered = True
+    if grp["director_status"] in (0, -1, -3):
+        logger.info(f"Auto-triggering director pipeline for group {group_id}")
+        asyncio.create_task(_run_director_pipeline(group_id))
+        triggered = True
+    if (grp["creative_status"] or 0) == 0:
+        logger.info(f"Auto-triggering creative pipeline for group {group_id}")
+        asyncio.create_task(_run_creative_pipeline(group_id))
+        triggered = True
+    if (grp["qianchuan_status"] or 0) in (0, -1, -3, -4):
+        logger.info(f"Auto-triggering qianchuan pipeline for group {group_id}")
+        from api_v2 import _run_qianchuan_pipeline
+        asyncio.create_task(_run_qianchuan_pipeline(group_id))
+        triggered = True
+    return triggered
+
+
+async def _extract_srt_for_director(group_id: int) -> Optional[str]:
+    """Extract combined SRT text for a group (up to 5000 chars)."""
+    try:
+        async with aio_connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT filename FROM recordings WHERE group_id = ? AND transcribed = 2 LIMIT 3",
+                (group_id,),
+            ) as cur:
+                rows = await cur.fetchall()
+        srt_content = ""
+        for r in rows:
+            srt_path = os.path.join(RECORDINGS_DIR, os.path.splitext(r["filename"])[0] + ".srt")
+            if os.path.exists(srt_path):
+                with open(srt_path, encoding="utf-8") as f:
+                    srt_content += f.read() + "\n\n"
+                if len(srt_content) > 3000:
+                    break
+        return srt_content[:5000] or None
+    except Exception as e:
+        logger.error(f"_extract_srt_for_director group {group_id}: {e}")
+        return None
+
+
+async def _get_group_total_duration(group_id: int) -> float:
+    """Calculate total duration of all valid recordings in a group.
+    Returns 0.0 if no recordings exist or all are invalid."""
+    total = 0.0
+    try:
+        async with aio_connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT id, filename FROM recordings WHERE group_id = ? AND transcribed = 2 AND local_deleted = 0",
+                (group_id,),
+            ) as cur:
+                rows = await cur.fetchall()
+        for r in rows:
+            mp4_path = os.path.join(RECORDINGS_DIR, r["filename"])
+            dur = await _get_video_duration(mp4_path)
+            if dur > 0:
+                total += dur
+    except Exception as e:
+        logger.warning(f"_get_group_total_duration group {group_id}: {e}")
+    return total
+
+
+def _pad_video_to_min_duration(out_path: str, current_duration: float, min_duration: float = MIN_FINAL_VIDEO_DURATION, target_duration: float = TARGET_PUBLISH_DURATION) -> Optional[str]:
+    """Pad near-threshold videos by cloning the last frame instead of failing.
+
+    Some GPU compositions land at 28-30 seconds because of transition/audio
+    rounding. Treat 28s as the business floor, and extend 28s+ outputs to
+    TARGET_PUBLISH_DURATION so Douyin's 30s boundary never rejects 29.x clips.
+    Returns the usable output path, or None if padding failed or the clip is
+    too short to rescue safely.
+    """
+    reject_local_media("local duration padding")
+    if current_duration >= target_duration:
+        return out_path
+    if current_duration < min_duration:
+        return None
+
+    import subprocess as _sp
+    from pathlib import Path as _Path
+
+    src = _Path(out_path)
+    padded = src.with_name(src.stem + "_padded.mp4")
+    pad = max(0.1, target_duration - current_duration)
+    cmd = [
+        "ffmpeg", "-y", "-i", str(src),
+        "-vf", f"tpad=stop_mode=clone:stop_duration={pad:.3f}",
+        "-af", f"apad=pad_dur={pad:.3f}",
+        "-t", f"{target_duration:.3f}",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart",
+        str(padded),
+    ]
+    result = _sp.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0 or not padded.exists() or padded.stat().st_size <= 0:
+        logger.warning(
+            "Failed to pad near-threshold video %s from %.1fs to %.1fs: %s",
+            out_path, current_duration, target_duration, (result.stderr or "")[-300:],
+        )
+        try:
+            padded.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return None
+
+    try:
+        src.unlink(missing_ok=True)
+    except Exception:
+        pass
+    return str(padded)
+
+
+async def _check_group_recordings_exist(group_id: int) -> tuple[bool, list]:
+    """Check if all recordings for a group exist on disk.
+    Returns (all_exist, list_of_missing_filenames)."""
+    missing = []
+    try:
+        async with aio_connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT id, filename FROM recordings WHERE group_id = ? AND local_deleted = 0",
+                (group_id,),
+            ) as cur:
+                rows = await cur.fetchall()
+        for r in rows:
+            mp4_path = os.path.join(RECORDINGS_DIR, r["filename"])
+            if not os.path.exists(mp4_path):
+                missing.append(f"{r['id']}:{r['filename']}")
+    except Exception as e:
+        logger.warning(f"_check_group_recordings_exist group {group_id}: {e}")
+    return len(missing) == 0, missing
+
+
+class DirectorPipelineStageTimeout(TimeoutError):
+    """Raised when one director pipeline stage exceeds its own deadline."""
+
+    def __init__(self, stage: str, seconds: int):
+        self.stage = stage
+        self.seconds = seconds
+        super().__init__(f"director {stage} timeout ({seconds}s exceeded)")
+
+
+async def _director_stage(group_id: int, stage: str, awaitable, timeout_seconds: int):
+    started = time.monotonic()
+    logger.info(f"Director pipeline group {group_id}: {stage} started (timeout={timeout_seconds}s)")
+    try:
+        result = await asyncio.wait_for(awaitable, timeout=timeout_seconds)
+    except asyncio.TimeoutError as exc:
+        elapsed = time.monotonic() - started
+        logger.error(f"Director pipeline group {group_id}: {stage} timed out after {elapsed:.1f}s")
+        raise DirectorPipelineStageTimeout(stage, timeout_seconds) from exc
+    elapsed = time.monotonic() - started
+    logger.info(f"Director pipeline group {group_id}: {stage} finished in {elapsed:.1f}s")
+    return result
+
+
+async def _run_director_pipeline(group_id: int):
+    """
+    Full director pipeline: generate script → match segments → voiceover → compose video.
+    Runs independently from the classic pipeline; no fallback to classic on failure.
+    At most _DIRECTOR_SEM concurrent pipelines to avoid flooding GPU TTS queue.
+    """
+    try:
+        async with aio_connect() as db:
+            from pipeline_state import claim_pipeline_start
+            if not await claim_pipeline_start(db, "director_status", group_id):
+                logger.info(f"Director pipeline group {group_id} already running/completed — skipping")
+                return
+            await db.commit()
+        # Skip if already completed (e.g. triggered again on restart)
+        async with aio_connect() as db:
+            async with db.execute(
+                "SELECT director_status FROM clip_groups WHERE id = ?", (group_id,)
+            ) as cur:
+                row = await cur.fetchone()
+        if row and row[0] == 2:
+            logger.info(f"Director pipeline group {group_id} already complete — skipping")
+            return
+    except Exception as e:
+        logger.error(f"Director pipeline {group_id} pre-check DB error: {e} — will retry inside sem")
+        # Don't abort; proceed to semaphore where inner will handle it properly
+
+    async with _DIRECTOR_SEM:
+        try:
+            await asyncio.wait_for(_run_director_pipeline_inner(group_id), timeout=1800)  # 30 min timeout
+        except DirectorPipelineStageTimeout as e:
+            logger.error(f"Director pipeline group {group_id} timed out in stage {e.stage} after {e.seconds}s")
+            try:
+                async with aio_connect() as db:
+                    await db.execute(
+                        "UPDATE clip_groups SET director_status = -1, director_error = ? WHERE id = ?",
+                        (f"{e.stage} timeout ({e.seconds}s exceeded)", group_id),
+                    )
+                    await db.commit()
+            except Exception:
+                pass
+        except asyncio.TimeoutError:
+            logger.error(f"Director pipeline group {group_id} timed out after 30min")
+            try:
+                async with aio_connect() as db:
+                    await db.execute(
+                        "UPDATE clip_groups SET director_status = -1, director_error = ? WHERE id = ?",
+                        ("pipeline timeout (30min exceeded; last step unknown)", group_id),
+                    )
+                    await db.commit()
+            except Exception:
+                pass
+        except Exception as e:
+            import traceback
+            logger.error(f"Director pipeline {group_id} unhandled exception: {e}\n{traceback.format_exc()}")
+            try:
+                async with aio_connect() as db:
+                    await db.execute(
+                        "UPDATE clip_groups SET director_status = -1, director_error = ? WHERE id = ?",
+                        (str(e)[:400], group_id),
+                    )
+                    await db.commit()
+            except Exception as db_err:
+                logger.error(f"Director pipeline {group_id} failed to write error status: {db_err}")
+
+
+async def _run_director_pipeline_inner(group_id: int):
+    import json
+    from director_script import DirectorScriptGenerator
+    from director_matcher import DirectorMatcher
+    from voice_director import VoiceDirector
+    from director_video import DirectorVideoComposer
+
+    # Re-check after semaphore (another task may have completed while we waited)
+    async with aio_connect() as db:
+        async with db.execute(
+            "SELECT director_status FROM clip_groups WHERE id = ?", (group_id,)
+        ) as cur:
+            row = await cur.fetchone()
+    if row and row[0] == 2:
+        logger.info(f"Director pipeline group {group_id} already complete (post-semaphore check) — skipping")
+        return
+
+    # Early check: skip groups without any recordings
+    async with aio_connect() as db:
+        async with db.execute(
+            "SELECT COUNT(*) FROM recordings WHERE group_id = ?",
+            (group_id,),
+        ) as cur:
+            rec_count = (await cur.fetchone())[0]
+    if rec_count == 0:
+        logger.info(f"Director pipeline group {group_id} has no recordings — skipping")
+        async with aio_connect() as db:
+            await db.execute(
+                "UPDATE clip_groups SET director_status = -2, director_error = 'no recordings in group' WHERE id = ?",
+                (group_id,),
+            )
+            await db.commit()
+        return
+
+    # Pre-filter: check if all recording files exist on disk
+    all_exist, missing_files = await _check_group_recordings_exist(group_id)
+    if not all_exist:
+        logger.info(f"Director pipeline group {group_id} skipping: {len(missing_files)} recording files missing")
+        async with aio_connect() as db:
+            await db.execute(
+                "UPDATE clip_groups SET director_status = -2, director_error = ? WHERE id = ?",
+                (f'recording files missing ({len(missing_files)}): ' + ', '.join(missing_files[:5]), group_id),
+            )
+            await db.commit()
+        return
+
+    async def _fail(reason: str):
+        logger.error(f"Director pipeline group {group_id} failed: {reason}")
+        async with aio_connect() as db:
+            await db.execute(
+                "UPDATE clip_groups SET director_status = -1, director_error = ? WHERE id = ?",
+                (reason[:400], group_id),
+            )
+            await db.commit()
+
+    # The wrapper atomically claimed status=1.
+    async with aio_connect() as db:
+        await db.execute("UPDATE clip_groups SET director_error = NULL WHERE id = ?", (group_id,))
+        await db.commit()
+
+    try:
+        # 1. Group metadata
+        async with aio_connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """SELECT cg.wig_model, cg.wig_color, r.name as room_name
+                   FROM clip_groups cg LEFT JOIN rooms r ON cg.room_id = r.id
+                   WHERE cg.id = ?""",
+                (group_id,),
+            ) as cur:
+                grp = await cur.fetchone()
+        if not grp:
+            return await _fail("group not found")
+
+        # 2. SRT content
+        srt_content = await _extract_srt_for_director(group_id)
+        if not srt_content:
+            return await _fail("no SRT content available")
+
+        # 3. Generate script
+        script_gen = DirectorScriptGenerator()
+        result = await _director_stage(
+            group_id,
+            "script generation",
+            script_gen.generate_script(
+                srt_content=srt_content,
+                wig_model=grp["wig_model"] or "",
+                wig_color=grp["wig_color"] or "",
+                room_name=grp["room_name"] or "",
+            ),
+            180,
+        )
+        if not result.get("success"):
+            # Fallback: use existing director_script from DB if generation fails
+            existing_script = None
+            try:
+                async with aio_connect() as db2:
+                    async with db2.execute(
+                        "SELECT director_script FROM clip_groups WHERE id = ?", (group_id,)
+                    ) as cur2:
+                        row2 = await cur2.fetchone()
+                    if row2 and row2[0]:
+                        import json as _json
+                        try:
+                            existing_script = _json.loads(row2[0])
+                            logger.info(f"Director pipeline group {group_id}: script generation failed ({result.get('error')}), using existing script from DB")
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            if existing_script:
+                script = existing_script
+            else:
+                return await _fail(f"script generation: {result.get('error', 'unknown')}")
+        else:
+            script = result["script"]
+        async with aio_connect() as db:
+            await db.execute(
+                "UPDATE clip_groups SET director_script = ? WHERE id = ?",
+                (json.dumps(script), group_id),
+            )
+            await db.commit()
+
+        # 4. Match segments to recordings
+        matcher = DirectorMatcher(DB_PATH)
+        script_segments = script.get("scenes") or script.get("segments") or []
+        matched_segments = await _director_stage(
+            group_id,
+            "segment matching",
+            matcher.match_segments_to_recordings(script_segments, group_id),
+            300,
+        )
+        if not matched_segments:
+            return await _fail("segment matching returned empty")
+
+        # 5. Voiceover
+        voice_dir = VoiceDirector()
+        vo_result = await _director_stage(
+            group_id,
+            "voiceover",
+            voice_dir.generate_voiceover(script=script, group_id=group_id, reference_audio_path=None),
+            900,
+        )
+        if not vo_result.get("success"):
+            return await _fail(f"voiceover: {vo_result.get('error', 'unknown')}")
+        async with aio_connect() as db:
+            await db.execute(
+                "UPDATE clip_groups SET director_audio_path = ?, director_segments = ? WHERE id = ?",
+                (vo_result.get("merged_audio_path"), json.dumps(vo_result.get("audio_segments", [])), group_id),
+            )
+            await db.commit()
+
+        # 6. Compose final video
+        audio_path = vo_result.get("merged_audio_path")
+        
+        
+        tts_audio_segments = vo_result.get("audio_segments", [])
+        config = {
+            "video_style": "trendy",
+            "script_type": script.get("script_type", "product_showcase"),
+            "wig_model": grp["wig_model"] or "",
+            "wig_color": grp["wig_color"] or "",
+        }
+        video_dir = DirectorVideoComposer(RECORDINGS_DIR)
+        out_path = await _director_stage(
+            group_id,
+            "video composition",
+            video_dir.compose_final_video(
+                matched_segments, audio_path, config, tts_audio_segments=tts_audio_segments
+            ),
+            1200,
+        )
+        if not out_path:
+            return await _fail("video composition returned no output")
+
+        import subprocess as _sp
+        _dur_result = _sp.run(
+            ["ffprobe", "-v", "quiet", "-show_entries", "format=duration", "-of", "csv=p=0", out_path],
+            capture_output=True, text=True,
+        )
+        _dur = float(_dur_result.stdout.strip()) if _dur_result.stdout.strip() else 0.0
+        if _dur <= 0:
+            return await _fail("导演版视频时长探测失败")
+        if _dur < TARGET_PUBLISH_DURATION:
+            padded_path = _pad_video_to_min_duration(out_path, _dur)
+            if padded_path:
+                logger.info(f"Director pipeline group {group_id}: padded video from {_dur:.1f}s to >={TARGET_PUBLISH_DURATION:.1f}s")
+                out_path = padded_path
+            else:
+                try:
+                    os.remove(out_path)
+                except Exception:
+                    pass
+                return await _fail(f"导演版视频时长 {_dur:.1f}s < {MIN_FINAL_VIDEO_DURATION:.0f}s 最低要求")
+
+        processed_path = await _director_stage(
+            group_id,
+            "final video postprocess",
+            postprocess_final_video(out_path),
+            900,
+        )
+        if not processed_path:
+            return await _fail("导演版4K/50fps背景补齐后处理失败")
+        out_path = processed_path
+
+        async with aio_connect() as db:
+            await db.execute(
+                """UPDATE clip_groups SET
+                   merge_status = 2, merged_at = datetime('now'),
+                   director_status = 2, director_final_video = ?
+                   WHERE id = ?""",
+                (out_path, group_id),
+            )
+            await db.commit()
+        logger.info(f"Director pipeline complete for group {group_id}: {os.path.basename(out_path)}")
+
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        logger.error(f"Director pipeline group {group_id} EXCEPTION: {e}\n{tb}")
+        await _fail(str(e))
+
+
+# ── Creative pipeline (自编文案，vibe=creative) ────────────────────────────────
+
+
+async def _run_creative_pipeline(group_id: int):
+    async with _CREATIVE_SEM:
+        try:
+            await asyncio.wait_for(_run_creative_pipeline_inner(group_id), timeout=1800)  # 30 min timeout
+        except asyncio.TimeoutError:
+            logger.error(f"Creative pipeline group {group_id} timed out after 30min")
+            try:
+                async with aio_connect() as db:
+                    await db.execute(
+                        "UPDATE clip_groups SET creative_status = -1, creative_error = ? WHERE id = ?",
+                        ("pipeline timeout (30min exceeded)", group_id),
+                    )
+                    await db.commit()
+            except Exception:
+                pass
+        except Exception as e:
+            logger.error(f"Creative pipeline group {group_id} unhandled: {e}")
+            try:
+                async with aio_connect() as db:
+                    await db.execute(
+                        "UPDATE clip_groups SET creative_status = -1, creative_error = ? WHERE id = ?",
+                        (str(e)[:400], group_id),
+                    )
+                    await db.commit()
+            except Exception as db_err:
+                logger.error(f"Creative pipeline {group_id} failed to write error status: {db_err}")
+
+
+async def _run_creative_pipeline_inner(group_id: int):
+    import json
+    from director_script import DirectorScriptGenerator
+    from director_matcher import DirectorMatcher
+    from voice_director import VoiceDirector
+    from director_video import DirectorVideoComposer
+
+    async with aio_connect() as db:
+        async with db.execute(
+            "SELECT creative_status FROM clip_groups WHERE id = ?", (group_id,)
+        ) as cur:
+            row = await cur.fetchone()
+    if row and row[0] == 2:
+        return
+
+    # Early check: skip groups without any recordings
+    async with aio_connect() as db:
+        async with db.execute(
+            "SELECT COUNT(*) FROM recordings WHERE group_id = ?",
+            (group_id,),
+        ) as cur:
+            rec_count = (await cur.fetchone())[0]
+    if rec_count == 0:
+        logger.info(f"Creative pipeline group {group_id} has no recordings — skipping")
+        async with aio_connect() as db:
+            await db.execute(
+                "UPDATE clip_groups SET creative_status = -2, creative_error = 'no recordings in group' WHERE id = ?",
+                (group_id,),
+            )
+            await db.commit()
+        return
+
+    # Pre-filter: check total recording duration before wasting GPU resources.
+    # Business rule: ignore unrecoverable <28s material, but allow/pad 28-30s.
+    total_dur = await _get_group_total_duration(group_id)
+    if 0 < total_dur < MIN_FINAL_VIDEO_DURATION:
+        logger.info(f"Creative pipeline group {group_id} skipping: total recording duration {total_dur:.1f}s < {MIN_FINAL_VIDEO_DURATION:.0f}s minimum")
+        async with aio_connect() as db:
+            await db.execute(
+                "UPDATE clip_groups SET creative_status = -2, creative_error = ? WHERE id = ?",
+                (f'total recording duration {total_dur:.1f}s < {MIN_FINAL_VIDEO_DURATION:.0f}s minimum', group_id),
+            )
+            await db.commit()
+        return
+
+    async def _fail(reason: str):
+        logger.error(f"Creative pipeline group {group_id} failed: {reason}")
+        async with aio_connect() as db:
+            await db.execute(
+                "UPDATE clip_groups SET creative_status = -1, creative_error = ? WHERE id = ?",
+                (reason[:400], group_id),
+            )
+            await db.commit()
+
+    async with aio_connect() as db:
+        await db.execute(
+            "UPDATE clip_groups SET creative_status = 1, creative_error = NULL WHERE id = ?",
+            (group_id,)
+        )
+        await db.commit()
+
+    try:
+        async with aio_connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """SELECT cg.wig_model, cg.wig_color, r.name as room_name
+                   FROM clip_groups cg LEFT JOIN rooms r ON cg.room_id = r.id
+                   WHERE cg.id = ?""",
+                (group_id,),
+            ) as cur:
+                grp = await cur.fetchone()
+        if not grp:
+            return await _fail("group not found")
+
+        # creative vibe: prompt ignores SRT, passes empty string
+        script_gen = DirectorScriptGenerator()
+        result = await script_gen.generate_script(
+            srt_content="",
+            wig_model=grp["wig_model"] or "",
+            wig_color=grp["wig_color"] or "",
+            room_name=grp["room_name"] or "",
+            vibe="creative",
+        )
+        if not result.get("success"):
+            # Fallback: use existing creative_script from DB if generation fails
+            existing_script = None
+            try:
+                async with aio_connect() as db2:
+                    async with db2.execute(
+                        "SELECT creative_script FROM clip_groups WHERE id = ?", (group_id,)
+                    ) as cur2:
+                        row2 = await cur2.fetchone()
+                    if row2 and row2[0]:
+                        import json as _json
+                        try:
+                            existing_script = _json.loads(row2[0])
+                            logger.info(f"Creative pipeline group {group_id}: script generation failed ({result.get('error')}), using existing script from DB")
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            if existing_script:
+                script = existing_script
+            else:
+                return await _fail(f"script generation: {result.get('error', 'unknown')}")
+        else:
+            script = result["script"]
+        async with aio_connect() as db:
+            await db.execute(
+                "UPDATE clip_groups SET creative_script = ? WHERE id = ?",
+                (json.dumps(script), group_id),
+            )
+            await db.commit()
+
+        matcher = DirectorMatcher(DB_PATH)
+        script_segments = script.get("scenes") or script.get("segments") or []
+        matched_segments = await matcher.match_segments_to_recordings(script_segments, group_id)
+        if not matched_segments:
+            return await _fail("segment matching returned empty")
+
+        voice_dir = VoiceDirector()
+        vo_result = await voice_dir.generate_voiceover(script=script, group_id=group_id, reference_audio_path=None)
+        if not vo_result.get("success"):
+            return await _fail(f"voiceover: {vo_result.get('error', 'unknown')}")
+        async with aio_connect() as db:
+            await db.execute(
+                "UPDATE clip_groups SET creative_audio_path = ? WHERE id = ?",
+                (vo_result.get("merged_audio_path"), group_id),
+            )
+            await db.commit()
+
+        audio_path = vo_result.get("merged_audio_path")
+        tts_audio_segments = vo_result.get("audio_segments", [])
+        config = {
+            "video_style": "trendy",
+            "script_type": script.get("script_type", "product_showcase"),
+            "wig_model": grp["wig_model"] or "",
+            "wig_color": grp["wig_color"] or "",
+        }
+        video_dir = DirectorVideoComposer(RECORDINGS_DIR)
+        out_path = await video_dir.compose_final_video(
+            matched_segments, audio_path, config, tts_audio_segments=tts_audio_segments
+        )
+        if not out_path:
+            return await _fail("video composition returned no output")
+
+        import subprocess as _sp
+        _dur_result = _sp.run(
+            ["ffprobe", "-v", "quiet", "-show_entries", "format=duration", "-of", "csv=p=0", out_path],
+            capture_output=True, text=True,
+        )
+        _dur = float(_dur_result.stdout.strip()) if _dur_result.stdout.strip() else 0.0
+        if _dur <= 0:
+            return await _fail("自编版视频时长探测失败")
+        if _dur < TARGET_PUBLISH_DURATION:
+            padded_path = _pad_video_to_min_duration(out_path, _dur)
+            if padded_path:
+                logger.info(f"Creative pipeline group {group_id}: padded video from {_dur:.1f}s to >={TARGET_PUBLISH_DURATION:.1f}s")
+                out_path = padded_path
+            else:
+                try:
+                    os.remove(out_path)
+                except Exception:
+                    pass
+                return await _fail(f"自编版视频时长 {_dur:.1f}s < {MIN_FINAL_VIDEO_DURATION:.0f}s 最低要求")
+
+        processed_path = await postprocess_final_video(out_path)
+        if not processed_path:
+            return await _fail("自编版4K/50fps背景补齐后处理失败")
+        out_path = processed_path
+
+        async with aio_connect() as db:
+            await db.execute(
+                "UPDATE clip_groups SET creative_status = 2, creative_final_video = ? WHERE id = ?",
+                (out_path, group_id),
+            )
+            await db.commit()
+        logger.info(f"Creative pipeline complete for group {group_id}: {os.path.basename(out_path)}")
+
+    except Exception as e:
+        await _fail(str(e))
+
+
+async def backfill_auto_merge():
+    """On startup:
+    1. Recover groups that were actively in-progress when the server crashed.
+    2. Auto-trigger director+creative pipelines for groups that have classic_status=2
+       but never ran director/creative (status=0). This handles groups merged before
+       the director/creative pipelines were added.
+    """
+    try:
+        async with aio_connect() as db:
+            db.row_factory = aiosqlite.Row
+            # Identify groups that were mid-run before resetting them
+            async with db.execute("SELECT id FROM clip_groups WHERE classic_status = 1") as cur:
+                classic_crashed = [r["id"] for r in await cur.fetchall()]
+            async with db.execute("SELECT id FROM clip_groups WHERE director_status = 1") as cur:
+                director_crashed = [r["id"] for r in await cur.fetchall()]
+            async with db.execute("SELECT id FROM clip_groups WHERE creative_status = 1") as cur:
+                creative_crashed = [r["id"] for r in await cur.fetchall()]
+
+            # Reset crashed pipelines back to 0 so they can be re-triggered
+            await db.execute("UPDATE clip_groups SET classic_status = 0 WHERE classic_status = 1")
+            await db.execute("UPDATE clip_groups SET director_status = 0 WHERE director_status = 1")
+            await db.execute("UPDATE clip_groups SET creative_status = 0 WHERE creative_status = 1")
+            await db.execute(
+                "UPDATE clip_groups SET merge_status = 0 "
+                "WHERE merge_status = 1 AND merged_filename IS NULL AND director_final_video IS NULL"
+            )
+            await db.commit()
+
+        # Only re-trigger the groups that were actually crashed mid-run
+        groups = list(set(classic_crashed) | set(director_crashed) | set(creative_crashed))
+        if classic_crashed:
+            logger.info(f"Backfill: {len(classic_crashed)} classic pipelines crashed, will retry: {classic_crashed}")
+        if director_crashed:
+            logger.info(f"Backfill: {len(director_crashed)} director pipelines crashed, will retry: {director_crashed}")
+        if creative_crashed:
+            logger.info(f"Backfill: {len(creative_crashed)} creative pipelines crashed, will retry: {creative_crashed}")
+
+        triggered = 0
+        for gid in groups:
+            async with aio_connect() as db:
+                db.row_factory = aiosqlite.Row
+                if await _auto_merge_group(db, gid):
+                    triggered += 1
+                    await asyncio.sleep(0.5)
+
+        if triggered:
+            logger.info(f"Backfill auto-merge: triggered {triggered}/{len(groups)} crash-recovered groups")
+        else:
+            logger.info("Backfill auto-merge: no crashed pipelines to recover")
+
+        # Phase 2: auto-trigger director+creative for groups that have classic done
+        # but never ran the new pipelines (status=0). These are groups merged before
+        # director/creative was added. Skip groups with status != 0 to avoid re-running.
+        # Also verify recording files actually exist on disk (not just in DB).
+        await asyncio.sleep(2)  # let Phase 1 tasks settle
+        async with aio_connect() as db:
+            db.row_factory = aiosqlite.Row
+            # First get candidate groups from DB
+            # Exclude -2 (permanently failed: no recordings / duration too short) to avoid infinite re-queue
+            async with db.execute(
+                """SELECT id FROM clip_groups
+                   WHERE classic_status = 2
+                     AND director_status IN (0, -1, -3)
+                     AND (creative_status IN (0, -1, -3) OR creative_status IS NULL)
+                     AND EXISTS (SELECT 1 FROM recordings WHERE recordings.group_id = clip_groups.id AND recordings.local_deleted = 0 AND recordings.clipped = 2)
+                   ORDER BY id DESC"""
+            ) as cur:
+                raw_director = [dict(r) for r in await cur.fetchall()]
+            
+            # Verify files actually exist on disk
+            backend_dir = Path(__file__).resolve().parent
+            recordings_dir = backend_dir.parent / 'recordings'
+            valid_director = []
+            for g in raw_director:
+                gid = g['id']
+                async with db.execute(
+                    """SELECT filename FROM recordings 
+                       WHERE group_id = ? AND local_deleted = 0 AND clipped = 2 
+                       LIMIT 1""", (gid,)
+                ) as rcur:
+                    rows = await rcur.fetchall()
+                    has_mp4 = any((recordings_dir / row['filename']).exists() for row in rows)
+                has_srt = bool(await _extract_srt_for_director(gid))
+                if has_mp4 and has_srt:
+                    valid_director.append(gid)
+                else:
+                    await db.execute(
+                        "UPDATE clip_groups SET director_status = -2, director_error = ? WHERE id = ?",
+                        ("no SRT content available", gid),
+                    )
+            await db.commit()
+            
+            # Groups where director done but creative not started (must have recordings with valid files)
+            # Exclude -2 (permanently failed: no recordings / duration too short) to avoid infinite re-queue
+            async with db.execute(
+                """SELECT id FROM clip_groups
+                   WHERE classic_status = 2
+                     AND director_status = 2
+                     AND (creative_status IN (0, -1, -3) OR creative_status IS NULL)
+                     AND EXISTS (SELECT 1 FROM recordings WHERE recordings.group_id = clip_groups.id AND recordings.local_deleted = 0 AND recordings.clipped = 2)
+                   ORDER BY id DESC"""
+            ) as cur:
+                raw_creative = [dict(r) for r in await cur.fetchall()]
+            
+            # Verify files actually exist on disk
+            valid_creative = []
+            for g in raw_creative:
+                gid = g['id']
+                async with db.execute(
+                    """SELECT filename FROM recordings 
+                       WHERE group_id = ? AND local_deleted = 0 AND clipped = 2 
+                       LIMIT 1""", (gid,)
+                ) as rcur:
+                    rows = await rcur.fetchall()
+                    for row in rows:
+                        fp = recordings_dir / row['filename']
+                        if fp.exists():
+                            valid_creative.append(gid)
+                            break
+            
+            pending_director = valid_director
+            pending_creative_only = valid_creative
+            
+            skipped_director = len(raw_director) - len(valid_director)
+            skipped_creative = len(raw_creative) - len(valid_creative)
+            if skipped_director > 0:
+                logger.warning(f"Backfill: skipping {skipped_director} director groups with missing recording/SRT files")
+            if skipped_creative > 0:
+                logger.warning(f"Backfill: skipping {skipped_creative} creative groups with missing recording files")
+
+        pending = list(set(pending_director) | set(pending_creative_only))
+
+        if pending_director:
+            logger.info(f"Backfill: {len(pending_director)} groups with classic done but director/creative not run — scheduling...")
+        if pending_creative_only:
+            logger.info(f"Backfill: {len(pending_creative_only)} groups with director done but creative not run — scheduling...")
+
+        # Phase 2b: Separate scheduling — director first, creative only after director done
+        # This prevents wasting resources on creative groups whose director hasn't finished.
+        pending_director_groups = pending_director
+        pending_creative_groups = pending_creative_only
+
+        # Phase 3: Reset recently failed director/creative groups and re-queue them.
+        # Groups that failed due to GPU issues (composition_no_output, ffmpeg_path_error,
+        # script_gen, JSON parse) should be retried after GPU restart.
+        # Skip groups that have been failing repeatedly (we track this via error patterns).
+        # Only retry if GPU is online — otherwise they'll just fail again.
+        from gpu_state import is_online as gpu_is_online
+        if gpu_is_online():
+            await asyncio.sleep(1)  # let Phase 2 tasks settle
+            async with aio_connect() as db:
+                db.row_factory = aiosqlite.Row
+                # Director groups with common recoverable errors (GPU timeout, ffmpeg path, script gen,
+                # segment matching, database locked) — permanently-failures (no SRT, no recordings,
+                # duration too short) are excluded from retry.
+                async with db.execute(
+                    """SELECT id FROM clip_groups
+                       WHERE classic_status = 2
+                         AND director_status IN (-1, -2)
+                         AND (
+                             director_error LIKE '%video composition returned no output%'
+                             OR director_error LIKE '%expected str, bytes or os.PathLike%'
+                             OR director_error LIKE '%script generation:%'
+                             OR director_error LIKE '%JSON parse%'
+                             OR director_error LIKE '%segment matching%'
+                             OR director_error LIKE '%database is locked%'
+                             OR director_error IS NULL OR director_error = ''
+                         )
+                         AND NOT (
+                             director_error LIKE '%no SRT content%'
+                             OR director_error = 'no recordings in group'
+                             OR director_error LIKE '%no recordings in group%'
+                             OR director_error LIKE '%duration%'
+                         )
+                         AND EXISTS (SELECT 1 FROM recordings WHERE recordings.group_id = clip_groups.id)
+                       ORDER BY id DESC"""
+                ) as cur:
+                    retry_director = [r["id"] for r in await cur.fetchall()]
+                # Creative groups with common recoverable errors
+                # (includes groups where director also failed — creative will re-run after director succeeds)
+                # Permanently-failed (no recordings, duration too short) excluded.
+                async with db.execute(
+                    """SELECT id FROM clip_groups
+                       WHERE classic_status = 2
+                         AND creative_status IN (-1, -2)
+                         AND (
+                             creative_error LIKE '%video composition returned no output%'
+                             OR creative_error LIKE '%expected str, bytes or os.PathLike%'
+                             OR creative_error LIKE '%script generation:%'
+                             OR creative_error LIKE '%JSON parse%'
+                             OR creative_error LIKE '%segment matching%'
+                             OR creative_error LIKE '%database is locked%'
+                             OR creative_error IS NULL OR creative_error = ''
+                         )
+                         AND NOT (
+                             creative_error LIKE '%no SRT content%'
+                             OR creative_error = 'no recordings in group'
+                             OR creative_error LIKE '%no recordings in group%'
+                             OR creative_error LIKE '%duration%'
+                         )
+                         AND EXISTS (SELECT 1 FROM recordings WHERE recordings.group_id = clip_groups.id)
+                       ORDER BY id DESC"""
+                ) as cur:
+                    retry_creative = [r["id"] for r in await cur.fetchall()]
+
+            reset_count = 0
+            for gid in retry_director:
+                try:
+                    async with aio_connect() as db2:
+                        await db2.execute(
+                            "UPDATE clip_groups SET director_status = 0, director_error = NULL WHERE id = ?",
+                            (gid,)
+                        )
+                        await db2.commit()
+                    asyncio.create_task(_run_director_pipeline(gid))
+                    reset_count += 1
+                    await asyncio.sleep(0.1)
+                except Exception as e:
+                    logger.warning(f"Backfill: failed to reset director group {gid}: {e}")
+            for gid in retry_creative:
+                try:
+                    async with aio_connect() as db2:
+                        await db2.execute(
+                            "UPDATE clip_groups SET creative_status = 0, creative_error = NULL WHERE id = ?",
+                            (gid,)
+                        )
+                        await db2.commit()
+                    asyncio.create_task(_run_creative_pipeline(gid))
+                    reset_count += 1
+                    await asyncio.sleep(0.1)
+                except Exception as e:
+                    logger.warning(f"Backfill: failed to reset creative group {gid}: {e}")
+
+            if reset_count:
+                logger.info(f"Backfill Phase 3: reset and re-queued {reset_count} failed groups ({len(retry_director)} director, {len(retry_creative)} creative)")
+            else:
+                logger.info("Backfill Phase 3: no failed groups to retry")
+        else:
+            logger.info("Backfill Phase 3: GPU offline — skipping failed group retry")
+
+        # Phase 2c: Schedule director groups first (only if GPU is online)
+        if gpu_is_online() and pending_director_groups:
+            logger.info(f"Backfill Phase 2c: queuing {len(pending_director_groups)} director groups first")
+            for gid in pending_director_groups:
+                asyncio.create_task(_run_director_pipeline(gid))
+                await asyncio.sleep(0.1)
+        elif pending_director_groups:
+            logger.info(f"Backfill Phase 2c: GPU offline — skipping {len(pending_director_groups)} director groups")
+
+        # Phase 2d: Schedule creative groups only where director is already done (only if GPU is online)
+        if gpu_is_online() and pending_creative_groups:
+            logger.info(f"Backfill Phase 2d: queuing {len(pending_creative_groups)} creative groups (director already done)")
+            for gid in pending_creative_groups:
+                asyncio.create_task(_run_creative_pipeline(gid))
+                await asyncio.sleep(0.1)
+        elif pending_creative_groups:
+            logger.info(f"Backfill Phase 2d: GPU offline — skipping {len(pending_creative_groups)} creative groups")
+        else:
+            logger.info("Backfill: all groups already have director/creative results or in progress")
+
+        # Phase 2e: Qianchuan was added after some groups had already finished
+        # clipping. Do NOT batch-start this on normal backend startup: hotfix #13
+        # requires one controlled trial video, and automatic restart backfill can
+        # claim hundreds of groups at once. Operators can explicitly enable the
+        # legacy batch behavior with QIANCHUAN_BACKFILL_ON_STARTUP=1.
+        if os.getenv("QIANCHUAN_BACKFILL_ON_STARTUP") == "1":
+            pending_qianchuan = []
+            try:
+                async with aio_connect() as db:
+                    db.row_factory = aiosqlite.Row
+                    async with db.execute(
+                        """SELECT id FROM clip_groups
+                           WHERE classic_status = 2
+                             AND qianchuan_status IN (0, -1, -3, -4)
+                             AND EXISTS (
+                               SELECT 1 FROM recordings
+                               WHERE recordings.group_id = clip_groups.id
+                                 AND recordings.local_deleted = 0
+                                 AND recordings.clipped = 2
+                             )
+                           ORDER BY id DESC"""
+                    ) as cur:
+                        pending_qianchuan = [row["id"] for row in await cur.fetchall()]
+            except Exception as e:
+                logger.error(f"Backfill Phase 2e Qianchuan scan failed: {e}")
+
+            if gpu_is_online() and pending_qianchuan:
+                from api_v2 import _run_qianchuan_pipeline
+                logger.info(f"Backfill Phase 2e: queuing {len(pending_qianchuan)} Qianchuan groups")
+                for gid in pending_qianchuan:
+                    asyncio.create_task(_run_qianchuan_pipeline(gid))
+                    await asyncio.sleep(0.1)
+            elif pending_qianchuan:
+                logger.info(f"Backfill Phase 2e: GPU offline — skipping {len(pending_qianchuan)} Qianchuan groups")
+        else:
+            logger.info("Backfill Phase 2e: Qianchuan startup batch disabled; use manual single-group trigger")
+
+        # Phase 4.5: Handle orphaned -3 status groups (never triggered)
+        # These are groups that were created with editing_mode=director but never had their
+        # pipeline triggered (likely from an old code path or manual intervention).
+        await asyncio.sleep(1)
+        orphaned_director = []
+        orphaned_creative = []
+        cleaned_orphans = 0
+        try:
+            async with aio_connect() as db:
+                db.row_factory = aiosqlite.Row
+                # Director orphans: classic done, director=-3, has valid recordings
+                async with db.execute(
+                    """SELECT id FROM clip_groups
+                       WHERE classic_status = 2
+                         AND director_status = -3
+                         AND EXISTS (SELECT 1 FROM recordings WHERE recordings.group_id = clip_groups.id AND recordings.local_deleted = 0 AND recordings.clipped = 2)
+                       ORDER BY id DESC"""
+                ) as cur:
+                    orphaned_director = [r["id"] for r in await cur.fetchall()]
+                # Creative orphans: classic done, director done, creative=-3, has valid recordings
+                async with db.execute(
+                    """SELECT id FROM clip_groups
+                       WHERE classic_status = 2
+                         AND director_status = 2
+                         AND creative_status = -3
+                         AND EXISTS (SELECT 1 FROM recordings WHERE recordings.group_id = clip_groups.id AND recordings.local_deleted = 0 AND recordings.clipped = 2)
+                       ORDER BY id DESC"""
+                ) as cur:
+                    orphaned_creative = [r["id"] for r in await cur.fetchall()]
+                # Clean up truly empty groups (no recordings at all) — set to -2
+                async with db.execute(
+                    """UPDATE clip_groups SET director_status = -2, director_error = 'no recordings in group'
+                       WHERE editing_mode = 'director'
+                         AND director_status = -3
+                         AND classic_status = 2
+                         AND NOT EXISTS (SELECT 1 FROM recordings WHERE recordings.group_id = clip_groups.id AND recordings.local_deleted = 0)"""
+                ) as cur:
+                    cleaned_orphans += cur.rowcount
+                async with db.execute(
+                    """UPDATE clip_groups SET creative_status = -2, creative_error = 'no recordings in group'
+                       WHERE editing_mode = 'director'
+                         AND creative_status = -3
+                         AND classic_status = 2
+                         AND director_status = 2
+                         AND NOT EXISTS (SELECT 1 FROM recordings WHERE recordings.group_id = clip_groups.id AND recordings.local_deleted = 0 AND recordings.clipped = 2)"""
+                ) as cur:
+                    cleaned_orphans += cur.rowcount
+                await db.commit()
+        except Exception as e:
+            logger.error(f"Backfill Phase 4.5 orphan cleanup error: {e}")
+
+        if cleaned_orphans:
+            logger.info(f"Backfill Phase 4.5: cleaned {cleaned_orphans} empty orphan groups")
+
+        # Only re-queue orphans if GPU is online
+        if gpu_is_online():
+            if orphaned_director:
+                logger.info(f"Backfill Phase 4.5: re-queuing {len(orphaned_director)} orphaned director groups (status=-3)")
+                for gid in orphaned_director:
+                    try:
+                        async with aio_connect() as db2:
+                            await db2.execute(
+                                "UPDATE clip_groups SET director_status = 0, director_error = NULL WHERE id = ?",
+                                (gid,)
+                            )
+                            await db2.commit()
+                        asyncio.create_task(_run_director_pipeline(gid))
+                        await asyncio.sleep(0.1)
+                    except Exception as e:
+                        logger.warning(f"Backfill Phase 4.5: failed to reset director orphan group {gid}: {e}")
+            if orphaned_creative:
+                # Only re-queue creative orphans where director is already done
+                valid_orphaned_creative = []
+                for gid in orphaned_creative:
+                    try:
+                        async with aio_connect() as db2:
+                            db2.row_factory = aiosqlite.Row
+                            async with db2.execute(
+                                "SELECT director_status FROM clip_groups WHERE id = ?",
+                                (gid,)
+                            ) as rcur:
+                                row = await rcur.fetchone()
+                            if row and row["director_status"] == 2:
+                                valid_orphaned_creative.append(gid)
+                            else:
+                                logger.info(f"Backfill Phase 4.5: skipping creative orphan {gid}, director not done (status={row['director_status'] if row else 'unknown'})")
+                    except Exception as e:
+                        logger.warning(f"Backfill Phase 4.5: failed to check director status for creative orphan {gid}: {e}")
+
+                if valid_orphaned_creative:
+                    logger.info(f"Backfill Phase 4.5: re-queuing {len(valid_orphaned_creative)} valid orphaned creative groups (director done)")
+                    for gid in valid_orphaned_creative:
+                        try:
+                            async with aio_connect() as db2:
+                                await db2.execute(
+                                    "UPDATE clip_groups SET creative_status = 0, creative_error = NULL WHERE id = ?",
+                                    (gid,)
+                                )
+                                await db2.commit()
+                            asyncio.create_task(_run_creative_pipeline(gid))
+                            await asyncio.sleep(0.1)
+                        except Exception as e:
+                            logger.warning(f"Backfill Phase 4.5: failed to reset creative orphan group {gid}: {e}")
+        else:
+            logger.info("Backfill Phase 4.5: GPU offline — skipping orphan re-queuing")
+
+        # Phase 4: Periodic retry of failed groups (runs every 30 min after backfill completes)
+        # Handles groups that failed during backfill execution or failed later.
+        async def _periodic_retry():
+            while True:
+                await asyncio.sleep(1800)  # 30 minutes
+                try:
+                    async with aio_connect() as db:
+                        db.row_factory = aiosqlite.Row
+                        async with db.execute(
+                            """SELECT id FROM clip_groups
+                               WHERE classic_status = 2
+                                 AND director_status IN (-1, -2)
+                                 AND (
+                                     director_error LIKE '%video composition returned no output%'
+                                     OR director_error LIKE '%expected str, bytes or os.PathLike%'
+                                     OR director_error LIKE '%script generation:%'
+                                     OR director_error LIKE '%JSON parse%'
+                                     OR director_error LIKE '%segment matching%'
+                                     OR director_error LIKE '%database is locked%'
+                                     OR director_error IS NULL OR director_error = ''
+                                 )
+                                 AND NOT (
+                                     director_error LIKE '%no SRT content%'
+                                     OR director_error = 'no recordings in group'
+                                     OR director_error LIKE '%no recordings in group%'
+                                     OR director_error LIKE '%duration%'
+                                 )
+                                 AND EXISTS (SELECT 1 FROM recordings WHERE recordings.group_id = clip_groups.id)
+                               ORDER BY id DESC
+                               LIMIT 100"""  # batch of 100 per cycle (increased from 20)
+                        ) as cur:
+                            retry_ids = [r["id"] for r in await cur.fetchall()]
+                        if retry_ids:
+                            logger.info(f"Periodic retry: found {len(retry_ids)} failed groups, re-queuing...")
+                            for gid in retry_ids:
+                                try:
+                                    async with aio_connect() as db2:
+                                        await db2.execute(
+                                            "UPDATE clip_groups SET director_status = 0, director_error = NULL WHERE id = ?",
+                                            (gid,)
+                                        )
+                                        await db2.commit()
+                                    asyncio.create_task(_run_director_pipeline(gid))
+                                except Exception as e:
+                                    logger.warning(f"Periodic retry: failed to reset director group {gid}: {e}")
+
+                        # Also retry creative — but ONLY where director is already done
+                        async with db.execute(
+                            """SELECT id FROM clip_groups
+                               WHERE classic_status = 2
+                                 AND creative_status IN (-1, -2)
+                                 AND director_status = 2
+                                 AND (
+                                     creative_error LIKE '%video composition returned no output%'
+                                     OR creative_error LIKE '%expected str, bytes or os.PathLike%'
+                                     OR creative_error LIKE '%script generation:%'
+                                     OR creative_error LIKE '%JSON parse%'
+                                     OR creative_error LIKE '%segment matching%'
+                                     OR creative_error LIKE '%database is locked%'
+                                     OR creative_error IS NULL OR creative_error = ''
+                                 )
+                                 AND NOT (
+                                     creative_error LIKE '%no SRT content%'
+                                     OR creative_error = 'no recordings in group'
+                                     OR creative_error LIKE '%no recordings in group%'
+                                     OR creative_error LIKE '%duration%'
+                                 )
+                                 AND EXISTS (SELECT 1 FROM recordings WHERE recordings.group_id = clip_groups.id)
+                               ORDER BY id DESC
+                               LIMIT 100"""  # batch of 100 per cycle (increased from 20)
+                        ) as cur:
+                            retry_creative_ids = [r["id"] for r in await cur.fetchall()]
+                        if retry_creative_ids:
+                            logger.info(f"Periodic retry: found {len(retry_creative_ids)} creative failed groups (director done), re-queuing...")
+                            for gid in retry_creative_ids:
+                                try:
+                                    async with aio_connect() as db2:
+                                        await db2.execute(
+                                            "UPDATE clip_groups SET creative_status = 0, creative_error = NULL WHERE id = ?",
+                                            (gid,)
+                                        )
+                                        await db2.commit()
+                                    asyncio.create_task(_run_creative_pipeline(gid))
+                                except Exception as e:
+                                    logger.warning(f"Periodic retry: failed to reset creative group {gid}: {e}")
+                except Exception as e:
+                    logger.warning(f"Periodic retry error: {e}")
+
+        asyncio.create_task(_periodic_retry())
+
+    except Exception as e:
+        logger.error(f"Backfill auto-merge error: {e}")

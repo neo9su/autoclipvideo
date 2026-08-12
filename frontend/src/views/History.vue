@@ -227,7 +227,6 @@ const clipVariantsLoading = reactive(new Set())
 const sortField = ref('start_time')
 const sortOrder = ref('desc')
 let wsCleanup = null
-const loading = ref(false)
 const loadError = ref('')
 
 const shortError = (msg) => msg && msg.length > 40 ? msg.slice(0, 40) + '…' : msg

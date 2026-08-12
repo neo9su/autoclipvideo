@@ -1,0 +1,114 @@
+[
+  {
+    "id": 12816,
+    "status": "scheduled",
+    "scheduled_at": "2026-07-27T09:00:00",
+    "account_id": 2,
+    "group_id": 4658,
+    "video_path": "/Users/claw/work/douyin-recorder/scripts/../recordings/merged_4658_大卷_小卷_中分款_蜂蜜茶色_蜜茶棕色_20260709_001107.mp4"
+  },
+  {
+    "id": 12817,
+    "status": "scheduled",
+    "scheduled_at": "2026-07-27T09:20:00",
+    "account_id": 4,
+    "group_id": 4660,
+    "video_path": "/Users/claw/work/douyin-recorder/scripts/../recordings/merged_4660_微卷_直发_中分_齐刘海_黑巧克力色_深巧克力色_20260709_001419.mp4"
+  },
+  {
+    "id": 12818,
+    "status": "scheduled",
+    "scheduled_at": "2026-07-27T09:40:00",
+    "account_id": 5,
+    "group_id": 4687,
+    "video_path": "/Users/claw/work/douyin-recorder/scripts/../recordings/merged_4687_中分直发_卷发_物棕色_20260709_030249.mp4"
+  },
+  {
+    "id": 12819,
+    "status": "scheduled",
+    "scheduled_at": "2026-07-27T10:00:00",
+    "account_id": 2,
+    "group_id": 4691,
+    "video_path": "/Users/claw/work/douyin-recorder/scripts/../recordings/merged_4691_韩系短发、长直发、蛋卷卷发_粉色、灰色_20260709_030900.mp4"
+  },
+  {
+    "id": 12820,
+    "status": "scheduled",
+    "scheduled_at": "2026-07-27T10:20:00",
+    "account_id": 4,
+    "group_id": 4694,
+    "video_path": "/Users/claw/work/douyin-recorder/scripts/../recordings/merged_4694_中分款_冷棕色_20260709_032729.mp4"
+  },
+  {
+    "id": 12821,
+    "status": "scheduled",
+    "scheduled_at": "2026-07-27T10:40:00",
+    "account_id": 5,
+    "group_id": 4697,
+    "video_path": "/Users/claw/work/douyin-recorder/scripts/../recordings/merged_4697_中分长款假发_蜜茶棕色_20260709_235544.mp4"
+  },
+  {
+    "id": 12822,
+    "status": "scheduled",
+    "scheduled_at": "2026-07-27T11:00:00",
+    "account_id": 2,
+    "group_id": 4711,
+    "video_path": "/Users/claw/work/douyin-recorder/scripts/../recordings/merged_4711_2号爆脏_黑巧克力色_20260710_013538.mp4"
+  },
+  {
+    "id": 12823,
+    "status": "scheduled",
+    "scheduled_at": "2026-07-27T11:20:00",
+    "account_id": 4,
+    "group_id": 4718,
+    "video_path": "/Users/claw/work/douyin-recorder/scripts/../recordings/merged_4718_微卷_高层次卷发_蜂蜜茶色_蜜棕色_20260710_022538.mp4"
+  },
+  {
+    "id": 12824,
+    "status": "scheduled",
+    "scheduled_at": "2026-07-27T11:40:00",
+    "account_id": 5,
+    "group_id": 4721,
+    "video_path": "/Users/claw/work/douyin-recorder/scripts/../recordings/merged_4721_齐刘海短发_冷棕色_20260710_025203.mp4"
+  },
+  {
+    "id": 12825,
+    "status": "scheduled",
+    "scheduled_at": "2026-07-27T12:00:00",
+    "account_id": 2,
+    "group_id": 4726,
+    "video_path": "/Users/claw/work/douyin-recorder/scripts/../recordings/merged_4726_小马姐人短发_未知色_20260710_214130.mp4"
+  },
+  {
+    "id": 12826,
+    "status": "scheduled",
+    "scheduled_at": "2026-07-27T12:20:00",
+    "account_id": 4,
+    "group_id": 4728,
+    "video_path": "/Users/claw/work/douyin-recorder/scripts/../recordings/merged_4728_天使星短短_黑茶_20260710_214522.mp4"
+  },
+  {
+    "id": 12827,
+    "status": "scheduled",
+    "scheduled_at": "2026-07-27T12:40:00",
+    "account_id": 5,
+    "group_id": 4729,
+    "video_path": "/Users/claw/work/douyin-recorder/scripts/../recordings/merged_4729_侧丸子头_高层次直发_茶棕色_20260710_220720.mp4"
+  },
+  {
+    "id": 12828,
+    "status": "scheduled",
+    "scheduled_at": "2026-07-27T13:00:00",
+    "account_id": 2,
+    "group_id": 4730,
+    "video_path": "/Users/claw/work/douyin-recorder/scripts/../recordings/merged_4730_齐耳直发_赏金猎人色_20260710_220940.mp4"
+  },
+  {
+    "id": 12829,
+    "status": "scheduled",
+    "scheduled_at": "2026-07-27T13:20:00",
+    "account_id": 4,
+    "group_id": 4731,
+    "video_path": "/Users/claw/work/douyin-recorder/scripts/../recordings/merged_4731_赏金猎人骑车海直发_金色_20260710_221055.mp4"
+  }
+]

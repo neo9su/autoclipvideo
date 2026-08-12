@@ -1,0 +1,104 @@
+{
+  "generated_at": "2026-07-29T11:03:22",
+  "director_reset_ids": [
+    4264,
+    4209,
+    4126,
+    3697,
+    3675,
+    3527,
+    188
+  ],
+  "publish_test_tasks": [
+    {
+      "task_id": 13140,
+      "group_id": 5051,
+      "label": "微卷大波浪 金色",
+      "room_id": 2,
+      "account_id": 4,
+      "scheduled_at": "2026-07-29T12:00:00",
+      "video_path": "/Users/claw/work/douyin-recorder/recordings/merged_5051_微卷大波浪_金色_20260729_024420_2160x3840_50fps.mp4"
+    },
+    {
+      "task_id": 13141,
+      "group_id": 5050,
+      "label": "一刀切短发 茶棕色",
+      "room_id": 2,
+      "account_id": 4,
+      "scheduled_at": "2026-07-29T12:20:00",
+      "video_path": "/Users/claw/work/douyin-recorder/recordings/merged_5050_一刀切短发_茶棕色_20260729_021100_2160x3840_50fps.mp4"
+    },
+    {
+      "task_id": 13142,
+      "group_id": 5049,
+      "label": "粉棕",
+      "room_id": 2,
+      "account_id": 4,
+      "scheduled_at": "2026-07-29T12:40:00",
+      "video_path": "/Users/claw/work/douyin-recorder/recordings/merged_5049_未知款_粉棕_20260729_015056_2160x3840_50fps.mp4"
+    },
+    {
+      "task_id": 13143,
+      "group_id": 5048,
+      "label": "水波纹卷发 木棕色",
+      "room_id": 2,
+      "account_id": 4,
+      "scheduled_at": "2026-07-29T13:00:00",
+      "video_path": "/Users/claw/work/douyin-recorder/recordings/merged_5048_水波纹卷发_木棕色_20260729_014809_2160x3840_50fps.mp4"
+    },
+    {
+      "task_id": 13144,
+      "group_id": 5047,
+      "label": "荆棘玫瑰 黑黄皮渐变发根染",
+      "room_id": 2,
+      "account_id": 4,
+      "scheduled_at": "2026-07-29T13:20:00",
+      "video_path": "/Users/claw/work/douyin-recorder/recordings/merged_5047_荆棘玫瑰_黑黄皮渐变发根染_20260729_014255_2160x3840_50fps.mp4"
+    },
+    {
+      "task_id": 13145,
+      "group_id": 5046,
+      "label": "短发 蜜茶棕色",
+      "room_id": 2,
+      "account_id": 4,
+      "scheduled_at": "2026-07-29T13:40:00",
+      "video_path": "/Users/claw/work/douyin-recorder/recordings/merged_5046_短发_蜜茶棕色_20260729_013732_2160x3840_50fps.mp4"
+    },
+    {
+      "task_id": 13146,
+      "group_id": 5044,
+      "label": "好命女主 亚麻灰棕",
+      "room_id": 1,
+      "account_id": 2,
+      "scheduled_at": "2026-07-29T14:00:00",
+      "video_path": "/Users/claw/work/douyin-recorder/recordings/merged_5044_好命女主_亚麻灰棕_20260729_011549_2160x3840_50fps.mp4"
+    },
+    {
+      "task_id": 13147,
+      "group_id": 5043,
+      "label": "混合卷 冷棕色",
+      "room_id": 1,
+      "account_id": 2,
+      "scheduled_at": "2026-07-29T14:20:00",
+      "video_path": "/Users/claw/work/douyin-recorder/recordings/merged_5043_混合卷_冷棕色_20260729_011356_2160x3840_50fps.mp4"
+    },
+    {
+      "task_id": 13148,
+      "group_id": 5042,
+      "label": "中分外翻卷 金棕色",
+      "room_id": 1,
+      "account_id": 2,
+      "scheduled_at": "2026-07-29T14:40:00",
+      "video_path": "/Users/claw/work/douyin-recorder/recordings/merged_5042_中分外翻卷_金棕色_20260729_011151_2160x3840_50fps.mp4"
+    },
+    {
+      "task_id": 13149,
+      "group_id": 5041,
+      "label": "YG练习生 豆沙灰粉",
+      "room_id": 1,
+      "account_id": 2,
+      "scheduled_at": "2026-07-29T15:00:00",
+      "video_path": "/Users/claw/work/douyin-recorder/recordings/merged_5041_YG练习生_豆沙灰粉_20260729_010951_2160x3840_50fps.mp4"
+    }
+  ]
+}

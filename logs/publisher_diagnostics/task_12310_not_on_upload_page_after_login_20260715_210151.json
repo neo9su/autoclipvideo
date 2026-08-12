@@ -1,0 +1,9 @@
+{
+  "task_id": 12310,
+  "reason": "not_on_upload_page_after_login",
+  "screenshot": "/Users/claw/work/douyin-recorder/backend/../logs/publisher_diagnostics/task_12310_not_on_upload_page_after_login_20260715_210151.png",
+  "url": "https://creator.douyin.com/creator-micro/content/upload",
+  "title": "抖音创作者中心",
+  "visible_texts": [],
+  "html_snippet": "🤖 系统操作中，请勿操作\n正在检查登录状态…"
+}

@@ -1,0 +1,129 @@
+{
+  "task_id": 12241,
+  "reason": "upload_input_not_found",
+  "screenshot": "/Users/claw/work/douyin-recorder/backend/../logs/publisher_diagnostics/task_12241_upload_input_not_found_20260714_132338.png",
+  "url": "https://creator.douyin.com/creator-micro/content/upload",
+  "title": "抖音创作者中心",
+  "visible_texts": [
+    {
+      "tag": "input",
+      "role": "combobox",
+      "type": "text",
+      "accept": "",
+      "text": "国家/地区"
+    },
+    {
+      "tag": "input",
+      "role": "",
+      "type": "tel",
+      "accept": "",
+      "text": "请输入手机号"
+    },
+    {
+      "tag": "input",
+      "role": "",
+      "type": "tel",
+      "accept": "",
+      "text": "请输入验证码"
+    },
+    {
+      "tag": "a",
+      "role": "",
+      "type": "",
+      "accept": "",
+      "text": "用户协议"
+    },
+    {
+      "tag": "a",
+      "role": "",
+      "type": "",
+      "accept": "",
+      "text": "隐私政策"
+    },
+    {
+      "tag": "a",
+      "role": "",
+      "type": "",
+      "accept": "",
+      "text": "抖音社区自律公约"
+    },
+    {
+      "tag": "a",
+      "role": "",
+      "type": "",
+      "accept": "",
+      "text": "账号授权协议"
+    },
+    {
+      "tag": "a",
+      "role": "",
+      "type": "",
+      "accept": "",
+      "text": "用户服务协议"
+    },
+    {
+      "tag": "a",
+      "role": "",
+      "type": "",
+      "accept": "",
+      "text": "隐私政策"
+    },
+    {
+      "tag": "a",
+      "role": "",
+      "type": "",
+      "accept": "",
+      "text": "账号找回"
+    },
+    {
+      "tag": "a",
+      "role": "",
+      "type": "",
+      "accept": "",
+      "text": "联系我们"
+    },
+    {
+      "tag": "a",
+      "role": "",
+      "type": "",
+      "accept": "",
+      "text": "京ICP备16016397号-3"
+    },
+    {
+      "tag": "a",
+      "role": "",
+      "type": "",
+      "accept": "",
+      "text": "北京抖音科技有限公司"
+    },
+    {
+      "tag": "a",
+      "role": "",
+      "type": "",
+      "accept": "",
+      "text": "京B2-20170846"
+    },
+    {
+      "tag": "a",
+      "role": "",
+      "type": "",
+      "accept": "",
+      "text": "中国互联网举报中心"
+    },
+    {
+      "tag": "a",
+      "role": "",
+      "type": "",
+      "accept": "",
+      "text": "网络文化经营许可证-京网文〔2025〕0181-061号"
+    },
+    {
+      "tag": "a",
+      "role": "",
+      "type": "",
+      "accept": "",
+      "text": "京公网安备11000002002046号"
+    }
+  ],
+  "html_snippet": "🤖 系统操作中，请勿操作\n正在上传视频文件（71 MB），请勿操作浏览器…\n网址\n抖音\n抖音创作者中心·创作者\n抖音创作者中心是抖音创作者的一站式服务平台 · 致力于助力创作者高效运营\n我是创作者\n我是MCN机构\n扫码登录\n如何扫码\n\n打开「抖音APP」点击左上角\n进行扫一扫\n\n验证码登录\n密码登录\n获取验证码\n登录/注册\n登录或注册即代表同意用户协议和隐私政策\n助力创作者高效运营\n作品发布及管理\n包括视频、图文、全景视频等体裁\n作品数据分析\n数据多维度与深度分析，精准化经营\n商单任务变现\n服务全渠道变现，丰富的变现方式\n创作灵感洞察\n更多灵感方式及曝光，为创作助力\n机构服务权益\n千万创作者邀你同行\n创作者登录\nMCN机构登录\n抖音社区自律公约账号授权协议用户服务协议隐私政策账号找回联系我们\n2026 © 抖音\n京ICP备16016397号-3\n北京抖音科技有限公司\n京B2-20170846\n\n\n中国互联网举报中心\n网络文化经营许可证-京网文〔2025〕0181-061号\n违法和不良信息举报：400-140-2108\n举报邮箱：feedback@douyin.com\n\n\n京公网安备11000002002046号\n地址：北京市海淀区北三环西路甲18号院4号楼2层2022\n\n"
+}

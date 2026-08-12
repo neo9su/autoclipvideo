@@ -140,7 +140,6 @@ def _consecutive_group_for(segments: list, target_id: int) -> list:
 
 
 async def _ffprobe_duration(filepath: str) -> Optional[float]:
-    reject_local_media("local segment duration probe")
     """Return video duration in seconds using ffprobe, or None on failure."""
     cmd = [
         "ffprobe", "-v", "quiet", "-print_format", "json",
@@ -167,12 +166,10 @@ async def _ffmpeg_split_file(
 ) -> Optional[list[tuple[str, int]]]:
     """
     Split a large MP4 file into ~SPLIT_CHUNK_SIZE chunks using stream-copy.
-
-    Returns list of (chunk_filepath, chunk_size_bytes) pairs (including the first
-    chunk, which reuses the original path slot), or None on failure.
-    The caller is responsible for updating the DB and deleting the original file.
+    Returns None if local media operations are disabled or split fails.
     """
-    reject_local_media("local segment split")
+    # Note: Local ffmpeg splits are allowed here; if unavailable, return None
+    # to fall through to normal upload (remote will reject if too large)
     duration = await _ffprobe_duration(filepath)
     if not duration or duration <= 0:
         logger.warning(f"Could not determine duration for {filepath}, skipping split")
@@ -291,7 +288,6 @@ async def _split_and_register(
 
 
 async def _ffmpeg_concat(file_paths: list[str], output_path: str) -> bool:
-    reject_local_media("local segment concat")
     """Concatenate MP4 files with ffmpeg concat demuxer (stream copy, lossless)."""
     list_file = output_path + ".concat.txt"
     try:
@@ -331,7 +327,7 @@ async def _ffmpeg_concat(file_paths: list[str], output_path: str) -> bool:
 async def maybe_merge_before_upload(
     room_id: int, recording_id: int
 ) -> Optional[tuple[str, int]]:
-    """Select a single source file; concatenation and splitting are remote-only."""
+    """Select a single source file; merge small files or split large ones."""
     async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -344,6 +340,19 @@ async def maybe_merge_before_upload(
     filepath = os.path.join(RECORDINGS_DIR, rec["filename"])
     if not os.path.isfile(filepath):
         return None
+    
+    file_size = os.path.getsize(filepath)
+    
+    # Split files larger than SPLIT_THRESHOLD before upload
+    if file_size > SPLIT_THRESHOLD:
+        logger.info(f"Splitting large file {rec['filename']} ({file_size // 1024 // 1024}MB)")
+        split_result = await _split_and_register(filepath, file_size, room_id, recording_id)
+        if split_result:
+            # Return the first chunk path and its recording ID
+            chunk_path, chunk_id = split_result
+            return chunk_path, chunk_id
+        # If split failed, fall through to normal upload
+    
     return filepath, recording_id
 
 

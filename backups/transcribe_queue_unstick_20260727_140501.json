@@ -1,0 +1,498 @@
+{
+  "created_at": "2026-07-27T14:05:02.376315",
+  "count": 29,
+  "summary": {
+    "restore_complete_metadata": 12,
+    "mark_local_deleted": 17
+  },
+  "changes": [
+    {
+      "id": 7106,
+      "filename": "2_20260708_005548_000.mp4",
+      "action": "restore_complete_metadata",
+      "duration_s": 1500.187,
+      "size_bytes": 863640344,
+      "end_time": "2026-07-08T01:20:48.761540",
+      "before": {
+        "id": 7106,
+        "filename": "2_20260708_005548_000.mp4",
+        "start_time": "2026-07-08T00:55:48.574540",
+        "end_time": null,
+        "size_bytes": null,
+        "synced": 0,
+        "transcribed": 0,
+        "local_deleted": 0
+      }
+    },
+    {
+      "id": 7117,
+      "filename": "2_20260708_032056_002.mp4",
+      "action": "mark_local_deleted",
+      "reason": "file_missing",
+      "before": {
+        "id": 7117,
+        "filename": "2_20260708_032056_002.mp4",
+        "start_time": "2026-07-08T03:20:56.987939",
+        "end_time": null,
+        "size_bytes": null,
+        "synced": 0,
+        "transcribed": 0,
+        "local_deleted": 0
+      }
+    },
+    {
+      "id": 7134,
+      "filename": "2_20260709_002741_001.mp4",
+      "action": "restore_complete_metadata",
+      "duration_s": 57.987438,
+      "size_bytes": 32702950,
+      "end_time": "2026-07-09T00:28:39.019886",
+      "before": {
+        "id": 7134,
+        "filename": "2_20260709_002741_001.mp4",
+        "start_time": "2026-07-09T00:27:41.032448",
+        "end_time": null,
+        "size_bytes": null,
+        "synced": 0,
+        "transcribed": 0,
+        "local_deleted": 0
+      }
+    },
+    {
+      "id": 7139,
+      "filename": "2_20260709_002901_000.mp4",
+      "action": "restore_complete_metadata",
+      "duration_s": 41.266438,
+      "size_bytes": 23454517,
+      "end_time": "2026-07-09T00:29:43.138462",
+      "before": {
+        "id": 7139,
+        "filename": "2_20260709_002901_000.mp4",
+        "start_time": "2026-07-09T00:29:01.872024",
+        "end_time": null,
+        "size_bytes": null,
+        "synced": 0,
+        "transcribed": 0,
+        "local_deleted": 0
+      }
+    },
+    {
+      "id": 7177,
+      "filename": "2_20260709_032317_007.mp4",
+      "action": "mark_local_deleted",
+      "reason": "file_missing",
+      "before": {
+        "id": 7177,
+        "filename": "2_20260709_032317_007.mp4",
+        "start_time": "2026-07-09T03:23:17.601319",
+        "end_time": null,
+        "size_bytes": null,
+        "synced": 0,
+        "transcribed": 0,
+        "local_deleted": 0
+      }
+    },
+    {
+      "id": 7254,
+      "filename": "1_20260711_010018_011.mp4",
+      "action": "mark_local_deleted",
+      "reason": "file_missing",
+      "before": {
+        "id": 7254,
+        "filename": "1_20260711_010018_011.mp4",
+        "start_time": "2026-07-11T01:00:18.420057",
+        "end_time": null,
+        "size_bytes": null,
+        "synced": 0,
+        "transcribed": 0,
+        "local_deleted": 0
+      }
+    },
+    {
+      "id": 7255,
+      "filename": "1_20260711_010035_011.mp4",
+      "action": "mark_local_deleted",
+      "reason": "file_missing",
+      "before": {
+        "id": 7255,
+        "filename": "1_20260711_010035_011.mp4",
+        "start_time": "2026-07-11T01:00:35.780202",
+        "end_time": null,
+        "size_bytes": null,
+        "synced": 0,
+        "transcribed": 0,
+        "local_deleted": 0
+      }
+    },
+    {
+      "id": 7256,
+      "filename": "1_20260711_010049_011.mp4",
+      "action": "mark_local_deleted",
+      "reason": "file_missing",
+      "before": {
+        "id": 7256,
+        "filename": "1_20260711_010049_011.mp4",
+        "start_time": "2026-07-11T01:00:49.346196",
+        "end_time": null,
+        "size_bytes": null,
+        "synced": 0,
+        "transcribed": 0,
+        "local_deleted": 0
+      }
+    },
+    {
+      "id": 7257,
+      "filename": "1_20260711_010102_011.mp4",
+      "action": "mark_local_deleted",
+      "reason": "file_missing",
+      "before": {
+        "id": 7257,
+        "filename": "1_20260711_010102_011.mp4",
+        "start_time": "2026-07-11T01:01:02.721844",
+        "end_time": null,
+        "size_bytes": null,
+        "synced": 0,
+        "transcribed": 0,
+        "local_deleted": 0
+      }
+    },
+    {
+      "id": 7258,
+      "filename": "1_20260711_010114_011.mp4",
+      "action": "mark_local_deleted",
+      "reason": "file_missing",
+      "before": {
+        "id": 7258,
+        "filename": "1_20260711_010114_011.mp4",
+        "start_time": "2026-07-11T01:01:14.969578",
+        "end_time": null,
+        "size_bytes": null,
+        "synced": 0,
+        "transcribed": 0,
+        "local_deleted": 0
+      }
+    },
+    {
+      "id": 7259,
+      "filename": "1_20260711_010129_011.mp4",
+      "action": "mark_local_deleted",
+      "reason": "file_missing",
+      "before": {
+        "id": 7259,
+        "filename": "1_20260711_010129_011.mp4",
+        "start_time": "2026-07-11T01:01:30.002089",
+        "end_time": null,
+        "size_bytes": null,
+        "synced": 0,
+        "transcribed": 0,
+        "local_deleted": 0
+      }
+    },
+    {
+      "id": 7261,
+      "filename": "1_20260711_010329_012.mp4",
+      "action": "mark_local_deleted",
+      "reason": "file_missing",
+      "before": {
+        "id": 7261,
+        "filename": "1_20260711_010329_012.mp4",
+        "start_time": "2026-07-11T01:03:29.191255",
+        "end_time": null,
+        "size_bytes": null,
+        "synced": 0,
+        "transcribed": 0,
+        "local_deleted": 0
+      }
+    },
+    {
+      "id": 7292,
+      "filename": "2_20260712_002759_008.mp4",
+      "action": "mark_local_deleted",
+      "reason": "file_missing",
+      "before": {
+        "id": 7292,
+        "filename": "2_20260712_002759_008.mp4",
+        "start_time": "2026-07-12T00:27:59.613191",
+        "end_time": null,
+        "size_bytes": null,
+        "synced": 0,
+        "transcribed": 0,
+        "local_deleted": 0
+      }
+    },
+    {
+      "id": 7293,
+      "filename": "2_20260712_002823_008.mp4",
+      "action": "restore_complete_metadata",
+      "duration_s": 1500.188,
+      "size_bytes": 627657737,
+      "end_time": "2026-07-12T00:53:23.837546",
+      "before": {
+        "id": 7293,
+        "filename": "2_20260712_002823_008.mp4",
+        "start_time": "2026-07-12T00:28:23.649546",
+        "end_time": null,
+        "size_bytes": null,
+        "synced": 0,
+        "transcribed": 0,
+        "local_deleted": 0
+      }
+    },
+    {
+      "id": 7338,
+      "filename": "2_20260715_010009_005.mp4",
+      "action": "restore_complete_metadata",
+      "duration_s": 1500.186,
+      "size_bytes": 852688450,
+      "end_time": "2026-07-15T01:25:09.900276",
+      "before": {
+        "id": 7338,
+        "filename": "2_20260715_010009_005.mp4",
+        "start_time": "2026-07-15T01:00:09.714276",
+        "end_time": null,
+        "size_bytes": null,
+        "synced": 0,
+        "transcribed": 0,
+        "local_deleted": 0
+      }
+    },
+    {
+      "id": 7348,
+      "filename": "1_20260715_221454_000.mp4",
+      "action": "restore_complete_metadata",
+      "duration_s": 1500.161,
+      "size_bytes": 787843380,
+      "end_time": "2026-07-15T22:39:54.876404",
+      "before": {
+        "id": 7348,
+        "filename": "1_20260715_221454_000.mp4",
+        "start_time": "2026-07-15T22:14:54.715404",
+        "end_time": null,
+        "size_bytes": null,
+        "synced": 0,
+        "transcribed": 0,
+        "local_deleted": 0
+      }
+    },
+    {
+      "id": 7352,
+      "filename": "1_20260715_232736_002.mp4",
+      "action": "restore_complete_metadata",
+      "duration_s": 1500.115,
+      "size_bytes": 864220386,
+      "end_time": "2026-07-15T23:52:37.009011",
+      "before": {
+        "id": 7352,
+        "filename": "1_20260715_232736_002.mp4",
+        "start_time": "2026-07-15T23:27:36.894011",
+        "end_time": null,
+        "size_bytes": null,
+        "synced": 0,
+        "transcribed": 0,
+        "local_deleted": 0
+      }
+    },
+    {
+      "id": 7370,
+      "filename": "2_20260716_013347_001.mp4",
+      "action": "restore_complete_metadata",
+      "duration_s": 1500.221,
+      "size_bytes": 884888998,
+      "end_time": "2026-07-16T01:58:48.044617",
+      "before": {
+        "id": 7370,
+        "filename": "2_20260716_013347_001.mp4",
+        "start_time": "2026-07-16T01:33:47.823617",
+        "end_time": null,
+        "size_bytes": null,
+        "synced": 0,
+        "transcribed": 0,
+        "local_deleted": 0
+      }
+    },
+    {
+      "id": 7455,
+      "filename": "1_20260718_011101_010.mp4",
+      "action": "mark_local_deleted",
+      "reason": "file_missing",
+      "before": {
+        "id": 7455,
+        "filename": "1_20260718_011101_010.mp4",
+        "start_time": "2026-07-18T01:11:01.576689",
+        "end_time": null,
+        "size_bytes": null,
+        "synced": 0,
+        "transcribed": 0,
+        "local_deleted": 0
+      }
+    },
+    {
+      "id": 7528,
+      "filename": "2_20260719_030221_010.mp4",
+      "action": "mark_local_deleted",
+      "reason": "file_missing",
+      "before": {
+        "id": 7528,
+        "filename": "2_20260719_030221_010.mp4",
+        "start_time": "2026-07-19T03:02:21.198070",
+        "end_time": null,
+        "size_bytes": null,
+        "synced": 0,
+        "transcribed": 0,
+        "local_deleted": 0
+      }
+    },
+    {
+      "id": 7641,
+      "filename": "1_20260724_004509_005.mp4",
+      "action": "mark_local_deleted",
+      "reason": "file_missing",
+      "before": {
+        "id": 7641,
+        "filename": "1_20260724_004509_005.mp4",
+        "start_time": "2026-07-24T00:45:09.870573",
+        "end_time": null,
+        "size_bytes": null,
+        "synced": 0,
+        "transcribed": 0,
+        "local_deleted": 0
+      }
+    },
+    {
+      "id": 7655,
+      "filename": "1_20260724_211814_000.mp4",
+      "action": "restore_complete_metadata",
+      "duration_s": 78.545,
+      "size_bytes": 37439140,
+      "end_time": "2026-07-24T21:19:33.067216",
+      "before": {
+        "id": 7655,
+        "filename": "1_20260724_211814_000.mp4",
+        "start_time": "2026-07-24T21:18:14.522216",
+        "end_time": null,
+        "size_bytes": null,
+        "synced": 0,
+        "transcribed": 0,
+        "local_deleted": 0
+      }
+    },
+    {
+      "id": 7656,
+      "filename": "1_20260724_211938_000.mp4",
+      "action": "restore_complete_metadata",
+      "duration_s": 221.55,
+      "size_bytes": 114078594,
+      "end_time": "2026-07-24T21:23:19.712516",
+      "before": {
+        "id": 7656,
+        "filename": "1_20260724_211938_000.mp4",
+        "start_time": "2026-07-24T21:19:38.162516",
+        "end_time": null,
+        "size_bytes": null,
+        "synced": 0,
+        "transcribed": 0,
+        "local_deleted": 0
+      }
+    },
+    {
+      "id": 7658,
+      "filename": "1_20260724_212345_001.mp4",
+      "action": "restore_complete_metadata",
+      "duration_s": 25.695,
+      "size_bytes": 13071504,
+      "end_time": "2026-07-24T21:24:10.899725",
+      "before": {
+        "id": 7658,
+        "filename": "1_20260724_212345_001.mp4",
+        "start_time": "2026-07-24T21:23:45.204725",
+        "end_time": null,
+        "size_bytes": null,
+        "synced": 0,
+        "transcribed": 0,
+        "local_deleted": 0
+      }
+    },
+    {
+      "id": 7659,
+      "filename": "1_20260724_213051_000.mp4",
+      "action": "restore_complete_metadata",
+      "duration_s": 46.592,
+      "size_bytes": 23859065,
+      "end_time": "2026-07-24T21:31:38.110470",
+      "before": {
+        "id": 7659,
+        "filename": "1_20260724_213051_000.mp4",
+        "start_time": "2026-07-24T21:30:51.518470",
+        "end_time": null,
+        "size_bytes": null,
+        "synced": 0,
+        "transcribed": 0,
+        "local_deleted": 0
+      }
+    },
+    {
+      "id": 7754,
+      "filename": "1_20260725_012113_012.mp4",
+      "action": "mark_local_deleted",
+      "reason": "file_missing",
+      "before": {
+        "id": 7754,
+        "filename": "1_20260725_012113_012.mp4",
+        "start_time": "2026-07-25T01:21:13.946396",
+        "end_time": null,
+        "size_bytes": null,
+        "synced": 0,
+        "transcribed": 0,
+        "local_deleted": 0
+      }
+    },
+    {
+      "id": 7767,
+      "filename": "2_20260725_022303_009.mp4",
+      "action": "mark_local_deleted",
+      "reason": "file_missing",
+      "before": {
+        "id": 7767,
+        "filename": "2_20260725_022303_009.mp4",
+        "start_time": "2026-07-25T02:23:03.958351",
+        "end_time": null,
+        "size_bytes": null,
+        "synced": 0,
+        "transcribed": 0,
+        "local_deleted": 0
+      }
+    },
+    {
+      "id": 7821,
+      "filename": "1_20260727_011322_010.mp4",
+      "action": "mark_local_deleted",
+      "reason": "file_missing",
+      "before": {
+        "id": 7821,
+        "filename": "1_20260727_011322_010.mp4",
+        "start_time": "2026-07-27T01:13:22.935349",
+        "end_time": null,
+        "size_bytes": null,
+        "synced": 0,
+        "transcribed": 0,
+        "local_deleted": 0
+      }
+    },
+    {
+      "id": 7845,
+      "filename": "2_20260727_030316_012.mp4",
+      "action": "mark_local_deleted",
+      "reason": "file_missing",
+      "before": {
+        "id": 7845,
+        "filename": "2_20260727_030316_012.mp4",
+        "start_time": "2026-07-27T03:03:16.199253",
+        "end_time": null,
+        "size_bytes": null,
+        "synced": 0,
+        "transcribed": 0,
+        "local_deleted": 0
+      }
+    }
+  ]
+}

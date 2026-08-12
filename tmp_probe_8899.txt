@@ -1,0 +1,7 @@
+$ lsof -nP -iTCP:8899 -sTCP:LISTEN || true
+
+$ ps -axo pid,ppid,etime,%cpu,%mem,state,command | grep 'uvicorn main:app' | grep -v grep || true
+
+socket=CLOSED ConnectionRefusedError(61, 'Connection refused')
+http://127.0.0.1:8899/ ERROR URLError: <urlopen error [Errno 61] Connection refused>
+http://127.0.0.1:8899/api/rooms ERROR URLError: <urlopen error [Errno 61] Connection refused>
