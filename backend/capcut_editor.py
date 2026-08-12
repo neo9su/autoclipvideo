@@ -22,6 +22,7 @@ from editor import (
     score_and_tag,
     select_clips,
 )
+from srt_resolver import resolve_srt_path
 
 logger = logging.getLogger(__name__)
 
@@ -53,10 +54,8 @@ async def create_capcut_draft(group_id: int) -> Optional[str]:
     label = rows[0]["label"]
     recording_data = []
     for rec in rows:
-        srt_path = os.path.join(
-            RECORDINGS_DIR, os.path.splitext(rec["filename"])[0] + ".srt"
-        )
-        if not os.path.exists(srt_path):
+        srt_path = resolve_srt_path(os.path.join(RECORDINGS_DIR, rec["filename"]))
+        if not srt_path:
             logger.warning(f"CapCut draft: SRT missing for {rec['filename']}")
             continue
         segs = parse_srt(srt_path)

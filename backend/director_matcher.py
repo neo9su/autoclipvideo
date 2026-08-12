@@ -14,6 +14,7 @@ import aiosqlite
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 import json
+from srt_resolver import resolve_srt_path
 
 logger = logging.getLogger(__name__)
 
@@ -604,8 +605,10 @@ class SemanticMatcher:
                     except Exception:
                         pass
 
-                from media_contract import resolve_srt_file
-                srt_path = resolve_srt_file(source_filename)
+                srt_path = resolve_srt_path(os.path.join(recordings_dir, source_filename))
+                if not srt_path:
+                    logger.warning("Skipping recording %s: missing or empty SRT", source_filename)
+                    continue
                 
                 # 解析 SRT 为结构化段落（保留时间戳）
                 srt_entries = _parse_srt_entries(str(srt_path)) if srt_path else []

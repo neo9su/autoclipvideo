@@ -1,4 +1,5 @@
 from gpu_execution import reject_local_media
+from srt_resolver import resolve_srt_path
 import asyncio
 import heapq
 import logging
@@ -346,8 +347,8 @@ async def poll_transcriptions(broadcast_fn=None):
         recoverable = []
         for rec in orphaned:
             mp4_path = os.path.join(RECORDINGS_DIR, rec["filename"])
-            srt_path = os.path.splitext(mp4_path)[0] + ".srt"
-            if os.path.exists(mp4_path) and os.path.exists(srt_path):
+            srt_path = resolve_srt_path(mp4_path)
+            if os.path.exists(mp4_path) and srt_path:
                 recoverable.append((rec, mp4_path, srt_path))
             else:
                 logger.warning(
@@ -913,7 +914,9 @@ async def _extract_srt_for_director(group_id: int) -> Optional[str]:
                 rows = await cur.fetchall()
         srt_content = ""
         for r in rows:
-            srt_path = os.path.join(RECORDINGS_DIR, os.path.splitext(r["filename"])[0] + ".srt")
+            srt_path = resolve_srt_path(os.path.join(RECORDINGS_DIR, r["filename"]))
+            if not srt_path:
+                continue
             if os.path.exists(srt_path):
                 with open(srt_path, encoding="utf-8") as f:
                     srt_content += f.read() + "\n\n"
