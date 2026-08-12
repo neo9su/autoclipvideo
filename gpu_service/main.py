@@ -50,7 +50,7 @@ from pydantic import BaseModel
 import shutil as _shutil
 
 _DEFAULT_STORAGE = (
-    r"C:\Users\neo\douyin_recordings" if os.name == "nt" else "/data/douyin-recordings"
+    r"F:\douyin_recordings" if os.name == "nt" else "/data/douyin-recordings"
 )
 STORAGE_DIR = os.environ.get("STORAGE_DIR", _DEFAULT_STORAGE)
 os.makedirs(STORAGE_DIR, exist_ok=True)

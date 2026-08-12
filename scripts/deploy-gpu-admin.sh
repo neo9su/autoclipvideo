@@ -26,7 +26,7 @@ cat > "$ENV_FILE" << ENVEOF
 GPU_API_TOKEN=$ADMIN_TOKEN
 ADMIN_RESTART_TOKEN=$ADMIN_TOKEN
 PORT=8877
-STORAGE_DIR=C:\\Users\\neo\\douyin_recordings
+STORAGE_DIR=F:\douyin_recordings
 ENVEOF
 echo "Step 2: Created local .env file"
 echo ""
