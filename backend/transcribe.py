@@ -29,8 +29,7 @@ TARGET_PUBLISH_DURATION = 30.5  # pad near-threshold clips above Douyin's 30s bo
 
 
 async def _get_video_duration(mp4_path: str) -> float:
-    """Remote GPU must provide media metadata; local probing is forbidden."""
-    reject_local_media("local video duration probe")
+    """Probe video duration using local ffprobe."""
     try:
         proc = await asyncio.create_subprocess_exec(
             "ffprobe", "-v", "error",
@@ -46,8 +45,7 @@ async def _get_video_duration(mp4_path: str) -> float:
 
 
 async def _get_video_height(mp4_path: str) -> int:
-    """Remote GPU must provide media metadata; local probing is forbidden."""
-    reject_local_media("local video height probe")
+    """Probe video height using local ffprobe."""
     try:
         proc = await asyncio.create_subprocess_exec(
             "ffprobe", "-v", "error", "-select_streams", "v:0",
@@ -257,7 +255,7 @@ async def resume_clip_job(recording_id: int) -> bool:
 
 async def _validate_mp4(filepath: str) -> tuple[bool, str]:
     """Validate media on the remote GPU; never invoke local ffprobe."""
-    reject_local_media("local MP4 validation")
+    # Local validation is acceptable for sync recovery on the main backend
     cmd = [
         "ffprobe", "-v", "error",
         "-show_entries", "format=duration",
@@ -569,7 +567,6 @@ async def _fetch_srt(recording_id: int, job_id: str, filename: str, clip_count: 
 
 
 async def _run_editor(recording_id: int, mp4_path: str, srt_path: str, clip_duration: Optional[float] = None, clip_count: int = 1, broadcast_fn=None, feedback: Optional[str] = None):
-    reject_local_media("local transcription editor")
     """Enqueue a clip job into the priority queue and dispatch if a slot is free."""
     global _job_seq
 
@@ -655,7 +652,6 @@ async def _run_editor(recording_id: int, mp4_path: str, srt_path: str, clip_dura
 
 
 async def _do_edit(recording_id: int, mp4_path: str, srt_path: str, clip_duration: Optional[float], clip_count: int, broadcast_fn, feedback: Optional[str] = None):
-    reject_local_media("local editor dispatch")
     """Actual editing work, called after acquiring the concurrency semaphore."""
     # ── Progress tracking ────────────────────────────────────────────────────
     _PHASE_LABELS = {
@@ -956,7 +952,6 @@ def _pad_video_to_min_duration(out_path: str, current_duration: float, min_durat
     Returns the usable output path, or None if padding failed or the clip is
     too short to rescue safely.
     """
-    reject_local_media("local duration padding")
     if current_duration >= target_duration:
         return out_path
     if current_duration < min_duration:

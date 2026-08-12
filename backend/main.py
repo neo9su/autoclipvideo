@@ -683,6 +683,12 @@ async def lifespan(app: FastAPI):
 
 APP_VERSION = "MVP1.04.2026032501"
 
+# API loading state (module-level for health endpoint access)
+_api_v2_loaded = False
+_qianchuan_api_loaded = False
+_qianchuan_api_error = None
+_qianchuan_upload_loaded = False
+
 app = FastAPI(title="Douyin Recorder", lifespan=lifespan)
 
 app.add_middleware(
@@ -728,7 +734,7 @@ async def health():
             "transcription", "backfill", "publish", "enhance",
             "creative", "director", "qianchuan", "room-monitors",
         ]
-        result["qianchuan_api_loaded"] = _qianchuan_api_loaded if "_qianchuan_api_loaded" in dir() else False
+        result["qianchuan_api_loaded"] = _qianchuan_api_loaded
         if "_qianchuan_api_error" in globals() and _qianchuan_api_error:
             result["qianchuan_api_error"] = _qianchuan_api_error
         try:
@@ -4596,7 +4602,7 @@ async def _periodic_clip_dispatch():
                             logger.debug(f"Clip dispatch: skipping {rec_id}, SRT missing")
                             continue
                         
-                        clip_count = rec.get("clip_count") or 1
+                        clip_count = rec["clip_count"] if rec["clip_count"] else 1
                         logger.info(f"Clip dispatch: queuing recording {rec_id} ({filename})")
                         
                         # Create broadcast function for this job
