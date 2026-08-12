@@ -1267,6 +1267,20 @@ async def create_job(
     mp4_path = os.path.join(room_dir, _raw_filename)
     srt_path = os.path.join(room_dir, job_id + ".srt")
 
+    # Check disk space before accepting upload
+    free_gb = _get_disk_free_gb()
+    if free_gb < BATCH_UPLOAD_LIMIT_GB:
+        logger.warning(f"Low disk space: {free_gb:.1f}GB free, requested {file.size or 'unknown'} bytes")
+        # Try to trigger cleanup
+        asyncio.create_task(_cleanup_old_jobs())
+        await asyncio.sleep(5)  # Wait for cleanup
+        free_gb = _get_disk_free_gb()
+        if free_gb < BATCH_UPLOAD_LIMIT_GB:
+            raise HTTPException(
+                status_code=507, 
+                detail=f"Insufficient disk space: {free_gb:.1f}GB free, need at least {BATCH_UPLOAD_LIMIT_GB}GB for upload"
+            )
+
     async with aiofiles.open(mp4_path, "wb") as f:
         while chunk := await file.read(1024 * 1024):
             await f.write(chunk)
@@ -1410,6 +1424,16 @@ async def create_clip_job(request: Request, req: ClipJobRequest):
             mp4_path = mp4_path_enc
         else:
             raise HTTPException(status_code=404, detail=f"MP4 not found on server: {mp4_path}")
+    
+    # Check disk space before starting clip job
+    free_gb = _get_disk_free_gb()
+    if free_gb < BATCH_UPLOAD_LIMIT_GB * 0.5:  # Need at least half batch limit for output
+        logger.warning(f"Low disk space: {free_gb:.1f}GB free, cannot start clip job")
+        _clip_jobs.pop(job_id, None)
+        raise HTTPException(
+            status_code=507,
+            detail=f"Insufficient disk space: {free_gb:.1f}GB free"
+        )
     if not req.segments:
         raise HTTPException(status_code=422, detail="segments list is empty")
 
@@ -2496,7 +2520,6 @@ async def remove_background(file: UploadFile = File(...)):
 @app.post("/maintenance/cleanup-clips")
 async def cleanup_clips():
     """Delete output dirs for completed/errored clip jobs. Frees disk space."""
-    import shutil
     deleted = 0
     freed_bytes = 0
 
