@@ -699,15 +699,13 @@ import QianchuanUpload from '../components/QianchuanUpload.vue'
 import { useToast } from '../composables/toast.js'
 
 const groups = ref([])
-<<<<<<< HEAD
+const rooms = ref([])
 const visibleGroupCount = ref(50)
 const groupsSentinel = ref(null)
 const visibleGroups = computed(() => groups.value.slice(0, visibleGroupCount.value))
 let groupsObserver = null
-=======
 const loading = ref(true)
 const rooms = ref([])
->>>>>>> 61135b7b1a047a829268c3428dbb1bedbf8e0d64
 const openId = ref(null)
 const detail = ref(null)
 const detailLoading = ref(false)
@@ -1003,10 +1001,7 @@ async function load() {
   loading.value = true
   try {
     ;[groups.value, rooms.value] = await Promise.all([getGroups(), getRooms()])
-<<<<<<< HEAD
     visibleGroupCount.value = Math.min(50, groups.value.length)
-=======
->>>>>>> 61135b7b1a047a829268c3428dbb1bedbf8e0d64
   } catch (error) {
     show(error.message || '分组加载失败', 'error')
   } finally {
@@ -1504,13 +1499,10 @@ onUnmounted(() => { wsCleanup?.(); stopProgressPolling(); groupsObserver?.discon
 .group-card-custom .btn-del:hover { color: #c0392b; }
 .empty-tip { color: #444; text-align: center; padding: 60px; }
 .groups-list { display: flex; flex-direction: column; gap: 12px; }
-<<<<<<< HEAD
 .virtual-list-sentinel { min-height: 32px; padding: 8px; text-align: center; color: #666; font-size: 12px; }
-=======
 .groups-list > .group-card { content-visibility: auto; contain-intrinsic-size: 420px; }
 .group-skeleton { min-height: 230px; background: linear-gradient(90deg, #1a1a1a 25%, #242424 50%, #1a1a1a 75%); background-size: 200% 100%; animation: group-shimmer 1.4s infinite; }
 @keyframes group-shimmer { to { background-position: -200% 0; } }
->>>>>>> 61135b7b1a047a829268c3428dbb1bedbf8e0d64
 .group-card { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 12px; padding: 18px; }
 .group-card-custom { background: #f5f3ef; border: 2px solid #fb923c; color: #1a1a1a; }
 .group-card-custom .group-label { color: #111; }

@@ -9,6 +9,11 @@
         </select>
       </div>
     </div>
+    <div v-if="loadError" class="inline-error" role="alert">
+      <span>{{ loadError }}</span>
+      <button class="btn-retry-inline" @click="load">重试</button>
+    </div>
+    <div v-if="loading" class="inline-loading" role="status">正在加载录像…</div>
 
     <!-- Stats panel -->
     <div class="stats-panel">
@@ -82,6 +87,9 @@
       </button>
     </div>
 
+    <div v-if="loadError" class="load-error" role="alert">
+      <span>{{ loadError }}</span><button class="btn-retry-load" @click="load">重试</button>
+    </div>
     <div v-if="loading" class="history-skeleton" aria-label="加载中"></div>
     <table v-else class="recordings-table">
       <thead>
@@ -219,6 +227,8 @@ const clipVariantsLoading = reactive(new Set())
 const sortField = ref('start_time')
 const sortOrder = ref('desc')
 let wsCleanup = null
+const loading = ref(false)
+const loadError = ref('')
 
 const shortError = (msg) => msg && msg.length > 40 ? msg.slice(0, 40) + '…' : msg
 
@@ -294,11 +304,11 @@ const isBusy = computed(() =>
 )
 
 async function loadStats() {
-  try { stats.value = await getStats() } catch {}
+  try { stats.value = await getStats() } catch (error) { show(error.message || '统计信息加载失败', 'error') }
 }
 
 async function loadClipJobs() {
-  try { clipJobs.value = await getClipJobs() } catch {}
+  try { clipJobs.value = await getClipJobs() } catch (error) { show(error.message || '作业进度加载失败', 'error') }
 }
 
 function toggleFilter(val) {
@@ -327,6 +337,7 @@ const fmtTime = (s) => s ? new Date(s).toLocaleString('zh-CN') : '—'
 
 async function load() {
   loading.value = true
+  loadError.value = ''
   try {
     const [data, r] = await Promise.all([
       getAllRecordings(page.value, filterStatus.value, sortField.value, sortOrder.value),
@@ -339,6 +350,9 @@ async function load() {
     await Promise.all([loadStats(), loadClipJobs()])
     const visibleIds = new Set(data.items.map(recording => recording.id))
     clipVariants.value = Object.fromEntries(Object.entries(clipVariants.value).filter(([id]) => visibleIds.has(Number(id))))
+  } catch (error) {
+    loadError.value = error.message || '录像历史加载失败'
+    show(loadError.value, 'error')
   } finally {
     loading.value = false
   }
@@ -465,6 +479,9 @@ onUnmounted(() => {
 .transcribe-fail-cell { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .error-tip { font-size: 11px; color: #e07060; background: rgba(200,60,30,0.12); border: 1px solid rgba(200,60,30,0.25); border-radius: 4px; padding: 2px 6px; cursor: help; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+.inline-error { display:flex; align-items:center; justify-content:space-between; gap:12px; margin:-8px 0 14px; padding:10px 12px; border:1px solid rgba(254,44,85,.35); border-radius:7px; background:rgba(254,44,85,.1); color:#fe7b96; font-size:12px; }
+.btn-retry-inline { border:1px solid rgba(254,44,85,.5); border-radius:5px; padding:4px 10px; background:transparent; color:#fe7b96; cursor:pointer; }
+.inline-loading { margin:-8px 0 14px; color:#aaa; font-size:12px; }
 .toolbar h2 { font-size: 16px; font-weight: 600; }
 .toolbar-right { display: flex; gap: 10px; align-items: center; }
 .room-filter { background: #1a1a1a; border: 1px solid #333; color: #ccc; padding: 7px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; }
