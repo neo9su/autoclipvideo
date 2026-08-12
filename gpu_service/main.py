@@ -936,10 +936,162 @@ _clip_jobs = _load_clip_jobs()
 _tts_jobs = _load_tts_jobs()
 _voice_refs = _load_voice_refs()
 
-_JOB_TTL_SECONDS = 24 * 3600  # 24 hours
-_STALE_JOB_SECONDS = 3600  # 1 hour — evict stuck processing jobs
-_TTS_TIMEOUT = 1800  # 30 min — CosyVoice2 synthesis timeout
-_TRANSCRIBE_TIMEOUT = 900  # 15 min — Whisper transcription timeout
+# Disk space management thresholds
+DISK_QUOTA_GB = float(os.environ.get("DISK_QUOTA_GB", "100"))      # max data files (clips, audio_concat, etc.)
+DISK_GUARD_GB = float(os.environ.get("DISK_GUARD_GB", "10"))       # safety margin below quota for incoming uploads
+BATCH_UPLOAD_LIMIT_GB = float(os.environ.get("BATCH_UPLOAD_LIMIT_GB", "80"))  # max upload batch size
+
+def _get_disk_free_gb() -> float:
+    """Return free space on STORAGE_DIR drive in GB."""
+    try:
+        if os.name == "nt":
+            import ctypes
+            remaining_bytes = ctypes.c_ulonglong(0)
+            result = ctypes.windll.kernel32.GetDiskFreeSpaceExW(
+                ctypes.c_wchar_p(STORAGE_DIR[:2]),
+                None, None, ctypes.pointer(remaining_bytes)
+            )
+            if result:
+                return remaining_bytes.value / (1024 ** 3)
+        else:
+            stat = os.statvfs(STORAGE_DIR)
+            return (stat.f_bavail * stat.f_frsize) / (1024 ** 3)
+    except Exception:
+        pass
+    return 0.0
+
+
+def _get_data_dir_size_gb() -> float:
+    """Return size of all processed output directories in GB."""
+    total = 0.0
+    output_dirs = ["clips", "concat", "tts_outputs", "director", "classic_concat", "audio_concat", "voice_refs"]
+    for d in output_dirs:
+        dir_path = os.path.join(STORAGE_DIR, d)
+        if os.path.isdir(dir_path):
+            for dp, _, files in os.walk(dir_path):
+                for f in files:
+                    fp = os.path.join(dp, f)
+                    try:
+                        total += os.path.getsize(fp)
+                    except OSError:
+                        pass
+    return total / (1024 ** 3)
+
+
+async def _disk_guard_loop():
+    """Periodically clean old job outputs to stay within disk quota.
+    
+    Cleans completed/errored job directories when free space drops below threshold.
+    Runs every 10 minutes.
+    """
+    while True:
+        await asyncio.sleep(600)  # every 10 minutes
+        try:
+            free_gb = _get_disk_free_gb()
+            data_gb = _get_data_dir_size_gb()
+            logger.info(f"Disk guard: free={free_gb:.1f}GB data={data_gb:.1f}GB quota={DISK_QUOTA_GB}GB")
+            
+            if free_gb < DISK_QUOTA_GB - DISK_GUARD_GB or data_gb > DISK_QUOTA_GB:
+                logger.warning(f"Disk space low! Cleaning old job outputs...")
+                await _cleanup_old_jobs()
+        except Exception as e:
+            logger.error(f"Disk guard error: {e}")
+
+
+async def _cleanup_old_jobs():
+    """Clean up completed/errored job output directories and in-memory state."""
+    import shutil
+    freed_bytes = 0
+    deleted_dirs = 0
+    
+    # Clean clip job outputs
+    for jid, job in list(_clip_jobs.items()):
+        if job.get("status") not in ("done", "error"):
+            continue
+        out_path = job.get("output_path")
+        if out_path and os.path.isdir(os.path.dirname(out_path)):
+            dir_path = os.path.dirname(out_path)
+            try:
+                freed_bytes += sum(
+                    os.path.getsize(os.path.join(dp, f))
+                    for dp, _, files in os.walk(dir_path)
+                    for f in files if os.path.exists(os.path.join(dp, f))
+                )
+                shutil.rmtree(dir_path, ignore_errors=True)
+                deleted_dirs += 1
+            except Exception:
+                pass
+        _clip_jobs.pop(jid, None)
+    
+    # Clean concat job outputs
+    for jid, job in list(_concat_jobs.items()):
+        if job.get("status") not in ("done", "error"):
+            continue
+        out_path = job.get("output_path")
+        if out_path and os.path.isfile(out_path):
+            try:
+                freed_bytes += os.path.getsize(out_path)
+                os.remove(out_path)
+                deleted_dirs += 1
+            except Exception:
+                pass
+        _concat_jobs.pop(jid, None)
+    
+    # Clean TTS outputs
+    tts_dir = os.path.join(STORAGE_DIR, "tts_outputs")
+    for jid, job in list(_tts_jobs.items()):
+        if job.get("status") not in ("done", "error"):
+            continue
+        out_path = job.get("output_path")
+        if out_path and os.path.isfile(out_path):
+            try:
+                freed_bytes += os.path.getsize(out_path)
+                os.remove(out_path)
+                deleted_dirs += 1
+            except Exception:
+                pass
+        _tts_jobs.pop(jid, None)
+    
+    # Clean director temp dirs
+    active_director_ids = {jid for jid, j in _director_jobs.items() if j.get("status") not in ("done", "error")}
+    director_base = os.path.join(STORAGE_DIR, "director")
+    if os.path.isdir(director_base):
+        for entry in os.listdir(director_base):
+            entry_path = os.path.join(director_base, entry)
+            if not os.path.isdir(entry_path) or entry in active_director_ids:
+                continue
+            try:
+                freed_bytes += sum(
+                    os.path.getsize(os.path.join(dp, f))
+                    for dp, _, files in os.walk(entry_path)
+                    for f in files if os.path.exists(os.path.join(dp, f))
+                )
+                shutil.rmtree(entry_path, ignore_errors=True)
+                deleted_dirs += 1
+            except Exception:
+                pass
+    
+    # Clean classic_concat temp dirs
+    active_classic_ids = {jid for jid, j in _classic_concat_jobs.items() if j.get("status") not in ("done", "error")}
+    classic_base = os.path.join(STORAGE_DIR, "classic_concat")
+    if os.path.isdir(classic_base):
+        for entry in os.listdir(classic_base):
+            entry_path = os.path.join(classic_base, entry)
+            if not os.path.isdir(entry_path) or entry in active_classic_ids:
+                continue
+            try:
+                freed_bytes += sum(
+                    os.path.getsize(os.path.join(dp, f))
+                    for dp, _, files in os.walk(entry_path)
+                    for f in files if os.path.exists(os.path.join(dp, f))
+                )
+                shutil.rmtree(entry_path, ignore_errors=True)
+                deleted_dirs += 1
+            except Exception:
+                pass
+    
+    if deleted_dirs > 0:
+        logger.info(f"Disk cleanup: deleted {deleted_dirs} dirs, freed {freed_bytes / 1024**3:.1f}GB")
 
 
 async def _auto_cleanup_loop():
@@ -974,6 +1126,7 @@ async def _auto_cleanup_loop():
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     asyncio.create_task(_auto_cleanup_loop())
+    asyncio.create_task(_disk_guard_loop())  # Start disk space monitoring
     # CosyVoice2 model is loaded lazily on first TTS job (model takes ~30s to load).
     yield
 
