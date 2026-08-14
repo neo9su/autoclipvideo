@@ -760,7 +760,7 @@ async def _do_edit(recording_id: int, mp4_path: str, srt_path: str, clip_duratio
                     "SELECT value FROM settings WHERE key = 'clip_engine'"
                 ) as cur:
                     row = await cur.fetchone()
-            if row and row["value"] in ("legacy", "v2"):
+            if row and row["value"] in ("legacy", "v2", "realistic", "conservative"):
                 clip_engine = row["value"]
         except Exception as e:
             logger.warning(f"Could not read clip_engine setting: {e}")

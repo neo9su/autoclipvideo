@@ -54,6 +54,10 @@ def _pick_music() -> Optional[str]:
 CLIP_MIN = 28.0   # seconds (业务最低时长；28-30s 由发布前补帧补音频兜底)
 CLIP_MAX = 60.0   # seconds（抖音完播率最佳上限 60s，>60s 完播率明显下降）
 MAX_CLIP_SEGMENTS = 50  # cap to avoid ffmpeg resource exhaustion
+REALISTIC_MIN_SEGMENTS = 4
+REALISTIC_MAX_SEGMENTS = 8
+REALISTIC_TARGET_MIN = 45.0
+REALISTIC_TARGET_MAX = 60.0
 SEG_PAD = 0.0     # no padding — avoids duplicate audio at segment boundaries
 
 # v2 引擎参数（发型边界识别模式）
@@ -553,7 +557,7 @@ _ANIM_KW = r"{\fad(150,100)\t(0,200,\fscx112\fscy112)\t(200,400,\fscx100\fscy100
 _ASS_HEADER: str = _make_ass_header()
 
 
-def build_ass(selected: List[Seg], all_segs: List[Seg]) -> str:
+def build_ass(selected: List[Seg], all_segs: List[Seg], realistic: bool = False) -> str:
     """
     Generate ASS subtitle string with 3-layer gradient border.
 
@@ -595,7 +599,7 @@ def build_ass(selected: List[Seg], all_segs: List[Seg]) -> str:
             t0 = offset + (ov_start - sel_seg.start)
             t1 = offset + (ov_end   - sel_seg.start)
             raw_text = _truncate(srt.text)
-            annotated, has_kw = _annotate_text(raw_text)
+            annotated, has_kw = ((raw_text, False) if realistic else _annotate_text(raw_text))
             anim = _ANIM_KW if has_kw else _ANIM_STYLES[line_idx % len(_ANIM_STYLES)]
             line_idx += 1
             ts0, ts1 = _sec_to_ass(t0), _sec_to_ass(t1)
@@ -2454,17 +2458,85 @@ def _select_realistic_template(valid: List[Seg], clip_min: float, clip_max: floa
     return selected, explanation
 
 
+def _select_realistic_window(
+    valid: List[Seg],
+    clip_min: float = REALISTIC_TARGET_MIN,
+    clip_max: float = REALISTIC_TARGET_MAX,
+    source_window: Optional[dict] = None,
+) -> tuple[List[Seg], dict]:
+    """Choose a small chronological run from one source window.
+
+    Unlike the legacy narrative selector this never assembles distant roles.  It
+    evaluates contiguous slices of the time-ordered scene candidates and keeps
+    the best slice which is close to the 45--60 second realistic target.
+    """
+    candidates = sorted((segment for segment in valid if segment.valid), key=lambda item: item.start)
+    if source_window:
+        start_limit = float(source_window.get("start_sec", 0.0))
+        end_limit = float(source_window.get("end_sec", float("inf")))
+        candidates = [s for s in candidates if s.start >= start_limit and s.end <= end_limit]
+    if not candidates:
+        return [], {"clip_style": "realistic", "source_window": source_window, "selection_reasons": ["no valid candidates"]}
+
+    target_min = max(REALISTIC_TARGET_MIN, clip_min)
+    target_max = min(REALISTIC_TARGET_MAX, max(target_min, clip_max))
+    best: Optional[tuple[float, List[Seg]]] = None
+    for left in range(len(candidates)):
+        duration = 0.0
+        for right in range(left, min(len(candidates), left + REALISTIC_MAX_SEGMENTS)):
+            if right > left and candidates[right].start - candidates[right - 1].end > 6.0:
+                break
+            duration += candidates[right].duration
+            count = right - left + 1
+            if count < REALISTIC_MIN_SEGMENTS:
+                continue
+            if duration < target_min:
+                continue
+            if duration > target_max and count > REALISTIC_MIN_SEGMENTS:
+                break
+            window = candidates[left:right + 1]
+            score = sum(max(0.0, item.score) for item in window)
+            score += 12.0 if duration <= target_max else -8.0
+            score -= abs(duration - (target_min + target_max) / 2.0) * 0.15
+            if best is None or score > best[0]:
+                best = (score, window)
+
+    if best is None:
+        # Short recordings are handled conservatively: take one chronological
+        # run, but never manufacture fragments or reorder the source.
+        chosen = candidates[:REALISTIC_MAX_SEGMENTS]
+    else:
+        chosen = best[1]
+    selected_window = {
+        "start_sec": chosen[0].start,
+        "end_sec": chosen[-1].end,
+        "duration_sec": round(sum(item.duration for item in chosen), 3),
+    }
+    explanation = {
+        "clip_style": "realistic",
+        "source_window": source_window or selected_window,
+        "selected_window": selected_window,
+        "selection_reasons": ["continuous chronological window", "limited to 4-8 scene candidates"],
+        "missing_roles": [],
+        "rejected_summary": {},
+    }
+    return chosen, explanation
+
+
 def _write_clip_explanation(out_path: str, explanation: dict, selected: List[Seg]) -> None:
     """Persist explainability next to the clip without changing media or audio."""
     payload = dict(explanation)
+    payload.setdefault("clip_style", "legacy")
+    payload["engine"] = "gpu_clip_job"
     payload["audio_policy"] = "preserve_original"
     payload["narration_policy"] = "no_generated_narration_or_tts"
     payload["selected_segments"] = [
         {"idx": segment.idx, "start": segment.start, "end": segment.end,
-         "role": segment.template_role or None, "text": segment.text}
+         "role": segment.template_role or None, "reason": segment.reject_reason or "selected",
+         "score": round(segment.score, 3), "text": segment.text}
         for segment in selected
     ]
-    explanation_path = os.path.splitext(out_path)[0] + "_explanation.json"
+    explanation_path = os.path.splitext(out_path)[0] + "_clip.json"
     with open(explanation_path, "w", encoding="utf-8") as explanation_file:
         json.dump(payload, explanation_file, ensure_ascii=False, indent=2)
 
@@ -2691,6 +2763,7 @@ async def _edit_via_gpu(
     out_path: str,
     on_progress=None,
     mp4_path: Optional[str] = None,   # local path; enables auto-upload on 404
+    realistic: bool = False,
 ) -> Optional[str]:
     require_remote_gpu("clip generation")
     """
@@ -2699,7 +2772,7 @@ async def _edit_via_gpu(
     uploaded automatically and the job is retried.
     Returns out_path on success, None on failure.
     """
-    ass_content = build_ass(selected, segs)
+    ass_content = build_ass(selected, segs, realistic=realistic)
     best_seg = max(selected, key=lambda s: s.score) if any(s.score > 0 for s in selected) \
                else selected[max(0, len(selected) // 4)]
 
@@ -2725,6 +2798,7 @@ async def _edit_via_gpu(
             }
             for s in selected
         ],
+        "preserve_original_audio": realistic,
         "ass_content": ass_content,
         "thumb_seek": best_seg.start + 1.0,
     }
@@ -3087,8 +3161,8 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
     if feedback:
         hints = await _feedback_to_hints(srt_path, feedback)
         _apply_hints(segs, hints)
-        c_min = hints.get("clip_min_override") or ((clip_duration * 0.85) if clip_duration else (CLIP_MIN_V2 if clip_engine == "v2" else CLIP_MIN))
-        c_max = hints.get("clip_max_override") or (clip_duration if clip_duration else (CLIP_MAX_V2 if clip_engine == "v2" else CLIP_MAX))
+        c_min = hints.get("clip_min_override") or ((clip_duration * 0.85) if clip_duration else (CLIP_MIN_V2 if clip_engine == "v2" else (REALISTIC_TARGET_MIN if clip_engine in ("realistic", "conservative") else CLIP_MIN)))
+        c_max = hints.get("clip_max_override") or (clip_duration if clip_duration else (CLIP_MAX_V2 if clip_engine == "v2" else (REALISTIC_TARGET_MAX if clip_engine in ("realistic", "conservative") else CLIP_MAX)))
         if hints.get("prefer_longer"):
             c_min = max(c_min, CLIP_MIN * 1.3)
     else:
@@ -3104,8 +3178,17 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
     c_max = max(c_max, c_min)
 
     # Select clips
-    if clip_engine == "realistic":
-        selected, template_explanation = _select_realistic_template(segs, c_min, c_max)
+    if clip_engine in ("realistic", "conservative"):
+        try:
+            from wig_boundary import detect_boundaries, pick_best_window
+            boundaries = await detect_boundaries(srt_path)
+            source_window = pick_best_window(boundaries, min_duration=45.0)
+        except Exception as error:
+            logger.warning(f"[realistic] Boundary detection skipped: {error}")
+            source_window = None
+        selected, template_explanation = _select_realistic_window(
+            segs, c_min, c_max, source_window=source_window
+        )
         for segment in selected:
             segment.transition = "cut:0"
     else:
@@ -3161,6 +3244,7 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
                 gpu_result = await _edit_via_gpu(
                     mp4_filename, room_id, selected, segs, out_path, on_progress,
                     mp4_path=mp4_path,
+                    realistic=clip_engine in ("realistic", "conservative"),
                 )
                 if gpu_result:
                     # GPU succeeded — generate thumbnail locally from original mp4
@@ -3268,18 +3352,28 @@ async def edit_recording_multi(
     except Exception as e:
         logger.warning(f"LLM text scoring skipped: {e}")
 
-    # v2: 发型边界识别
-    if clip_engine == "v2":
+    source_window = None
+    # v2 and realistic: constrain candidates to one detected wig window.
+    if clip_engine in ("v2", "realistic", "conservative"):
         try:
             from wig_boundary import detect_boundaries, pick_best_window
             boundaries = await detect_boundaries(srt_path)
-            window = pick_best_window(boundaries)
+            window = pick_best_window(
+                boundaries,
+                min_duration=45.0 if clip_engine in ("realistic", "conservative") else 120.0,
+            )
             if window:
-                segs = [s for s in segs if s.start >= window["start_sec"] and s.end <= window["end_sec"]]
-                if not segs:
-                    logger.warning("[v2 multi] No segments in wig window, falling back to all segs")
+                source_window = window
+                in_window = [
+                    s for s in segs
+                    if s.start >= window["start_sec"] and s.end <= window["end_sec"]
+                ]
+                if in_window:
+                    segs = in_window
+                else:
+                    logger.warning(f"[{clip_engine} multi] No segments in wig window, falling back to all segs")
         except Exception as e:
-            logger.warning(f"[v2 multi] Boundary detection error: {e}")
+            logger.warning(f"[{clip_engine} multi] Boundary detection error: {e}")
 
     # Apply feedback hints if provided
     if feedback:
@@ -3289,6 +3383,9 @@ async def edit_recording_multi(
     if clip_engine == "v2":
         c_min = clip_duration * 0.85 if clip_duration else CLIP_MIN_V2
         c_max = clip_duration if clip_duration else CLIP_MAX_V2
+    elif clip_engine in ("realistic", "conservative"):
+        c_min = clip_duration * 0.85 if clip_duration else REALISTIC_TARGET_MIN
+        c_max = clip_duration if clip_duration else REALISTIC_TARGET_MAX
     else:
         c_min = (clip_duration * 0.85) if clip_duration else CLIP_MIN
         c_max = clip_duration if clip_duration else CLIP_MAX
@@ -3315,18 +3412,20 @@ async def edit_recording_multi(
 
     for k in range(count):
         if k == 0:
-            if clip_engine == "realistic":
-                selected, template_explanation = _select_realistic_template(
-                    [s for s in segs if s.valid], c_min, c_max
+            if clip_engine in ("realistic", "conservative"):
+                selected, template_explanation = _select_realistic_window(
+                    [s for s in segs if s.valid], c_min, c_max,
+                    source_window=source_window,
                 )
                 for segment in selected:
                     segment.transition = "cut:0"
             else:
                 selected = _select_from_valid([s for s in segs if s.valid], c_min, c_max)
         else:
-            if clip_engine == "realistic":
-                selected, template_explanation = _select_realistic_template(
-                    [s for s in segs if s.valid and id(s) not in exclude_ids], c_min, c_max
+            if clip_engine in ("realistic", "conservative"):
+                selected, template_explanation = _select_realistic_window(
+                    [s for s in segs if s.valid and id(s) not in exclude_ids], c_min, c_max,
+                    source_window=source_window,
                 )
                 for segment in selected:
                     segment.transition = "cut:0"
@@ -3368,6 +3467,7 @@ async def edit_recording_multi(
                 gpu_result = await _edit_via_gpu(
                     mp4_filename, _room_id_v, selected, segs, out_path, on_progress,
                     mp4_path=mp4_path,
+                    realistic=clip_engine in ("realistic", "conservative"),
                 )
                 if gpu_result:
                     try:
