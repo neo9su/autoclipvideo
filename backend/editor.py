@@ -2484,6 +2484,8 @@ def _select_realistic_window(
     for left in range(len(candidates)):
         duration = 0.0
         for right in range(left, min(len(candidates), left + REALISTIC_MAX_SEGMENTS)):
+            if right > left and candidates[right].start - candidates[right - 1].end > 6.0:
+                break
             duration += candidates[right].duration
             count = right - left + 1
             if count < REALISTIC_MIN_SEGMENTS:
@@ -3350,18 +3352,28 @@ async def edit_recording_multi(
     except Exception as e:
         logger.warning(f"LLM text scoring skipped: {e}")
 
-    # v2: 发型边界识别
-    if clip_engine == "v2":
+    source_window = None
+    # v2 and realistic: constrain candidates to one detected wig window.
+    if clip_engine in ("v2", "realistic", "conservative"):
         try:
             from wig_boundary import detect_boundaries, pick_best_window
             boundaries = await detect_boundaries(srt_path)
-            window = pick_best_window(boundaries)
+            window = pick_best_window(
+                boundaries,
+                min_duration=45.0 if clip_engine in ("realistic", "conservative") else 120.0,
+            )
             if window:
-                segs = [s for s in segs if s.start >= window["start_sec"] and s.end <= window["end_sec"]]
-                if not segs:
-                    logger.warning("[v2 multi] No segments in wig window, falling back to all segs")
+                source_window = window
+                in_window = [
+                    s for s in segs
+                    if s.start >= window["start_sec"] and s.end <= window["end_sec"]
+                ]
+                if in_window:
+                    segs = in_window
+                else:
+                    logger.warning(f"[{clip_engine} multi] No segments in wig window, falling back to all segs")
         except Exception as e:
-            logger.warning(f"[v2 multi] Boundary detection error: {e}")
+            logger.warning(f"[{clip_engine} multi] Boundary detection error: {e}")
 
     # Apply feedback hints if provided
     if feedback:
@@ -3369,8 +3381,11 @@ async def edit_recording_multi(
         _apply_hints(segs, hints)
 
     if clip_engine == "v2":
-        c_min = clip_duration * 0.85 if clip_duration else (CLIP_MIN_V2 if clip_engine == "v2" else (REALISTIC_TARGET_MIN if clip_engine in ("realistic", "conservative") else CLIP_MIN))
-        c_max = clip_duration if clip_duration else (CLIP_MAX_V2 if clip_engine == "v2" else (REALISTIC_TARGET_MAX if clip_engine in ("realistic", "conservative") else CLIP_MAX))
+        c_min = clip_duration * 0.85 if clip_duration else CLIP_MIN_V2
+        c_max = clip_duration if clip_duration else CLIP_MAX_V2
+    elif clip_engine in ("realistic", "conservative"):
+        c_min = clip_duration * 0.85 if clip_duration else REALISTIC_TARGET_MIN
+        c_max = clip_duration if clip_duration else REALISTIC_TARGET_MAX
     else:
         c_min = (clip_duration * 0.85) if clip_duration else CLIP_MIN
         c_max = clip_duration if clip_duration else CLIP_MAX
@@ -3399,7 +3414,8 @@ async def edit_recording_multi(
         if k == 0:
             if clip_engine in ("realistic", "conservative"):
                 selected, template_explanation = _select_realistic_window(
-                    [s for s in segs if s.valid], c_min, c_max
+                    [s for s in segs if s.valid], c_min, c_max,
+                    source_window=source_window,
                 )
                 for segment in selected:
                     segment.transition = "cut:0"
@@ -3408,7 +3424,8 @@ async def edit_recording_multi(
         else:
             if clip_engine in ("realistic", "conservative"):
                 selected, template_explanation = _select_realistic_window(
-                    [s for s in segs if s.valid and id(s) not in exclude_ids], c_min, c_max
+                    [s for s in segs if s.valid and id(s) not in exclude_ids], c_min, c_max,
+                    source_window=source_window,
                 )
                 for segment in selected:
                     segment.transition = "cut:0"

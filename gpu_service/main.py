@@ -577,7 +577,14 @@ async def _nvenc_xfade_merge(seg_files_with_dur: list, out_dir: str):
     return chunks[0][0] if chunks else None
 
 
-async def _do_clip_job(job_id: str, mp4_path: str, segments: list, ass_content: str, thumb_seek: float):
+async def _do_clip_job(
+    job_id: str,
+    mp4_path: str,
+    segments: list,
+    ass_content: str,
+    thumb_seek: float,
+    preserve_original_audio: bool = False,
+):
     """Full NVENC clip pipeline: preprocess → xfade merge → subtitle burn → thumbnail."""
     out_dir = os.path.join(STORAGE_DIR, "clips", job_id)
     os.makedirs(out_dir, exist_ok=True)
@@ -648,6 +655,8 @@ async def _do_clip_job(job_id: str, mp4_path: str, segments: list, ass_content: 
         final_out = os.path.join(out_dir, "clip.mp4")
 
         audio_filter = (
+            "[0:a]aformat=sample_fmts=fltp:channel_layouts=stereo[aout]"
+            if preserve_original_audio else
             "[0:a]acompressor=threshold=-25dB:ratio=3:attack=5:release=100:makeup=4dB,"
             "aformat=sample_fmts=fltp:channel_layouts=stereo[aout]"
         )
@@ -709,9 +718,19 @@ async def _do_clip_job(job_id: str, mp4_path: str, segments: list, ass_content: 
         _update_clip_job(job_id, status="error", error=str(e))
 
 
-async def _run_clip_job(job_id: str, mp4_path: str, segments: list, ass_content: str, thumb_seek: float):
+async def _run_clip_job(
+    job_id: str,
+    mp4_path: str,
+    segments: list,
+    ass_content: str,
+    thumb_seek: float,
+    preserve_original_audio: bool = False,
+):
     async with _clip_sem:
-        await _do_clip_job(job_id, mp4_path, segments, ass_content, thumb_seek)
+        await _do_clip_job(
+            job_id, mp4_path, segments, ass_content, thumb_seek,
+            preserve_original_audio=preserve_original_audio,
+        )
 
 
 # ── Concat-merge job (stream-copy, no re-encode) ──────────────────────────────
@@ -1466,7 +1485,12 @@ async def create_clip_job(request: Request, req: ClipJobRequest):
         "_created_at": time.time(),
     }
     _db_insert_clip_job(job_id)
-    asyncio.create_task(_run_clip_job(job_id, mp4_path, req.segments, req.ass_content, req.thumb_seek))
+    asyncio.create_task(
+        _run_clip_job(
+            job_id, mp4_path, req.segments, req.ass_content, req.thumb_seek,
+            preserve_original_audio=req.preserve_original_audio,
+        )
+    )
     return {"job_id": job_id, "status": "queued"}
 
 

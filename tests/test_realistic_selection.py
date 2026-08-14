@@ -36,3 +36,17 @@ def test_realistic_selector_honors_detected_source_window():
     assert selected[0].start >= 30
     assert selected[-1].end <= 89
     assert explanation["source_window"]["start_sec"] == 30
+
+
+def test_realistic_selector_does_not_bridge_unrelated_timestamp_gap():
+    segments = [
+        Seg(idx=0, start=0.0, end=12.0, text="intro", score=4),
+        Seg(idx=1, start=13.0, end=25.0, text="detail", score=8),
+        Seg(idx=2, start=26.0, end=38.0, text="wearing", score=7),
+        Seg(idx=3, start=39.0, end=51.0, text="result", score=6),
+        Seg(idx=4, start=100.0, end=112.0, text="other product", score=20),
+    ]
+    selected, _ = _select_realistic_window(segments, clip_min=40.0, clip_max=60.0)
+
+    assert selected
+    assert selected[-1].end <= 51.0
