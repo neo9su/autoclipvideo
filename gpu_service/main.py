@@ -476,6 +476,28 @@ async def _nvenc_xfade_merge(seg_files_with_dur: list, out_dir: str):
 
     async def _merge2(f1: str, d1: float, f2: str, d2: float, dst: str,
                       tr: str = "slideleft", tr_dur: float = 0.35):
+        if tr in {"cut", "none"} or tr_dur <= 0:
+            ha1, ha2 = await asyncio.gather(_has_audio_stream(f1), _has_audio_stream(f2))
+            streams = int(ha1) + int(ha2)
+            if streams == 2:
+                fc = "[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[vout][aout]"
+                maps = ["-map", "[vout]", "-map", "[aout]"]
+                aargs = ["-c:a", "aac", "-b:a", "128k"]
+            elif streams:
+                fc = "[0:v][1:v]concat=n=2:v=1:a=0[vout]"
+                maps = ["-map", "[vout]", "-map", "0:a" if ha1 else "1:a"]
+                aargs = ["-c:a", "aac", "-b:a", "128k"]
+            else:
+                fc = "[0:v][1:v]concat=n=2:v=1:a=0[vout]"
+                maps = ["-map", "[vout]"]
+                aargs = ["-an"]
+            rc = await _run_ffmpeg(
+                "ffmpeg", "-y", "-i", f1, "-i", f2,
+                "-filter_complex", fc, *maps,
+                "-pix_fmt", "yuv420p", "-c:v", "h264_nvenc", "-b:v", "8M",
+                *aargs, dst,
+            )
+            return rc == 0, d1 + d2
         fade = max(0.1, min(tr_dur, 1.0))
         tr_used = tr if tr in _VALID_XFADE_CLASSIC else "slideleft"
         off = max(0.0, d1 - fade)
@@ -592,12 +614,9 @@ async def _do_clip_job(job_id: str, mp4_path: str, segments: list, ass_content: 
             fs          = audio_start - pre
             fe          = fs + padded_dur
 
-            af = (
-                f"atrim={fs:.3f}:{fe:.3f},asetpts=PTS-STARTPTS,"
-                "highpass=f=100,"
-                "afftdn=nf=-40:nt=w,"
-                "anlmdn=s=7:p=0.002:r=0.002:m=15"
-            )
+            # Keep the live recording's original audio; realistic clips must
+            # not introduce narration or alter the speaker's voice.
+            af = "atrim={:.3f}:{:.3f},asetpts=PTS-STARTPTS".format(fs, fe)
             vf = f"trim={fs:.3f}:{fe:.3f},setpts=PTS-STARTPTS,{_SF},fps=25"
 
             rc = await _run_ffmpeg(
@@ -1400,6 +1419,7 @@ class ClipJobRequest(BaseModel):
     thumb_seek: float = 5.0
     idempotency_key: str = ""
     execution_node: str = "remote-gpu"
+    preserve_original_audio: bool = False
 
 
 @app.post("/clip-jobs", status_code=201)
