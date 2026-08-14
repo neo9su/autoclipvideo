@@ -1,0 +1,22 @@
+{
+  "name": "英区女高齐刘海",
+  "source": "reference-video",
+  "duration_target": [45, 60],
+  "audio_policy": "preserve_original",
+  "transition_policy": "mostly_hard_cut",
+  "bgm_policy": "none_or_low_0.15_0.22",
+  "shot_sequence": [
+    {"role": "hook_proof", "target_sec": [0, 3], "keywords": ["风", "甩", "不掉", "防风"], "categories": ["comfort", "product"], "requires_visual_evidence": true},
+    {"role": "beauty_reveal", "target_sec": [3, 8], "keywords": ["正面", "好看", "自然", "刘海"], "categories": ["result", "product"]},
+    {"role": "realism_detail", "target_sec": [8, 18], "keywords": ["头顶", "发缝", "发根", "头皮", "蓬松"], "categories": ["detail", "product"], "requires_visual_evidence": true},
+    {"role": "styling_demo", "target_sec": [18, 35], "keywords": ["梳", "整理", "戴", "佩戴", "吹"], "categories": ["wearing", "detail"]},
+    {"role": "trust_detail", "target_sec": [35, 48], "keywords": ["防风扣", "卡扣", "勾", "内部", "固定"], "categories": ["comfort", "detail", "wearing"], "requires_visual_evidence": true},
+    {"role": "face_shape_effect", "target_sec": [48, 58], "keywords": ["侧面", "脸型", "轮廓", "效果", "整体"], "categories": ["result", "detail"]}
+  ],
+  "subtitle_overlay_policy": {
+    "position": "bottom",
+    "style": "large_white_or_yellow_with_dark_outline",
+    "overlay": "sparse_explanatory_arrows_or_stickers"
+  },
+  "disabled_items": ["generated_script", "tts", "director_voiceover", "complex_transitions", "hard_sell_ending"]
+}

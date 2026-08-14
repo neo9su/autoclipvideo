@@ -15,6 +15,7 @@ import random
 import re
 import tempfile
 import time
+import json
 
 from gpu_execution import reject_local_media, require_remote_gpu
 from dataclasses import dataclass, field
@@ -396,6 +397,7 @@ class Seg:
     motion: str = "static"      # camera motion style: push_in / push_in_strong / pull_out / pan_right / pan_left / tilt_up / tilt_down / static
     transition: str = "dissolve:0.35"  # xfade transition INTO this segment: "type:duration"
     reject_reason: str = ""     # why this seg was marked invalid (used by segment_scorer)
+    template_role: str = ""     # optional realistic reference-template role
 
     @property
     def duration(self) -> float:
@@ -2421,6 +2423,52 @@ def _select_from_valid(valid: List[Seg], clip_min: float = CLIP_MIN, clip_max: f
     return assembled
 
 
+def _select_realistic_template(valid: List[Seg], clip_min: float, clip_max: float) -> tuple[List[Seg], dict]:
+    """Select a chronological, evidence-led clip using the realistic template."""
+    from template_profiles import get_template_profile, match_template_roles
+
+    profile = get_template_profile()
+    if profile is None:
+        return _select_from_valid(valid, clip_min, clip_max), {
+            "template_name": None, "matched_roles": [], "missing_roles": [],
+            "selection_reasons": ["realistic template profile unavailable; legacy selector used"],
+        }
+    candidates = sorted(valid, key=lambda segment: segment.start)
+    _, initial_explanation = match_template_roles(candidates, profile)
+    role_ids = {item["segment_idx"] for item in initial_explanation["matched_roles"]}
+    preferred = [segment for segment in candidates if segment.idx in role_ids]
+    remainder = [segment for segment in candidates if segment.idx not in role_ids]
+    selected: List[Seg] = []
+    duration = 0.0
+    for segment in preferred + sorted(remainder, key=lambda item: item.score, reverse=True):
+        if len(selected) >= MAX_CLIP_SEGMENTS or duration >= clip_max:
+            break
+        if duration + segment.duration > clip_max + 3.0 and duration >= clip_min:
+            continue
+        selected.append(segment)
+        duration += segment.duration
+    selected = sorted(selected, key=lambda segment: segment.start)
+    if duration < clip_min:
+        selected = _select_from_valid(valid, clip_min, clip_max)
+    _, explanation = match_template_roles(selected, profile)
+    return selected, explanation
+
+
+def _write_clip_explanation(out_path: str, explanation: dict, selected: List[Seg]) -> None:
+    """Persist explainability next to the clip without changing media or audio."""
+    payload = dict(explanation)
+    payload["audio_policy"] = "preserve_original"
+    payload["narration_policy"] = "no_generated_narration_or_tts"
+    payload["selected_segments"] = [
+        {"idx": segment.idx, "start": segment.start, "end": segment.end,
+         "role": segment.template_role or None, "text": segment.text}
+        for segment in selected
+    ]
+    explanation_path = os.path.splitext(out_path)[0] + "_explanation.json"
+    with open(explanation_path, "w", encoding="utf-8") as explanation_file:
+        json.dump(payload, explanation_file, ensure_ascii=False, indent=2)
+
+
 def _expand_to_meet_minimum(
     segs: List[Seg],
     valid: List[Seg],
@@ -3056,7 +3104,18 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
     c_max = max(c_max, c_min)
 
     # Select clips
-    selected = select_clips(segs, clip_min=c_min, clip_max=c_max)
+    if clip_engine == "realistic":
+        selected, template_explanation = _select_realistic_template(segs, c_min, c_max)
+        for segment in selected:
+            segment.transition = "cut:0"
+    else:
+        selected = select_clips(segs, clip_min=c_min, clip_max=c_max)
+        template_explanation = {
+            "template_name": None,
+            "matched_roles": [],
+            "missing_roles": [],
+            "selection_reasons": ["legacy/v2 selector retained"],
+        }
     if not selected:
         logger.warning(f"No valid clips selected for {mp4_path}")
         return None
@@ -3117,6 +3176,7 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
                     except Exception as e:
                         logger.warning(f"Thumbnail prepend skipped (GPU path): {e}")
                     size_mb = os.path.getsize(out_path) / 1024 / 1024
+                    _write_clip_explanation(out_path, template_explanation, selected)
                     logger.info(f"Clip ready (GPU): {out_path} ({size_mb:.1f} MB, {total_dur:.1f}s)")
                     return out_path
                 raise RuntimeError("remote GPU clip job returned no output")
@@ -3138,6 +3198,7 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
         except Exception as e:
             logger.warning(f"Thumbnail prepend skipped: {e}")
         size_mb = os.path.getsize(out_path) / 1024 / 1024
+        _write_clip_explanation(out_path, template_explanation, selected)
         logger.info(f"Clip ready (fast-local): {out_path} ({size_mb:.1f} MB, {total_dur:.1f}s)")
         return out_path
     return None
@@ -3245,12 +3306,32 @@ async def edit_recording_multi(
 
     results: List[str] = []
     exclude_ids: set = set()
+    template_explanation = {
+        "template_name": None,
+        "matched_roles": [],
+        "missing_roles": [],
+        "selection_reasons": ["legacy/v2 selector retained"],
+    }
 
     for k in range(count):
         if k == 0:
-            selected = _select_from_valid([s for s in segs if s.valid], c_min, c_max)
+            if clip_engine == "realistic":
+                selected, template_explanation = _select_realistic_template(
+                    [s for s in segs if s.valid], c_min, c_max
+                )
+                for segment in selected:
+                    segment.transition = "cut:0"
+            else:
+                selected = _select_from_valid([s for s in segs if s.valid], c_min, c_max)
         else:
-            selected = select_clips_variant(segs, exclude_ids, c_min, c_max, seed=k)
+            if clip_engine == "realistic":
+                selected, template_explanation = _select_realistic_template(
+                    [s for s in segs if s.valid and id(s) not in exclude_ids], c_min, c_max
+                )
+                for segment in selected:
+                    segment.transition = "cut:0"
+            else:
+                selected = select_clips_variant(segs, exclude_ids, c_min, c_max, seed=k)
 
         if not selected:
             logger.warning(f"No clips selected for variant {k+1}")
@@ -3299,6 +3380,7 @@ async def edit_recording_multi(
                     except Exception as te:
                         logger.warning(f"Thumbnail prepend skipped (GPU variant {k+1}): {te}")
                     size_mb = os.path.getsize(out_path) / 1024 / 1024
+                    _write_clip_explanation(out_path, template_explanation, selected)
                     logger.info(f"Variant {k+1} ready (NVENC): {out_path} ({size_mb:.1f} MB)")
                     results.append(out_path)
                     gpu_used = True
@@ -3328,6 +3410,7 @@ async def edit_recording_multi(
             except Exception as e:
                 logger.warning(f"Thumbnail prepend skipped (variant {k+1}): {e}")
             size_mb = os.path.getsize(out_path) / 1024 / 1024
+            _write_clip_explanation(out_path, template_explanation, selected)
             logger.info(f"Variant {k+1} ready (fast-local): {out_path} ({size_mb:.1f} MB)")
             results.append(out_path)
         else:
