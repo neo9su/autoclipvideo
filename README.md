@@ -105,6 +105,13 @@ uvicorn main:app --host 0.0.0.0 --port 8899
 
 ## 剪辑模式
 
+通过设置表中的 `clip_engine` 选择基础剪辑引擎：`legacy`（默认）、`v2`、`realistic` 或
+`conservative`。`realistic` 与 `conservative` 是同一套保守直播剪辑流程的别名：优先
+选择一个 45–60 秒的连续窗口，保留原直播音频，使用硬切、关闭关键词弹出字幕，不走
+导演版/TTS 配音路径。生成的 MP4 旁会写入同名 `_clip.json` 解释文件，记录来源窗口和
+选段原因。单元选择路径可用 `python -m pytest tests/test_realistic_selection.py -q` 验证；
+完整 GPU 编码仍需远程 GPU 服务可用。
+
 ### 经典版
 原始直播素材 → SRT 评分选段 → xfade 合并 → 字幕 + BGM → 色调增强 + 锐化
 
