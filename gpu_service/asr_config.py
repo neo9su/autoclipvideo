@@ -39,7 +39,12 @@ def transcribe_options() -> dict:
         "condition_on_previous_text": False,
         "initial_prompt": ASR_INITIAL_PROMPT,
         "vad_filter": True,
-        "vad_parameters": ASR_VAD_PARAMETERS,
+        "vad_parameters": dict(ASR_VAD_PARAMETERS),
         "word_timestamps": True,
         "without_timestamps": False,
     }
+
+
+def get_asr_config() -> dict:
+    """Backward-compatible name for standalone GPU deployments."""
+    return transcribe_options()
