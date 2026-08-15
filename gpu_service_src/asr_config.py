@@ -5,6 +5,7 @@ the settings in one small module makes model changes auditable and gives
 operators a single rollback point.
 """
 import os
+import math
 
 ASR_MODEL = os.environ.get("ASR_MODEL", "large-v3")
 ASR_LANGUAGE = os.environ.get("ASR_LANGUAGE", "zh")
@@ -49,8 +50,10 @@ def get_asr_config() -> dict:
 
 def aligned_segment_bounds(segment: object) -> tuple[float, float]:
     """Return speech edges rather than VAD-padded segment edges when present."""
-    segment_start = float(getattr(segment, "start", 0.0))
-    segment_end = float(getattr(segment, "end", segment_start))
+    segment_start = _finite_timestamp(getattr(segment, "start", 0.0), 0.0)
+    segment_end = _finite_timestamp(getattr(segment, "end", segment_start), segment_start)
+    segment_start = max(0.0, segment_start)
+    segment_end = max(segment_start, segment_end)
     words = getattr(segment, "words", None) or ()
     valid_words = [
         word for word in words
@@ -59,4 +62,15 @@ def aligned_segment_bounds(segment: object) -> tuple[float, float]:
     ]
     if not valid_words:
         return segment_start, segment_end
-    return float(valid_words[0].start), float(valid_words[-1].end)
+    word_start = _finite_timestamp(valid_words[0].start, segment_start)
+    word_end = _finite_timestamp(valid_words[-1].end, segment_end)
+    return max(0.0, word_start), max(word_start, word_end)
+
+
+def _finite_timestamp(value: object, fallback: float) -> float:
+    """Return a finite timestamp without allowing malformed model output into SRT."""
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    return timestamp if math.isfinite(timestamp) else fallback

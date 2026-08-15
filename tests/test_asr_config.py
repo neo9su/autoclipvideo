@@ -46,3 +46,8 @@ def test_word_edges_remove_vad_padding_from_srt_cue():
 
 def test_segment_edges_are_fallback_when_word_timestamps_are_missing():
     assert aligned_segment_bounds(_Segment(2.0, 3.5)) == (2.0, 3.5)
+
+
+def test_word_edges_are_safe_for_invalid_model_timestamps():
+    segment = _Segment(-2.0, 1.0, [_Word(float("nan"), 0.8), _Word(0.4, float("inf"))])
+    assert aligned_segment_bounds(segment) == (0.0, 1.0)
