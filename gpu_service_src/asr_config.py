@@ -4,9 +4,10 @@ The GPU service is intentionally the only place where Whisper runs.  Keeping
 the settings in one small module makes model changes auditable and gives
 operators a single rollback point.
 """
+import os
 
-ASR_MODEL = "large-v3"
-ASR_LANGUAGE = "zh"
+ASR_MODEL = os.environ.get("ASR_MODEL", "large-v3")
+ASR_LANGUAGE = os.environ.get("ASR_LANGUAGE", "zh")
 ASR_INITIAL_PROMPT = (
     "这是中文直播带货口播，商品是假发。"
     "假发、刘海、鬓发、头顶、颅顶、发际线、黑长直、自然黑、方圆脸、"
@@ -19,10 +20,10 @@ ASR_INITIAL_PROMPT = (
 ASR_TRANSCRIBE_OPTIONS = {
     "language": ASR_LANGUAGE,
     "initial_prompt": ASR_INITIAL_PROMPT,
-    "beam_size": 8,
-    "best_of": 5,
+    "beam_size": int(os.environ.get("ASR_BEAM_SIZE", "8")),
+    "best_of": int(os.environ.get("ASR_BEST_OF", "5")),
     "temperature": (0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
-    "condition_on_previous_text": False,
+    "condition_on_previous_text": os.environ.get("ASR_CONDITION_ON_PREVIOUS_TEXT", "0").lower() in {"1", "true"},
     "word_timestamps": True,
     "vad_filter": True,
     "vad_parameters": {

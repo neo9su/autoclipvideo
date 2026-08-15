@@ -6,6 +6,18 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "gpu_service"))
 from asr_config import ASR_INITIAL_PROMPT, transcribe_options
 
 
+class FakeWord:
+    def __init__(self, start, end):
+        self.start = start
+        self.end = end
+
+
+class FakeSegment:
+    start = 1.0
+    end = 4.0
+    words = [FakeWord(1.4, 2.0), FakeWord(2.1, 2.8)]
+
+
 def test_mandarin_live_commerce_options_are_explicit():
     options = transcribe_options()
     assert options["language"] == "zh"
@@ -24,3 +36,9 @@ def test_retranscription_tool_is_explicitly_opt_in():
     assert "does not enqueue director" in text
     assert "mark_recording_transcribed" in text
     assert "X-Idempotency-Key" in text
+
+
+def test_gpu_srt_uses_word_timestamp_edges_when_available():
+    source = (Path(__file__).parents[1] / "gpu_service" / "main.py").read_text(encoding="utf-8")
+    assert "def _segment_bounds" in source
+    assert "_segment_bounds(seg)" in source

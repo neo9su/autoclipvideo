@@ -370,6 +370,15 @@ def _fmt_ts(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:06.3f}".replace(".", ",")
 
 
+def _segment_bounds(segment):
+    """Use word timestamps when available to keep SRT edges on speech."""
+    words = getattr(segment, "words", None) or []
+    valid = [word for word in words if word.start is not None and word.end is not None]
+    if valid:
+        return max(0.0, float(valid[0].start)), max(float(valid[0].start), float(valid[-1].end))
+    return max(0.0, float(segment.start)), max(float(segment.start), float(segment.end))
+
+
 def _do_transcribe(job_id: str):
     job = _jobs[job_id]
     mp4_path = job["mp4_path"]
@@ -395,7 +404,8 @@ def _do_transcribe(job_id: str):
         with open(srt_path, "w", encoding="utf-8") as f:
             for i, seg in enumerate(segments, 1):
                 f.write(f"{i}\n")
-                f.write(f"{_fmt_ts(seg.start)} --> {_fmt_ts(seg.end)}\n")
+                start, end = _segment_bounds(seg)
+                f.write(f"{_fmt_ts(start)} --> {_fmt_ts(end)}\n")
                 f.write(f"{seg.text.strip()}\n\n")
         job["status"] = "done"
         _db_update_job(job_id, "done")
