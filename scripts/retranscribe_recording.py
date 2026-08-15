@@ -38,7 +38,12 @@ def load_recording(recording_id: int) -> tuple[str, int]:
         ).fetchone()
     if not row:
         raise SystemExit(f"recording {recording_id} not found")
-    return row[0], row[1]
+    filename, room_id = row
+    if not filename or Path(filename).name != filename or "\x00" in filename:
+        raise SystemExit("recording has an unsafe filename")
+    if room_id is None or room_id < 1:
+        raise SystemExit("recording has an invalid room id")
+    return filename, room_id
 
 
 async def upload_and_fetch(filename: str, room_id: int, output_path: Path) -> tuple[bytes, str]:
