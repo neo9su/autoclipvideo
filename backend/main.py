@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -1936,6 +1937,58 @@ async def retranscribe_recording(recording_id: int):
         await db.commit()
     await flush_poll()
     return {"recording_id": recording_id, "status": "queued", "clip_deferred": True}
+
+
+@app.post("/api/recordings/{recording_id}/retranscribe")
+async def retranscribe_recording(recording_id: int):
+    """Queue a GPU-only ASR refresh and leave creative pipelines untouched.
+
+    The existing SRT is retained as ``.previous.srt`` until the new GPU SRT
+    is downloaded. This endpoint deliberately resets only this recording's
+    transcription/clip state; it never changes the recording's group state or
+    schedules director, creative, or Qianchuan work.
+    """
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM recordings WHERE id = ?", (recording_id,)) as cur:
+            rec = await cur.fetchone()
+    if not rec:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    recordings_dir = os.path.join(os.path.dirname(__file__), "..", "recordings")
+    filepath = os.path.join(recordings_dir, rec["filename"])
+    if not os.path.isfile(filepath):
+        raise HTTPException(status_code=404, detail="Recording file missing on disk")
+
+    srt_path = os.path.splitext(filepath)[0] + ".srt"
+    backup_path = srt_path + ".previous.srt"
+    if os.path.isfile(srt_path):
+        try:
+            shutil.copyfile(srt_path, backup_path)
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail="Could not preserve existing SRT") from exc
+
+    async with aio_connect() as db:
+        await db.execute(
+            """UPDATE recordings
+               SET transcribed = 0, synced = 0, gpu_job_id = NULL,
+                   clipped = 0, clip_filename = NULL, clip_error = NULL,
+                   transcribe_error = NULL
+               WHERE id = ?""",
+            (recording_id,),
+        )
+        await db.commit()
+
+    from comfyui_client import free_vram
+    from transcribe import flush_poll
+    await free_vram()
+    await flush_poll()
+    return {
+        "recording_id": recording_id,
+        "status": "queued",
+        "srt_backup": os.path.basename(backup_path) if os.path.isfile(backup_path) else None,
+        "creative_pipelines_triggered": False,
+    }
 
 
 @app.post("/api/recordings/clip-missing")

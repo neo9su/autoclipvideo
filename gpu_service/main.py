@@ -48,6 +48,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 import shutil as _shutil
+from asr_config import ASR_CONFIG
 
 _DEFAULT_STORAGE = (
     r"F:\douyin_recordings" if os.name == "nt" else "/data/douyin-recordings"
@@ -113,18 +114,6 @@ _cosyvoice = None       # Singleton CosyVoice2 model
 _gpu_sem: asyncio.Semaphore = asyncio.Semaphore(1)
 # NVENC concurrency: 2 concurrent — NVENC is a dedicated hardware unit, no VRAM cost
 _clip_sem: asyncio.Semaphore = asyncio.Semaphore(2)
-
-# Mandarin live-commerce ASR profile.  large-v3 fits the 4080 SUPER with one
-# transcription worker and is materially more accurate than the old default
-# profile.  Keep this in code so deployments are auditable and rollback is a
-# one-line change (restore the previous arguments in _do_transcribe).
-ASR_MODEL_NAME = os.environ.get("ASR_MODEL_NAME", "large-v3")
-ASR_LANGUAGE = "zh"
-ASR_BEAM_SIZE = 8
-ASR_INITIAL_PROMPT = (
-    "这是中文普通话电商直播。假发、刘海、鬓发、头顶、颅顶、发际线、黑长直、"
-    "自然黑、方圆脸、显脸小、真人发、高温丝。"
- )
 
 # ── Clip pipeline constants ───────────────────────────────────────────────────
 CLIP_W    = 1080
@@ -365,7 +354,9 @@ def _get_model():
     global _model
     if _model is None:
         from faster_whisper import WhisperModel
-        _model = WhisperModel(ASR_MODEL_NAME, device="cuda", compute_type="float16")
+        # large-v3 is intentional: realistic/conservative clips retain live
+        # audio, so transcription quality is more important than throughput.
+        _model = WhisperModel(ASR_CONFIG.model_name, device="cuda", compute_type="float16")
     return _model
 
 
@@ -383,21 +374,7 @@ def _do_transcribe(job_id: str):
     try:
         model = _get_model()
         with _SuppressStdout():
-            segments, info = model.transcribe(
-                mp4_path,
-                language=ASR_LANGUAGE,
-                beam_size=ASR_BEAM_SIZE,
-                initial_prompt=ASR_INITIAL_PROMPT,
-                condition_on_previous_text=False,
-                temperature=(0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
-                word_timestamps=True,
-                vad_filter=True,
-                vad_parameters={
-                    "threshold": 0.35,
-                    "min_silence_duration_ms": 450,
-                    "speech_pad_ms": 250,
-                },
-            )
+            segments, info = model.transcribe(mp4_path, **ASR_CONFIG.transcribe_options())
         with open(srt_path, "w", encoding="utf-8") as f:
             for i, seg in enumerate(segments, 1):
                 f.write(f"{i}\n")
