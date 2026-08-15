@@ -41,7 +41,7 @@ def load_recording(recording_id: int) -> tuple[str, int]:
     return row[0], row[1]
 
 
-async def upload_and_fetch(filename: str, room_id: int, output_path: Path) -> bytes:
+async def upload_and_fetch(filename: str, room_id: int, output_path: Path) -> tuple[bytes, str]:
     source_path = RECORDINGS_DIR / filename
     if not source_path.is_file():
         raise SystemExit(f"source media not found: {source_path.name}")
@@ -55,7 +55,8 @@ async def upload_and_fetch(filename: str, room_id: int, output_path: Path) -> by
         form.add_field("room_id", str(room_id))
         with source_path.open("rb") as source:
             form.add_field("file", source, filename=source_path.name, content_type="video/mp4")
-            async with session.post(f"{GPU_SERVICE_URL}/jobs", data=form) as response:
+            headers["X-Idempotency-Key"] = f"retranscribe:{room_id}:{filename}:{time.time_ns()}"
+            async with session.post(f"{GPU_SERVICE_URL}/jobs", data=form, headers=headers) as response:
                 if response.status != 201:
                     raise SystemExit(f"GPU upload failed with status {response.status}")
                 job_id = (await response.json()).get("job_id")
@@ -73,9 +74,24 @@ async def upload_and_fetch(filename: str, room_id: int, output_path: Path) -> by
                         raise SystemExit("GPU job completed but SRT was unavailable")
                     content = await response.read()
                 output_path.write_bytes(content)
-                return content
+                return content, job_id
             await asyncio.sleep(5)
     raise SystemExit("timed out waiting for GPU transcription")
+
+
+def mark_recording_transcribed(recording_id: int, job_id: str, reclip: bool) -> None:
+    """Persist the completed remote job without touching group pipelines."""
+    with sqlite3.connect(DB_PATH) as connection:
+        connection.execute(
+            """UPDATE recordings
+               SET transcribed = 2, synced = 1, gpu_job_id = ?,
+                   transcribe_error = NULL, clipped = CASE WHEN ? THEN 0 ELSE clipped END
+               WHERE id = ?""",
+            (job_id, int(reclip), recording_id),
+        )
+        if connection.total_changes != 1:
+            raise SystemExit(f"recording {recording_id} disappeared while saving transcription")
+        connection.commit()
 
 
 async def main() -> None:
@@ -86,7 +102,8 @@ async def main() -> None:
     old_path = output_path.with_suffix(output_path.suffix + ".before-asr")
     if output_path.exists():
         shutil.copy2(output_path, old_path)
-    await upload_and_fetch(filename, room_id, output_path)
+    _, job_id = await upload_and_fetch(filename, room_id, output_path)
+    mark_recording_transcribed(args.recording_id, job_id, args.reclip)
     print(f"wrote improved SRT: {output_path.name}")
     if args.diff and old_path.exists():
         import difflib

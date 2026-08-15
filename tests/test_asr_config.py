@@ -22,3 +22,5 @@ def test_retranscription_tool_is_explicitly_opt_in():
     assert "--recording-id" in text
     assert "--reclip" in text
     assert "does not enqueue director" in text
+    assert "mark_recording_transcribed" in text
+    assert "X-Idempotency-Key" in text
