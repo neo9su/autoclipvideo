@@ -4,6 +4,7 @@ The GPU service is the only runtime consumer of these settings.  Keep the
 model explicit so a deployment can roll back by changing one constant.
 """
 from __future__ import annotations
+from dataclasses import dataclass
 
 import os
 
@@ -52,6 +53,19 @@ ASR_VAD_PARAMETERS = {
     "min_silence_duration_ms": 450,
     "speech_pad_ms": 250,
 }
+
+
+@dataclass(frozen=True)
+class AsrConfig:
+    """Immutable profile consumed by the GPU transcription service."""
+
+    model_name: str = ASR_MODEL
+
+    def transcribe_options(self) -> dict:
+        return transcribe_options()
+
+
+ASR_CONFIG = AsrConfig()
 
 
 def transcribe_options() -> dict:

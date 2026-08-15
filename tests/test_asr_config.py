@@ -3,7 +3,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "gpu_service"))
 
-from asr_config import ASR_INITIAL_PROMPT, transcribe_options
+from asr_config import ASR_CONFIG, ASR_INITIAL_PROMPT, transcribe_options
 
 
 class FakeWord:
@@ -26,6 +26,14 @@ def test_mandarin_live_commerce_options_are_explicit():
     assert options["word_timestamps"] is True
     assert "假发" in ASR_INITIAL_PROMPT
     assert "高温丝" in ASR_INITIAL_PROMPT
+    assert ASR_CONFIG.model_name == "large-v3"
+
+
+def test_word_boundaries_are_used_for_subtitle_edges():
+    source = Path(__file__).parents[1] / "gpu_service" / "main.py"
+    text = source.read_text(encoding="utf-8")
+    assert "_aligned_segment_times" in text
+    assert "word.start" in text
 
 
 def test_retranscription_tool_is_explicitly_opt_in():
