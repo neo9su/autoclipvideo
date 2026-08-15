@@ -87,8 +87,18 @@ _gpu_sem: asyncio.Semaphore = asyncio.Semaphore(1)
 # NVENC concurrency: 2 concurrent — NVENC is a dedicated hardware unit, no VRAM cost
 _clip_sem: asyncio.Semaphore = asyncio.Semaphore(2)
 
+from asr_config import aligned_segment_bounds
+
 # Mandarin live-commerce ASR profile; keep this source distribution aligned
 # with gpu_service/main.py for remote deployments and straightforward rollback.
+ASR_MODEL_NAME = os.environ.get("ASR_MODEL_NAME", "large-v3")
+ASR_LANGUAGE = "zh"
+ASR_BEAM_SIZE = 8
+ASR_INITIAL_PROMPT = (
+    "这是中文普通话电商直播。假发、刘海、鬓发、头顶、颅顶、发际线、黑长直、"
+    "自然黑、方圆脸、显脸小、真人发、高温丝。"
+)
+
 # ── Clip pipeline constants ───────────────────────────────────────────────────
 CLIP_W    = 1080
 CLIP_H    = 1920
@@ -351,8 +361,7 @@ def _get_model():
     global _model
     if _model is None:
         from faster_whisper import WhisperModel
-        from asr_config import get_model_name
-        _model = WhisperModel(get_model_name(), device="cuda", compute_type="float16")
+        _model = WhisperModel(ASR_MODEL_NAME, device="cuda", compute_type="float16")
     return _model
 
 
@@ -363,15 +372,6 @@ def _fmt_ts(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:06.3f}".replace(".", ",")
 
 
-def _segment_bounds(segment) -> tuple[float, float]:
-    """Use word boundaries when available, avoiding VAD padding drift."""
-    words = [word for word in (getattr(segment, "words", None) or [])
-             if word.start is not None and word.end is not None and word.end > word.start]
-    if words:
-        return float(words[0].start), float(words[-1].end)
-    return float(segment.start), float(segment.end)
-
-
 def _do_transcribe(job_id: str):
     job = _jobs[job_id]
     mp4_path = job["mp4_path"]
@@ -379,13 +379,26 @@ def _do_transcribe(job_id: str):
     try:
         model = _get_model()
         with _SuppressStdout():
-            from asr_config import get_asr_config
-            segments, info = model.transcribe(mp4_path, **get_asr_config())
+            segments, info = model.transcribe(
+                mp4_path,
+                language=ASR_LANGUAGE,
+                beam_size=ASR_BEAM_SIZE,
+                initial_prompt=ASR_INITIAL_PROMPT,
+                condition_on_previous_text=False,
+                temperature=(0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
+                word_timestamps=True,
+                vad_filter=True,
+                vad_parameters={
+                    "threshold": 0.35,
+                    "min_silence_duration_ms": 450,
+                    "speech_pad_ms": 250,
+                },
+            )
         with open(srt_path, "w", encoding="utf-8") as f:
             for i, seg in enumerate(segments, 1):
-                start, end = _segment_bounds(seg)
+                cue_start, cue_end = aligned_segment_bounds(seg)
                 f.write(f"{i}\n")
-                f.write(f"{_fmt_ts(start)} --> {_fmt_ts(end)}\n")
+                f.write(f"{_fmt_ts(cue_start)} --> {_fmt_ts(cue_end)}\n")
                 f.write(f"{seg.text.strip()}\n\n")
         job["status"] = "done"
         _db_update_job(job_id, "done")

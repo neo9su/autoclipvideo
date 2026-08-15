@@ -45,3 +45,18 @@ def get_asr_config() -> dict:
         **ASR_TRANSCRIBE_OPTIONS,
         "vad_parameters": dict(ASR_TRANSCRIBE_OPTIONS["vad_parameters"]),
     }
+
+
+def aligned_segment_bounds(segment: object) -> tuple[float, float]:
+    """Return speech edges rather than VAD-padded segment edges when present."""
+    segment_start = float(getattr(segment, "start", 0.0))
+    segment_end = float(getattr(segment, "end", segment_start))
+    words = getattr(segment, "words", None) or ()
+    valid_words = [
+        word for word in words
+        if getattr(word, "start", None) is not None
+        and getattr(word, "end", None) is not None
+    ]
+    if not valid_words:
+        return segment_start, segment_end
+    return float(valid_words[0].start), float(valid_words[-1].end)

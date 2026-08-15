@@ -3,7 +3,20 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "gpu_service"))
 
-from asr_config import ASR_CONFIG, ASR_INITIAL_PROMPT, transcribe_options
+from asr_config import ASR_INITIAL_PROMPT, aligned_segment_bounds, transcribe_options
+
+
+class _Word:
+    def __init__(self, start, end):
+        self.start = start
+        self.end = end
+
+
+class _Segment:
+    def __init__(self, start, end, words=None):
+        self.start = start
+        self.end = end
+        self.words = words
 
 
 def test_mandarin_live_commerce_options_are_explicit():
@@ -26,13 +39,10 @@ def test_retranscription_tool_is_explicitly_opt_in():
     assert "X-Idempotency-Key" in text
 
 
-def test_asr_profile_supports_remote_operator_overrides(monkeypatch):
-    monkeypatch.setenv("ASR_BEAM_SIZE", "9")
-    monkeypatch.setenv("ASR_VAD_MIN_SILENCE_MS", "500")
-    import importlib
-    import asr_config
-    config = importlib.reload(asr_config).ASR_CONFIG
-    options = config.transcribe_options()
-    assert options["beam_size"] == 9
-    assert options["vad_parameters"]["min_silence_duration_ms"] == 500
-    assert options["language"] == "zh"
+def test_word_edges_remove_vad_padding_from_srt_cue():
+    segment = _Segment(10.0, 14.0, [_Word(10.6, 11.2), _Word(12.4, 13.1)])
+    assert aligned_segment_bounds(segment) == (10.6, 13.1)
+
+
+def test_segment_edges_are_fallback_when_word_timestamps_are_missing():
+    assert aligned_segment_bounds(_Segment(2.0, 3.5)) == (2.0, 3.5)

@@ -48,7 +48,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 import shutil as _shutil
-from asr_config import ASR_CONFIG
+from asr_config import ASR_CONFIG, aligned_segment_bounds
 
 _DEFAULT_STORAGE = (
     r"F:\douyin_recordings" if os.name == "nt" else "/data/douyin-recordings"
@@ -367,24 +367,6 @@ def _fmt_ts(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:06.3f}".replace(".", ",")
 
 
-def _write_srt(path: str, segments) -> None:
-    """Write monotonic absolute ASR offsets without introducing chunk drift."""
-    previous_end = 0.0
-    cue_number = 0
-    with open(path, "w", encoding="utf-8") as output:
-        for segment in segments:
-            text = segment.text.strip()
-            start = max(float(segment.start), previous_end)
-            end = max(float(segment.end), start)
-            if not text or end <= start:
-                continue
-            cue_number += 1
-            output.write(f"{cue_number}\n")
-            output.write(f"{_fmt_ts(start)} --> {_fmt_ts(end)}\n")
-            output.write(f"{text}\n\n")
-            previous_end = end
-
-
 def _do_transcribe(job_id: str):
     job = _jobs[job_id]
     mp4_path = job["mp4_path"]
@@ -393,7 +375,12 @@ def _do_transcribe(job_id: str):
         model = _get_model()
         with _SuppressStdout():
             segments, info = model.transcribe(mp4_path, **ASR_CONFIG.transcribe_options())
-        _write_srt(srt_path, segments)
+        with open(srt_path, "w", encoding="utf-8") as f:
+            for i, seg in enumerate(segments, 1):
+                cue_start, cue_end = aligned_segment_bounds(seg)
+                f.write(f"{i}\n")
+                f.write(f"{_fmt_ts(cue_start)} --> {_fmt_ts(cue_end)}\n")
+                f.write(f"{seg.text.strip()}\n\n")
         job["status"] = "done"
         _db_update_job(job_id, "done")
     except Exception as e:
