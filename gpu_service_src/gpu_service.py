@@ -33,6 +33,11 @@ try:
 except ImportError:
     from .logging_setup import configure_rotating_logging
 
+try:
+    from asr_config import ASR_MODEL, get_asr_config
+except ImportError:
+    from .asr_config import ASR_MODEL, get_asr_config
+
 logger = configure_rotating_logging("gpu_service", "gpu_service.log", default_directory=str(Path(__file__).parent))
 
 import aiofiles
@@ -349,7 +354,9 @@ def _get_model():
     global _model
     if _model is None:
         from faster_whisper import WhisperModel
-        _model = WhisperModel("large-v3", device="cuda", compute_type="float16")
+        # large-v3 is the accuracy-first model validated for the 16 GB RTX
+        # 4080 SUPER deployment.  Keep this explicit for an easy rollback.
+        _model = WhisperModel(ASR_MODEL, device="cuda", compute_type="float16")
     return _model
 
 
@@ -360,6 +367,16 @@ def _fmt_ts(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:06.3f}".replace(".", ",")
 
 
+def _aligned_segment_bounds(segment) -> tuple[float, float]:
+    """Prefer word boundaries to padded segment boundaries when available."""
+    words = getattr(segment, "words", None) or []
+    starts = [word.start for word in words if word.start is not None]
+    ends = [word.end for word in words if word.end is not None]
+    start = min(starts, default=segment.start)
+    end = max(ends, default=segment.end)
+    return max(0.0, start), max(start, end)
+
+
 def _do_transcribe(job_id: str):
     job = _jobs[job_id]
     mp4_path = job["mp4_path"]
@@ -367,21 +384,12 @@ def _do_transcribe(job_id: str):
     try:
         model = _get_model()
         with _SuppressStdout():
-            segments, info = model.transcribe(
-                mp4_path,
-                language="zh",
-                beam_size=5,
-                vad_filter=True,
-                vad_parameters={
-                    "threshold": 0.3,              # more sensitive — catches speech under background music
-                    "min_silence_duration_ms": 300, # shorter gap needed to split segments
-                    "speech_pad_ms": 400,
-                },
-            )
+            segments, info = model.transcribe(mp4_path, **get_asr_config())
         with open(srt_path, "w", encoding="utf-8") as f:
             for i, seg in enumerate(segments, 1):
+                start, end = _aligned_segment_bounds(seg)
                 f.write(f"{i}\n")
-                f.write(f"{_fmt_ts(seg.start)} --> {_fmt_ts(seg.end)}\n")
+                f.write(f"{_fmt_ts(start)} --> {_fmt_ts(end)}\n")
                 f.write(f"{seg.text.strip()}\n\n")
         job["status"] = "done"
         _db_update_job(job_id, "done")
