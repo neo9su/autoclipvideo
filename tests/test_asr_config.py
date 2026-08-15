@@ -50,3 +50,11 @@ def test_gpu_srt_uses_word_timestamp_edges_when_available():
     source = (Path(__file__).parents[1] / "gpu_service" / "main.py").read_text(encoding="utf-8")
     assert "def _segment_bounds" in source
     assert "_segment_bounds(seg)" in source
+
+
+def test_deployed_gpu_source_uses_the_shared_asr_profile():
+    source = (Path(__file__).parents[1] / "gpu_service_src" / "gpu_service.py").read_text(encoding="utf-8")
+    assert "get_model_name()" in source
+    assert "get_asr_config()" in source
+    assert "ASR_BEAM_SIZE =" not in source
+    assert "condition_on_previous_text=False" not in source

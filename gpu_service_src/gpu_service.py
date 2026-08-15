@@ -89,14 +89,6 @@ _clip_sem: asyncio.Semaphore = asyncio.Semaphore(2)
 
 # Mandarin live-commerce ASR profile; keep this source distribution aligned
 # with gpu_service/main.py for remote deployments and straightforward rollback.
-ASR_MODEL_NAME = os.environ.get("ASR_MODEL_NAME", "large-v3")
-ASR_LANGUAGE = "zh"
-ASR_BEAM_SIZE = 8
-ASR_INITIAL_PROMPT = (
-    "这是中文普通话电商直播。假发、刘海、鬓发、头顶、颅顶、发际线、黑长直、"
-    "自然黑、方圆脸、显脸小、真人发、高温丝。"
-)
-
 # ── Clip pipeline constants ───────────────────────────────────────────────────
 CLIP_W    = 1080
 CLIP_H    = 1920
@@ -359,7 +351,8 @@ def _get_model():
     global _model
     if _model is None:
         from faster_whisper import WhisperModel
-        _model = WhisperModel(ASR_MODEL_NAME, device="cuda", compute_type="float16")
+        from asr_config import get_model_name
+        _model = WhisperModel(get_model_name(), device="cuda", compute_type="float16")
     return _model
 
 
@@ -386,21 +379,8 @@ def _do_transcribe(job_id: str):
     try:
         model = _get_model()
         with _SuppressStdout():
-            segments, info = model.transcribe(
-                mp4_path,
-                language=ASR_LANGUAGE,
-                beam_size=ASR_BEAM_SIZE,
-                initial_prompt=ASR_INITIAL_PROMPT,
-                condition_on_previous_text=False,
-                temperature=(0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
-                word_timestamps=True,
-                vad_filter=True,
-                vad_parameters={
-                    "threshold": 0.35,
-                    "min_silence_duration_ms": 450,
-                    "speech_pad_ms": 250,
-                },
-            )
+            from asr_config import get_asr_config
+            segments, info = model.transcribe(mp4_path, **get_asr_config())
         with open(srt_path, "w", encoding="utf-8") as f:
             for i, seg in enumerate(segments, 1):
                 start, end = _segment_bounds(seg)

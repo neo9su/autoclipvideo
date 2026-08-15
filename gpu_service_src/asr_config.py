@@ -34,6 +34,11 @@ ASR_TRANSCRIBE_OPTIONS = {
 }
 
 
+def get_model_name() -> str:
+    """Return the explicitly selected faster-whisper model name."""
+    return ASR_MODEL
+
+
 def get_asr_config() -> dict:
     """Return a copy so callers cannot mutate process-wide ASR defaults."""
     return {
