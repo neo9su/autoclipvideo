@@ -31,16 +31,11 @@ def main():
 
     print(f"Loading faster-whisper large-v3 ...")
     from faster_whisper import WhisperModel
-    model = WhisperModel("large-v3", device="cuda", compute_type="float16")
+    from asr_config import ASR_MODEL, transcribe_options
+    model = WhisperModel(ASR_MODEL, device="cuda", compute_type="float16")
 
     print(f"Transcribing: {mp4_path}")
-    segments, info = model.transcribe(
-        mp4_path,
-        language="zh",
-        beam_size=5,
-        vad_filter=True,
-        vad_parameters={"min_silence_duration_ms": 500},
-    )
+    segments, info = model.transcribe(mp4_path, **transcribe_options())
 
     print(f"Language: {info.language} ({info.language_probability:.2%})")
 

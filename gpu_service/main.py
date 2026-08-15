@@ -48,6 +48,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 import shutil as _shutil
+from asr_config import ASR_CONFIG
 
 _DEFAULT_STORAGE = (
     r"F:\douyin_recordings" if os.name == "nt" else "/data/douyin-recordings"
@@ -353,7 +354,9 @@ def _get_model():
     global _model
     if _model is None:
         from faster_whisper import WhisperModel
-        _model = WhisperModel("large-v3", device="cuda", compute_type="float16")
+        # large-v3 is intentional: realistic/conservative clips retain live
+        # audio, so transcription quality is more important than throughput.
+        _model = WhisperModel(ASR_CONFIG.model_name, device="cuda", compute_type="float16")
     return _model
 
 
@@ -371,17 +374,7 @@ def _do_transcribe(job_id: str):
     try:
         model = _get_model()
         with _SuppressStdout():
-            segments, info = model.transcribe(
-                mp4_path,
-                language="zh",
-                beam_size=5,
-                vad_filter=True,
-                vad_parameters={
-                    "threshold": 0.3,              # more sensitive — catches speech under background music
-                    "min_silence_duration_ms": 300, # shorter gap needed to split segments
-                    "speech_pad_ms": 400,
-                },
-            )
+            segments, info = model.transcribe(mp4_path, **ASR_CONFIG.transcribe_options())
         with open(srt_path, "w", encoding="utf-8") as f:
             for i, seg in enumerate(segments, 1):
                 f.write(f"{i}\n")

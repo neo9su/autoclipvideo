@@ -74,6 +74,9 @@ _poll_state: dict = {
 
 # Event to wake the poll loop immediately (used by the flush endpoint)
 _flush_event: asyncio.Event = asyncio.Event()
+# Explicit retranscription requests can opt out of automatic clipping.  This
+# keeps validation of a single recording isolated from director/creative work.
+_retranscribe_without_clip: set[int] = set()
 RECORDINGS_DIR = os.path.join(os.path.dirname(__file__), "..", "recordings")
 POLL_INTERVAL = 60  # seconds
 
@@ -557,9 +560,12 @@ async def _fetch_srt(recording_id: int, job_id: str, filename: str, clip_count: 
                     "UPDATE recordings SET transcribed = 2 WHERE id = ?", (recording_id,)
                 )
                 await db.commit()
-            # Trigger smart editing in background
-            mp4_path = os.path.join(RECORDINGS_DIR, filename)
-            asyncio.create_task(_run_editor(recording_id, mp4_path, local_srt, clip_count=clip_count, broadcast_fn=broadcast_fn))
+            # Validation/retranscription requests may explicitly defer clipping.
+            if recording_id not in _retranscribe_without_clip:
+                mp4_path = os.path.join(RECORDINGS_DIR, filename)
+                asyncio.create_task(_run_editor(recording_id, mp4_path, local_srt, clip_count=clip_count, broadcast_fn=broadcast_fn))
+            else:
+                _retranscribe_without_clip.discard(recording_id)
         else:
             logger.error(f"SRT download failed for {job_id}: {_srt_status}")
     except Exception as e:
