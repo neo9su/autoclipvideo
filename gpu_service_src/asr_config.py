@@ -29,7 +29,7 @@ ASR_TRANSCRIBE_OPTIONS = {
     "vad_parameters": {
         "threshold": 0.35,
         "min_silence_duration_ms": 450,
-        "speech_pad_ms": 300,
+        "speech_pad_ms": 250,
     },
 }
 
