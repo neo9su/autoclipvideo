@@ -5,43 +5,14 @@ model explicit so a deployment can roll back by changing one constant.
 """
 from __future__ import annotations
 
-import os
+import math
+from dataclasses import dataclass
 
-
-def _env_int(name: str, default: int) -> int:
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    try:
-        parsed = int(value)
-    except ValueError as exc:
-        raise ValueError(f"{name} must be an integer") from exc
-    if parsed < 1:
-        raise ValueError(f"{name} must be positive")
-    return parsed
-
-
-def _env_bool(name: str, default: bool) -> bool:
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    normalized = value.strip().lower()
-    if normalized not in {"0", "1", "false", "true"}:
-        raise ValueError(f"{name} must be one of 0, 1, false, true")
-    return normalized in {"1", "true"}
-
-
-# large-v3 is the accuracy-first profile for the RTX 4080 SUPER.  Keep all
-# overrides explicit and deployment-local so rollback is a service restart.
-ASR_MODEL = os.environ.get("ASR_MODEL", "large-v3")
-# Kept as an attribute alias for the service's configuration-module import.
-# This makes the selected model visible in one auditable place.
-model_name = ASR_MODEL
-ASR_LANGUAGE = os.environ.get("ASR_LANGUAGE", "zh")
-ASR_BEAM_SIZE = _env_int("ASR_BEAM_SIZE", 8)
-ASR_BEST_OF = _env_int("ASR_BEST_OF", 5)
-ASR_TEMPERATURE = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
-ASR_CONDITION_ON_PREVIOUS_TEXT = _env_bool("ASR_CONDITION_ON_PREVIOUS_TEXT", False)
+ASR_MODEL = "large-v3"
+ASR_LANGUAGE = "zh"
+ASR_BEAM_SIZE = 8
+ASR_BEST_OF = 5
+ASR_TEMPERATURE = (0.0, 0.2, 0.4, 0.6, 0.8)
 ASR_INITIAL_PROMPT = (
     "这是中文直播带货，主题是发型和假发。"
     "假发、刘海、鬓发、头顶、颅顶、发际线、黑长直、自然黑、方圆脸、"
@@ -54,6 +25,19 @@ ASR_VAD_PARAMETERS = {
 }
 
 
+@dataclass(frozen=True)
+class ASRProfile:
+    """Deployable faster-whisper profile kept in one auditable object."""
+
+    model_name: str = ASR_MODEL
+
+    def transcribe_options(self) -> dict:
+        return transcribe_options()
+
+
+ASR_CONFIG = ASRProfile()
+
+
 def transcribe_options() -> dict:
     """Return conservative, alignment-friendly faster-whisper options."""
     return {
@@ -63,9 +47,35 @@ def transcribe_options() -> dict:
         "best_of": ASR_BEST_OF,
         "temperature": ASR_TEMPERATURE,
         "initial_prompt": ASR_INITIAL_PROMPT,
-        "condition_on_previous_text": ASR_CONDITION_ON_PREVIOUS_TEXT,
+        "condition_on_previous_text": False,
         "vad_filter": True,
         "vad_parameters": dict(ASR_VAD_PARAMETERS),
         "word_timestamps": True,
         "without_timestamps": False,
     }
+
+
+def _finite_timestamp(value: object, fallback: float) -> float:
+    """Return a finite timestamp without allowing malformed output into SRT."""
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    return timestamp if math.isfinite(timestamp) else fallback
+
+
+def aligned_segment_bounds(segment: object) -> tuple[float, float]:
+    """Use word edges to remove VAD padding from subtitle cue boundaries."""
+    start = max(0.0, _finite_timestamp(getattr(segment, "start", 0.0), 0.0))
+    end = max(start, _finite_timestamp(getattr(segment, "end", start), start))
+    words = getattr(segment, "words", None) or ()
+    valid_words = [
+        word for word in words
+        if getattr(word, "start", None) is not None
+        and getattr(word, "end", None) is not None
+    ]
+    if not valid_words:
+        return start, end
+    word_start = max(0.0, _finite_timestamp(valid_words[0].start, start))
+    word_end = max(word_start, _finite_timestamp(valid_words[-1].end, end))
+    return word_start, word_end

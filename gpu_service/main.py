@@ -48,7 +48,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 import shutil as _shutil
-import asr_config as ASR_CONFIG
+from asr_config import ASR_CONFIG, aligned_segment_bounds
 
 _DEFAULT_STORAGE = (
     r"F:\douyin_recordings" if os.name == "nt" else "/data/douyin-recordings"
@@ -367,15 +367,6 @@ def _fmt_ts(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:06.3f}".replace(".", ",")
 
 
-def _segment_bounds(segment) -> tuple[float, float]:
-    """Prefer word edges so VAD padding cannot make cues visibly drift."""
-    words = getattr(segment, "words", None) or []
-    valid = [word for word in words if word.start is not None and word.end is not None]
-    if valid:
-        return max(0.0, float(valid[0].start)), max(float(valid[0].start), float(valid[-1].end))
-    return max(0.0, float(segment.start)), max(float(segment.start), float(segment.end))
-
-
 def _do_transcribe(job_id: str):
     job = _jobs[job_id]
     mp4_path = job["mp4_path"]
@@ -386,8 +377,8 @@ def _do_transcribe(job_id: str):
             segments, info = model.transcribe(mp4_path, **ASR_CONFIG.transcribe_options())
         with open(srt_path, "w", encoding="utf-8") as f:
             for i, seg in enumerate(segments, 1):
+                start, end = aligned_segment_bounds(seg)
                 f.write(f"{i}\n")
-                start, end = _segment_bounds(seg)
                 f.write(f"{_fmt_ts(start)} --> {_fmt_ts(end)}\n")
                 f.write(f"{seg.text.strip()}\n\n")
         job["status"] = "done"

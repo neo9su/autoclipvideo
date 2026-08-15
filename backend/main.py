@@ -1897,6 +1897,14 @@ async def retry_transcribe(recording_id: int, regenerate_clip: bool = Query(defa
     filepath = os.path.join(os.path.dirname(__file__), "..", "recordings", rec["filename"])
     if not os.path.exists(filepath):
         raise HTTPException(status_code=404, detail="Recording file missing on disk")
+    # Preserve the old sidecar before the poll loop replaces it.
+    srt_path = os.path.splitext(filepath)[0] + ".srt"
+    backup_path = srt_path + ".previous.srt"
+    if os.path.isfile(srt_path):
+        try:
+            shutil.copyfile(srt_path, backup_path)
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail="Could not preserve existing SRT") from exc
     # Reset to unsynced/untranscribed so the poll loop picks it up via maybe_merge_before_upload
     # (which handles large-file splitting before GPU upload)
     async with aio_connect() as db:
@@ -1913,6 +1921,12 @@ async def retry_transcribe(recording_id: int, regenerate_clip: bool = Query(defa
     await free_vram()
     await flush_poll()   # wake the poll loop immediately
     return {"recording_id": recording_id, "status": "queued", "regenerate_clip": regenerate_clip}
+    return {
+        "recording_id": recording_id,
+        "status": "queued",
+        "regenerate_clip": regenerate_clip,
+        "srt_backup": os.path.basename(backup_path) if os.path.isfile(backup_path) else None,
+    }
 
 
 @app.post("/api/recordings/{recording_id}/retranscribe")
