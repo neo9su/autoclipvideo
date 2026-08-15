@@ -1886,7 +1886,7 @@ async def get_recording(recording_id: int):
 # ── Retry ────────────────────────────────────────────────────────────────────
 
 @app.post("/api/recordings/{recording_id}/retry-transcribe")
-async def retry_transcribe(recording_id: int):
+async def retry_transcribe(recording_id: int, regenerate_clip: bool = Query(default=True)):
     async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM recordings WHERE id = ?", (recording_id,)) as cur:
@@ -1904,11 +1904,14 @@ async def retry_transcribe(recording_id: int):
             (recording_id,)
         )
         await db.commit()
+    if not regenerate_clip:
+        from transcribe import _retranscribe_only_ids
+        _retranscribe_only_ids.add(recording_id)
     from comfyui_client import free_vram
     from transcribe import flush_poll
     await free_vram()
     await flush_poll()   # wake the poll loop immediately
-    return {"recording_id": recording_id, "status": "queued"}
+    return {"recording_id": recording_id, "status": "queued", "regenerate_clip": regenerate_clip}
 
 
 @app.post("/api/recordings/clip-missing")

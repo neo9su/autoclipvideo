@@ -88,6 +88,10 @@ _job_submit_times: dict[str, float] = {}   # gpu_job_id → time.time() when sub
 _job_durations: list[float] = []           # recent completed job durations (last 20)
 _session_done: int = 0                     # jobs completed since backend start
 
+# Explicit retranscription requests can opt out of clipping.  This is used for
+# QA/review runs so a new SRT never silently starts director/creative/qianchuan.
+_retranscribe_only_ids: set[int] = set()
+
 
 def transcribe_timing() -> dict:
     recent = _job_durations[-10:] if _job_durations else []
@@ -557,6 +561,10 @@ async def _fetch_srt(recording_id: int, job_id: str, filename: str, clip_count: 
                     "UPDATE recordings SET transcribed = 2 WHERE id = ?", (recording_id,)
                 )
                 await db.commit()
+            if recording_id in _retranscribe_only_ids:
+                _retranscribe_only_ids.discard(recording_id)
+                logger.info("SRT refreshed for recording %s; clipping intentionally suppressed", recording_id)
+                return
             # Trigger smart editing in background
             mp4_path = os.path.join(RECORDINGS_DIR, filename)
             asyncio.create_task(_run_editor(recording_id, mp4_path, local_srt, clip_count=clip_count, broadcast_fn=broadcast_fn))

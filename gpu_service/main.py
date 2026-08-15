@@ -353,9 +353,8 @@ def _get_model():
     global _model
     if _model is None:
         from faster_whisper import WhisperModel
-        from asr_config import ASR_COMPUTE_TYPE, ASR_MODEL
-        logger.info("Loading ASR model=%s compute_type=%s", ASR_MODEL, ASR_COMPUTE_TYPE)
-        _model = WhisperModel(ASR_MODEL, device="cuda", compute_type=ASR_COMPUTE_TYPE)
+        from asr_config import ASR_MODEL
+        _model = WhisperModel(ASR_MODEL, device="cuda", compute_type="float16")
     return _model
 
 
@@ -366,16 +365,6 @@ def _fmt_ts(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:06.3f}".replace(".", ",")
 
 
-def _aligned_segment_bounds(segment) -> tuple[float, float]:
-    """Prefer word boundaries to VAD-padded segment boundaries."""
-    words = getattr(segment, "words", None) or []
-    starts = [word.start for word in words if word.start is not None]
-    ends = [word.end for word in words if word.end is not None]
-    start = min(starts, default=segment.start)
-    end = max(ends, default=segment.end)
-    return max(0.0, start), max(start, end)
-
-
 def _do_transcribe(job_id: str):
     job = _jobs[job_id]
     mp4_path = job["mp4_path"]
@@ -384,12 +373,14 @@ def _do_transcribe(job_id: str):
         model = _get_model()
         from asr_config import transcribe_options
         with _SuppressStdout():
-            segments, info = model.transcribe(mp4_path, **transcribe_options())
+            segments, info = model.transcribe(
+                mp4_path,
+                **transcribe_options(),
+            )
         with open(srt_path, "w", encoding="utf-8") as f:
             for i, seg in enumerate(segments, 1):
-                start, end = _aligned_segment_bounds(seg)
                 f.write(f"{i}\n")
-                f.write(f"{_fmt_ts(start)} --> {_fmt_ts(end)}\n")
+                f.write(f"{_fmt_ts(seg.start)} --> {_fmt_ts(seg.end)}\n")
                 f.write(f"{seg.text.strip()}\n\n")
         job["status"] = "done"
         _db_update_job(job_id, "done")
