@@ -17,6 +17,18 @@ import db as dbmod
 from db import init_db
 
 
+def test_asr_profile_is_explicit_and_remote_friendly() -> None:
+    sys.path.insert(0, "gpu_service")
+    import asr_config
+
+    assert asr_config.ASR_MODEL == "large-v3"
+    assert asr_config.ASR_LANGUAGE == "zh"
+    assert asr_config.ASR_BEAM_SIZE >= 5
+    assert asr_config.ASR_WORD_TIMESTAMPS is True
+    assert "假发" in asr_config.ASR_INITIAL_PROMPT
+    assert asr_config.ASR_CONDITION_ON_PREVIOUS_TEXT is False
+
+
 def _load_backend_main():
     """Import backend.main while hiding optional integration startup warnings."""
     stderr = io.StringIO()
