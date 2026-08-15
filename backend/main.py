@@ -1914,6 +1914,30 @@ async def retry_transcribe(recording_id: int, regenerate_clip: bool = Query(defa
     return {"recording_id": recording_id, "status": "queued", "regenerate_clip": regenerate_clip}
 
 
+@app.post("/api/recordings/{recording_id}/retranscribe")
+async def retranscribe_recording(recording_id: int):
+    """Queue one recording for ASR only; clipping stays opt-in via retry-clip."""
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM recordings WHERE id = ?", (recording_id,)) as cur:
+            rec = await cur.fetchone()
+    if not rec:
+        raise HTTPException(status_code=404, detail="Recording not found")
+    filepath = os.path.join(os.path.dirname(__file__), "..", "recordings", rec["filename"])
+    if not os.path.exists(filepath):
+        raise HTTPException(status_code=404, detail="Recording file missing on disk")
+    from transcribe import _retranscribe_without_clip, flush_poll
+    _retranscribe_without_clip.add(recording_id)
+    async with aio_connect() as db:
+        await db.execute(
+            "UPDATE recordings SET transcribed = 0, synced = 0, gpu_job_id = NULL, clipped = 0 WHERE id = ?",
+            (recording_id,),
+        )
+        await db.commit()
+    await flush_poll()
+    return {"recording_id": recording_id, "status": "queued", "clip_deferred": True}
+
+
 @app.post("/api/recordings/clip-missing")
 async def clip_missing():
     """查找所有已转录但未剪辑的记录，批量发起剪辑任务。"""

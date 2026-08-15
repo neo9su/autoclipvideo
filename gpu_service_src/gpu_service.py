@@ -33,11 +33,6 @@ try:
 except ImportError:
     from .logging_setup import configure_rotating_logging
 
-try:
-    from asr_config import ASR_MODEL, get_asr_config
-except ImportError:
-    from .asr_config import ASR_MODEL, get_asr_config
-
 logger = configure_rotating_logging("gpu_service", "gpu_service.log", default_directory=str(Path(__file__).parent))
 
 import aiofiles
@@ -91,6 +86,16 @@ _cosyvoice = None       # Singleton CosyVoice2 model
 _gpu_sem: asyncio.Semaphore = asyncio.Semaphore(1)
 # NVENC concurrency: 2 concurrent — NVENC is a dedicated hardware unit, no VRAM cost
 _clip_sem: asyncio.Semaphore = asyncio.Semaphore(2)
+
+# Mandarin live-commerce ASR profile; keep this source distribution aligned
+# with gpu_service/main.py for remote deployments and straightforward rollback.
+ASR_MODEL_NAME = os.environ.get("ASR_MODEL_NAME", "large-v3")
+ASR_LANGUAGE = "zh"
+ASR_BEAM_SIZE = 8
+ASR_INITIAL_PROMPT = (
+    "这是中文普通话电商直播。假发、刘海、鬓发、头顶、颅顶、发际线、黑长直、"
+    "自然黑、方圆脸、显脸小、真人发、高温丝。"
+)
 
 # ── Clip pipeline constants ───────────────────────────────────────────────────
 CLIP_W    = 1080
@@ -354,9 +359,7 @@ def _get_model():
     global _model
     if _model is None:
         from faster_whisper import WhisperModel
-        # large-v3 is the accuracy-first model validated for the 16 GB RTX
-        # 4080 SUPER deployment.  Keep this explicit for an easy rollback.
-        _model = WhisperModel(ASR_MODEL, device="cuda", compute_type="float16")
+        _model = WhisperModel(ASR_MODEL_NAME, device="cuda", compute_type="float16")
     return _model
 
 
@@ -367,16 +370,6 @@ def _fmt_ts(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:06.3f}".replace(".", ",")
 
 
-def _aligned_segment_bounds(segment) -> tuple[float, float]:
-    """Prefer word boundaries to padded segment boundaries when available."""
-    words = getattr(segment, "words", None) or []
-    starts = [word.start for word in words if word.start is not None]
-    ends = [word.end for word in words if word.end is not None]
-    start = min(starts, default=segment.start)
-    end = max(ends, default=segment.end)
-    return max(0.0, start), max(start, end)
-
-
 def _do_transcribe(job_id: str):
     job = _jobs[job_id]
     mp4_path = job["mp4_path"]
@@ -384,12 +377,25 @@ def _do_transcribe(job_id: str):
     try:
         model = _get_model()
         with _SuppressStdout():
-            segments, info = model.transcribe(mp4_path, **get_asr_config())
+            segments, info = model.transcribe(
+                mp4_path,
+                language=ASR_LANGUAGE,
+                beam_size=ASR_BEAM_SIZE,
+                initial_prompt=ASR_INITIAL_PROMPT,
+                condition_on_previous_text=False,
+                temperature=(0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
+                word_timestamps=True,
+                vad_filter=True,
+                vad_parameters={
+                    "threshold": 0.35,
+                    "min_silence_duration_ms": 450,
+                    "speech_pad_ms": 250,
+                },
+            )
         with open(srt_path, "w", encoding="utf-8") as f:
             for i, seg in enumerate(segments, 1):
-                start, end = _aligned_segment_bounds(seg)
                 f.write(f"{i}\n")
-                f.write(f"{_fmt_ts(start)} --> {_fmt_ts(end)}\n")
+                f.write(f"{_fmt_ts(seg.start)} --> {_fmt_ts(seg.end)}\n")
                 f.write(f"{seg.text.strip()}\n\n")
         job["status"] = "done"
         _db_update_job(job_id, "done")
