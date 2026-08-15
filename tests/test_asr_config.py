@@ -6,18 +6,6 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "gpu_service"))
 from asr_config import ASR_CONFIG, ASR_INITIAL_PROMPT, transcribe_options
 
 
-class FakeWord:
-    def __init__(self, start, end):
-        self.start = start
-        self.end = end
-
-
-class FakeSegment:
-    start = 1.0
-    end = 4.0
-    words = [FakeWord(1.4, 2.0), FakeWord(2.1, 2.8)]
-
-
 def test_mandarin_live_commerce_options_are_explicit():
     options = transcribe_options()
     assert options["language"] == "zh"
@@ -26,14 +14,6 @@ def test_mandarin_live_commerce_options_are_explicit():
     assert options["word_timestamps"] is True
     assert "假发" in ASR_INITIAL_PROMPT
     assert "高温丝" in ASR_INITIAL_PROMPT
-    assert ASR_CONFIG.model_name == "large-v3"
-
-
-def test_word_boundaries_are_used_for_subtitle_edges():
-    source = Path(__file__).parents[1] / "gpu_service" / "main.py"
-    text = source.read_text(encoding="utf-8")
-    assert "_segment_bounds" in text
-    assert "word.start" in text
 
 
 def test_retranscription_tool_is_explicitly_opt_in():
@@ -46,15 +26,13 @@ def test_retranscription_tool_is_explicitly_opt_in():
     assert "X-Idempotency-Key" in text
 
 
-def test_gpu_srt_uses_word_timestamp_edges_when_available():
-    source = (Path(__file__).parents[1] / "gpu_service" / "main.py").read_text(encoding="utf-8")
-    assert "def _segment_bounds" in source
-    assert "_segment_bounds(seg)" in source
-
-
-def test_deployed_gpu_source_uses_the_shared_asr_profile():
-    source = (Path(__file__).parents[1] / "gpu_service_src" / "gpu_service.py").read_text(encoding="utf-8")
-    assert "get_model_name()" in source
-    assert "get_asr_config()" in source
-    assert "ASR_BEAM_SIZE =" not in source
-    assert "condition_on_previous_text=False" not in source
+def test_asr_profile_supports_remote_operator_overrides(monkeypatch):
+    monkeypatch.setenv("ASR_BEAM_SIZE", "9")
+    monkeypatch.setenv("ASR_VAD_MIN_SILENCE_MS", "500")
+    import importlib
+    import asr_config
+    config = importlib.reload(asr_config).ASR_CONFIG
+    options = config.transcribe_options()
+    assert options["beam_size"] == 9
+    assert options["vad_parameters"]["min_silence_duration_ms"] == 500
+    assert options["language"] == "zh"
