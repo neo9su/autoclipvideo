@@ -21,12 +21,13 @@ def test_asr_profile_is_explicit_and_remote_friendly() -> None:
     sys.path.insert(0, "gpu_service")
     import asr_config
 
-    assert asr_config.ASR_MODEL == "large-v3"
-    assert asr_config.ASR_LANGUAGE == "zh"
-    assert asr_config.ASR_BEAM_SIZE >= 5
-    assert asr_config.ASR_WORD_TIMESTAMPS is True
-    assert "假发" in asr_config.ASR_INITIAL_PROMPT
-    assert asr_config.ASR_CONDITION_ON_PREVIOUS_TEXT is False
+    assert asr_config.ASR_CONFIG.model_name == "large-v3"
+    options = asr_config.ASR_CONFIG.transcribe_options()
+    assert options["language"] == "zh"
+    assert options["beam_size"] >= 5
+    assert options["word_timestamps"] is True
+    assert "假发" in options["initial_prompt"]
+    assert options["condition_on_previous_text"] is False
 
 
 def _load_backend_main():
