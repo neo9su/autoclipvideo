@@ -353,7 +353,9 @@ def _get_model():
     global _model
     if _model is None:
         from faster_whisper import WhisperModel
-        _model = WhisperModel("large-v3", device="cuda", compute_type="float16")
+        from asr_config import ASR_COMPUTE_TYPE, ASR_MODEL
+        logger.info("Loading ASR model=%s compute_type=%s", ASR_MODEL, ASR_COMPUTE_TYPE)
+        _model = WhisperModel(ASR_MODEL, device="cuda", compute_type=ASR_COMPUTE_TYPE)
     return _model
 
 
@@ -370,18 +372,9 @@ def _do_transcribe(job_id: str):
     srt_path = job["srt_path"]
     try:
         model = _get_model()
+        from asr_config import transcribe_options
         with _SuppressStdout():
-            segments, info = model.transcribe(
-                mp4_path,
-                language="zh",
-                beam_size=5,
-                vad_filter=True,
-                vad_parameters={
-                    "threshold": 0.3,              # more sensitive — catches speech under background music
-                    "min_silence_duration_ms": 300, # shorter gap needed to split segments
-                    "speech_pad_ms": 400,
-                },
-            )
+            segments, info = model.transcribe(mp4_path, **transcribe_options())
         with open(srt_path, "w", encoding="utf-8") as f:
             for i, seg in enumerate(segments, 1):
                 f.write(f"{i}\n")
