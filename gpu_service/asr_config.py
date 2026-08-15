@@ -6,6 +6,7 @@ model explicit so a deployment can roll back by changing one constant.
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 ASR_MODEL = "large-v3"
 ASR_LANGUAGE = "zh"
@@ -22,6 +23,19 @@ ASR_VAD_PARAMETERS = {
     "min_silence_duration_ms": 450,
     "speech_pad_ms": 250,
 }
+
+
+@dataclass(frozen=True)
+class ASRProfile:
+    """Deployable faster-whisper profile kept in one auditable object."""
+
+    model_name: str = ASR_MODEL
+
+    def transcribe_options(self) -> dict:
+        return transcribe_options()
+
+
+ASR_CONFIG = ASRProfile()
 
 
 def transcribe_options() -> dict:
@@ -41,17 +55,19 @@ def transcribe_options() -> dict:
     }
 
 
-def aligned_segment_bounds(segment: object) -> tuple[float, float]:
-    """Use word edges for SRT cues when faster-whisper provides them.
+def _finite_timestamp(value: object, fallback: float) -> float:
+    """Return a finite timestamp without allowing malformed output into SRT."""
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    return timestamp if math.isfinite(timestamp) else fallback
 
-    VAD and decoder segments can include padding around speech.  Word-level
-    edges remove that padding without making alignment depend on a word list
-    being present (older model/runtime combinations may omit it).
-    """
-    segment_start = _finite_timestamp(getattr(segment, "start", 0.0), 0.0)
-    segment_end = _finite_timestamp(getattr(segment, "end", segment_start), segment_start)
-    segment_start = max(0.0, segment_start)
-    segment_end = max(segment_start, segment_end)
+
+def aligned_segment_bounds(segment: object) -> tuple[float, float]:
+    """Use word edges to remove VAD padding from subtitle cue boundaries."""
+    start = max(0.0, _finite_timestamp(getattr(segment, "start", 0.0), 0.0))
+    end = max(start, _finite_timestamp(getattr(segment, "end", start), start))
     words = getattr(segment, "words", None) or ()
     valid_words = [
         word for word in words
@@ -59,16 +75,7 @@ def aligned_segment_bounds(segment: object) -> tuple[float, float]:
         and getattr(word, "end", None) is not None
     ]
     if not valid_words:
-        return segment_start, segment_end
-    word_start = _finite_timestamp(valid_words[0].start, segment_start)
-    word_end = _finite_timestamp(valid_words[-1].end, segment_end)
-    return max(0.0, word_start), max(word_start, word_end)
-
-
-def _finite_timestamp(value: object, fallback: float) -> float:
-    """Return a finite timestamp without allowing malformed model output into SRT."""
-    try:
-        timestamp = float(value)
-    except (TypeError, ValueError):
-        return fallback
-    return timestamp if math.isfinite(timestamp) else fallback
+        return start, end
+    word_start = max(0.0, _finite_timestamp(valid_words[0].start, start))
+    word_end = max(word_start, _finite_timestamp(valid_words[-1].end, end))
+    return word_start, word_end

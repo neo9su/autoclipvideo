@@ -377,9 +377,9 @@ def _do_transcribe(job_id: str):
             segments, info = model.transcribe(mp4_path, **ASR_CONFIG.transcribe_options())
         with open(srt_path, "w", encoding="utf-8") as f:
             for i, seg in enumerate(segments, 1):
-                cue_start, cue_end = aligned_segment_bounds(seg)
+                start, end = aligned_segment_bounds(seg)
                 f.write(f"{i}\n")
-                f.write(f"{_fmt_ts(cue_start)} --> {_fmt_ts(cue_end)}\n")
+                f.write(f"{_fmt_ts(start)} --> {_fmt_ts(end)}\n")
                 f.write(f"{seg.text.strip()}\n\n")
         job["status"] = "done"
         _db_update_job(job_id, "done")

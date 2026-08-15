@@ -3,20 +3,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "gpu_service"))
 
-from asr_config import ASR_INITIAL_PROMPT, aligned_segment_bounds, transcribe_options
-
-
-class _Word:
-    def __init__(self, start, end):
-        self.start = start
-        self.end = end
-
-
-class _Segment:
-    def __init__(self, start, end, words=None):
-        self.start = start
-        self.end = end
-        self.words = words
+from asr_config import ASR_CONFIG, ASR_INITIAL_PROMPT, aligned_segment_bounds, transcribe_options
 
 
 def test_mandarin_live_commerce_options_are_explicit():
@@ -39,15 +26,25 @@ def test_retranscription_tool_is_explicitly_opt_in():
     assert "X-Idempotency-Key" in text
 
 
-def test_word_edges_remove_vad_padding_from_srt_cue():
-    segment = _Segment(10.0, 14.0, [_Word(10.6, 11.2), _Word(12.4, 13.1)])
-    assert aligned_segment_bounds(segment) == (10.6, 13.1)
+def test_profile_exposes_large_v3_and_word_aligned_bounds():
+    assert ASR_CONFIG.model_name == "large-v3"
+
+    class Word:
+        start = 1.25
+        end = 2.75
+
+    class Segment:
+        start = 1.0
+        end = 3.0
+        words = [Word()]
+
+    assert aligned_segment_bounds(Segment()) == (1.25, 2.75)
 
 
-def test_segment_edges_are_fallback_when_word_timestamps_are_missing():
-    assert aligned_segment_bounds(_Segment(2.0, 3.5)) == (2.0, 3.5)
+def test_alignment_falls_back_for_malformed_model_timestamps():
+    class Segment:
+        start = float("nan")
+        end = float("inf")
+        words = []
 
-
-def test_word_edges_are_safe_for_invalid_model_timestamps():
-    segment = _Segment(-2.0, 1.0, [_Word(float("nan"), 0.8), _Word(0.4, float("inf"))])
-    assert aligned_segment_bounds(segment) == (0.0, 1.0)
+    assert aligned_segment_bounds(Segment()) == (0.0, 0.0)

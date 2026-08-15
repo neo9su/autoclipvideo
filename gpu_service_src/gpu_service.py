@@ -41,6 +41,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 import shutil as _shutil
+from asr_config import aligned_segment_bounds
 
 _DEFAULT_STORAGE = (
     r"C:\Users\neo\douyin_recordings" if os.name == "nt" else "/data/douyin-recordings"
@@ -87,12 +88,15 @@ _gpu_sem: asyncio.Semaphore = asyncio.Semaphore(1)
 # NVENC concurrency: 2 concurrent — NVENC is a dedicated hardware unit, no VRAM cost
 _clip_sem: asyncio.Semaphore = asyncio.Semaphore(2)
 
-from asr_config import aligned_segment_bounds, get_asr_config, get_model_name
-
-# Keep the deployable source distribution on the same audited profile as the
-# canonical GPU service.  ASR_MODEL and the tuning overrides are intentionally
-# read by asr_config so rollback is a single configuration change.
-ASR_MODEL_NAME = get_model_name()
+# Mandarin live-commerce ASR profile; keep this source distribution aligned
+# with gpu_service/main.py for remote deployments and straightforward rollback.
+ASR_MODEL_NAME = os.environ.get("ASR_MODEL_NAME", "large-v3")
+ASR_LANGUAGE = "zh"
+ASR_BEAM_SIZE = 8
+ASR_INITIAL_PROMPT = (
+    "这是中文普通话电商直播。假发、刘海、鬓发、头顶、颅顶、发际线、黑长直、"
+    "自然黑、方圆脸、显脸小、真人发、高温丝。"
+)
 
 # ── Clip pipeline constants ───────────────────────────────────────────────────
 CLIP_W    = 1080
@@ -374,12 +378,26 @@ def _do_transcribe(job_id: str):
     try:
         model = _get_model()
         with _SuppressStdout():
-            segments, info = model.transcribe(mp4_path, **get_asr_config())
+            segments, info = model.transcribe(
+                mp4_path,
+                language=ASR_LANGUAGE,
+                beam_size=ASR_BEAM_SIZE,
+                initial_prompt=ASR_INITIAL_PROMPT,
+                condition_on_previous_text=False,
+                temperature=(0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
+                word_timestamps=True,
+                vad_filter=True,
+                vad_parameters={
+                    "threshold": 0.35,
+                    "min_silence_duration_ms": 450,
+                    "speech_pad_ms": 250,
+                },
+            )
         with open(srt_path, "w", encoding="utf-8") as f:
             for i, seg in enumerate(segments, 1):
-                cue_start, cue_end = aligned_segment_bounds(seg)
+                start, end = aligned_segment_bounds(seg)
                 f.write(f"{i}\n")
-                f.write(f"{_fmt_ts(cue_start)} --> {_fmt_ts(cue_end)}\n")
+                f.write(f"{_fmt_ts(start)} --> {_fmt_ts(end)}\n")
                 f.write(f"{seg.text.strip()}\n\n")
         job["status"] = "done"
         _db_update_job(job_id, "done")
