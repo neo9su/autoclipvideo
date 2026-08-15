@@ -34,6 +34,9 @@ def _env_bool(name: str, default: bool) -> bool:
 # large-v3 is the accuracy-first profile for the RTX 4080 SUPER.  Keep all
 # overrides explicit and deployment-local so rollback is a service restart.
 ASR_MODEL = os.environ.get("ASR_MODEL", "large-v3")
+# Kept as an attribute alias for the service's configuration-module import.
+# This makes the selected model visible in one auditable place.
+model_name = ASR_MODEL
 ASR_LANGUAGE = os.environ.get("ASR_LANGUAGE", "zh")
 ASR_BEAM_SIZE = _env_int("ASR_BEAM_SIZE", 8)
 ASR_BEST_OF = _env_int("ASR_BEST_OF", 5)

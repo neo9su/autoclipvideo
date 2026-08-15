@@ -48,7 +48,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 import shutil as _shutil
-from asr_config import ASR_CONFIG
+import asr_config as ASR_CONFIG
 
 _DEFAULT_STORAGE = (
     r"F:\douyin_recordings" if os.name == "nt" else "/data/douyin-recordings"
