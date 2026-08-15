@@ -32,7 +32,7 @@ def test_mandarin_live_commerce_options_are_explicit():
 def test_word_boundaries_are_used_for_subtitle_edges():
     source = Path(__file__).parents[1] / "gpu_service" / "main.py"
     text = source.read_text(encoding="utf-8")
-    assert "_aligned_segment_times" in text
+    assert "_segment_bounds" in text
     assert "word.start" in text
 
 

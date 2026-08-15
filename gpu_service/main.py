@@ -367,7 +367,7 @@ def _fmt_ts(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:06.3f}".replace(".", ",")
 
 
-def _aligned_segment_times(segment) -> tuple[float, float]:
+def _segment_bounds(segment) -> tuple[float, float]:
     """Use word boundaries when available, avoiding VAD padding drift."""
     words = [word for word in (getattr(segment, "words", None) or [])
              if word.start is not None and word.end is not None and word.end > word.start]
@@ -386,7 +386,7 @@ def _do_transcribe(job_id: str):
             segments, info = model.transcribe(mp4_path, **ASR_CONFIG.transcribe_options())
         with open(srt_path, "w", encoding="utf-8") as f:
             for i, seg in enumerate(segments, 1):
-                start, end = _aligned_segment_times(seg)
+                start, end = _segment_bounds(seg)
                 f.write(f"{i}\n")
                 f.write(f"{_fmt_ts(start)} --> {_fmt_ts(end)}\n")
                 f.write(f"{seg.text.strip()}\n\n")
