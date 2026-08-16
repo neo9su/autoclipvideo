@@ -1246,17 +1246,7 @@ async function load({ showLoading = true } = {}) {
       pendingRefresh = true
       return
     }
-    const currentById = new Map(groups.value.map(group => [group.id, group]))
-    const mergedGroups = nextGroups.map(nextGroup => {
-      const currentGroup = currentById.get(nextGroup.id)
-      if (currentGroup) {
-        Object.assign(currentGroup, nextGroup)
-        return currentGroup
-      }
-      return nextGroup
-    })
-    groups.value = mergedGroups
-    applyGroups(nextGroups)
+    applyGroups(nextGroups, true)
     rooms.value = nextRooms
   } catch (error) {
     show(error.message || '分组加载失败', 'error')
@@ -1265,7 +1255,7 @@ async function load({ showLoading = true } = {}) {
   }
 }
 
-function applyGroups(nextGroups) {
+function applyGroups(nextGroups, resetVisibleCount = false) {
   const currentById = new Map(groups.value.map(group => [group.id, group]))
   const mergedGroups = nextGroups.map(nextGroup => {
     const currentGroup = currentById.get(nextGroup.id)
@@ -1275,8 +1265,10 @@ function applyGroups(nextGroups) {
     }
     return nextGroup
   })
-  groups.value = mergedGroups
-  visibleGroupCount.value = Math.min(50, mergedGroups.length)
+  // Keep the array and existing card objects stable during status updates so
+  // focused controls and expanded cards are not recreated.
+  groups.value.splice(0, groups.value.length, ...mergedGroups)
+  if (resetVisibleCount) visibleGroupCount.value = Math.min(50, mergedGroups.length)
 }
 
 async function refreshGroupStatuses() {
@@ -1285,7 +1277,12 @@ async function refreshGroupStatuses() {
     return
   }
   try {
-    applyGroups(await getGroups())
+    const nextGroups = await getGroups()
+    if (hasActiveInteraction() || document.hidden) {
+      pendingRefresh = true
+      return
+    }
+    applyGroups(nextGroups)
   } catch (error) {
     console.warn('分组状态轮询失败', error)
   }
