@@ -1206,8 +1206,9 @@ const importPreviewCount = computed(() => {
 })
 
 let pendingRefresh = false
-let refreshTimer = null
 const pendingGroupRefreshes = new Set()
+let refreshTimer = null
+const refreshingGroupIds = new Set()
 
 function hasActiveInteraction() {
   if (openId.value || groupModal.value || customModal.value || reclipModal.value || reviewModal.value ||
@@ -1250,11 +1251,8 @@ async function load({ showLoading = true, background = false } = {}) {
 }
 
 async function refreshGroup(groupId) {
-  if (groupId == null) return
-  if (hasActiveInteraction() || document.hidden) {
-    pendingGroupRefreshes.add(groupId)
-    return
-  }
+  if (groupId == null || refreshingGroupIds.has(groupId)) return
+  refreshingGroupIds.add(groupId)
   try {
     const nextGroup = await getGroup(groupId)
     if (hasActiveInteraction() || document.hidden) {
@@ -1266,11 +1264,16 @@ async function refreshGroup(groupId) {
   } catch (error) {
     // Websocket updates are best effort and must not interrupt active work.
     console.warn('分组状态更新失败', error)
+  } finally {
+    refreshingGroupIds.delete(groupId)
   }
 }
 
 function requestRefresh(groupId = null) {
   if (groupId != null) {
+    pendingGroupRefreshes.add(groupId)
+    if (hasActiveInteraction() || document.hidden) return
+    pendingGroupRefreshes.delete(groupId)
     refreshGroup(groupId)
     return
   }
@@ -1288,11 +1291,13 @@ function requestRefresh(groupId = null) {
 
 function flushPendingRefresh() {
   if ((!pendingRefresh && pendingGroupRefreshes.size === 0) || hasActiveInteraction() || document.hidden) return
+  const shouldLoad = pendingRefresh
   pendingRefresh = false
-  if (pendingRefresh) load({ showLoading: false, background: true })
+  if (shouldLoad) load({ showLoading: false, background: true })
   const groupIds = [...pendingGroupRefreshes]
   pendingGroupRefreshes.clear()
   for (const groupId of groupIds) refreshGroup(groupId)
+}
 }
 
 async function toggleDetail(id) {
