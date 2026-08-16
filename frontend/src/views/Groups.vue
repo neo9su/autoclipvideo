@@ -1228,6 +1228,12 @@ async function load({ showLoading = true } = {}) {
   if (showLoading) loading.value = true
   try {
     const [nextGroups, nextRooms] = await Promise.all([getGroups(), getRooms()])
+    // A fallback request may have started before the user opened a control.
+    // Never apply its snapshot while the page is being operated.
+    if (!showLoading && (hasActiveInteraction() || document.hidden)) {
+      pendingRefresh = true
+      return
+    }
     const currentById = new Map(groups.value.map(group => [group.id, group]))
     const mergedGroups = nextGroups.map(nextGroup => {
       const currentGroup = currentById.get(nextGroup.id)
@@ -1250,13 +1256,16 @@ async function load({ showLoading = true } = {}) {
 }
 
 async function refreshGroup(groupId) {
-  if (groupId == null || hasActiveInteraction({ includeExpanded: false }) || document.hidden) {
-    if (groupId != null) pendingGroupRefreshes.add(groupId)
+  if (groupId == null) return
+  if (hasActiveInteraction({ includeExpanded: false }) || document.hidden) {
+    pendingGroupRefreshes.add(groupId)
     return
   }
   try {
     const nextGroup = await getGroup(groupId)
-    if (hasActiveInteraction() || document.hidden) {
+    // The user may have opened a control while the request was in flight.
+    // Queue the result rather than changing the live card under that control.
+    if (hasActiveInteraction({ includeExpanded: false }) || document.hidden) {
       pendingGroupRefreshes.add(groupId)
       return
     }
