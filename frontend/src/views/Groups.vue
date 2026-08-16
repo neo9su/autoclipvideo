@@ -1091,6 +1091,8 @@ const importPreviewCount = computed(() => {
 
 let pendingRefresh = false
 let refreshTimer = null
+const pendingGroupRefreshes = new Set()
+const refreshingGroupIds = new Set()
 
 function hasActiveInteraction() {
   if (openId.value || groupModal.value || customModal.value || reclipModal.value || reviewModal.value ||
@@ -1127,20 +1129,33 @@ async function load({ showLoading = true } = {}) {
 }
 
 async function refreshGroup(groupId) {
-  if (groupId == null || hasActiveInteraction() || document.hidden) return
+  if (groupId == null) return
+  if (hasActiveInteraction() || document.hidden) {
+    pendingGroupRefreshes.add(groupId)
+    return
+  }
+  if (refreshingGroupIds.has(groupId)) return
+  refreshingGroupIds.add(groupId)
   try {
     const nextGroup = await getGroup(groupId)
+    if (hasActiveInteraction() || document.hidden) {
+      pendingGroupRefreshes.add(groupId)
+      return
+    }
     const currentGroup = groups.value.find(group => group.id === nextGroup.id)
     if (currentGroup) Object.assign(currentGroup, nextGroup)
   } catch (error) {
     // Websocket updates are best effort and must not interrupt active work.
     console.warn('分组状态更新失败', error)
+  } finally {
+    refreshingGroupIds.delete(groupId)
   }
 }
 
 function requestRefresh(groupId = null) {
   if (groupId != null) {
-    refreshGroup(groupId)
+    pendingGroupRefreshes.add(groupId)
+    flushPendingRefresh()
     return
   }
   if (hasActiveInteraction() || document.hidden) {
@@ -1156,9 +1171,14 @@ function requestRefresh(groupId = null) {
 }
 
 function flushPendingRefresh() {
-  if (!pendingRefresh || hasActiveInteraction() || document.hidden) return
-  pendingRefresh = false
-  load({ showLoading: false })
+  if ((!pendingRefresh && pendingGroupRefreshes.size === 0) || hasActiveInteraction() || document.hidden) return
+  const groupIds = [...pendingGroupRefreshes]
+  pendingGroupRefreshes.clear()
+  if (pendingRefresh) {
+    pendingRefresh = false
+    load({ showLoading: false })
+  }
+  groupIds.forEach(groupId => refreshGroup(groupId))
 }
 
 async function toggleDetail(id) {
