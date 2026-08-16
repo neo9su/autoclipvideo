@@ -341,21 +341,29 @@
 
     <!-- Video preview modal -->
     <div v-if="previewGroup" class="preview-overlay" @click.self="closeGroupPreview">
-      <div class="preview-modal" role="dialog" aria-modal="true" :aria-label="`${previewGroup.label} 视频预览`">
+      <div class="preview-modal" role="dialog" aria-modal="true" :aria-label="`预览 ${previewGroup.label}`">
         <div class="preview-header">
           <span class="preview-title">{{ previewGroup.label }}</span>
           <div v-if="availableVersionCount(previewGroup) >= 2" class="preview-tabs">
-            <button v-if="previewGroup.director_status === 2 && previewGroup.director_available" :class="['ptab', previewVersion === 'director' && 'ptab-active']" @click="selectPreviewVersion('director')">🎬 导演版</button>
-            <button v-if="previewGroup.classic_status === 2 && previewGroup.classic_available" :class="['ptab', previewVersion === 'classic' && 'ptab-active']" @click="selectPreviewVersion('classic')">📹 经典版</button>
-            <button v-if="previewGroup.creative_status === 2 && previewGroup.creative_available" :class="['ptab', previewVersion === 'creative' && 'ptab-active']" @click="selectPreviewVersion('creative')">✍️ 自编版</button>
-            <button v-if="previewGroup.qianchuan_status === 2 && previewGroup.qianchuan_available" :class="['ptab', previewVersion === 'qianchuan' && 'ptab-active']" @click="selectPreviewVersion('qianchuan')">📣 千川投流</button>
+            <button v-if="previewGroup.director_status === 2 && previewGroup.director_available" :class="['ptab', previewVersion === 'director' && 'ptab-active']" @click="previewVersion = 'director'">🎬 导演版</button>
+            <button v-if="previewGroup.classic_status === 2 && previewGroup.classic_available" :class="['ptab', previewVersion === 'classic' && 'ptab-active']" @click="previewVersion = 'classic'">📹 经典版</button>
+            <button v-if="previewGroup.creative_status === 2 && previewGroup.creative_available" :class="['ptab', previewVersion === 'creative' && 'ptab-active']" @click="previewVersion = 'creative'">✍️ 自编版</button>
+            <button v-if="previewGroup.qianchuan_status === 2 && previewGroup.qianchuan_available" :class="['ptab', previewVersion === 'qianchuan' && 'ptab-active']" @click="previewVersion = 'qianchuan'">📣 千川投流</button>
           </div>
-          <button class="preview-close" aria-label="关闭视频预览" @click="closeGroupPreview">✕</button>
+          <button class="preview-close" aria-label="关闭预览" @click="closeGroupPreview">✕</button>
         </div>
-        <div class="preview-video-wrap">
-          <video class="preview-video" :src="previewVideoUrl" :key="`${previewGroup.id}-${previewVersion}`" controls autoplay playsinline @error="previewLoadError = true" @loadeddata="previewLoadError = false"></video>
-          <div v-if="previewLoadError" class="preview-error">视频加载失败</div>
-        </div>
+        <video
+          v-if="previewVideoUrl"
+          class="preview-video"
+          :src="previewVideoUrl"
+          :key="`${previewGroup.id}-${previewVersion}`"
+          controls
+          autoplay
+          playsinline
+          preload="metadata"
+          @error="previewError = true"
+        ></video>
+        <div v-if="previewError" class="preview-error">视频加载失败</div>
       </div>
     </div>
 
@@ -586,7 +594,7 @@ const metaSchemes = ref([])
 const selectedScheme = ref('')
 const previewGroup = ref(null)   // group being previewed in video modal
 const previewVersion = ref('director')  // 'director' | 'classic' | 'creative' | 'qianchuan'
-const previewLoadError = ref(false)
+const previewError = ref(false)
 const reclipModal = ref(null)    // {group, feedback, saving, submitted}
 const selectedPublishVersion = ref('both')
 const apiBase = REMOTE_API_BASE
@@ -1158,15 +1166,6 @@ const selectedGroup = computed(() =>
   newTask.value.group_id ? mergedGroups.value.find(g => g.id === newTask.value.group_id) : null
 )
 
-function closeGroupPreview() {
-  previewGroup.value = null
-  previewLoadError.value = false
-}
-
-function selectPreviewVersion(version) {
-  previewVersion.value = version
-  previewLoadError.value = false
-}
 const previewVideoUrl = computed(() => {
   if (!previewGroup.value) return ''
   if (previewVersion.value === 'classic') return `${BASE_URL}/api/groups/${previewGroup.value.id}/download`
@@ -1177,13 +1176,19 @@ const previewVideoUrl = computed(() => {
 })
 
 watch(previewGroup, (g) => {
-  if (!g) {
-    previewLoadError.value = false
-    return
-  }
-  previewLoadError.value = false
+  previewError.value = false
+  if (!g) return
   previewVersion.value = g.qianchuan_status === 2 && g.qianchuan_available ? 'qianchuan' : g.director_status === 2 && g.director_available ? 'director' : g.creative_status === 2 && g.creative_available ? 'creative' : 'classic'
 })
+
+watch(previewVersion, () => {
+  previewError.value = false
+})
+
+function closeGroupPreview() {
+  previewGroup.value = null
+  previewError.value = false
+}
 
 function groupVideoUrl(groupId) {
   return `${BASE_URL}/api/groups/${groupId}/download`
@@ -1510,15 +1515,14 @@ label { display: block; font-size: 12px; color: #888; margin: 12px 0 4px; }
 .gact-orange:hover { background: rgba(249,115,22,0.1); }
 .gact-red { color: #fe2c55; border-color: #fe2c55; }
 .gact-red:hover { background: rgba(254,44,85,0.1); }
-.preview-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.85); z-index: 1000; display: flex; align-items: center; justify-content: center; padding: 16px; }
-.preview-modal { background: #111; border: 1px solid #555; border-radius: 12px; width: min(860px, 94vw); max-height: 90vh; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,0.7); }
-.preview-header { display: flex; justify-content: space-between; align-items: center; padding: 14px 18px; border-bottom: 1px solid #333; font-size: 13px; font-weight: 600; gap: 12px; flex-shrink: 0; }
-.preview-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.preview-close { background: none; border: none; color: #aaa; cursor: pointer; font-size: 18px; padding: 2px 6px; flex-shrink: 0; }
-.preview-close:hover { color: #fff; }
-.preview-video-wrap { position: relative; min-height: 180px; display: flex; align-items: center; justify-content: center; background: #000; }
-.preview-video { width: 100%; max-height: 70vh; display: block; background: #000; }
-.preview-error { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #fe2c55; background: rgba(0,0,0,0.82); font-size: 14px; }
+.preview-overlay { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center; padding: 24px; background: rgba(0,0,0,0.85); overflow-y: auto; }
+.preview-modal { background: #111; border: 1px solid #555; border-radius: 12px; width: min(860px, 95vw); max-height: calc(100vh - 48px); display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 20px 70px rgba(0,0,0,0.7); }
+.preview-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #333; font-size: 13px; font-weight: 600; gap: 12px; flex-wrap: wrap; }
+.preview-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.preview-close { flex: 0 0 auto; background: #2a2a2a; border: 1px solid #555; border-radius: 4px; color: #ccc; cursor: pointer; font-size: 16px; line-height: 1; padding: 3px 7px; }
+.preview-close:hover { color: #fff; background: #3a3a3a; }
+.preview-video { width: 100%; height: auto; max-height: calc(100vh - 130px); min-height: 180px; display: block; background: #000; object-fit: contain; }
+.preview-error { padding: 28px 16px; color: #fe2c55; text-align: center; font-size: 13px; background: #111; }
 .reclip-modal { background: #1a1a1a; border: 1px solid #333; border-radius: 12px; padding: 20px; width: min(400px, 95vw); }
 .group-item:last-child { border-bottom: none; }
 .group-item:hover { background: #1a1a1a; }
