@@ -248,9 +248,15 @@
             <div class="styles-actions">
               <button
                 class="btn-action rose"
-                :disabled="g.ready_count === 0 || stylesBusy[g.id] || g.realistic_status === 1 || g.conservative_status === 1"
-                @click="generateStyles(g)">
-                {{ stylesBusy[g.id] ? '生成中…' : (hasStylesFailure(g) ? '↺ 重试直出版/保守版' : '生成直出版/保守版') }}
+                :disabled="versionTriggerDisabled(g, 'realistic')"
+                @click="triggerVersion(g, 'realistic')">
+                {{ versionTriggerLabel(g, 'realistic') === '生成中…' ? '直出版生成中…' : (versionTriggerLabel(g, 'realistic') === '↺ 重试' ? '↺ 重试直出版' : '生成直出版') }}
+              </button>
+              <button
+                class="btn-action orange"
+                :disabled="versionTriggerDisabled(g, 'conservative')"
+                @click="triggerVersion(g, 'conservative')">
+                {{ versionTriggerLabel(g, 'conservative') === '生成中…' ? '保守版生成中…' : (versionTriggerLabel(g, 'conservative') === '↺ 重试' ? '↺ 重试保守版' : '生成保守版') }}
               </button>
               <template v-if="g.realistic_status === 2 && g.realistic_available">
                 <button class="btn-action rose" @click="openStylePreview(g, 'realistic')">▶ 直出版</button>
@@ -1027,18 +1033,6 @@ function styleStatusClass(status) {
 }
 function hasStylesFailure(group) { return Number(group.realistic_status) < 0 || Number(group.conservative_status) < 0 }
 function summarizeStyleError(error) { return String(error).replace(/\s+/g, ' ').slice(0, 160) }
-async function generateStyles(group) {
-  stylesBusy.value[group.id] = true
-  try {
-    await retryStyles(group.id)
-    show('直出版+保守版任务已提交', 'info')
-    await load()
-  } catch (error) {
-    show(error.message || '样式任务提交失败', 'error')
-  } finally {
-    stylesBusy.value[group.id] = false
-  }
-}
 
 // Re-clip (single recording)
 const reclipModal = ref(null)
