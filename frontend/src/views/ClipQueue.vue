@@ -172,12 +172,20 @@
       <div class="section-header">
         <span class="section-title">剪辑失败</span>
         <span class="section-badge failed">{{ failedClips.length }}</span>
-        <div class="bulk-actions">
-          <button class="bulk-btn retry" @click="retryAllFailed" :disabled="bulkRetrying || bulkDismissing">
+        <div class="section-actions">
+          <button
+            class="act-btn retry bulk-action"
+            :disabled="bulkRetrying || bulkClearing || retryableFailedClips.length === 0"
+            @click="retryAllFailed"
+            title="重试所有可重试的失败剪辑">
             {{ bulkRetrying ? '重试中…' : '批量重试' }}
           </button>
-          <button class="bulk-btn dismiss" @click="dismissAllFailed" :disabled="bulkRetrying || bulkDismissing">
-            {{ bulkDismissing ? '清除中…' : '批量清除' }}
+          <button
+            class="act-btn dismiss bulk-action"
+            :disabled="bulkRetrying || bulkClearing"
+            @click="clearAllFailed"
+            title="清除所有失败剪辑">
+            {{ bulkClearing ? '清除中…' : '批量清除' }}
           </button>
         </div>
         <span class="section-hint">点击重试重新入队</span>
@@ -213,10 +221,12 @@ const failedClips = ref([])
 const transcribeJobs = ref([])
 const transcribeMeta = ref({ total: 0, session_done: 0, avg_duration_s: 0, eta_seconds: null })
 const loading = ref(false)
-const bulkRetrying = ref(false)
-const bulkDismissing = ref(false)
 const maxConcurrent = ref(2)
+const bulkRetrying = ref(false)
+const bulkClearing = ref(false)
 let timer = null
+
+const retryableFailedClips = computed(() => failedClips.value.filter(job => !job.skip_reason))
 
 const overallPct = computed(() => {
   const { total, session_done } = transcribeMeta.value
@@ -328,26 +338,24 @@ async function dismissJob(recordingId) {
 }
 
 async function retryAllFailed() {
-  const recordingIds = failedClips.value.filter(job => !job.skip_reason).map(job => job.id)
-  if (recordingIds.length === 0) {
-    showToast('暂无可重试的失败剪辑', 'info')
+  const failedJobs = retryableFailedClips.value
+  if (failedJobs.length === 0) {
+    showToast('当前没有可重试的失败剪辑', 'info')
     return
   }
 
   bulkRetrying.value = true
   try {
-    const response = await remoteFetch('/api/clip-queue/bulk-retry', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ids: recordingIds }),
-    })
-    const payload = await response.json().catch(() => ({}))
-    if (!response.ok) {
-      showToast(payload.detail || '批量重试失败', 'error')
-      return
+    const results = await Promise.allSettled(
+      failedJobs.map(job => remoteFetch(`/api/clip-queue/${job.id}/retry`, { method: 'POST' }))
+    )
+    const succeeded = results.filter(result => result.status === 'fulfilled' && result.value.ok).length
+    const failed = results.length - succeeded
+    if (failed === 0) {
+      showToast(`已重新入队 ${succeeded} 个剪辑任务`, 'success')
+    } else {
+      showToast(`已重新入队 ${succeeded} 个，${failed} 个重试失败`, 'error')
     }
-    const skippedCount = payload.skipped?.length || 0
-    showToast(skippedCount ? `已重试 ${payload.queued.length} 条，${skippedCount} 条无法重试` : `已重试 ${payload.queued.length} 条`, skippedCount ? 'info' : 'success')
     await load()
   } catch {
     showToast('批量重试请求失败', 'error')
@@ -356,32 +364,31 @@ async function retryAllFailed() {
   }
 }
 
-async function dismissAllFailed() {
-  const recordingIds = failedClips.value.map(job => job.id)
-  if (recordingIds.length === 0) {
-    showToast('暂无失败剪辑可清除', 'info')
+async function clearAllFailed() {
+  const failedJobs = failedClips.value
+  if (failedJobs.length === 0) {
+    showToast('当前没有可清除的失败剪辑', 'info')
     return
   }
-  if (!window.confirm(`确定清除当前 ${recordingIds.length} 条失败剪辑吗？清除后将不再显示在失败列表中。`)) return
+  if (!window.confirm(`确定要清除当前 ${failedJobs.length} 个失败剪辑吗？此操作不会删除录像文件。`)) return
 
-  bulkDismissing.value = true
+  bulkClearing.value = true
   try {
-    const response = await remoteFetch('/api/clip-queue/bulk-dismiss', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ids: recordingIds }),
-    })
-    const payload = await response.json().catch(() => ({}))
-    if (!response.ok) {
-      showToast(payload.detail || '批量清除失败', 'error')
-      return
+    const results = await Promise.allSettled(
+      failedJobs.map(job => remoteFetch(`/api/clip-queue/${job.id}/dismiss`, { method: 'POST' }))
+    )
+    const succeeded = results.filter(result => result.status === 'fulfilled' && result.value.ok).length
+    const failed = results.length - succeeded
+    if (failed === 0) {
+      showToast(`已清除 ${succeeded} 个失败剪辑`, 'success')
+    } else {
+      showToast(`已清除 ${succeeded} 个，${failed} 个清除失败`, 'error')
     }
-    showToast(`已清除 ${payload.dismissed?.length || 0} 条失败剪辑`, 'success')
     await load()
   } catch {
     showToast('批量清除请求失败', 'error')
   } finally {
-    bulkDismissing.value = false
+    bulkClearing.value = false
   }
 }
 
@@ -413,21 +420,12 @@ onUnmounted(() => clearInterval(timer))
 
 .section { margin-bottom: 24px; }
 .section-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.section-actions { display: flex; align-items: center; gap: 6px; margin-left: 4px; }
 .section-title { font-size: 14px; font-weight: 600; color: #ccc; }
 .section-badge { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 10px; }
 .section-badge.running { background: rgba(251,191,36,0.2); color: #fbbf24; }
 .section-badge.queued  { background: rgba(148,163,184,0.15); color: #94a3b8; }
 .section-hint { font-size: 11px; color: #555; margin-left: auto; }
-.bulk-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
-.bulk-btn {
-  border: 1px solid #333; cursor: pointer; border-radius: 5px;
-  font-size: 12px; padding: 4px 9px; transition: all 0.15s;
-}
-.bulk-btn:disabled { cursor: not-allowed; opacity: 0.55; }
-.bulk-btn.retry { background: rgba(96,165,250,0.1); border-color: rgba(96,165,250,0.3); color: #60a5fa; }
-.bulk-btn.retry:hover:not(:disabled) { background: rgba(96,165,250,0.25); }
-.bulk-btn.dismiss { background: rgba(107,114,128,0.1); border-color: rgba(107,114,128,0.3); color: #9ca3af; }
-.bulk-btn.dismiss:hover:not(:disabled) { background: rgba(107,114,128,0.25); }
 
 .job-list { display: flex; flex-direction: column; gap: 8px; }
 
@@ -545,6 +543,9 @@ onUnmounted(() => clearInterval(timer))
 .act-btn.retry:hover  { background: rgba(96,165,250,0.25); }
 .act-btn.dismiss { background: rgba(107,114,128,0.1); border-color: rgba(107,114,128,0.3); color: #9ca3af; }
 .act-btn.dismiss:hover { background: rgba(107,114,128,0.25); }
+.act-btn:disabled { cursor: not-allowed; opacity: 0.45; }
+.act-btn:disabled:hover { background: inherit; }
+.bulk-action { padding: 4px 10px; }
 
 /* ── Paused card ── */
 .job-card.paused-card { display: flex; align-items: center; gap: 14px; border-color: rgba(251,191,36,0.2); opacity: 0.85; }
