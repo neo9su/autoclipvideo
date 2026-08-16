@@ -188,6 +188,12 @@ async def init_db():
             "ALTER TABLE clip_groups ADD COLUMN creative_script TEXT",
             "ALTER TABLE clip_groups ADD COLUMN creative_audio_path TEXT",
             "ALTER TABLE clip_groups ADD COLUMN creative_final_video TEXT",
+            "ALTER TABLE clip_groups ADD COLUMN realistic_status INTEGER DEFAULT 0",
+            "ALTER TABLE clip_groups ADD COLUMN realistic_error TEXT",
+            "ALTER TABLE clip_groups ADD COLUMN realistic_final_video TEXT",
+            "ALTER TABLE clip_groups ADD COLUMN conservative_status INTEGER DEFAULT 0",
+            "ALTER TABLE clip_groups ADD COLUMN conservative_error TEXT",
+            "ALTER TABLE clip_groups ADD COLUMN conservative_final_video TEXT",
             # 商品缩略图
             "ALTER TABLE products ADD COLUMN product_thumb TEXT",
             # 发布重试计数

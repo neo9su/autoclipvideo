@@ -1587,7 +1587,11 @@ async def list_groups():
             ORDER BY g.created_at DESC
         """) as cur:
             rows = await cur.fetchall()
-    result = [dict(r) | _artifact_statuses(dict(r)) for r in rows]
+    result = []
+    for row in rows:
+        item = dict(row) | _artifact_statuses(dict(row))
+        item.update(_publish_version_metadata(item))
+        result.append(item)
     _groups_cache = (now, result)
     return result
 
@@ -1595,11 +1599,45 @@ async def list_groups():
 def _artifact_statuses(group: dict) -> dict:
     statuses = {}
     for version, field in (("classic", "merged_filename"), ("director", "director_final_video"),
+                           ("realistic", "realistic_final_video"), ("conservative", "conservative_final_video"),
                            ("creative", "creative_final_video"), ("qianchuan", "qianchuan_final_video")):
         path, reason = resolve_artifact_path(group.get(field), version)
         statuses[f"{version}_file_status"] = "ready" if path else reason
         statuses[f"{version}_available"] = bool(path)
     return statuses
+
+
+PUBLISHABLE_VERSIONS = ("classic", "director", "realistic", "conservative", "qianchuan")
+PUBLISH_VERSION_LABELS = {
+    "classic": "经典版",
+    "director": "导演版",
+    "realistic": "直出版",
+    "conservative": "保守版",
+    "qianchuan": "千川版",
+}
+
+
+def _publish_version_metadata(group: dict) -> dict:
+    """Expose one stable, frontend-friendly availability object per publish version."""
+    download_paths = {
+        "classic": "download",
+        "director": "director-download",
+        "realistic": "realistic-download",
+        "conservative": "conservative-download",
+        "qianchuan": "qianchuan-download",
+    }
+    return {
+        "publish_versions": [
+            {
+                "version": version,
+                "label": PUBLISH_VERSION_LABELS[version],
+                "available": bool(group.get(f"{version}_available")),
+                "status": group.get(f"{version}_file_status", "not_generated"),
+                "download_url": f"/api/groups/{group['id']}/{download_paths[version]}",
+            }
+            for version in PUBLISHABLE_VERSIONS
+        ]
+    }
 
 async def get_group(group_id: int):
     async with aio_connect() as db:
@@ -1618,7 +1656,9 @@ async def get_group(group_id: int):
             (group_id,)
         ) as cur:
             recs = await cur.fetchall()
-    return dict(group) | _artifact_statuses(dict(group)) | {"recordings": [dict(r) for r in recs]}
+    group_data = dict(group) | _artifact_statuses(dict(group))
+    group_data.update(_publish_version_metadata(group_data))
+    return group_data | {"recordings": [dict(r) for r in recs]}
 
 
 @app.post("/api/groups/{group_id}/merge")
@@ -1654,7 +1694,7 @@ async def trigger_merge(group_id: int, force: bool = False):
                 (group_id,)
             )
         await db.commit()
-    from transcribe import _run_director_pipeline, _run_creative_pipeline
+    from transcribe import _run_director_pipeline, _run_creative_pipeline, _run_variant_pipeline
     async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -1675,6 +1715,8 @@ async def trigger_merge(group_id: int, force: bool = False):
         asyncio.create_task(merge_group(group_id))
     asyncio.create_task(_run_director_pipeline(group_id))
     asyncio.create_task(_run_creative_pipeline(group_id))
+    asyncio.create_task(_run_variant_pipeline(group_id, "realistic"))
+    asyncio.create_task(_run_variant_pipeline(group_id, "conservative"))
     return {"group_id": group_id, "merge_status": 1}
 
 
@@ -1691,17 +1733,19 @@ async def retry_director_creative(group_id: int):
             (group_id,),
         )
         await db.commit()
-    from transcribe import _run_director_pipeline, _run_creative_pipeline
+    from transcribe import _run_director_pipeline, _run_creative_pipeline, _run_variant_pipeline
     asyncio.create_task(_run_director_pipeline(group_id))
     asyncio.create_task(_run_creative_pipeline(group_id))
+    asyncio.create_task(_run_variant_pipeline(group_id, "realistic"))
+    asyncio.create_task(_run_variant_pipeline(group_id, "conservative"))
     return {"group_id": group_id, "status": "queued"}
 
 
 @app.patch("/api/groups/{group_id}/publish-versions")
 async def set_publish_versions(group_id: int, body: dict):
     versions = body.get("publish_versions", "both")
-    if versions not in ("classic", "director", "creative", "qianchuan", "both"):
-        raise HTTPException(status_code=400, detail="publish_versions must be 'classic', 'director', 'creative', 'qianchuan', or 'both'")
+    if versions not in ("classic", "director", "creative", "realistic", "conservative", "qianchuan", "both"):
+        raise HTTPException(status_code=400, detail="publish_versions must be one of classic, director, creative, realistic, conservative, qianchuan, or both")
     async with aio_connect() as db:
         await db.execute(
             "UPDATE clip_groups SET publish_versions = ? WHERE id = ?", (versions, group_id)
@@ -1730,8 +1774,8 @@ async def download_merged(group_id: int, request: Request):
             if not rec:
                 raise HTTPException(status_code=404, detail="No preview available")
             rel_path = rec["clip_filename"]
-    path = os.path.join(os.path.dirname(__file__), "..", "recordings", rel_path)
-    if not os.path.exists(path):
+    path, reason = resolve_artifact_path(rel_path, "classic")
+    if not path:
         raise HTTPException(status_code=404, detail="Classic video file missing (file_missing/stale_path/needs_regeneration)")
     return _stream_video_file(path, request)
 
@@ -1754,6 +1798,16 @@ async def download_qianchuan_preview(group_id: int, request: Request):
 @app.get("/api/groups/{group_id}/qianchuan-download")
 async def download_qianchuan_video(group_id: int, request: Request):
     return await _download_artifact(group_id, "qianchuan", "qianchuan_final_video", "千川结果", request)
+
+
+@app.get("/api/groups/{group_id}/realistic-download")
+async def download_realistic_video(group_id: int, request: Request):
+    return await _download_artifact(group_id, "realistic", "realistic_final_video", "直出版", request)
+
+
+@app.get("/api/groups/{group_id}/conservative-download")
+async def download_conservative_video(group_id: int, request: Request):
+    return await _download_artifact(group_id, "conservative", "conservative_final_video", "保守版", request)
 
 
 async def _download_artifact(group_id: int, version: str, field: str, label: str, request: Request):
@@ -3696,11 +3750,12 @@ async def get_unscheduled_groups(platform: str = "douyin", room_id: Optional[int
         db.row_factory = aiosqlite.Row
         sql = """
             SELECT g.id, g.label, g.merged_filename, g.director_final_video,
+                   g.realistic_final_video, g.conservative_final_video,
                    g.creative_final_video, g.qianchuan_final_video, g.publish_versions, g.room_id, rm.name as room_name
             FROM clip_groups g
             LEFT JOIN rooms rm ON g.room_id = rm.id
             WHERE (g.merge_status = 2 OR g.classic_status = 2 OR g.director_status = 2 OR g.creative_status = 2 OR g.qianchuan_status = 2)
-              AND (g.merged_filename IS NOT NULL OR g.director_final_video IS NOT NULL OR g.creative_final_video IS NOT NULL OR g.qianchuan_final_video IS NOT NULL)
+              AND (g.merged_filename IS NOT NULL OR g.director_final_video IS NOT NULL OR g.realistic_final_video IS NOT NULL OR g.conservative_final_video IS NOT NULL OR g.creative_final_video IS NOT NULL OR g.qianchuan_final_video IS NOT NULL)
               AND g.label != '未分类'
               AND NOT EXISTS (
                   SELECT 1 FROM publish_tasks pt
@@ -3720,6 +3775,8 @@ async def get_unscheduled_groups(platform: str = "douyin", room_id: Optional[int
     for row in rows:
         resolved, reason = resolve_video_path(None, dict(row))
         item = dict(row)
+        item.update(_artifact_statuses(item))
+        item["available_versions"] = [version for version in ("classic", "director", "realistic", "conservative", "creative", "qianchuan") if item.get(f"{version}_available")]
         item["video_available"] = bool(resolved)
         item["missing_reason"] = None if resolved else reason
         if resolved:

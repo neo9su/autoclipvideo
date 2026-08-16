@@ -221,6 +221,13 @@
               <span class="vsw-label">📣 千川投流</span>
               <span class="vsw-preview-btn" @click.stop="previewGroup = selectedGroup; previewVersion = 'qianchuan'">▶ 预览</span>
             </div>
+            <div v-for="version in ['realistic', 'conservative']" :key="version"
+                 v-if="selectedGroup[`${version}_status`] === 2 && selectedGroup[`${version}_available`]"
+                 :class="['vsw-option', selectedPublishVersion === version && 'vsw-active']"
+                 @click="setPublishVersion(version)">
+              <span class="vsw-label">{{ version === 'realistic' ? '🎥 直出版' : '🛡️ 保守版' }}</span>
+              <span class="vsw-preview-btn" @click.stop="previewGroup = selectedGroup; previewVersion = version">▶ 预览</span>
+            </div>
           </div>
         </template>
 
@@ -349,6 +356,7 @@
             <button v-if="previewGroup.classic_status === 2 && previewGroup.classic_available" :class="['ptab', previewVersion === 'classic' && 'ptab-active']" @click="previewVersion = 'classic'">📹 经典版</button>
             <button v-if="previewGroup.creative_status === 2 && previewGroup.creative_available" :class="['ptab', previewVersion === 'creative' && 'ptab-active']" @click="previewVersion = 'creative'">✍️ 自编版</button>
             <button v-if="previewGroup.qianchuan_status === 2 && previewGroup.qianchuan_available" :class="['ptab', previewVersion === 'qianchuan' && 'ptab-active']" @click="previewVersion = 'qianchuan'">📣 千川投流</button>
+            <button v-for="version in ['realistic', 'conservative']" :key="version" v-if="previewGroup[`${version}_status`] === 2 && previewGroup[`${version}_available`]" :class="['ptab', previewVersion === version && 'ptab-active']" @click="previewVersion = version">{{ version === 'realistic' ? '🎥 直出版' : '🛡️ 保守版' }}</button>
           </div>
           <button class="preview-close" aria-label="关闭预览" @click="closeGroupPreview">✕</button>
         </div>
@@ -593,7 +601,7 @@ const matchedProduct = ref(null)
 const metaSchemes = ref([])
 const selectedScheme = ref('')
 const previewGroup = ref(null)   // group being previewed in video modal
-const previewVersion = ref('director')  // 'director' | 'classic' | 'creative' | 'qianchuan'
+const previewVersion = ref('director')
 const previewError = ref(false)
 const reclipModal = ref(null)    // {group, feedback, saving, submitted}
 const selectedPublishVersion = ref('both')
@@ -911,6 +919,8 @@ function availableVersionCount(group) {
   if (!group) return 0
   return (group.classic_status === 2 && group.classic_available ? 1 : 0)
     + (group.director_status === 2 && group.director_available ? 1 : 0)
+    + (group.realistic_status === 2 && group.realistic_available ? 1 : 0)
+    + (group.conservative_status === 2 && group.conservative_available ? 1 : 0)
     + (group.creative_status === 2 && group.creative_available ? 1 : 0)
     + (group.qianchuan_status === 2 && group.qianchuan_available ? 1 : 0)
 }
@@ -1170,6 +1180,8 @@ const previewVideoUrl = computed(() => {
   if (!previewGroup.value) return ''
   if (previewVersion.value === 'classic') return `${BASE_URL}/api/groups/${previewGroup.value.id}/download`
   if (previewVersion.value === 'director') return `${BASE_URL}/api/groups/${previewGroup.value.id}/director-download`
+  if (previewVersion.value === 'realistic') return `${BASE_URL}/api/groups/${previewGroup.value.id}/realistic-download`
+  if (previewVersion.value === 'conservative') return `${BASE_URL}/api/groups/${previewGroup.value.id}/conservative-download`
   if (previewVersion.value === 'creative') return `${BASE_URL}/api/groups/${previewGroup.value.id}/creative-download`
   if (previewVersion.value === 'qianchuan') return `${BASE_URL}/api/groups/${previewGroup.value.id}/qianchuan-download`
   return `${BASE_URL}/api/groups/${previewGroup.value.id}/download`
@@ -1178,7 +1190,7 @@ const previewVideoUrl = computed(() => {
 watch(previewGroup, (g) => {
   previewError.value = false
   if (!g) return
-  previewVersion.value = g.qianchuan_status === 2 && g.qianchuan_available ? 'qianchuan' : g.director_status === 2 && g.director_available ? 'director' : g.creative_status === 2 && g.creative_available ? 'creative' : 'classic'
+  previewVersion.value = ['qianchuan', 'realistic', 'conservative', 'director', 'creative', 'classic'].find(version => g[`${version}_status`] === 2 && g[`${version}_available`]) || 'classic'
 })
 
 watch(previewVersion, () => {
@@ -1318,6 +1330,7 @@ async function submitCreate() {
     product_ids: newTask.value.product_ids.length ? newTask.value.product_ids : null,
     auto_meta: !(newTask.value.title || '').trim() || !(newTask.value.description || '').trim(),
     no_cart: newTask.value.no_cart,
+    publish_version: selectedPublishVersion.value,
   }
   try {
     try {
