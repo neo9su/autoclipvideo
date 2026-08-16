@@ -180,6 +180,12 @@ export async function retryModes(id) {
   return res.json()
 }
 
+export async function retryStyles(id) {
+  const res = await fetchWithTimeout(`${BASE}/api/groups/${id}/retry-styles`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
 export async function uploadRecording(roomId, file, srtFile = null, durationSec = null, clipCount = 1) {
   const form = new FormData()
   form.append('file', file)

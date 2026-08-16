@@ -44,6 +44,8 @@
                   <option value="classic">📹 经典版</option>
                   <option value="creative">✍️ 自编版</option>
                   <option value="qianchuan">📣 千川投流</option>
+                  <option v-if="g.realistic_status === 2 && g.realistic_available" value="realistic">🧾 直出版</option>
+                  <option v-if="g.conservative_status === 2 && g.conservative_available" value="conservative">🛡️ 保守版</option>
                 </select>
               </div>
             </div>
@@ -185,6 +187,40 @@
           <div class="qianchuan-hint">{{ qianchuanStatusMeta(g).hint }}</div>
           <div v-if="g.qianchuan_status === 2 && g.qianchuan_file_status !== 'ready'" class="qianchuan-error">⚠ 千川结果文件缺失（stale_path），请重新生成</div>
           <div v-if="g.qianchuan_error" class="qianchuan-error">⚠ {{ summarizeQianchuanError(g.qianchuan_error) }}</div>
+        </div>
+
+        <!-- 直出版 / 保守版操作面板 -->
+        <div class="styles-panel">
+          <div class="styles-header">
+            <div class="styles-title-row">
+              <span class="styles-title">直出版 + 保守版</span>
+              <span class="styles-hint">基于经典版生成两种节奏</span>
+            </div>
+            <div class="styles-actions">
+              <button
+                class="btn-action rose"
+                :disabled="g.ready_count === 0 || stylesBusy[g.id] || g.realistic_status === 1 || g.conservative_status === 1"
+                @click="generateStyles(g)">
+                {{ stylesBusy[g.id] ? '生成中…' : (hasStylesFailure(g) ? '↺ 重试直出版/保守版' : '生成直出版/保守版') }}
+              </button>
+              <template v-if="g.realistic_status === 2 && g.realistic_available">
+                <button class="btn-action rose" @click="openStylePreview(g, 'realistic')">▶ 直出版</button>
+                <a :href="`${apiBase}/api/groups/${g.id}/realistic-download`" class="btn-action rose" download>↓</a>
+              </template>
+              <template v-if="g.conservative_status === 2 && g.conservative_available">
+                <button class="btn-action orange" @click="openStylePreview(g, 'conservative')">▶ 保守版</button>
+                <a :href="`${apiBase}/api/groups/${g.id}/conservative-download`" class="btn-action orange" download>↓</a>
+              </template>
+            </div>
+          </div>
+          <div class="styles-statuses">
+            <span :class="['style-status', styleStatusClass(g.realistic_status)]">直出版：{{ styleStatusLabel(g.realistic_status) }}</span>
+            <span :class="['style-status', styleStatusClass(g.conservative_status)]">保守版：{{ styleStatusLabel(g.conservative_status) }}</span>
+          </div>
+          <div v-if="g.realistic_status === 2 && g.realistic_file_status !== 'ready'" class="styles-error">⚠ 直出版文件缺失，请重新生成</div>
+          <div v-if="g.conservative_status === 2 && g.conservative_file_status !== 'ready'" class="styles-error">⚠ 保守版文件缺失，请重新生成</div>
+          <div v-if="g.realistic_error" class="styles-error">⚠ 直出版：{{ summarizeStyleError(g.realistic_error) }}</div>
+          <div v-if="g.conservative_error" class="styles-error">⚠ 保守版：{{ summarizeStyleError(g.conservative_error) }}</div>
         </div>
 
         <!-- 封面生成面板 -->
@@ -497,6 +533,27 @@
     </div>
   </div>
 
+  <!-- Realistic / Conservative Preview Modal -->
+  <div v-if="stylePreview" class="modal-backdrop" @click.self="closeStylePreview">
+    <div class="preview-modal">
+      <div class="preview-header">
+        <span class="preview-title">{{ styleLabels[stylePreview.version] }} · {{ stylePreview.group.label }}</span>
+        <button class="modal-close" @click="closeStylePreview">✕</button>
+      </div>
+      <video
+        :src="`${apiBase}/api/groups/${stylePreview.group.id}/${stylePreview.version}-download`"
+        controls
+        autoplay
+        class="preview-video"
+        @error="stylePreviewError = true"
+      ></video>
+      <div v-if="stylePreviewError" class="preview-err">视频加载失败</div>
+      <div class="preview-footer">
+        <a :href="`${apiBase}/api/groups/${stylePreview.group.id}/${stylePreview.version}-download`" class="btn-action rose" download>↓ 下载</a>
+      </div>
+    </div>
+  </div>
+
   <!-- Cover Preview Modal -->
   <div v-if="coverPreview" class="modal-backdrop" @click.self="coverPreview = null">
     <div class="cover-preview-modal">
@@ -694,7 +751,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { REMOTE_API_BASE } from '../remoteApi.js'
-import { getGroups, getGroup, getRooms, mergeGroup, retryModes, createGroup, updateGroup, reassignRecording, importGroupVideos, createWS, getThumbnailUrl, createCustomGroup, uploadCustomGroupVideo, deleteGroup, getProcessingProgress, reclipRecording, reclipGroupAll, generateQianchuanGroup } from '../api.js'
+import { getGroups, getGroup, getRooms, mergeGroup, retryModes, retryStyles, createGroup, updateGroup, reassignRecording, importGroupVideos, createWS, getThumbnailUrl, createCustomGroup, uploadCustomGroupVideo, deleteGroup, getProcessingProgress, reclipRecording, reclipGroupAll, generateQianchuanGroup } from '../api.js'
 import QianchuanUpload from '../components/QianchuanUpload.vue'
 import { useToast } from '../composables/toast.js'
 
@@ -825,6 +882,42 @@ const qianchuanPreviewGroup = ref(null)
 const qianchuanPreviewError = ref(false)
 function openQianchuanPreview(g) { qianchuanPreviewGroup.value = g; qianchuanPreviewError.value = false }
 function closeQianchuanPreview() { qianchuanPreviewGroup.value = null }
+
+const stylePreview = ref(null)
+const stylePreviewError = ref(false)
+const stylesBusy = ref({})
+const styleLabels = { realistic: '直出版', conservative: '保守版' }
+function openStylePreview(group, version) {
+  stylePreview.value = { group, version }
+  stylePreviewError.value = false
+}
+function closeStylePreview() { stylePreview.value = null }
+function styleStatusLabel(status) {
+  if (status === 1) return '生成中'
+  if (status === 2) return '已完成'
+  if (status < 0) return '生成失败'
+  return '未生成'
+}
+function styleStatusClass(status) {
+  if (status === 1) return 'running'
+  if (status === 2) return 'done'
+  if (status < 0) return 'failed'
+  return 'idle'
+}
+function hasStylesFailure(group) { return Number(group.realistic_status) < 0 || Number(group.conservative_status) < 0 }
+function summarizeStyleError(error) { return String(error).replace(/\s+/g, ' ').slice(0, 160) }
+async function generateStyles(group) {
+  stylesBusy.value[group.id] = true
+  try {
+    await retryStyles(group.id)
+    show('直出版+保守版任务已提交', 'info')
+    await load()
+  } catch (error) {
+    show(error.message || '样式任务提交失败', 'error')
+  } finally {
+    stylesBusy.value[group.id] = false
+  }
+}
 
 // Re-clip (single recording)
 const reclipModal = ref(null)
@@ -1145,7 +1238,7 @@ async function setPublishVersions(group, versions) {
       const error = await response.json().catch(() => ({}))
       throw new Error(error.detail || '设置失败')
     }
-    const labels = { both: '全部版本', director: '导演版', classic: '经典版', creative: '自编版', qianchuan: '千川投流' }
+    const labels = { both: '全部版本', director: '导演版', classic: '经典版', creative: '自编版', qianchuan: '千川投流', realistic: '直出版', conservative: '保守版' }
     show(`发布版本已设为：${labels[versions] || versions}`, 'success')
   } catch (e) {
     show(e.message || '设置发布版本失败', 'error')
@@ -1674,6 +1767,18 @@ onUnmounted(() => { wsCleanup?.(); stopProgressPolling(); groupsObserver?.discon
 .btn-qianchuan:disabled { opacity: 0.45; cursor: not-allowed; }
 .qianchuan-hint { margin-top: 6px; font-size: 11px; color: #67e8f9; line-height: 1.5; }
 .qianchuan-error { margin-top: 6px; font-size: 11px; color: #f87171; line-height: 1.5; word-break: break-all; }
+.styles-panel { padding: 12px 16px; background: rgba(251,113,133,0.06); border-top: 1px solid rgba(251,113,133,0.2); border-bottom: 1px solid rgba(251,113,133,0.18); }
+.styles-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.styles-title-row, .styles-actions, .styles-statuses { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.styles-title { font-size: 12px; font-weight: 700; color: #fb7185; }
+.styles-hint { font-size: 11px; color: #fda4af; }
+.style-status { font-size: 11px; padding: 2px 8px; border-radius: 999px; }
+.style-status.idle { background: rgba(148,163,184,0.16); color: #cbd5e1; }
+.style-status.running { background: rgba(251,191,36,0.14); color: #fbbf24; }
+.style-status.done { background: rgba(52,211,153,0.14); color: #6ee7b7; }
+.style-status.failed { background: rgba(254,44,85,0.14); color: #f87171; }
+.styles-statuses { margin-top: 8px; }
+.styles-error { margin-top: 6px; font-size: 11px; color: #f87171; line-height: 1.5; word-break: break-all; }
 /* Review modal */
 .review-modal { width: 680px; max-width: 95vw; max-height: 90vh; display: flex; flex-direction: column; }
 .review-loading { text-align: center; color: #666; padding: 30px 0; flex: 1; }
