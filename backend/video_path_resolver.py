@@ -31,7 +31,13 @@ def _candidate_paths(path: object) -> list[Path]:
         # paths, project-relative paths, and absolute paths.  Never resolve a
         # relative artifact against the process cwd (which differs between the
         # API and worker services).
-        candidates.extend((RECORDINGS_DIR / normalized, PROJECT_ROOT / normalized))
+        # A value beginning with ``recordings/`` is already project-relative;
+        # avoid producing the historical ``recordings/recordings/...`` path.
+        if normalized.parts and normalized.parts[0].lower() == RECORDINGS_DIR.name.lower():
+            candidates.append(PROJECT_ROOT / normalized)
+        else:
+            candidates.append(RECORDINGS_DIR / normalized)
+            candidates.append(PROJECT_ROOT / normalized)
     basename = path_basename(raw)
     if basename:
         candidates.append(RECORDINGS_DIR / basename)

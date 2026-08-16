@@ -134,14 +134,20 @@
             <a :href="`${apiBase}/api/groups/${selectedTask.group_id}/download`" class="dl-btn dl-classic" target="_blank" title="经典版（合并版）" download>
               📹 经典版
             </a>
-            <a v-if="selectedTask.video_path && selectedTask.video_path.includes('director')" :href="`${apiBase}/api/groups/${selectedTask.group_id}/director-download`" class="dl-btn dl-director" target="_blank" title="导演版" download>
+            <a v-if="selectedTask.available_versions?.includes('director')" :href="`${apiBase}/api/groups/${selectedTask.group_id}/director-download`" class="dl-btn dl-director" target="_blank" title="导演版" download>
               🎬 导演版
             </a>
-            <a v-if="selectedTask.video_path && selectedTask.video_path.includes('creative')" :href="`${apiBase}/api/groups/${selectedTask.group_id}/creative-download`" class="dl-btn dl-creative" target="_blank" title="自编版" download>
+            <a v-if="selectedTask.available_versions?.includes('creative')" :href="`${apiBase}/api/groups/${selectedTask.group_id}/creative-download`" class="dl-btn dl-creative" target="_blank" title="自编版" download>
               ✍️ 自编版
             </a>
-            <a v-if="selectedTask.video_path && selectedTask.video_path.includes('qianchuan')" :href="`${apiBase}/api/groups/${selectedTask.group_id}/qianchuan-download`" class="dl-btn dl-qianchuan" target="_blank" title="千川投流">
+            <a v-if="selectedTask.available_versions?.includes('qianchuan')" :href="`${apiBase}/api/groups/${selectedTask.group_id}/qianchuan-download`" class="dl-btn dl-qianchuan" target="_blank" title="千川投流">
               📣 千川
+            </a>
+            <a v-if="selectedTask.available_versions?.includes('realistic')" :href="`${apiBase}/api/groups/${selectedTask.group_id}/realistic-download`" class="dl-btn dl-realistic" target="_blank" title="直出版" download>
+              🧾 直出版
+            </a>
+            <a v-if="selectedTask.available_versions?.includes('conservative')" :href="`${apiBase}/api/groups/${selectedTask.group_id}/conservative-download`" class="dl-btn dl-conservative" target="_blank" title="保守版" download>
+              🛡️ 保守版
             </a>
           </div>
         </div>

@@ -45,3 +45,17 @@ def test_publish_resolver_keeps_legacy_selection_values(tmp_path, monkeypatch):
     path, selected, _, _ = resolve_publish_video({"merged_filename": "classic.mp4"}, "creative")
     assert path is None
     assert selected is None
+
+
+def test_publish_resolver_accepts_recordings_relative_paths(tmp_path, monkeypatch):
+    import backend.video_path_resolver as resolver
+
+    monkeypatch.setattr(resolver, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(resolver, "RECORDINGS_DIR", tmp_path / "recordings")
+    (tmp_path / "recordings" / "test_previews").mkdir(parents=True)
+    artifact = tmp_path / "recordings" / "test_previews" / "realistic.mp4"
+    artifact.write_bytes(b"video")
+
+    path, reason = resolve_artifact_path("recordings/test_previews/realistic.mp4", "realistic")
+    assert Path(path) == artifact
+    assert reason == "ready"

@@ -1743,9 +1743,13 @@ async def download_merged(group_id: int, request: Request):
             group = await cur.fetchone()
         if not group:
             raise HTTPException(status_code=404, detail="Group not found")
-        # Prefer merged video; fall back to any ready clip in the group
-        if group["merge_status"] == 2 and group["merged_filename"]:
-            rel_path = group["merged_filename"]
+        # Prefer the resolved classic artifact.  Database values may be
+        # recordings-relative, project-relative, or absolute.
+        path, _ = resolve_artifact_path(group["merged_filename"], "classic")
+        if path:
+            return _stream_video_file(path, request)
+        # Fall back to any ready clip in the group for legacy groups that have
+        # not produced a merged classic artifact yet.
         else:
             async with db.execute(
                 "SELECT clip_filename FROM recordings WHERE group_id = ? AND clip_filename IS NOT NULL AND clipped = 2 ORDER BY id DESC LIMIT 1",
@@ -1755,8 +1759,8 @@ async def download_merged(group_id: int, request: Request):
             if not rec:
                 raise HTTPException(status_code=404, detail="No preview available")
             rel_path = rec["clip_filename"]
-    path = os.path.join(os.path.dirname(__file__), "..", "recordings", rel_path)
-    if not os.path.exists(path):
+    path, _ = resolve_artifact_path(rel_path, "classic")
+    if not path:
         raise HTTPException(status_code=404, detail="Classic video file missing (file_missing/stale_path/needs_regeneration)")
     return _stream_video_file(path, request)
 
@@ -3600,6 +3604,9 @@ async def list_publish_tasks(status: Optional[str] = None):
         if status:
             async with db.execute(
                 """SELECT t.*, g.label as group_label, g.merged_filename,
+                          g.director_final_video, g.realistic_final_video,
+                          g.conservative_final_video, g.creative_final_video,
+                          g.qianchuan_final_video,
                           pa.account_name, pa.platform as account_platform,
                           p.product_name, t.product_ids, rm.name as room_name,
                           t.manual_published, t.manual_published_at
@@ -3616,6 +3623,9 @@ async def list_publish_tasks(status: Optional[str] = None):
         else:
             async with db.execute(
                 """SELECT t.*, g.label as group_label, g.merged_filename,
+                          g.director_final_video, g.realistic_final_video,
+                          g.conservative_final_video, g.creative_final_video,
+                          g.qianchuan_final_video,
                           pa.account_name, pa.platform as account_platform,
                           p.product_name, t.product_ids, rm.name as room_name,
                           t.manual_published, t.manual_published_at
@@ -3627,7 +3637,20 @@ async def list_publish_tasks(status: Optional[str] = None):
                    ORDER BY t.created_at DESC"""
             ) as cur:
                 rows = await cur.fetchall()
-    return [dict(r) for r in rows]
+    version_fields = (
+        ("classic", "merged_filename"), ("director", "director_final_video"),
+        ("realistic", "realistic_final_video"), ("conservative", "conservative_final_video"),
+        ("creative", "creative_final_video"), ("qianchuan", "qianchuan_final_video"),
+    )
+    result = []
+    for row in rows:
+        item = dict(row)
+        item["available_versions"] = [
+            version for version, field in version_fields
+            if resolve_artifact_path(item.get(field), version)[0]
+        ]
+        result.append(item)
+    return result
 
 
 @app.post("/api/publish-tasks", status_code=201)
@@ -3761,13 +3784,22 @@ async def get_unscheduled_groups(platform: str = "douyin", room_id: Optional[int
         item = dict(row)
         item["video_available"] = bool(resolved)
         item["missing_reason"] = None if resolved else reason
+        version_fields = (
+            ("classic", "merged_filename"), ("director", "director_final_video"),
+            ("realistic", "realistic_final_video"), ("conservative", "conservative_final_video"),
+            ("creative", "creative_final_video"), ("qianchuan", "qianchuan_final_video"),
+        )
         item["available_versions"] = [
-            version for version, field in (
-                ("classic", "merged_filename"), ("director", "director_final_video"),
-                ("realistic", "realistic_final_video"), ("conservative", "conservative_final_video"),
-                ("creative", "creative_final_video"), ("qianchuan", "qianchuan_final_video"),
-            ) if resolve_artifact_path(item.get(field), version)[0]
+            version for version, field in version_fields
+            if resolve_artifact_path(item.get(field), version)[0]
         ]
+        item["version_availability"] = {
+            version: {
+                "available": bool(resolve_artifact_path(item.get(field), version)[0]),
+                "status": resolve_artifact_path(item.get(field), version)[1],
+            }
+            for version, field in version_fields
+        }
         if resolved:
             available_rows.append(item)
     return available_rows

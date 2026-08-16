@@ -42,6 +42,8 @@
                   <option value="both">📤 全部版本</option>
                   <option value="director">🎬 导演版</option>
                   <option value="classic">📹 经典版</option>
+                  <option value="realistic">🧾 直出版</option>
+                  <option value="conservative">🛡️ 保守版</option>
                   <option value="creative">✍️ 自编版</option>
                   <option value="qianchuan">📣 千川投流</option>
                 </select>
