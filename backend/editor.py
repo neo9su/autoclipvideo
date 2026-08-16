@@ -419,13 +419,23 @@ _XQNT_FONT_FILE = "WenYue-XinQingNianTi-W8-J-2.otf"
 
 def resolve_subtitle_font_path(fonts_dir: Optional[str] = None) -> str:
     """Return the bundled 新青年体 font, failing clearly when unavailable."""
-    candidates = []
+    candidates: list[Path] = []
     if fonts_dir:
         candidates.append(Path(fonts_dir) / _XQNT_FONT_FILE)
     candidates.extend([
         Path(__file__).resolve().parent / "assets" / "fonts" / _XQNT_FONT_FILE,
         Path("C:/Windows/Fonts") / _XQNT_FONT_FILE,
     ])
+    # Windows production images may rename/copy the font while retaining its
+    # family name.  Search only the Fonts directories (never arbitrary user
+    # paths) and still verify that the file is readable and non-empty.
+    search_dirs = [Path("C:/Windows/Fonts"), Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"]
+    if fonts_dir:
+        search_dirs.insert(0, Path(fonts_dir))
+    for directory in search_dirs:
+        if directory.is_dir():
+            candidates.extend(sorted(directory.glob("*XinQingNianTi*.otf")))
+            candidates.extend(sorted(directory.glob("*XinQingNianTi*.ttf")))
     for candidate in candidates:
         if candidate.is_file() and candidate.stat().st_size > 0:
             return str(candidate)
@@ -619,8 +629,13 @@ def build_ass(selected: List[Seg], all_segs: List[Seg], realistic: bool = False)
             if dedup_key in rendered_srt_ids:
                 continue
             rendered_srt_ids.add(dedup_key)
-            t0 = offset + (ov_start - sel_seg.start)
-            t1 = offset + (ov_end   - sel_seg.start)
+            # A selected source segment is concatenated at ``offset``.  Map
+            # every original SRT cue into that local timeline, rather than
+            # using the merged scene text (which loses cue boundaries).
+            t0 = offset + max(0.0, ov_start - sel_seg.start)
+            t1 = offset + min(sel_seg.duration, ov_end - sel_seg.start)
+            if t1 <= t0:
+                continue
             raw_text = _format_subtitle_text(srt.text)
             annotated, has_kw = _annotate_text(raw_text)
             line_idx += 1
@@ -2778,6 +2793,7 @@ async def _edit_via_gpu(
     segs: List["Seg"],
     out_path: str,
     on_progress=None,
+    subtitle_segs: Optional[List["Seg"]] = None,
     mp4_path: Optional[str] = None,   # local path; enables auto-upload on 404
     realistic: bool = False,
 ) -> Optional[str]:
@@ -2788,7 +2804,10 @@ async def _edit_via_gpu(
     uploaded automatically and the job is retried.
     Returns out_path on success, None on failure.
     """
-    ass_content = build_ass(selected, segs, realistic=realistic)
+    # ``segs`` is intentionally merged/scored for selection.  Subtitle timing
+    # must instead use the untouched cue list, otherwise one merged scene is
+    # rendered for its whole duration and intermediate cues disappear.
+    ass_content = build_ass(selected, subtitle_segs or segs, realistic=realistic)
     best_seg = max(selected, key=lambda s: s.score) if any(s.score > 0 for s in selected) \
                else selected[max(0, len(selected) // 4)]
 
@@ -3103,11 +3122,11 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
         return None
 
     # Parse + merge short segments + smart split + score
-    segs = parse_srt(srt_path)
-    if not segs:
+    source_subtitle_segs = parse_srt(srt_path)
+    if not source_subtitle_segs:
         logger.warning(f"Empty SRT: {srt_path}")
         return None
-    segs = _merge_short_segs(segs)
+    segs = _merge_short_segs(source_subtitle_segs)
     # Phase 2: Smart shot splitting — split long segments (>8s) at speech boundaries
     segs = _split_long_segments(segs, srt_path)
     for seg in segs:
@@ -3259,6 +3278,7 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
                 mp4_filename = os.path.basename(mp4_path)
                 gpu_result = await _edit_via_gpu(
                     mp4_filename, room_id, selected, segs, out_path, on_progress,
+                    subtitle_segs=source_subtitle_segs,
                     mp4_path=mp4_path,
                     realistic=clip_engine in ("realistic", "conservative"),
                 )
@@ -3328,11 +3348,11 @@ async def edit_recording_multi(
         return []
 
     # Parse + merge short segments + score once
-    segs = parse_srt(srt_path)
-    if not segs:
+    source_subtitle_segs = parse_srt(srt_path)
+    if not source_subtitle_segs:
         logger.warning(f"Empty SRT: {srt_path}")
         return []
-    segs = _merge_short_segs(segs)
+    segs = _merge_short_segs(source_subtitle_segs)
     for seg in segs:
         score_and_tag(seg)
 
@@ -3482,6 +3502,7 @@ async def edit_recording_multi(
                 mp4_filename = os.path.basename(mp4_path)
                 gpu_result = await _edit_via_gpu(
                     mp4_filename, _room_id_v, selected, segs, out_path, on_progress,
+                    subtitle_segs=source_subtitle_segs,
                     mp4_path=mp4_path,
                     realistic=clip_engine in ("realistic", "conservative"),
                 )

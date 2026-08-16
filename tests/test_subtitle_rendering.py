@@ -38,3 +38,22 @@ def test_realistic_ass_keeps_all_text_and_uses_requested_style(tmp_path):
 
 def test_subtitle_font_path_is_bundled():
     assert Path(resolve_subtitle_font_path()).name == "WenYue-XinQingNianTi-W8-J-2.otf"
+
+
+def test_ass_uses_original_cue_timing_when_selection_segments_are_merged():
+    selected = [
+        Seg(idx=1, start=10, end=16, text="第一句 第二句", transition="cut:0"),
+    ]
+    source_cues = [
+        Seg(idx=1, start=10, end=12, text="第一句"),
+        Seg(idx=2, start=12.2, end=14, text="自然 第二句"),
+        Seg(idx=3, start=14.2, end=16, text="最后一句"),
+    ]
+
+    ass = build_ass(selected, source_cues, realistic=True)
+
+    assert ass.count("Dialogue:") == 3
+    assert "0:00:00.00,0:00:02.00" in ass
+    assert "0:00:02.20,0:00:04.00" in ass
+    assert "0:00:04.20,0:00:06.00" in ass
+    assert "{\\c&H000000FF&}自然{\\r}" in ass

@@ -95,6 +95,11 @@ def _require_subtitle_font() -> str:
     if FONTS_DIR:
         candidates.append(Path(FONTS_DIR) / _SUBTITLE_FONT_FILE)
     candidates.append(Path(STORAGE_DIR) / "fonts" / _SUBTITLE_FONT_FILE)
+    search_dirs = [Path(FONTS_DIR), Path(STORAGE_DIR) / "fonts"]
+    for directory in search_dirs:
+        if directory.is_dir():
+            candidates.extend(sorted(directory.glob("*XinQingNianTi*.otf")))
+            candidates.extend(sorted(directory.glob("*XinQingNianTi*.ttf")))
     for candidate in candidates:
         if candidate.is_file() and candidate.stat().st_size > 0:
             return str(candidate.parent)
