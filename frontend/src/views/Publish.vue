@@ -188,7 +188,7 @@
             </div>
             <span v-if="publishedGroupIds.has(g.id)" class="group-published-badge">✓ 已发布</span>
             <div class="group-item-actions" @click.stop>
-              <button class="gact-btn" title="预览视频" @click="openGroupPreview(g)">▶</button>
+              <button class="gact-btn" title="预览视频" @click="previewGroup = g">▶</button>
               <button class="gact-btn gact-orange" title="重新剪辑" @click="openReclipModal(g)">↺ 重剪</button>
               <button class="gact-btn gact-red" title="删除分组" @click="confirmDeleteGroup(g)">✕</button>
             </div>
@@ -202,24 +202,24 @@
             <div :class="['vsw-option', selectedPublishVersion === 'director' && 'vsw-active']"
                  @click="setPublishVersion('director')">
               <span class="vsw-label">🎬 导演版</span>
-              <span class="vsw-preview-btn" @click.stop="openGroupPreview(selectedGroup, 'director')">▶ 预览</span>
+              <span class="vsw-preview-btn" @click.stop="previewGroup = selectedGroup; previewVersion = 'director'">▶ 预览</span>
             </div>
             <div :class="['vsw-option', selectedPublishVersion === 'classic' && 'vsw-active']"
                  @click="setPublishVersion('classic')">
               <span class="vsw-label">📹 经典版</span>
-              <span class="vsw-preview-btn" @click.stop="openGroupPreview(selectedGroup, 'classic')">▶ 预览</span>
+              <span class="vsw-preview-btn" @click.stop="previewGroup = selectedGroup; previewVersion = 'classic'">▶ 预览</span>
             </div>
             <div v-if="selectedGroup && selectedGroup.creative_status === 2"
                  :class="['vsw-option', selectedPublishVersion === 'creative' && 'vsw-active']"
                  @click="setPublishVersion('creative')">
               <span class="vsw-label">✍️ 自编版</span>
-              <span class="vsw-preview-btn" @click.stop="openGroupPreview(selectedGroup, 'creative')">▶ 预览</span>
+              <span class="vsw-preview-btn" @click.stop="previewGroup = selectedGroup; previewVersion = 'creative'">▶ 预览</span>
             </div>
             <div v-if="selectedGroup && selectedGroup.qianchuan_status === 2"
                  :class="['vsw-option', selectedPublishVersion === 'qianchuan' && 'vsw-active']"
                  @click="setPublishVersion('qianchuan')">
               <span class="vsw-label">📣 千川投流</span>
-              <span class="vsw-preview-btn" @click.stop="openGroupPreview(selectedGroup, 'qianchuan')">▶ 预览</span>
+              <span class="vsw-preview-btn" @click.stop="previewGroup = selectedGroup; previewVersion = 'qianchuan'">▶ 预览</span>
             </div>
           </div>
         </template>
@@ -341,31 +341,20 @@
 
     <!-- Video preview modal -->
     <div v-if="previewGroup" class="preview-overlay" @click.self="closeGroupPreview">
-      <div class="preview-modal">
+      <div class="preview-modal" role="dialog" aria-modal="true" :aria-label="`${previewGroup.label} 视频预览`">
         <div class="preview-header">
-          <span>{{ previewGroup.label }}</span>
+          <span class="preview-title">{{ previewGroup.label }}</span>
           <div v-if="availableVersionCount(previewGroup) >= 2" class="preview-tabs">
-            <button v-if="previewGroup.director_status === 2 && previewGroup.director_available" :class="['ptab', previewVersion === 'director' && 'ptab-active']" @click="previewVersion = 'director'">🎬 导演版</button>
-            <button v-if="previewGroup.classic_status === 2 && previewGroup.classic_available" :class="['ptab', previewVersion === 'classic' && 'ptab-active']" @click="previewVersion = 'classic'">📹 经典版</button>
-            <button v-if="previewGroup.creative_status === 2 && previewGroup.creative_available" :class="['ptab', previewVersion === 'creative' && 'ptab-active']" @click="previewVersion = 'creative'">✍️ 自编版</button>
-            <button v-if="previewGroup.qianchuan_status === 2 && previewGroup.qianchuan_available" :class="['ptab', previewVersion === 'qianchuan' && 'ptab-active']" @click="previewVersion = 'qianchuan'">📣 千川投流</button>
+            <button v-if="previewGroup.director_status === 2 && previewGroup.director_available" :class="['ptab', previewVersion === 'director' && 'ptab-active']" @click="selectPreviewVersion('director')">🎬 导演版</button>
+            <button v-if="previewGroup.classic_status === 2 && previewGroup.classic_available" :class="['ptab', previewVersion === 'classic' && 'ptab-active']" @click="selectPreviewVersion('classic')">📹 经典版</button>
+            <button v-if="previewGroup.creative_status === 2 && previewGroup.creative_available" :class="['ptab', previewVersion === 'creative' && 'ptab-active']" @click="selectPreviewVersion('creative')">✍️ 自编版</button>
+            <button v-if="previewGroup.qianchuan_status === 2 && previewGroup.qianchuan_available" :class="['ptab', previewVersion === 'qianchuan' && 'ptab-active']" @click="selectPreviewVersion('qianchuan')">📣 千川投流</button>
           </div>
           <button class="preview-close" aria-label="关闭视频预览" @click="closeGroupPreview">✕</button>
         </div>
-        <video
-          v-if="!previewError"
-          class="preview-video"
-          :src="previewVideoUrl"
-          :key="`${previewGroup.id}-${previewVersion}`"
-          controls
-          autoplay
-          playsinline
-          @error="previewError = true"
-          @loadeddata="previewError = false"
-        ></video>
-        <div v-else class="preview-error" role="alert">
-          <div>视频加载失败</div>
-          <button class="btn-secondary btn-sm" @click="retryGroupPreview">重试</button>
+        <div class="preview-video-wrap">
+          <video class="preview-video" :src="previewVideoUrl" :key="`${previewGroup.id}-${previewVersion}`" controls autoplay playsinline @error="previewLoadError = true" @loadeddata="previewLoadError = false"></video>
+          <div v-if="previewLoadError" class="preview-error">视频加载失败</div>
         </div>
       </div>
     </div>
@@ -597,7 +586,7 @@ const metaSchemes = ref([])
 const selectedScheme = ref('')
 const previewGroup = ref(null)   // group being previewed in video modal
 const previewVersion = ref('director')  // 'director' | 'classic' | 'creative' | 'qianchuan'
-const previewError = ref(false)
+const previewLoadError = ref(false)
 const reclipModal = ref(null)    // {group, feedback, saving, submitted}
 const selectedPublishVersion = ref('both')
 const apiBase = REMOTE_API_BASE
@@ -1169,40 +1158,35 @@ const selectedGroup = computed(() =>
   newTask.value.group_id ? mergedGroups.value.find(g => g.id === newTask.value.group_id) : null
 )
 
-const previewVideoUrl = computed(() => {
-  if (!previewGroup.value) return ''
-  if (previewVersion.value === 'classic') return `${apiBase}/api/groups/${previewGroup.value.id}/download`
-  if (previewVersion.value === 'director') return `${apiBase}/api/groups/${previewGroup.value.id}/director-download`
-  if (previewVersion.value === 'creative') return `${apiBase}/api/groups/${previewGroup.value.id}/creative-download`
-  if (previewVersion.value === 'qianchuan') return `${apiBase}/api/groups/${previewGroup.value.id}/qianchuan-download`
-  return `${apiBase}/api/groups/${previewGroup.value.id}/download`
-})
-
-watch(previewVersion, () => {
-  previewError.value = false
-})
-
-function defaultPreviewVersion(group) {
-  return group.qianchuan_status === 2 && group.qianchuan_available ? 'qianchuan' : group.director_status === 2 && group.director_available ? 'director' : group.creative_status === 2 && group.creative_available ? 'creative' : 'classic'
-}
-
-function openGroupPreview(group, version = null) {
-  previewError.value = false
-  previewVersion.value = version || defaultPreviewVersion(group)
-  previewGroup.value = group
-}
-
 function closeGroupPreview() {
   previewGroup.value = null
-  previewError.value = false
+  previewLoadError.value = false
 }
 
-function retryGroupPreview() {
-  previewError.value = false
+function selectPreviewVersion(version) {
+  previewVersion.value = version
+  previewLoadError.value = false
 }
+const previewVideoUrl = computed(() => {
+  if (!previewGroup.value) return ''
+  if (previewVersion.value === 'classic') return `${BASE_URL}/api/groups/${previewGroup.value.id}/download`
+  if (previewVersion.value === 'director') return `${BASE_URL}/api/groups/${previewGroup.value.id}/director-download`
+  if (previewVersion.value === 'creative') return `${BASE_URL}/api/groups/${previewGroup.value.id}/creative-download`
+  if (previewVersion.value === 'qianchuan') return `${BASE_URL}/api/groups/${previewGroup.value.id}/qianchuan-download`
+  return `${BASE_URL}/api/groups/${previewGroup.value.id}/download`
+})
+
+watch(previewGroup, (g) => {
+  if (!g) {
+    previewLoadError.value = false
+    return
+  }
+  previewLoadError.value = false
+  previewVersion.value = g.qianchuan_status === 2 && g.qianchuan_available ? 'qianchuan' : g.director_status === 2 && g.director_available ? 'director' : g.creative_status === 2 && g.creative_available ? 'creative' : 'classic'
+})
 
 function groupVideoUrl(groupId) {
-  return `${apiBase}/api/groups/${groupId}/download`
+  return `${BASE_URL}/api/groups/${groupId}/download`
 }
 
 async function setPublishVersion(version) {
@@ -1211,7 +1195,7 @@ async function setPublishVersion(version) {
   selectedPublishVersion.value = version
   g.publish_versions = version
   try {
-    await fetch(`${apiBase}/api/groups/${g.id}/publish-versions`, {
+    await fetch(`${BASE_URL}/api/groups/${g.id}/publish-versions`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ publish_versions: version }),
@@ -1526,13 +1510,15 @@ label { display: block; font-size: 12px; color: #888; margin: 12px 0 4px; }
 .gact-orange:hover { background: rgba(249,115,22,0.1); }
 .gact-red { color: #fe2c55; border-color: #fe2c55; }
 .gact-red:hover { background: rgba(254,44,85,0.1); }
-.preview-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.85); z-index: 1000; display: flex; align-items: center; justify-content: center; padding: 16px; box-sizing: border-box; }
-.preview-modal { background: #111; border: 1px solid #555; border-radius: 12px; width: min(860px, 95vw); max-height: 90vh; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,0.6); }
-.preview-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #222; font-size: 13px; font-weight: 600; }
-.preview-close { background: none; border: none; color: #888; cursor: pointer; font-size: 16px; padding: 0 4px; }
+.preview-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.85); z-index: 1000; display: flex; align-items: center; justify-content: center; padding: 16px; }
+.preview-modal { background: #111; border: 1px solid #555; border-radius: 12px; width: min(860px, 94vw); max-height: 90vh; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,0.7); }
+.preview-header { display: flex; justify-content: space-between; align-items: center; padding: 14px 18px; border-bottom: 1px solid #333; font-size: 13px; font-weight: 600; gap: 12px; flex-shrink: 0; }
+.preview-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.preview-close { background: none; border: none; color: #aaa; cursor: pointer; font-size: 18px; padding: 2px 6px; flex-shrink: 0; }
 .preview-close:hover { color: #fff; }
-.preview-video { width: 100%; max-height: calc(90vh - 58px); min-height: 180px; display: block; background: #000; object-fit: contain; }
-.preview-error { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; min-height: 180px; padding: 24px; color: #fe2c55; }
+.preview-video-wrap { position: relative; min-height: 180px; display: flex; align-items: center; justify-content: center; background: #000; }
+.preview-video { width: 100%; max-height: 70vh; display: block; background: #000; }
+.preview-error { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #fe2c55; background: rgba(0,0,0,0.82); font-size: 14px; }
 .reclip-modal { background: #1a1a1a; border: 1px solid #333; border-radius: 12px; padding: 20px; width: min(400px, 95vw); }
 .group-item:last-child { border-bottom: none; }
 .group-item:hover { background: #1a1a1a; }
