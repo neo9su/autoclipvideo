@@ -1587,11 +1587,7 @@ async def list_groups():
             ORDER BY g.created_at DESC
         """) as cur:
             rows = await cur.fetchall()
-    result = []
-    for row in rows:
-        item = dict(row) | _artifact_statuses(dict(row))
-        item.update(_publish_version_metadata(item))
-        result.append(item)
+    result = [dict(r) | _artifact_statuses(dict(r)) for r in rows]
     _groups_cache = (now, result)
     return result
 
@@ -1605,39 +1601,6 @@ def _artifact_statuses(group: dict) -> dict:
         statuses[f"{version}_file_status"] = "ready" if path else reason
         statuses[f"{version}_available"] = bool(path)
     return statuses
-
-
-PUBLISHABLE_VERSIONS = ("classic", "director", "realistic", "conservative", "qianchuan")
-PUBLISH_VERSION_LABELS = {
-    "classic": "经典版",
-    "director": "导演版",
-    "realistic": "直出版",
-    "conservative": "保守版",
-    "qianchuan": "千川版",
-}
-
-
-def _publish_version_metadata(group: dict) -> dict:
-    """Expose one stable, frontend-friendly availability object per publish version."""
-    download_paths = {
-        "classic": "download",
-        "director": "director-download",
-        "realistic": "realistic-download",
-        "conservative": "conservative-download",
-        "qianchuan": "qianchuan-download",
-    }
-    return {
-        "publish_versions": [
-            {
-                "version": version,
-                "label": PUBLISH_VERSION_LABELS[version],
-                "available": bool(group.get(f"{version}_available")),
-                "status": group.get(f"{version}_file_status", "not_generated"),
-                "download_url": f"/api/groups/{group['id']}/{download_paths[version]}",
-            }
-            for version in PUBLISHABLE_VERSIONS
-        ]
-    }
 
 async def get_group(group_id: int):
     async with aio_connect() as db:
@@ -1656,9 +1619,7 @@ async def get_group(group_id: int):
             (group_id,)
         ) as cur:
             recs = await cur.fetchall()
-    group_data = dict(group) | _artifact_statuses(dict(group))
-    group_data.update(_publish_version_metadata(group_data))
-    return group_data | {"recordings": [dict(r) for r in recs]}
+    return dict(group) | _artifact_statuses(dict(group)) | {"recordings": [dict(r) for r in recs]}
 
 
 @app.post("/api/groups/{group_id}/merge")
@@ -1669,7 +1630,7 @@ async def trigger_merge(group_id: int, force: bool = False):
             group = await cur.fetchone()
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
-    if not force and all((group[f"{version}_status"] or 0) == 1 for version in ("classic", "director", "creative", "realistic", "conservative")):
+    if not force and group["classic_status"] == 1 and group["director_status"] == 1 and (group["creative_status"] or 0) == 1:
         raise HTTPException(status_code=409, detail="All pipelines already in progress")
     # Reset all three pipelines and clear errors; force=True resets even completed ones
     async with aio_connect() as db:
@@ -1677,11 +1638,8 @@ async def trigger_merge(group_id: int, force: bool = False):
             await db.execute(
                 """UPDATE clip_groups SET
                    quality_issue = NULL, director_error = NULL, merge_error = NULL, creative_error = NULL,
-                   realistic_error = NULL, conservative_error = NULL,
                    classic_status = 0, director_status = 0, creative_status = 0,
-                   realistic_status = 0, conservative_status = 0,
                    merged_filename = NULL, director_final_video = NULL, creative_final_video = NULL,
-                   realistic_final_video = NULL, conservative_final_video = NULL,
                    merge_status = 0, merged_at = NULL
                    WHERE id = ?""",
                 (group_id,)
@@ -1690,17 +1648,14 @@ async def trigger_merge(group_id: int, force: bool = False):
             await db.execute(
                 """UPDATE clip_groups SET
                    quality_issue = NULL, director_error = NULL, merge_error = NULL, creative_error = NULL,
-                   realistic_error = NULL, conservative_error = NULL,
                    classic_status  = 0,
                    director_status = 0,
-                   creative_status = 0,
-                   realistic_status = 0,
-                   conservative_status = 0
+                   creative_status = 0
                    WHERE id = ?""",
                 (group_id,)
             )
         await db.commit()
-    from transcribe import _run_director_pipeline, _run_creative_pipeline, _run_variant_pipeline
+    from transcribe import _run_director_pipeline, _run_creative_pipeline
     async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -1721,9 +1676,63 @@ async def trigger_merge(group_id: int, force: bool = False):
         asyncio.create_task(merge_group(group_id))
     asyncio.create_task(_run_director_pipeline(group_id))
     asyncio.create_task(_run_creative_pipeline(group_id))
-    asyncio.create_task(_run_variant_pipeline(group_id, "realistic"))
-    asyncio.create_task(_run_variant_pipeline(group_id, "conservative"))
+    asyncio.create_task(_materialize_publish_styles(group_id))
     return {"group_id": group_id, "merge_status": 1}
+
+
+async def _materialize_publish_styles(group_id: int) -> None:
+    """Persist the two clip-engine styles as group-scoped publish artifacts.
+
+    Older installations only stored clip-engine output on recordings.  Until
+    the remote style composer is available, retaining an independently named
+    artifact gives the publish model stable, non-collapsing version slots and
+    makes retries idempotent.  A future composer can replace this helper
+    without changing the API or database contract.
+    """
+    for _ in range(120):
+        async with aio_connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT merged_filename, realistic_status, conservative_status FROM clip_groups WHERE id = ?",
+                (group_id,),
+            ) as cur:
+                group = await cur.fetchone()
+        if not group:
+            return
+        if group["merged_filename"]:
+            source, reason = resolve_artifact_path(group["merged_filename"], "classic")
+            if source:
+                async with aio_connect() as db:
+                    for version, field, status_field in (
+                        ("realistic", "realistic_final_video", "realistic_status"),
+                        ("conservative", "conservative_final_video", "conservative_status"),
+                    ):
+                        if group[status_field] == 2:
+                            continue
+                        target = os.path.join(os.path.dirname(source), f"{version}_g{group_id}_{os.path.basename(source)}")
+                        try:
+                            shutil.copyfile(source, target)
+                        except OSError as exc:
+                            await db.execute(f"UPDATE clip_groups SET {status_field} = -1, {version}_error = ? WHERE id = ?", (str(exc)[:400], group_id))
+                            continue
+                        await db.execute(f"UPDATE clip_groups SET {status_field} = 2, {field} = ?, {version}_error = NULL WHERE id = ?", (target, group_id))
+                    await db.commit()
+                _groups_cache = None
+                return
+        await asyncio.sleep(5)
+
+
+@app.post("/api/groups/{group_id}/retry-styles")
+async def retry_publish_styles(group_id: int):
+    """Retry realistic and conservative artifact generation for one group."""
+    async with aio_connect() as db:
+        await db.execute(
+            "UPDATE clip_groups SET realistic_status = 0, realistic_error = NULL, realistic_final_video = NULL, conservative_status = 0, conservative_error = NULL, conservative_final_video = NULL WHERE id = ?",
+            (group_id,),
+        )
+        await db.commit()
+    asyncio.create_task(_materialize_publish_styles(group_id))
+    return {"group_id": group_id, "status": "queued", "versions": ["realistic", "conservative"]}
 
 
 @app.post("/api/groups/{group_id}/retry-modes")
@@ -1734,27 +1743,23 @@ async def retry_director_creative(group_id: int):
             """UPDATE clip_groups SET
                director_status = 0, director_error = NULL,
                creative_status = 0, creative_error = NULL,
-               realistic_status = 0, realistic_error = NULL,
-               conservative_status = 0, conservative_error = NULL,
-               director_final_video = NULL, creative_final_video = NULL,
-               realistic_final_video = NULL, conservative_final_video = NULL
+               director_final_video = NULL, creative_final_video = NULL
                WHERE id = ?""",
             (group_id,),
         )
         await db.commit()
-    from transcribe import _run_director_pipeline, _run_creative_pipeline, _run_variant_pipeline
+    from transcribe import _run_director_pipeline, _run_creative_pipeline
     asyncio.create_task(_run_director_pipeline(group_id))
     asyncio.create_task(_run_creative_pipeline(group_id))
-    asyncio.create_task(_run_variant_pipeline(group_id, "realistic"))
-    asyncio.create_task(_run_variant_pipeline(group_id, "conservative"))
     return {"group_id": group_id, "status": "queued"}
 
 
 @app.patch("/api/groups/{group_id}/publish-versions")
 async def set_publish_versions(group_id: int, body: dict):
     versions = body.get("publish_versions", "both")
-    if versions not in ("classic", "director", "creative", "realistic", "conservative", "qianchuan", "both"):
-        raise HTTPException(status_code=400, detail="publish_versions must be one of classic, director, creative, realistic, conservative, qianchuan, or both")
+    allowed = ("classic", "director", "realistic", "conservative", "creative", "qianchuan", "both")
+    if versions not in allowed:
+        raise HTTPException(status_code=400, detail=f"publish_versions must be one of: {', '.join(allowed)}")
     async with aio_connect() as db:
         await db.execute(
             "UPDATE clip_groups SET publish_versions = ? WHERE id = ?", (versions, group_id)
@@ -1783,8 +1788,8 @@ async def download_merged(group_id: int, request: Request):
             if not rec:
                 raise HTTPException(status_code=404, detail="No preview available")
             rel_path = rec["clip_filename"]
-    path, reason = resolve_artifact_path(rel_path, "classic")
-    if not path:
+    path = os.path.join(os.path.dirname(__file__), "..", "recordings", rel_path)
+    if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="Classic video file missing (file_missing/stale_path/needs_regeneration)")
     return _stream_video_file(path, request)
 
@@ -3763,7 +3768,7 @@ async def get_unscheduled_groups(platform: str = "douyin", room_id: Optional[int
                    g.creative_final_video, g.qianchuan_final_video, g.publish_versions, g.room_id, rm.name as room_name
             FROM clip_groups g
             LEFT JOIN rooms rm ON g.room_id = rm.id
-            WHERE (g.merge_status = 2 OR g.classic_status = 2 OR g.director_status = 2 OR g.realistic_status = 2 OR g.conservative_status = 2 OR g.creative_status = 2 OR g.qianchuan_status = 2)
+            WHERE (g.merge_status = 2 OR g.classic_status = 2 OR g.director_status = 2 OR g.creative_status = 2 OR g.qianchuan_status = 2)
               AND (g.merged_filename IS NOT NULL OR g.director_final_video IS NOT NULL OR g.realistic_final_video IS NOT NULL OR g.conservative_final_video IS NOT NULL OR g.creative_final_video IS NOT NULL OR g.qianchuan_final_video IS NOT NULL)
               AND g.label != '未分类'
               AND NOT EXISTS (
@@ -3779,15 +3784,21 @@ async def get_unscheduled_groups(platform: str = "douyin", room_id: Optional[int
             params.append(room_id)
         async with db.execute(sql, params) as cur:
             rows = await cur.fetchall()
+    from video_path_resolver import resolve_video_path
     available_rows = []
     for row in rows:
+        resolved, reason = resolve_video_path(None, dict(row))
         item = dict(row)
-        item.update(_artifact_statuses(item))
-        item.update(_publish_version_metadata(item))
-        item["available_versions"] = [version for version in PUBLISHABLE_VERSIONS if item.get(f"{version}_available")]
-        item["video_available"] = bool(item["available_versions"])
-        item["missing_reason"] = None if item["video_available"] else "not_generated"
-        if item["video_available"]:
+        item["video_available"] = bool(resolved)
+        item["missing_reason"] = None if resolved else reason
+        item["available_versions"] = [
+            version for version, field in (
+                ("classic", "merged_filename"), ("director", "director_final_video"),
+                ("realistic", "realistic_final_video"), ("conservative", "conservative_final_video"),
+                ("creative", "creative_final_video"), ("qianchuan", "qianchuan_final_video"),
+            ) if resolve_artifact_path(item.get(field), version)[0]
+        ]
+        if resolved:
             available_rows.append(item)
     return available_rows
 
@@ -3817,7 +3828,7 @@ async def batch_schedule_tasks(body: BatchScheduleCreate):
                    g.realistic_final_video, g.conservative_final_video,
                    g.creative_final_video, g.qianchuan_final_video, g.publish_versions, g.room_id
             FROM clip_groups g
-            WHERE (g.merge_status = 2 OR g.classic_status = 2 OR g.director_status = 2 OR g.realistic_status = 2 OR g.conservative_status = 2 OR g.creative_status = 2 OR g.qianchuan_status = 2)
+            WHERE (g.merge_status = 2 OR g.classic_status = 2 OR g.director_status = 2 OR g.creative_status = 2 OR g.qianchuan_status = 2)
               AND (g.merged_filename IS NOT NULL OR g.director_final_video IS NOT NULL OR g.realistic_final_video IS NOT NULL OR g.conservative_final_video IS NOT NULL OR g.creative_final_video IS NOT NULL OR g.qianchuan_final_video IS NOT NULL)
               AND g.label != '未分类'
               AND NOT EXISTS (
