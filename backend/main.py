@@ -3754,7 +3754,7 @@ async def get_unscheduled_groups(platform: str = "douyin", room_id: Optional[int
                    g.creative_final_video, g.qianchuan_final_video, g.publish_versions, g.room_id, rm.name as room_name
             FROM clip_groups g
             LEFT JOIN rooms rm ON g.room_id = rm.id
-            WHERE (g.merge_status = 2 OR g.classic_status = 2 OR g.director_status = 2 OR g.creative_status = 2 OR g.qianchuan_status = 2)
+            WHERE (g.merge_status = 2 OR g.classic_status = 2 OR g.director_status = 2 OR g.realistic_status = 2 OR g.conservative_status = 2 OR g.creative_status = 2 OR g.qianchuan_status = 2)
               AND (g.merged_filename IS NOT NULL OR g.director_final_video IS NOT NULL OR g.realistic_final_video IS NOT NULL OR g.conservative_final_video IS NOT NULL OR g.creative_final_video IS NOT NULL OR g.qianchuan_final_video IS NOT NULL)
               AND g.label != '未分类'
               AND NOT EXISTS (
@@ -3770,16 +3770,15 @@ async def get_unscheduled_groups(platform: str = "douyin", room_id: Optional[int
             params.append(room_id)
         async with db.execute(sql, params) as cur:
             rows = await cur.fetchall()
-    from video_path_resolver import resolve_video_path
     available_rows = []
     for row in rows:
-        resolved, reason = resolve_video_path(None, dict(row))
         item = dict(row)
         item.update(_artifact_statuses(item))
-        item["available_versions"] = [version for version in ("classic", "director", "realistic", "conservative", "creative", "qianchuan") if item.get(f"{version}_available")]
-        item["video_available"] = bool(resolved)
-        item["missing_reason"] = None if resolved else reason
-        if resolved:
+        item.update(_publish_version_metadata(item))
+        item["available_versions"] = [version for version in PUBLISHABLE_VERSIONS if item.get(f"{version}_available")]
+        item["video_available"] = bool(item["available_versions"])
+        item["missing_reason"] = None if item["video_available"] else "not_generated"
+        if item["video_available"]:
             available_rows.append(item)
     return available_rows
 
@@ -3808,8 +3807,8 @@ async def batch_schedule_tasks(body: BatchScheduleCreate):
             SELECT g.id, g.label, g.merged_filename, g.director_final_video,
                    g.creative_final_video, g.qianchuan_final_video, g.publish_versions, g.room_id
             FROM clip_groups g
-            WHERE (g.merge_status = 2 OR g.classic_status = 2 OR g.director_status = 2 OR g.creative_status = 2 OR g.qianchuan_status = 2)
-              AND (g.merged_filename IS NOT NULL OR g.director_final_video IS NOT NULL OR g.creative_final_video IS NOT NULL OR g.qianchuan_final_video IS NOT NULL)
+            WHERE (g.merge_status = 2 OR g.classic_status = 2 OR g.director_status = 2 OR g.realistic_status = 2 OR g.conservative_status = 2 OR g.creative_status = 2 OR g.qianchuan_status = 2)
+              AND (g.merged_filename IS NOT NULL OR g.director_final_video IS NOT NULL OR g.realistic_final_video IS NOT NULL OR g.conservative_final_video IS NOT NULL OR g.creative_final_video IS NOT NULL OR g.qianchuan_final_video IS NOT NULL)
               AND g.label != '未分类'
               AND NOT EXISTS (
                   SELECT 1 FROM publish_tasks pt
