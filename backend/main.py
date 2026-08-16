@@ -1595,6 +1595,7 @@ async def list_groups():
 def _artifact_statuses(group: dict) -> dict:
     statuses = {}
     for version, field in (("classic", "merged_filename"), ("director", "director_final_video"),
+                           ("realistic", "realistic_final_video"), ("conservative", "conservative_final_video"),
                            ("creative", "creative_final_video"), ("qianchuan", "qianchuan_final_video")):
         path, reason = resolve_artifact_path(group.get(field), version)
         statuses[f"{version}_file_status"] = "ready" if path else reason
@@ -1697,11 +1698,53 @@ async def retry_director_creative(group_id: int):
     return {"group_id": group_id, "status": "queued"}
 
 
+@app.post("/api/groups/{group_id}/generate-variant")
+async def generate_publish_variant(group_id: int, body: dict):
+    """Materialize a realistic/conservative artifact on the source group.
+
+    The variant slots are independent persisted artifacts.  Existing groups can
+    therefore be backfilled without creating comparison groups.  The source
+    video is copied rather than linked so later regeneration of classic cannot
+    change an already-published variant.
+    """
+    import shutil
+    version = str(body.get("version", "")).strip().lower()
+    if version not in ("realistic", "conservative"):
+        raise HTTPException(status_code=400, detail="version must be realistic or conservative")
+    field = f"{version}_final_video"
+    status_field = f"{version}_status"
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM clip_groups WHERE id = ?", (group_id,)) as cur:
+            group = await cur.fetchone()
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    source, reason = resolve_artifact_path(group["merged_filename"], "classic")
+    if not source:
+        raise HTTPException(status_code=409, detail=f"classic artifact unavailable: {reason}")
+    source_path = Path(source)
+    destination = source_path.with_name(f"{version}_g{group_id}_{source_path.name}")
+    try:
+        shutil.copyfile(source_path, destination)
+    except OSError as exc:
+        raise HTTPException(status_code=503, detail="Unable to persist publish variant") from exc
+    async with aio_connect() as db:
+        await db.execute(
+            f"UPDATE clip_groups SET {status_field} = 2, {field} = ?, {version}_error = NULL WHERE id = ?",
+            (str(destination), group_id),
+        )
+        await db.commit()
+    return {"group_id": group_id, "version": version, "status": 2, "path": str(destination)}
+
+
 @app.patch("/api/groups/{group_id}/publish-versions")
 async def set_publish_versions(group_id: int, body: dict):
     versions = body.get("publish_versions", "both")
-    if versions not in ("classic", "director", "creative", "qianchuan", "both"):
-        raise HTTPException(status_code=400, detail="publish_versions must be 'classic', 'director', 'creative', 'qianchuan', or 'both'")
+    allowed = {"classic", "director", "realistic", "conservative", "creative", "qianchuan", "both"}
+    if isinstance(versions, list):
+        versions = ",".join(str(v).strip().lower() for v in versions)
+    if not isinstance(versions, str) or versions != "both" and (not versions or any(v not in allowed - {"both"} for v in versions.split(","))):
+        raise HTTPException(status_code=400, detail="publish_versions contains an unsupported version")
     async with aio_connect() as db:
         await db.execute(
             "UPDATE clip_groups SET publish_versions = ? WHERE id = ?", (versions, group_id)
@@ -1720,7 +1763,10 @@ async def download_merged(group_id: int, request: Request):
             raise HTTPException(status_code=404, detail="Group not found")
         # Prefer merged video; fall back to any ready clip in the group
         if group["merge_status"] == 2 and group["merged_filename"]:
-            rel_path = group["merged_filename"]
+            path, reason = resolve_artifact_path(group["merged_filename"], "classic")
+            if not path:
+                raise HTTPException(status_code=404, detail=f"Classic video file missing ({reason})")
+            return _stream_video_file(path, request)
         else:
             async with db.execute(
                 "SELECT clip_filename FROM recordings WHERE group_id = ? AND clip_filename IS NOT NULL AND clipped = 2 ORDER BY id DESC LIMIT 1",
@@ -1730,9 +1776,12 @@ async def download_merged(group_id: int, request: Request):
             if not rec:
                 raise HTTPException(status_code=404, detail="No preview available")
             rel_path = rec["clip_filename"]
-    path = os.path.join(os.path.dirname(__file__), "..", "recordings", rel_path)
-    if not os.path.exists(path):
-        raise HTTPException(status_code=404, detail="Classic video file missing (file_missing/stale_path/needs_regeneration)")
+    path, reason = resolve_artifact_path(rel_path, "classic")
+    if not path:
+        # A clip_filename may be stored as a recordings-relative path.
+        path, reason = resolve_artifact_path(rel_path, "classic")
+    if not path:
+        raise HTTPException(status_code=404, detail=f"Classic video file missing ({reason})")
     return _stream_video_file(path, request)
 
 
@@ -1744,6 +1793,16 @@ async def download_director_video(group_id: int, request: Request):
 @app.get("/api/groups/{group_id}/creative-download")
 async def download_creative_video(group_id: int, request: Request):
     return await _download_artifact(group_id, "creative", "creative_final_video", "自编版", request)
+
+
+@app.get("/api/groups/{group_id}/realistic-download")
+async def download_realistic_video(group_id: int, request: Request):
+    return await _download_artifact(group_id, "realistic", "realistic_final_video", "直出版", request)
+
+
+@app.get("/api/groups/{group_id}/conservative-download")
+async def download_conservative_video(group_id: int, request: Request):
+    return await _download_artifact(group_id, "conservative", "conservative_final_video", "保守版", request)
 
 
 @app.get("/api/groups/{group_id}/qianchuan-preview-download")
@@ -3696,11 +3755,12 @@ async def get_unscheduled_groups(platform: str = "douyin", room_id: Optional[int
         db.row_factory = aiosqlite.Row
         sql = """
             SELECT g.id, g.label, g.merged_filename, g.director_final_video,
+                   g.realistic_final_video, g.conservative_final_video,
                    g.creative_final_video, g.qianchuan_final_video, g.publish_versions, g.room_id, rm.name as room_name
             FROM clip_groups g
             LEFT JOIN rooms rm ON g.room_id = rm.id
             WHERE (g.merge_status = 2 OR g.classic_status = 2 OR g.director_status = 2 OR g.creative_status = 2 OR g.qianchuan_status = 2)
-              AND (g.merged_filename IS NOT NULL OR g.director_final_video IS NOT NULL OR g.creative_final_video IS NOT NULL OR g.qianchuan_final_video IS NOT NULL)
+              AND (g.merged_filename IS NOT NULL OR g.director_final_video IS NOT NULL OR g.realistic_final_video IS NOT NULL OR g.conservative_final_video IS NOT NULL OR g.creative_final_video IS NOT NULL OR g.qianchuan_final_video IS NOT NULL)
               AND g.label != '未分类'
               AND NOT EXISTS (
                   SELECT 1 FROM publish_tasks pt
@@ -3720,6 +3780,8 @@ async def get_unscheduled_groups(platform: str = "douyin", room_id: Optional[int
     for row in rows:
         resolved, reason = resolve_video_path(None, dict(row))
         item = dict(row)
+        item.update(_artifact_statuses(item))
+        item["available_versions"] = [v for v in ("classic", "director", "realistic", "conservative", "creative", "qianchuan") if item.get(f"{v}_available")]
         item["video_available"] = bool(resolved)
         item["missing_reason"] = None if resolved else reason
         if resolved:
@@ -3749,10 +3811,11 @@ async def batch_schedule_tasks(body: BatchScheduleCreate):
         db.row_factory = aiosqlite.Row
         sql = """
             SELECT g.id, g.label, g.merged_filename, g.director_final_video,
+                   g.realistic_final_video, g.conservative_final_video,
                    g.creative_final_video, g.qianchuan_final_video, g.publish_versions, g.room_id
             FROM clip_groups g
             WHERE (g.merge_status = 2 OR g.classic_status = 2 OR g.director_status = 2 OR g.creative_status = 2 OR g.qianchuan_status = 2)
-              AND (g.merged_filename IS NOT NULL OR g.director_final_video IS NOT NULL OR g.creative_final_video IS NOT NULL OR g.qianchuan_final_video IS NOT NULL)
+              AND (g.merged_filename IS NOT NULL OR g.director_final_video IS NOT NULL OR g.realistic_final_video IS NOT NULL OR g.conservative_final_video IS NOT NULL OR g.creative_final_video IS NOT NULL OR g.qianchuan_final_video IS NOT NULL)
               AND g.label != '未分类'
               AND NOT EXISTS (
                   SELECT 1 FROM publish_tasks pt

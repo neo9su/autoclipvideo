@@ -876,7 +876,7 @@ async def _auto_merge_group(db, group_id: int) -> bool:
 
     # Check per-pipeline statuses (0=not started, 1=running, 2=done, -1=failed)
     async with db.execute(
-        "SELECT classic_status, director_status, creative_status, qianchuan_status FROM clip_groups WHERE id = ?", (group_id,)
+        "SELECT classic_status, director_status, creative_status, qianchuan_status, realistic_status, conservative_status FROM clip_groups WHERE id = ?", (group_id,)
     ) as cur:
         grp = await cur.fetchone()
     if not grp:
