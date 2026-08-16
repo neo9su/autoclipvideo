@@ -175,17 +175,15 @@
         <span class="section-hint">点击重试重新入队</span>
         <div class="bulk-actions">
           <button
-            class="act-btn retry"
-            :disabled="bulkRetrying || bulkClearing"
+            class="bulk-btn retry"
+            :disabled="bulkAction !== null || retryableFailedClips.length === 0"
             @click="retryAllFailed"
-            title="重新剪辑所有可重试的失败任务"
-          >{{ bulkRetrying ? '重试中…' : '批量重试' }}</button>
+          >{{ bulkAction === 'retry' ? '重试中…' : '批量重试' }}</button>
           <button
-            class="act-btn dismiss"
-            :disabled="bulkRetrying || bulkClearing"
+            class="bulk-btn dismiss"
+            :disabled="bulkAction !== null || failedClips.length === 0"
             @click="dismissAllFailed"
-            title="清除所有失败任务"
-          >{{ bulkClearing ? '清除中…' : '批量清除' }}</button>
+          >{{ bulkAction === 'dismiss' ? '清除中…' : '批量清除' }}</button>
         </div>
       </div>
       <div class="job-list">
@@ -199,8 +197,8 @@
             <span v-else-if="job.clip_error" class="job-error">{{ job.clip_error }}</span>
           </div>
           <div class="action-btns">
-            <button v-if="!job.skip_reason" class="act-btn retry" @click="retryJob(job.id)" title="重新剪辑">重试</button>
-            <button class="act-btn dismiss" @click="dismissJob(job.id)" title="从列表移除">清除</button>
+            <button v-if="!job.skip_reason" class="act-btn retry" :disabled="bulkAction !== null" @click="retryJob(job.id)" title="重新剪辑">重试</button>
+            <button class="act-btn dismiss" :disabled="bulkAction !== null" @click="dismissJob(job.id)" title="从列表移除">清除</button>
           </div>
         </div>
       </div>
@@ -219,10 +217,11 @@ const failedClips = ref([])
 const transcribeJobs = ref([])
 const transcribeMeta = ref({ total: 0, session_done: 0, avg_duration_s: 0, eta_seconds: null })
 const loading = ref(false)
+const bulkAction = ref(null)
 const maxConcurrent = ref(2)
-const bulkRetrying = ref(false)
-const bulkClearing = ref(false)
 let timer = null
+
+const retryableFailedClips = computed(() => failedClips.value.filter(job => !job.skip_reason))
 
 const overallPct = computed(() => {
   const { total, session_done } = transcribeMeta.value
@@ -325,77 +324,59 @@ async function retryJob(recordingId) {
   } catch { showToast('请求失败', 'error') }
 }
 
-async function runBulkAction(recordingIds, action, failureMessage) {
-  const results = await Promise.allSettled(
-    recordingIds.map(async (recordingId) => {
-      const response = await remoteFetch(`/api/clip-queue/${recordingId}/${action}`, { method: 'POST' })
-      if (!response.ok) {
-        const error = await response.json().catch(() => ({}))
-        throw new Error(error.detail || failureMessage)
-      }
-    }),
-  )
-  return {
-    succeeded: results.filter(result => result.status === 'fulfilled').length,
-    failed: results.filter(result => result.status === 'rejected').length,
-  }
-}
-
-async function retryAllFailed() {
-  const recordingIds = failedClips.value
-    .filter(job => !job.skip_reason)
-    .map(job => job.id)
-  if (recordingIds.length === 0) {
-    showToast('当前没有可重试的失败任务', 'error')
-    return
-  }
-
-  bulkRetrying.value = true
-  try {
-    const { succeeded, failed } = await runBulkAction(recordingIds, 'retry', '重试失败')
-    if (failed > 0) {
-      showToast(`已重试 ${succeeded} 项，${failed} 项失败`, 'error')
-    } else {
-      showToast(`已重新入队 ${succeeded} 项`, 'success')
-    }
-    await load()
-  } catch {
-    showToast('批量重试失败', 'error')
-  } finally {
-    bulkRetrying.value = false
-  }
-}
-
-async function dismissAllFailed() {
-  const recordingIds = failedClips.value.map(job => job.id)
-  if (recordingIds.length === 0) {
-    showToast('当前没有可清除的失败任务', 'error')
-    return
-  }
-  if (!confirm(`确定清除全部 ${recordingIds.length} 个剪辑失败任务吗？此操作不可撤销。`)) return
-
-  bulkClearing.value = true
-  try {
-    const { succeeded, failed } = await runBulkAction(recordingIds, 'dismiss', '清除失败')
-    if (failed > 0) {
-      showToast(`已清除 ${succeeded} 项，${failed} 项失败`, 'error')
-    } else {
-      showToast(`已清除 ${succeeded} 项`, 'success')
-    }
-    await load()
-  } catch {
-    showToast('批量清除失败', 'error')
-  } finally {
-    bulkClearing.value = false
-  }
-}
-
 async function dismissJob(recordingId) {
   try {
     const r = await remoteFetch(`/api/clip-queue/${recordingId}/dismiss`, { method: 'POST' })
     if (r.ok) { showToast('已清除', 'success'); await load() }
     else { const e = await r.json().catch(() => ({})); showToast(e.detail || '操作失败', 'error') }
   } catch { showToast('请求失败', 'error') }
+}
+
+async function runBulkAction(action, recordingIds) {
+  if (recordingIds.length === 0) {
+    showToast(action === 'retry' ? '没有可重试的失败任务' : '没有可清除的失败任务', 'info')
+    return
+  }
+  bulkAction.value = action
+  try {
+    const endpoint = action === 'retry' ? '/api/clip-queue/bulk-retry' : '/api/clip-queue/bulk-dismiss'
+    const response = await remoteFetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ recording_ids: recordingIds }),
+    })
+    const payload = await response.json().catch(() => ({}))
+    if (!response.ok) {
+      showToast(payload.detail || '批量操作失败', 'error')
+      return
+    }
+    const actionLabel = action === 'retry' ? '重试' : '清除'
+    const failedCount = payload.failed_count || 0
+    showToast(failedCount ? `已${actionLabel} ${payload.processed_count || 0} 项，${failedCount} 项未处理` : `已批量${actionLabel}`, failedCount ? 'error' : 'success')
+    await load()
+  } catch {
+    showToast('批量操作请求失败', 'error')
+  } finally {
+    bulkAction.value = null
+  }
+}
+
+async function retryAllFailed() {
+  if (retryableFailedClips.value.length === 0) {
+    showToast('没有可重试的失败任务', 'info')
+    return
+  }
+  await runBulkAction('retry', retryableFailedClips.value.map(job => job.id))
+}
+
+async function dismissAllFailed() {
+  if (failedClips.value.length === 0) {
+    showToast('没有可清除的失败任务', 'info')
+    return
+  }
+  const count = failedClips.value.length
+  if (!window.confirm(`确定要清除当前 ${count} 项剪辑失败记录吗？此操作不可撤销。`)) return
+  await runBulkAction('dismiss', failedClips.value.map(job => job.id))
 }
 
 function formatEta(secs) {
@@ -426,12 +407,21 @@ onUnmounted(() => clearInterval(timer))
 
 .section { margin-bottom: 24px; }
 .section-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
-.bulk-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
 .section-title { font-size: 14px; font-weight: 600; color: #ccc; }
 .section-badge { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 10px; }
 .section-badge.running { background: rgba(251,191,36,0.2); color: #fbbf24; }
 .section-badge.queued  { background: rgba(148,163,184,0.15); color: #94a3b8; }
 .section-hint { font-size: 11px; color: #555; margin-left: auto; }
+.bulk-actions { display: flex; gap: 6px; margin-left: auto; }
+.bulk-btn {
+  border: 1px solid #333; cursor: pointer; border-radius: 5px;
+  font-size: 12px; padding: 4px 9px; transition: all 0.15s;
+}
+.bulk-btn:disabled, .act-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.bulk-btn.retry { background: rgba(96,165,250,0.1); border-color: rgba(96,165,250,0.3); color: #60a5fa; }
+.bulk-btn.retry:hover:not(:disabled) { background: rgba(96,165,250,0.25); }
+.bulk-btn.dismiss { background: rgba(107,114,128,0.1); border-color: rgba(107,114,128,0.3); color: #9ca3af; }
+.bulk-btn.dismiss:hover:not(:disabled) { background: rgba(107,114,128,0.25); }
 
 .job-list { display: flex; flex-direction: column; gap: 8px; }
 
@@ -539,7 +529,6 @@ onUnmounted(() => clearInterval(timer))
   font-size: 12px; padding: 3px 8px; transition: all 0.15s;
   display: flex; align-items: center; justify-content: center;
 }
-.act-btn:disabled { cursor: not-allowed; opacity: 0.55; }
 .act-btn.start  { background: rgba(52,211,153,0.1); border-color: rgba(52,211,153,0.3); color: #34d399; }
 .act-btn.start:hover  { background: rgba(52,211,153,0.25); }
 .act-btn.pause  { background: rgba(251,191,36,0.1);  border-color: rgba(251,191,36,0.3);  color: #fbbf24; }
