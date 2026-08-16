@@ -343,8 +343,17 @@ async def _run_qianchuan_pipeline(group_id: int) -> None:
             raise RuntimeError("group not found")
         group = context["group"]
         match = score_product_match(context, keywords=[group.get("label"), group.get("wig_model"), group.get("wig_color")], threshold=0.0)
+        # Production recordings may have no matching product catalog row. The
+        # recording's own SRT is still the authoritative source for a
+        # validation render, so retain group metadata as product context.
+        product_context = match.get("product") or {
+            "product_name": group.get("wig_model") or group.get("label") or "假发",
+            "matched_color": group.get("wig_color") or "自然色",
+            "keywords": [group.get("label"), group.get("wig_model"), group.get("wig_color")],
+            "source": "group_metadata_srt_fallback",
+        }
         script = generate_qianchuan_script(
-            group, product_context=match.get("product") or {}, selling_points=[]
+            group, product_context=product_context, selling_points=[]
         )
         script["preview_mode"] = False
         async with aiosqlite.connect(DB_PATH) as db:
