@@ -103,6 +103,11 @@ def _require_subtitle_font() -> str:
     for candidate in candidates:
         if candidate.is_file() and candidate.stat().st_size > 0:
             return str(candidate.parent)
+        if candidate.parent.is_dir():
+            expected_name = candidate.name.casefold()
+            for sibling in candidate.parent.iterdir():
+                if sibling.name.casefold() == expected_name and sibling.is_file() and sibling.stat().st_size > 0:
+                    return str(sibling.parent)
     searched = ", ".join(str(candidate) for candidate in candidates)
     raise RuntimeError(f"新青年体 font unavailable; searched: {searched}")
 

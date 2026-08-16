@@ -36,6 +36,23 @@ def test_realistic_ass_keeps_all_text_and_uses_requested_style(tmp_path):
     assert "&H000000FF" in ass
 
 
+def test_realistic_ass_renders_every_original_cue_in_selected_window():
+    selected = [Seg(idx=10, start=10, end=16, text="scene", transition="cut:0")]
+    source = [
+        Seg(idx=1, start=10.0, end=11.2, text="第一句"),
+        Seg(idx=2, start=11.2, end=13.0, text="第二句显白"),
+        Seg(idx=3, start=13.0, end=15.8, text="第三句完整保留"),
+    ]
+
+    ass = build_ass(selected, source, realistic=True)
+
+    dialogue = [line for line in ass.splitlines() if line.startswith("Dialogue:")]
+    assert len(dialogue) == len(source)
+    assert all(text in ass for text in ("第一句", "第二句", "第三句完整保留"))
+    assert "0:00:10" not in ass  # cues are rebased to the clip timeline
+    assert "0:00:00.00" in ass
+
+
 def test_subtitle_font_path_is_bundled():
     assert Path(resolve_subtitle_font_path()).name == "WenYue-XinQingNianTi-W8-J-2.otf"
 
