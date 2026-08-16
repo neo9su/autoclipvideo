@@ -1208,7 +1208,6 @@ const importPreviewCount = computed(() => {
 let pendingRefresh = false
 const pendingGroupRefreshes = new Set()
 let refreshTimer = null
-const pendingGroupRefreshes = new Set()
 
 function hasActiveInteraction({ includeExpanded = true } = {}) {
   if ((includeExpanded && openId.value) || groupModal.value || customModal.value || reclipModal.value || reviewModal.value ||
