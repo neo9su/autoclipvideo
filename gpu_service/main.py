@@ -91,24 +91,29 @@ _SUBTITLE_FONT_FILE = "WenYue-XinQingNianTi-W8-J-2.otf"
 
 def _require_subtitle_font() -> str:
     """Return the configured 新青年体 directory or fail before encoding."""
+    search_dirs = []
+    for directory in (FONTS_DIR, os.path.join(STORAGE_DIR, "fonts")):
+        if directory and Path(directory) not in search_dirs:
+            search_dirs.append(Path(directory))
+
     candidates = []
-    if FONTS_DIR:
-        candidates.append(Path(FONTS_DIR))
-    candidates.append(Path(STORAGE_DIR) / "fonts")
-    if os.name == "nt":
-        candidates.append(Path(r"C:\Windows\Fonts"))
-    for directory in candidates:
+    normalized_name = _SUBTITLE_FONT_FILE.casefold().replace("-", "").replace("_", "")
+    for directory in search_dirs:
         if not directory.is_dir():
             continue
-        exact = directory / _SUBTITLE_FONT_FILE
-        if exact.is_file() and exact.stat().st_size > 0:
-            return str(directory)
-        for candidate in directory.iterdir():
-            if (candidate.is_file()
-                    and candidate.name.lower() == _SUBTITLE_FONT_FILE.lower()
-                    and candidate.stat().st_size > 0):
-                return str(directory)
-    searched = ", ".join(str(candidate) for candidate in candidates)
+        try:
+            for candidate in directory.iterdir():
+                normalized_stem = candidate.stem.casefold().replace("-", "").replace("_", "")
+                if (candidate.is_file() and candidate.suffix.casefold() in {".otf", ".ttf"}
+                        and (candidate.name.casefold() == _SUBTITLE_FONT_FILE.casefold()
+                             or normalized_name in normalized_stem)):
+                    candidates.append(candidate)
+        except OSError:
+            continue
+    for candidate in candidates:
+        if candidate.stat().st_size > 0:
+            return str(candidate.parent)
+    searched = ", ".join(str(directory) for directory in search_dirs)
     raise RuntimeError(f"新青年体 font unavailable; searched: {searched}")
 
 # CosyVoice2 model directory.
@@ -649,9 +654,7 @@ async def _do_clip_job(
                 "ffmpeg", "-y",
                 "-ss", f"{pre:.3f}", "-i", mp4_path,
                 "-vf", vf, "-af", af,
-                # Do not add an encoding cushion: the merge duration and the
-                # subtitle timeline must describe the same number of samples.
-                "-t", f"{padded_dur:.3f}",
+                "-t", f"{padded_dur + 0.1:.3f}",
                 "-c:v", "h264_nvenc", "-b:v", "10M",
                 "-c:a", "aac", "-b:a", "128k",
                 seg_out,

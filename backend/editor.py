@@ -421,40 +421,35 @@ def resolve_subtitle_font_path(fonts_dir: Optional[str] = None) -> str:
     """Return the bundled 新青年体 font, failing clearly when unavailable."""
     candidates: list[Path] = []
     if fonts_dir:
-        candidates.extend(_font_file_candidates(Path(fonts_dir)))
+        candidates.extend(_find_subtitle_font_candidates(Path(fonts_dir)))
     candidates.extend([
         Path(__file__).resolve().parent / "assets" / "fonts" / _XQNT_FONT_FILE,
-        Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts" / _XQNT_FONT_FILE,
-        Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "Windows" / "Fonts" / _XQNT_FONT_FILE,
+        Path("C:/Windows/Fonts") / _XQNT_FONT_FILE,
     ])
+    candidates.extend(_find_subtitle_font_candidates(Path("C:/Windows/Fonts")))
     for candidate in candidates:
         if candidate.is_file() and candidate.stat().st_size > 0:
             return str(candidate)
-    # Windows font files are sometimes copied with a case-only name change.
-    # Scan only the known font directories, never the whole filesystem.
-    for directory in {candidate.parent for candidate in candidates}:
-        try:
-            expected = _XQNT_FONT_FILE.casefold()
-            match = next((path for path in directory.iterdir()
-                          if path.is_file() and path.name.casefold() == expected
-                          and path.stat().st_size > 0), None)
-            if match:
-                return str(match)
-        except OSError:
-            continue
     searched = ", ".join(str(candidate) for candidate in candidates)
     raise FileNotFoundError(f"新青年体 font unavailable; searched: {searched}")
 
 
-def _font_file_candidates(fonts_dir: Path) -> list[Path]:
-    """Find the font on case-sensitive and case-insensitive filesystems."""
-    exact = fonts_dir / _XQNT_FONT_FILE
-    candidates = [exact]
-    if fonts_dir.is_dir():
+def _find_subtitle_font_candidates(fonts_dir: Path) -> list[Path]:
+    """Find XinQingNianTi files despite Windows case/name variations."""
+    if not fonts_dir.is_dir():
+        return []
+    expected = _XQNT_FONT_FILE.casefold()
+    candidates = [fonts_dir / _XQNT_FONT_FILE]
+    try:
         candidates.extend(
             path for path in fonts_dir.iterdir()
-            if path.is_file() and path.name.lower() == _XQNT_FONT_FILE.lower()
+            if path.is_file()
+            and path.suffix.casefold() in {".otf", ".ttf"}
+            and "xinqingnianti" in path.stem.casefold().replace("-", "").replace("_", "")
+            and path.name.casefold() != expected
         )
+    except OSError:
+        return candidates
     return candidates
 
 # ── Highlight keywords: product descriptors + scene nouns ─────────────────────
@@ -610,21 +605,29 @@ def build_ass(selected: List[Seg], all_segs: List[Seg], realistic: bool = False)
     only the configured incoming transition duration.
     """
     def _format_subtitle_text(text: str) -> str:
-        """Preserve all source text while normalizing ASS line breaks."""
-        source_lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.splitlines()]
+        """Preserve every source character while adding safe ASS line breaks.
+
+        Do not join the source lines first and then slice the resulting string:
+        ``\\N`` is a two-character ASS escape and slicing it can split the escape
+        (or make it look like missing subtitle text).  Wrap each logical source
+        line independently instead.
+        """
         wrapped_lines: list[str] = []
-        for source_line in source_lines:
-            if not source_line:
+        for source_line in text.splitlines():
+            normalized_line = re.sub(r"[ \t]+", " ", source_line).strip()
+            if not normalized_line:
                 continue
-            # Wrap each source line independently so a line break marker is
-            # never split into a literal backslash or ``N`` character.
-            wrapped_lines.extend(source_line[i:i + 14] for i in range(0, len(source_line), 14))
+            wrapped_lines.extend(
+                normalized_line[start:start + 14]
+                for start in range(0, len(normalized_line), 14)
+            )
         return r"\N".join(wrapped_lines)
 
     header = _ASS_HEADER
     dialogue: list[str] = []
     cursor = 0.0
     line_idx = 0
+    rendered_srt_ids: set = set()   # track (srt.idx, sel_seg_idx) to avoid duplicates
     for sel_idx, sel_seg in enumerate(selected):
         offset = cursor
         if sel_idx == 0:
@@ -642,6 +645,10 @@ def build_ass(selected: List[Seg], all_segs: List[Seg], realistic: bool = False)
             ov_end   = min(srt.end,   sel_seg.end)
             if ov_end - ov_start < 0.15:  # require at least 150ms overlap
                 continue
+            dedup_key = (srt.idx, sel_idx)
+            if dedup_key in rendered_srt_ids:
+                continue
+            rendered_srt_ids.add(dedup_key)
             t0 = offset + (ov_start - sel_seg.start)
             t1 = offset + (ov_end   - sel_seg.start)
             raw_text = _format_subtitle_text(srt.text)
@@ -1729,9 +1736,7 @@ async def _gen_person_frames(
 # ── SRT parsing ───────────────────────────────────────────────────────────────
 
 def _ts_to_sec(ts: str) -> float:
-    # Ignore optional cue settings after the end timestamp (WebVTT-style
-    # producers occasionally emit them in otherwise valid SRT files).
-    ts = ts.strip().split()[0].replace(",", ".")
+    ts = ts.strip().replace(",", ".")
     parts = ts.split(":")
     h, m, s = int(parts[0]), int(parts[1]), float(parts[2])
     return h * 3600 + m * 60 + s
@@ -1744,14 +1749,14 @@ def parse_srt(path: str) -> List[Seg]:
     segs = []
     for block in re.split(r"\n\s*\n", content.strip()):
         lines = [line.strip() for line in block.splitlines() if line.strip()]
-        if len(lines) < 3:
+        if len(lines) < 2:
             continue
         try:
-            index_position = next(position for position, line in enumerate(lines) if line.isdigit())
-            timestamp_position = index_position + 1
-            if timestamp_position >= len(lines):
-                continue
-            arrow = lines[timestamp_position].split("-->")
+            timestamp_position = next(
+                position for position, line in enumerate(lines)
+                if "-->" in line
+            )
+            arrow = lines[timestamp_position].split("-->", 1)
             if len(arrow) != 2:
                 raise ValueError("invalid SRT timestamp separator")
             start = _ts_to_sec(arrow[0])
@@ -1759,7 +1764,11 @@ def parse_srt(path: str) -> List[Seg]:
             text = " ".join(lines[timestamp_position + 1:]).strip()
             if end <= start or not text:
                 continue
-            segs.append(Seg(idx=int(lines[index_position]), start=start, end=end, text=text))
+            # Cue numbers are optional in valid SRT variants.  Keep a stable
+            # deterministic id for blocks that omit or corrupt the number.
+            index_text = lines[timestamp_position - 1] if timestamp_position else ""
+            cue_index = int(index_text) if index_text.isdigit() else len(segs) + 1
+            segs.append(Seg(idx=cue_index, start=start, end=end, text=text))
         except (ValueError, IndexError):
             continue
     return sorted(segs, key=lambda segment: (segment.start, segment.end, segment.idx))
@@ -2807,7 +2816,6 @@ async def _edit_via_gpu(
     on_progress=None,
     mp4_path: Optional[str] = None,   # local path; enables auto-upload on 404
     realistic: bool = False,
-    subtitle_segs: Optional[List["Seg"]] = None,
 ) -> Optional[str]:
     require_remote_gpu("clip generation")
     """
@@ -2816,7 +2824,7 @@ async def _edit_via_gpu(
     uploaded automatically and the job is retried.
     Returns out_path on success, None on failure.
     """
-    ass_content = build_ass(selected, subtitle_segs or segs, realistic=realistic)
+    ass_content = build_ass(selected, segs, realistic=realistic)
     best_seg = max(selected, key=lambda s: s.score) if any(s.score > 0 for s in selected) \
                else selected[max(0, len(selected) // 4)]
 
@@ -2998,7 +3006,6 @@ async def _fast_local_clip(
     segs: List[Seg],
     out: str,
     on_progress=None,
-    subtitle_segs: Optional[List[Seg]] = None,
 ) -> bool:
     reject_local_media("local clip encoder")
     """
@@ -3006,7 +3013,7 @@ async def _fast_local_clip(
     Stream-copy segment extraction + concat + single re-encode pass.
     Skips all transitions and pre-processing.  ~10-30s vs 30+ minutes.
     """
-    ass_content = build_ass(selected, subtitle_segs or segs)
+    ass_content = build_ass(selected, segs)
     has_subs = "Dialogue:" in ass_content
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -3131,12 +3138,13 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
         logger.error(f"SRT not found: {srt_path}")
         return None
 
-    # Parse + merge short segments + smart split + score
+    # Keep raw timed cues as the authoritative subtitle source. Selection may
+    # merge/split cues for shot scoring, but must never replace subtitle text.
     source_segs = parse_srt(srt_path)
     if not source_segs:
         logger.warning(f"Empty SRT: {srt_path}")
         return None
-    segs = source_segs.copy()
+    segs = source_segs
     segs = _merge_short_segs(segs)
     # Phase 2: Smart shot splitting — split long segments (>8s) at speech boundaries
     segs = _split_long_segments(segs, srt_path)
@@ -3288,10 +3296,9 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
             try:
                 mp4_filename = os.path.basename(mp4_path)
                 gpu_result = await _edit_via_gpu(
-                    mp4_filename, room_id, selected, segs, out_path, on_progress,
+                    mp4_filename, room_id, selected, source_segs, out_path, on_progress,
                     mp4_path=mp4_path,
                     realistic=clip_engine in ("realistic", "conservative"),
-                    subtitle_segs=source_segs,
                 )
                 if gpu_result:
                     # GPU succeeded — generate thumbnail locally from original mp4
@@ -3316,8 +3323,7 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
                 raise
 
     reject_local_media("clip generation")
-    if await _fast_local_clip(mp4_path, selected, segs, out_path, on_progress=on_progress,
-                              subtitle_segs=source_segs):
+    if await _fast_local_clip(mp4_path, selected, source_segs, out_path, on_progress=on_progress):
         try:
             if on_progress:
                 await on_progress("thumbnail", 0, 1)
@@ -3364,7 +3370,7 @@ async def edit_recording_multi(
     if not source_segs:
         logger.warning(f"Empty SRT: {srt_path}")
         return []
-    segs = source_segs.copy()
+    segs = source_segs
     segs = _merge_short_segs(segs)
     for seg in segs:
         score_and_tag(seg)
@@ -3514,10 +3520,9 @@ async def edit_recording_multi(
             try:
                 mp4_filename = os.path.basename(mp4_path)
                 gpu_result = await _edit_via_gpu(
-                    mp4_filename, _room_id_v, selected, segs, out_path, on_progress,
+                    mp4_filename, _room_id_v, selected, source_segs, out_path, on_progress,
                     mp4_path=mp4_path,
                     realistic=clip_engine in ("realistic", "conservative"),
-                    subtitle_segs=source_segs,
                 )
                 if gpu_result:
                     try:
@@ -3547,8 +3552,7 @@ async def edit_recording_multi(
         logger.info(f"Using fast local fallback for variant {k+1} of {os.path.basename(mp4_path)}")
         if on_progress:
             await on_progress("build", k, count)
-        if await _fast_local_clip(mp4_path, selected, segs, out_path, on_progress=on_progress,
-                                  subtitle_segs=source_segs):
+        if await _fast_local_clip(mp4_path, selected, source_segs, out_path, on_progress=on_progress):
             try:
                 if on_progress:
                     await on_progress("thumbnail", k, count)
