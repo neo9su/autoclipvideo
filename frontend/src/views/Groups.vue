@@ -1298,7 +1298,6 @@ function flushPendingRefresh() {
   pendingGroupRefreshes.clear()
   for (const groupId of groupIds) refreshGroup(groupId)
 }
-}
 
 async function toggleDetail(id) {
   if (openId.value === id) {
