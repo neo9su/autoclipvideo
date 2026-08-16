@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import re
-import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -1639,7 +1638,9 @@ async def trigger_merge(group_id: int, force: bool = False):
                 """UPDATE clip_groups SET
                    quality_issue = NULL, director_error = NULL, merge_error = NULL, creative_error = NULL,
                    classic_status = 0, director_status = 0, creative_status = 0,
+                   realistic_status = 0, conservative_status = 0,
                    merged_filename = NULL, director_final_video = NULL, creative_final_video = NULL,
+                   realistic_final_video = NULL, conservative_final_video = NULL,
                    merge_status = 0, merged_at = NULL
                    WHERE id = ?""",
                 (group_id,)
@@ -1650,12 +1651,14 @@ async def trigger_merge(group_id: int, force: bool = False):
                    quality_issue = NULL, director_error = NULL, merge_error = NULL, creative_error = NULL,
                    classic_status  = 0,
                    director_status = 0,
-                   creative_status = 0
+                   creative_status = 0, realistic_status = 0, conservative_status = 0,
+                   realistic_error = NULL, conservative_error = NULL,
+                   realistic_final_video = NULL, conservative_final_video = NULL
                    WHERE id = ?""",
                 (group_id,)
             )
         await db.commit()
-    from transcribe import _run_director_pipeline, _run_creative_pipeline
+    from transcribe import _run_director_pipeline, _run_creative_pipeline, _run_variant_pipeline
     async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -1676,50 +1679,12 @@ async def trigger_merge(group_id: int, force: bool = False):
         asyncio.create_task(merge_group(group_id))
     asyncio.create_task(_run_director_pipeline(group_id))
     asyncio.create_task(_run_creative_pipeline(group_id))
-    asyncio.create_task(_materialize_publish_styles(group_id))
+    # Realistic and conservative are independent clip-engine pipelines.  Do
+    # not copy the classic artifact: each style must be generated and stored
+    # separately so its output remains meaningful and retryable.
+    asyncio.create_task(_run_variant_pipeline(group_id, "realistic"))
+    asyncio.create_task(_run_variant_pipeline(group_id, "conservative"))
     return {"group_id": group_id, "merge_status": 1}
-
-
-async def _materialize_publish_styles(group_id: int) -> None:
-    """Persist the two clip-engine styles as group-scoped publish artifacts.
-
-    Older installations only stored clip-engine output on recordings.  Until
-    the remote style composer is available, retaining an independently named
-    artifact gives the publish model stable, non-collapsing version slots and
-    makes retries idempotent.  A future composer can replace this helper
-    without changing the API or database contract.
-    """
-    for _ in range(120):
-        async with aio_connect() as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute(
-                "SELECT merged_filename, realistic_status, conservative_status FROM clip_groups WHERE id = ?",
-                (group_id,),
-            ) as cur:
-                group = await cur.fetchone()
-        if not group:
-            return
-        if group["merged_filename"]:
-            source, reason = resolve_artifact_path(group["merged_filename"], "classic")
-            if source:
-                async with aio_connect() as db:
-                    for version, field, status_field in (
-                        ("realistic", "realistic_final_video", "realistic_status"),
-                        ("conservative", "conservative_final_video", "conservative_status"),
-                    ):
-                        if group[status_field] == 2:
-                            continue
-                        target = os.path.join(os.path.dirname(source), f"{version}_g{group_id}_{os.path.basename(source)}")
-                        try:
-                            shutil.copyfile(source, target)
-                        except OSError as exc:
-                            await db.execute(f"UPDATE clip_groups SET {status_field} = -1, {version}_error = ? WHERE id = ?", (str(exc)[:400], group_id))
-                            continue
-                        await db.execute(f"UPDATE clip_groups SET {status_field} = 2, {field} = ?, {version}_error = NULL WHERE id = ?", (target, group_id))
-                    await db.commit()
-                _groups_cache = None
-                return
-        await asyncio.sleep(5)
 
 
 @app.post("/api/groups/{group_id}/retry-styles")
@@ -1731,7 +1696,9 @@ async def retry_publish_styles(group_id: int):
             (group_id,),
         )
         await db.commit()
-    asyncio.create_task(_materialize_publish_styles(group_id))
+    from transcribe import _run_variant_pipeline
+    asyncio.create_task(_run_variant_pipeline(group_id, "realistic"))
+    asyncio.create_task(_run_variant_pipeline(group_id, "conservative"))
     return {"group_id": group_id, "status": "queued", "versions": ["realistic", "conservative"]}
 
 
@@ -3768,7 +3735,7 @@ async def get_unscheduled_groups(platform: str = "douyin", room_id: Optional[int
                    g.creative_final_video, g.qianchuan_final_video, g.publish_versions, g.room_id, rm.name as room_name
             FROM clip_groups g
             LEFT JOIN rooms rm ON g.room_id = rm.id
-            WHERE (g.merge_status = 2 OR g.classic_status = 2 OR g.director_status = 2 OR g.creative_status = 2 OR g.qianchuan_status = 2)
+            WHERE (g.merge_status = 2 OR g.classic_status = 2 OR g.director_status = 2 OR g.realistic_status = 2 OR g.conservative_status = 2 OR g.creative_status = 2 OR g.qianchuan_status = 2)
               AND (g.merged_filename IS NOT NULL OR g.director_final_video IS NOT NULL OR g.realistic_final_video IS NOT NULL OR g.conservative_final_video IS NOT NULL OR g.creative_final_video IS NOT NULL OR g.qianchuan_final_video IS NOT NULL)
               AND g.label != '未分类'
               AND NOT EXISTS (
@@ -3828,7 +3795,7 @@ async def batch_schedule_tasks(body: BatchScheduleCreate):
                    g.realistic_final_video, g.conservative_final_video,
                    g.creative_final_video, g.qianchuan_final_video, g.publish_versions, g.room_id
             FROM clip_groups g
-            WHERE (g.merge_status = 2 OR g.classic_status = 2 OR g.director_status = 2 OR g.creative_status = 2 OR g.qianchuan_status = 2)
+            WHERE (g.merge_status = 2 OR g.classic_status = 2 OR g.director_status = 2 OR g.realistic_status = 2 OR g.conservative_status = 2 OR g.creative_status = 2 OR g.qianchuan_status = 2)
               AND (g.merged_filename IS NOT NULL OR g.director_final_video IS NOT NULL OR g.realistic_final_video IS NOT NULL OR g.conservative_final_video IS NOT NULL OR g.creative_final_video IS NOT NULL OR g.qianchuan_final_video IS NOT NULL)
               AND g.label != '未分类'
               AND NOT EXISTS (
