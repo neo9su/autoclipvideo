@@ -1206,9 +1206,7 @@ const importPreviewCount = computed(() => {
 })
 
 let pendingRefresh = false
-const pendingGroupRefreshes = new Set()
 let refreshTimer = null
-const refreshingGroupIds = new Set()
 
 function hasActiveInteraction() {
   if (openId.value || groupModal.value || customModal.value || reclipModal.value || reviewModal.value ||
@@ -1221,16 +1219,23 @@ function hasActiveInteraction() {
     activeElement.matches('input, select, textarea, [contenteditable="true"]'))
 }
 
-async function load({ showLoading = true, background = false } = {}) {
+// Targeted card updates are safe while a detail card is expanded, but must not
+// overwrite an input/select/modal that the user is currently operating.
+function hasTargetedRefreshBlock() {
+  if (groupModal.value || customModal.value || reclipModal.value || reviewModal.value ||
+      showUploadModal.value || scriptReviewGroup.value || classicPreviewGroup.value || directorPreviewGroup.value ||
+      creativePreviewGroup.value || qianchuanPreviewGroup.value || stylePreview.value || coverPreview.value ||
+      mergeErrorGroup.value || showSuggestions.value) return true
+
+  const activeElement = document.activeElement
+  return Boolean(activeElement && activeElement !== document.body &&
+    activeElement.matches('input, select, textarea, [contenteditable="true"]'))
+}
+
+async function load({ showLoading = true } = {}) {
   if (showLoading) loading.value = true
   try {
     const [nextGroups, nextRooms] = await Promise.all([getGroups(), getRooms()])
-    // A request can finish after the user starts editing. Do not apply a
-    // background snapshot over an active form, select, preview, or detail.
-    if (background && (hasActiveInteraction() || document.hidden)) {
-      pendingRefresh = true
-      return
-    }
     const currentById = new Map(groups.value.map(group => [group.id, group]))
     const mergedGroups = nextGroups.map(nextGroup => {
       const currentGroup = currentById.get(nextGroup.id)
@@ -1251,29 +1256,23 @@ async function load({ showLoading = true, background = false } = {}) {
 }
 
 async function refreshGroup(groupId) {
-  if (groupId == null || refreshingGroupIds.has(groupId)) return
-  refreshingGroupIds.add(groupId)
+  if (groupId == null || document.hidden) return
+  if (hasTargetedRefreshBlock()) {
+    pendingRefresh = true
+    return
+  }
   try {
     const nextGroup = await getGroup(groupId)
-    if (hasActiveInteraction() || document.hidden) {
-      pendingGroupRefreshes.add(groupId)
-      return
-    }
     const currentGroup = groups.value.find(group => group.id === nextGroup.id)
     if (currentGroup) Object.assign(currentGroup, nextGroup)
   } catch (error) {
     // Websocket updates are best effort and must not interrupt active work.
     console.warn('分组状态更新失败', error)
-  } finally {
-    refreshingGroupIds.delete(groupId)
   }
 }
 
 function requestRefresh(groupId = null) {
   if (groupId != null) {
-    pendingGroupRefreshes.add(groupId)
-    if (hasActiveInteraction() || document.hidden) return
-    pendingGroupRefreshes.delete(groupId)
     refreshGroup(groupId)
     return
   }
@@ -1285,18 +1284,17 @@ function requestRefresh(groupId = null) {
   if (refreshTimer) return
   refreshTimer = window.setTimeout(() => {
     refreshTimer = null
-    load({ showLoading: false, background: true })
+    // Re-check at execution time: focus can move into a control while the
+    // debounce timer is waiting, and a full list replacement would reset it.
+    if (!document.hidden && !hasActiveInteraction()) load({ showLoading: false })
+    else pendingRefresh = true
   }, 500)
 }
 
 function flushPendingRefresh() {
-  if ((!pendingRefresh && pendingGroupRefreshes.size === 0) || hasActiveInteraction() || document.hidden) return
-  const shouldLoad = pendingRefresh
+  if (!pendingRefresh || hasActiveInteraction() || document.hidden) return
   pendingRefresh = false
-  if (shouldLoad) load({ showLoading: false, background: true })
-  const groupIds = [...pendingGroupRefreshes]
-  pendingGroupRefreshes.clear()
-  for (const groupId of groupIds) refreshGroup(groupId)
+  load({ showLoading: false })
 }
 
 async function toggleDetail(id) {
@@ -1304,6 +1302,7 @@ async function toggleDetail(id) {
     openId.value = null
     detail.value = null
     stopProgressPolling()
+    flushPendingRefresh()
     return
   }
   openId.value = id
