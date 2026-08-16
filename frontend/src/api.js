@@ -187,11 +187,12 @@ export async function retryDirector(id) {
 }
 
 export async function retryStyles(id, version) {
-  const body = version ? JSON.stringify({ version }) : undefined
-  const res = await fetchWithTimeout(`${BASE}/api/groups/${id}/retry-styles`, {
-    method: 'POST',
-    ...(body ? { headers: { 'Content-Type': 'application/json' }, body } : {}),
-  })
+  const options = { method: 'POST' }
+  if (version !== undefined) {
+    options.headers = { 'Content-Type': 'application/json' }
+    options.body = JSON.stringify({ version })
+  }
+  const res = await fetchWithTimeout(`${BASE}/api/groups/${id}/retry-styles`, options)
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }

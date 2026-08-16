@@ -6,8 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test:mappings": "node scripts/check-group-version-mappings.mjs",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:mapping": "node tests/groups-endpoint-mapping.test.mjs"
   },
   "dependencies": {
     "vue": "^3.5.30",
