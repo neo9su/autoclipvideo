@@ -23,10 +23,9 @@ def _candidate_paths(path: object) -> list[Path]:
     if not raw:
         return []
     normalized = Path(raw.replace("\\", "/"))
-    # Database paths historically contain either a recordings-relative path or
-    # an absolute path.  Resolve relative paths from the recordings directory,
-    # not the backend process cwd (which differs between dev and deployment).
-    candidates = [RECORDINGS_DIR / normalized if not normalized.is_absolute() else normalized]
+    candidates = [normalized]
+    if not normalized.is_absolute():
+        candidates.extend((PROJECT_ROOT / normalized, RECORDINGS_DIR / normalized))
     basename = path_basename(raw)
     if basename:
         candidates.append(RECORDINGS_DIR / basename)
@@ -36,10 +35,10 @@ def _candidate_paths(path: object) -> list[Path]:
 _VERSION_FIELDS = {
     "qianchuan": "qianchuan_final_video",
     "creative": "creative_final_video",
-    "director": "director_final_video",
-    "classic": "merged_filename",
     "realistic": "realistic_final_video",
     "conservative": "conservative_final_video",
+    "director": "director_final_video",
+    "classic": "merged_filename",
 }
 
 
@@ -68,7 +67,7 @@ def resolve_publish_video(
     """
     requested = str(requested_version or "both").strip().lower()
     if requested in ("", "default", "both"):
-        versions = ["qianchuan", "creative", "director", "realistic", "conservative", "classic"]
+        versions = ["qianchuan", "realistic", "conservative", "creative", "director", "classic"]
     elif requested in _VERSION_FIELDS:
         versions = [requested]
     else:
@@ -77,7 +76,7 @@ def resolve_publish_video(
     checked: list[str] = []
     available: list[str] = []
     resolved: dict[str, str] = {}
-    for version in ("qianchuan", "creative", "director", "realistic", "conservative", "classic"):
+    for version in ("qianchuan", "realistic", "conservative", "creative", "director", "classic"):
         field = _VERSION_FIELDS[version]
         value = group.get(field)
         if not value:
@@ -104,8 +103,7 @@ def resolve_video_path(video_path: object, group: Optional[Mapping[str, object]]
     """Return a local existing path and reason, preferring current group artifacts."""
     values: list[object] = []
     if group:
-        for field in ("qianchuan_final_video", "creative_final_video", "director_final_video",
-                      "realistic_final_video", "conservative_final_video"):
+        for field in ("qianchuan_final_video", "realistic_final_video", "conservative_final_video", "creative_final_video", "director_final_video"):
             if group.get(field):
                 values.append(group[field])
         if group.get("merged_filename"):
