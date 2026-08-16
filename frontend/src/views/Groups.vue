@@ -1649,7 +1649,6 @@ onMounted(() => {
   }, 60000)
   const onInteractionEnd = () => {
     window.setTimeout(flushPendingRefresh, 0)
-    window.setTimeout(flushPendingGroupRefreshes, 0)
   }
   document.addEventListener('focusout', onInteractionEnd)
   document.addEventListener('click', onInteractionEnd)
