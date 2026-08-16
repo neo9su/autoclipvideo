@@ -800,7 +800,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { REMOTE_API_BASE } from '../remoteApi.js'
-import { getGroups, getGroup, getRooms, mergeGroup, retryModes, retryStyles, createGroup, updateGroup, reassignRecording, importGroupVideos, createWS, getThumbnailUrl, createCustomGroup, uploadCustomGroupVideo, deleteGroup, getProcessingProgress, reclipRecording, reclipGroupAll, generateQianchuanGroup } from '../api.js'
+import { getGroups, getGroup, getRooms, mergeGroup, retryModes, retryDirector, retryStyles, retryQianchuan, createGroup, updateGroup, reassignRecording, importGroupVideos, createWS, getThumbnailUrl, createCustomGroup, uploadCustomGroupVideo, deleteGroup, getProcessingProgress, reclipRecording, reclipGroupAll, generateQianchuanGroup } from '../api.js'
 import QianchuanUpload from '../components/QianchuanUpload.vue'
 import { useToast } from '../composables/toast.js'
 
@@ -946,9 +946,11 @@ const fiveVersions = [
 
 const versionLabels = Object.fromEntries(fiveVersions.map(version => [version.key, version.label]))
 function versionStatus(group, version) {
+  if (version === 'classic') return Number(group.merge_status ?? 0)
   return Number(group[`${version}_status`] ?? 0)
 }
 function versionIsReady(group, version) {
+  if (version === 'classic') return versionStatus(group, version) === 2 && Boolean(group.merged_filename)
   return versionStatus(group, version) === 2 && group[`${version}_available`] !== false && group[`${version}_file_status`] !== 'missing'
 }
 function versionBusy(group, version) {
@@ -958,14 +960,13 @@ function versionBusy(group, version) {
 }
 function versionStatusMeta(group, version) {
   const status = versionStatus(group, version)
-  const error = group[`${version}_error`]
+  const error = version === 'classic' ? group.merge_error : group[`${version}_error`]
   if (status === 1 || versionBusy(group, version)) return { label: '生成中', className: 'running', hint: '任务进行中，请勿重复提交。' }
   if (status === 2 && versionIsReady(group, version)) return { label: '已完成', className: 'done', hint: '' }
   if (status < 0 || (status === 2 && !versionIsReady(group, version))) {
     return { label: '失败', className: 'failed', error: summarizeStyleError(error) || '结果文件缺失，可重试。', hint: '' }
   }
-  const hint = (version === 'realistic' || version === 'conservative') ? '当前接口会同时提交直出版与保守版。' : ''
-  return { label: '未生成', className: 'idle', hint }
+  return { label: '未生成', className: 'idle', hint: '' }
 }
 function versionTriggerDisabled(group, version) {
   return group.ready_count === 0 || versionBusy(group, version) || versionStatus(group, version) === 1
@@ -993,9 +994,9 @@ async function refreshGroupCard(group) {
 async function triggerVersion(group, version) {
   try {
     if (version === 'classic') await mergeGroup(group.id)
-    else if (version === 'director') await retryModes(group.id)
-    else if (version === 'qianchuan') return generateQianchuan(group, true)
-    else await retryStyles(group.id)
+    else if (version === 'director') await retryDirector(group.id)
+    else if (version === 'qianchuan') await retryQianchuan(group.id)
+    else await retryStyles(group.id, version)
     show(`${versionLabels[version]}生成任务已提交`, 'info')
     await refreshGroupCard(group)
   } catch (error) {
