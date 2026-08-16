@@ -409,7 +409,11 @@ async def _qianchuan_generate_bg(group_id: int, script: Dict) -> None:
                 detail = {
                     "matched_count": len(matched), "required_count": minimum_matches,
                     "matched_scene_ids": [item.get("script_segment", {}).get("scene_id") for item in matched],
-                    "reason": "recordings unavailable or no usable SRT match",
+                    "reason": (
+                        "source media/SRT unavailable" if not matched
+                        else "source SRT fallback produced too few segments"
+                    ),
+                    "match_reasons": sorted({item.get("match_reason", "unknown") for item in matched}),
                 }
                 logger.error("Qianchuan shot matching insufficient for group %s: %s", group_id, detail)
                 await _set_qianchuan_error(group_id, -2, "千川镜头匹配不足: " + json.dumps(detail, ensure_ascii=False), review_payload)
@@ -952,7 +956,10 @@ async def _compose_video_bg(
             matcher = get_matcher(DB_PATH)
             matched_segments = await matcher.match_segments_to_recordings(script_segments, group_id)
             if not matched_segments:
-                raise RuntimeError("未能匹配到任何录像片段，请确认分组内有已转录录像（clipped=2）")
+                raise RuntimeError(
+                    "导演镜头匹配为空：未找到 clipped=2 且可读取源媒体和非空 SRT；"
+                    "请检查 recordings.filename、媒体挂载和转录状态"
+                )
 
             composer = DirectorVideoComposer(recordings_dir)
             config = {"video_style": video_style}

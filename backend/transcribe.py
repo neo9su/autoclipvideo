@@ -1309,7 +1309,7 @@ async def _run_director_pipeline_inner(group_id: int):
             300,
         )
         if not matched_segments:
-            return await _fail("segment matching returned empty")
+            return await _fail(matcher.match_error or "segment matching returned empty")
 
         # 5. Voiceover
         voice_dir = VoiceDirector()
@@ -1548,7 +1548,7 @@ async def _run_creative_pipeline_inner(group_id: int):
         script_segments = script.get("scenes") or script.get("segments") or []
         matched_segments = await matcher.match_segments_to_recordings(script_segments, group_id)
         if not matched_segments:
-            return await _fail("segment matching returned empty")
+            return await _fail(matcher.match_error or "segment matching returned empty")
 
         voice_dir = VoiceDirector()
         vo_result = await voice_dir.generate_voiceover(script=script, group_id=group_id, reference_audio_path=None)

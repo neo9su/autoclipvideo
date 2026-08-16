@@ -7,7 +7,7 @@ and the worker container.
 from __future__ import annotations
 
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -15,9 +15,12 @@ STORAGE_DIR = Path(os.environ.get("STORAGE_DIR", str(PROJECT_ROOT / "recordings"
 
 
 def resolve_media_file(filename: str) -> Path | None:
-    """Resolve a basename below STORAGE_DIR, rejecting traversal and aliases."""
-    candidate_name = Path(str(filename).replace("\\", "/"))
-    if candidate_name.is_absolute() or candidate_name.name != str(candidate_name):
+    """Resolve a relative media path below STORAGE_DIR safely."""
+    raw_filename = str(filename or "").strip()
+    candidate_name = Path(raw_filename.replace("\\", "/"))
+    windows_name = PureWindowsPath(raw_filename)
+    if (not raw_filename or candidate_name.is_absolute() or windows_name.is_absolute()
+            or windows_name.drive or ".." in candidate_name.parts):
         return None
     candidate = (STORAGE_DIR / candidate_name).resolve()
     try:
@@ -38,11 +41,12 @@ def srt_candidates(mp4_path: Path) -> tuple[Path, ...]:
 def resolve_srt_file(filename: str) -> Path | None:
     """Resolve the first readable, non-empty SRT sidecar for an MP4 basename."""
     mp4_path = resolve_media_file(filename)
-    if mp4_path is None:
+    if mp4_path is None or not mp4_path.is_file():
         return None
     return next(
         (path for path in srt_candidates(mp4_path)
-         if path.is_file() and os.access(path, os.R_OK) and path.stat().st_size > 0),
+         if path.is_file() and os.access(path, os.R_OK) and path.stat().st_size > 0
+         and path.read_bytes().strip()),
         None,
     )
 
