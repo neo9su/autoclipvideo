@@ -186,6 +186,28 @@ export async function retryStyles(id) {
   return res.json()
 }
 
+export async function retryStyle(id, version) {
+  const res = await fetchWithTimeout(`${BASE}/api/groups/${id}/retry-styles`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ version }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function retryDirector(id) {
+  const res = await fetchWithTimeout(`${BASE}/api/groups/${id}/retry-director`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function retryQianchuan(id) {
+  const res = await fetchWithTimeout(`${BASE}/api/groups/${id}/retry-qianchuan`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
 export async function uploadRecording(roomId, file, srtFile = null, durationSec = null, clipCount = 1) {
   const form = new FormData()
   form.append('file', file)

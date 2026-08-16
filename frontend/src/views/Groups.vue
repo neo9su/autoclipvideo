@@ -58,21 +58,21 @@
           <div class="group-actions">
             <!-- 三模式触发按钮 -->
             <button
-              v-if="g.classic_status !== 1 && g.director_status !== 1 && (g.creative_status || 0) !== 1 && (g.qianchuan_status || 0) !== 1"
+              v-if="g.merge_status !== 1 && g.director_status !== 1 && (g.creative_status || 0) !== 1 && (g.qianchuan_status || 0) !== 1"
               class="btn-action"
               :disabled="g.ready_count === 0"
               @click="doMerge(g)">
-              {{ (g.classic_status === 2 || g.director_status === 2 || g.creative_status === 2 || g.qianchuan_status === 2) ? '↺ 重新合并' : '剪辑并合并' }}
+              {{ (g.merge_status === 2 || g.director_status === 2 || g.creative_status === 2 || g.qianchuan_status === 2) ? '↺ 重新合并' : '剪辑并合并' }}
             </button>
             <button v-else class="btn-action yellow" disabled>处理中…</button>
             <!-- 经典版结果 -->
-            <template v-if="g.classic_status === 2 && g.classic_available">
+            <template v-if="classicIsReady(g)">
               <button class="btn-action teal" style="margin-right:2px" @click="openClassicPreview(g)">▶ 经典版</button>
               <a :href="`${apiBase}/api/groups/${g.id}/download`" class="btn-action teal" title="经典版下载" download>↓</a>
             </template>
-            <span v-else-if="g.classic_status === 1" class="badge yellow">经典版处理中…</span>
-            <span v-else-if="g.classic_status === 2 && g.classic_file_status !== 'ready'" class="badge red">经典版文件缺失，请重新生成</span>
-            <span v-else-if="g.classic_status === -1" class="badge red">经典版失败</span>
+            <span v-else-if="g.merge_status === 1" class="badge yellow">经典版处理中…</span>
+            <span v-else-if="g.merge_status === 2 && !classicIsReady(g)" class="badge red">经典版文件缺失，请重新生成</span>
+            <span v-else-if="g.merge_status === -1 || g.merge_error" class="badge red">经典版失败</span>
             <!-- 自编版结果 -->
             <template v-if="g.creative_status === 2 && g.creative_available">
               <button class="btn-action green" style="margin-right:2px" @click="openCreativePreview(g)">▶ 自编版</button>
@@ -273,7 +273,7 @@
         </div>
 
         <!-- 封面生成面板 -->
-        <div class="cover-panel" v-if="g.classic_status === 2 || g.director_status === 2 || g.creative_status === 2 || g.qianchuan_status === 2">
+        <div class="cover-panel" v-if="g.merge_status === 2 || g.director_status === 2 || g.creative_status === 2 || g.qianchuan_status === 2">
           <div class="cover-panel-header">
             <span class="cover-panel-title">封面</span>
             <button
@@ -800,7 +800,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { REMOTE_API_BASE } from '../remoteApi.js'
-import { getGroups, getGroup, getRooms, mergeGroup, retryModes, retryStyles, createGroup, updateGroup, reassignRecording, importGroupVideos, createWS, getThumbnailUrl, createCustomGroup, uploadCustomGroupVideo, deleteGroup, getProcessingProgress, reclipRecording, reclipGroupAll, generateQianchuanGroup } from '../api.js'
+import { getGroups, getGroup, getRooms, mergeGroup, retryModes, retryStyle, retryDirector, retryQianchuan, retryStyles, createGroup, updateGroup, reassignRecording, importGroupVideos, createWS, getThumbnailUrl, createCustomGroup, uploadCustomGroupVideo, deleteGroup, getProcessingProgress, reclipRecording, reclipGroupAll, generateQianchuanGroup } from '../api.js'
 import QianchuanUpload from '../components/QianchuanUpload.vue'
 import { useToast } from '../composables/toast.js'
 
@@ -946,15 +946,19 @@ const fiveVersions = [
 
 const versionLabels = Object.fromEntries(fiveVersions.map(version => [version.key, version.label]))
 function versionStatus(group, version) {
-  return Number(group[`${version}_status`] ?? 0)
+  return version === 'classic' ? Number(group.merge_status ?? group.classic_status ?? 0) : Number(group[`${version}_status`] ?? 0)
 }
 function versionIsReady(group, version) {
+  if (version === 'classic') return versionStatus(group, version) === 2 && Boolean(group.merged_filename) && group.classic_available !== false
   return versionStatus(group, version) === 2 && group[`${version}_available`] !== false && group[`${version}_file_status`] !== 'missing'
+}
+function classicIsReady(group) {
+  return versionIsReady(group, 'classic')
 }
 function versionBusy(group, version) {
   return version === 'director' ? Boolean(directorBusy.value[group.id]) :
     version === 'qianchuan' ? Boolean(qianchuanBusy.value[group.id]) :
-      version === 'realistic' || version === 'conservative' ? Boolean(stylesBusy.value[group.id]) : false
+      version === 'realistic' || version === 'conservative' ? Boolean(stylesBusy.value[`${group.id}:${version}`]) : false
 }
 function versionStatusMeta(group, version) {
   const status = versionStatus(group, version)
@@ -964,8 +968,7 @@ function versionStatusMeta(group, version) {
   if (status < 0 || (status === 2 && !versionIsReady(group, version))) {
     return { label: '失败', className: 'failed', error: summarizeStyleError(error) || '结果文件缺失，可重试。', hint: '' }
   }
-  const hint = (version === 'realistic' || version === 'conservative') ? '当前接口会同时提交直出版与保守版。' : ''
-  return { label: '未生成', className: 'idle', hint }
+  return { label: '未生成', className: 'idle', hint: '' }
 }
 function versionTriggerDisabled(group, version) {
   return group.ready_count === 0 || versionBusy(group, version) || versionStatus(group, version) === 1
@@ -993,14 +996,19 @@ async function refreshGroupCard(group) {
 async function triggerVersion(group, version) {
   try {
     if (version === 'classic') await mergeGroup(group.id)
-    else if (version === 'director') await retryModes(group.id)
-    else if (version === 'qianchuan') return generateQianchuan(group, true)
-    else await retryStyles(group.id)
+    else if (version === 'director') await retryDirector(group.id)
+    else if (version === 'qianchuan') await retryQianchuan(group.id)
+    else {
+      stylesBusy.value[`${group.id}:${version}`] = true
+      await retryStyle(group.id, version)
+    }
     show(`${versionLabels[version]}生成任务已提交`, 'info')
     await refreshGroupCard(group)
   } catch (error) {
     group[`${version}_error`] = error.message || `${versionLabels[version]}生成失败`
     show(group[`${version}_error`], 'error')
+  } finally {
+    if (version === 'realistic' || version === 'conservative') stylesBusy.value[`${group.id}:${version}`] = false
   }
 }
 function openStylePreview(group, version) {
@@ -1027,7 +1035,7 @@ async function generateStyles(group) {
   try {
     await retryStyles(group.id)
     show('直出版+保守版任务已提交', 'info')
-    await load()
+    await refreshGroupCard(group)
   } catch (error) {
     show(error.message || '样式任务提交失败', 'error')
   } finally {
