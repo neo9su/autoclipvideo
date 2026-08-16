@@ -117,3 +117,12 @@ def test_ass_wrap_does_not_drop_text_or_split_ass_line_break_escape():
     assert source_text in rendered_text
     assert r"\N" in ass
     assert "\\" + "N" not in ass.replace(r"\N", "")
+
+
+def test_ass_escapes_source_override_characters_without_dropping_text():
+    selected = [Seg(idx=1, start=0, end=3, text="scene", transition="cut:0")]
+    source_cues = [Seg(idx=1, start=0, end=3, text="保留\\路径 {原文}")]
+
+    ass = build_ass(selected, source_cues, realistic=True)
+
+    assert "保留\\\\路径 \\{原文\\}" in ass

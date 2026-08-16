@@ -92,7 +92,7 @@ _SUBTITLE_FONT_FILE = "WenYue-XinQingNianTi-W8-J-2.otf"
 def _require_subtitle_font() -> str:
     """Return the configured 新青年体 directory or fail before encoding."""
     search_dirs = []
-    for directory in (FONTS_DIR, os.path.join(STORAGE_DIR, "fonts")):
+    for directory in (FONTS_DIR, os.path.join(STORAGE_DIR, "fonts"), r"C:\Windows\Fonts"):
         if directory and Path(directory) not in search_dirs:
             search_dirs.append(Path(directory))
 

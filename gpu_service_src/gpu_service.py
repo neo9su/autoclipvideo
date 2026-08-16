@@ -60,6 +60,27 @@ FFMPEG_ASS = _CHOCO_FFMPEG if os.name == "nt" else (_shutil.which("ffmpeg") or "
 # Falls back to the known location inside STORAGE_DIR/fonts.
 _DEFAULT_FONTS_DIR = os.path.join(_DEFAULT_STORAGE, "fonts")
 FONTS_DIR = os.environ.get("FONTS_DIR", _DEFAULT_FONTS_DIR if os.path.isdir(_DEFAULT_FONTS_DIR) else "")
+_SUBTITLE_FONT_FILE = "WenYue-XinQingNianTi-W8-J-2.otf"
+
+
+def _require_subtitle_font() -> str:
+    """Return the 新青年体 directory, or fail before producing a bad clip."""
+    search_dirs = [Path(FONTS_DIR), Path(STORAGE_DIR) / "fonts", Path(r"C:\Windows\Fonts")]
+    expected = _SUBTITLE_FONT_FILE.casefold()
+    candidates = []
+    for directory in search_dirs:
+        if not directory.is_dir():
+            continue
+        candidates.extend(path for path in directory.iterdir() if (
+            path.is_file()
+            and path.suffix.casefold() in {".otf", ".ttf"}
+            and "xinqingnianti" in "".join(ch for ch in path.stem.casefold() if ch.isalnum())
+        ))
+    for candidate in candidates:
+        if candidate.name.casefold() == expected or candidate.stat().st_size > 0:
+            return str(candidate.parent)
+    searched = ", ".join(str(directory) for directory in search_dirs)
+    raise RuntimeError(f"新青年体 font unavailable; searched: {searched}")
 
 # CosyVoice2 model directory.
 # ModelScope downloads to models/iic/CosyVoice2-0.5B (with symlink).
@@ -579,6 +600,7 @@ async def _do_clip_job(job_id: str, mp4_path: str, segments: list, ass_content: 
         with open(ass_path, "w", encoding="utf-8") as f:
             f.write(ass_content)
         has_subs = "Dialogue:" in ass_content
+        subtitle_fonts_dir = _require_subtitle_font() if has_subs else ""
 
         n = len(segments)
         _SF = (
@@ -648,8 +670,8 @@ async def _do_clip_job(job_id: str, mp4_path: str, segments: list, ass_content: 
             # Windows path fix: forward slashes + escape drive colon for ffmpeg filter parser
             fwd = ass_path.replace("\\", "/")
             escaped = fwd[:1] + "\\:" + fwd[2:]  # "C:/..." → "C\:/..."
-            if FONTS_DIR:
-                fonts_fwd = FONTS_DIR.replace("\\", "/")
+            if subtitle_fonts_dir:
+                fonts_fwd = subtitle_fonts_dir.replace("\\", "/")
                 # Escape drive colon for FFmpeg filter string (Windows: "D:/..." → "D\:/...")
                 if len(fonts_fwd) > 1 and fonts_fwd[1] == ":":
                     fonts_escaped = fonts_fwd[0] + "\\:" + fonts_fwd[2:]

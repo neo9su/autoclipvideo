@@ -439,13 +439,14 @@ def _find_subtitle_font_candidates(fonts_dir: Path) -> list[Path]:
     if not fonts_dir.is_dir():
         return []
     expected = _XQNT_FONT_FILE.casefold()
+    normalized_stem = re.sub(r"[^a-z0-9]", "", Path(_XQNT_FONT_FILE).stem.casefold())
     candidates = [fonts_dir / _XQNT_FONT_FILE]
     try:
         candidates.extend(
             path for path in fonts_dir.iterdir()
             if path.is_file()
             and path.suffix.casefold() in {".otf", ".ttf"}
-            and "xinqingnianti" in path.stem.casefold().replace("-", "").replace("_", "")
+            and normalized_stem in re.sub(r"[^a-z0-9]", "", path.stem.casefold())
             and path.name.casefold() != expected
         )
     except OSError:
@@ -605,13 +606,7 @@ def build_ass(selected: List[Seg], all_segs: List[Seg], realistic: bool = False)
     only the configured incoming transition duration.
     """
     def _format_subtitle_text(text: str) -> str:
-        """Preserve every source character while adding safe ASS line breaks.
-
-        Do not join the source lines first and then slice the resulting string:
-        ``\\N`` is a two-character ASS escape and slicing it can split the escape
-        (or make it look like missing subtitle text).  Wrap each logical source
-        line independently instead.
-        """
+        """Preserve source text while adding safe ASS line breaks."""
         wrapped_lines: list[str] = []
         for source_line in text.splitlines():
             normalized_line = re.sub(r"[ \t]+", " ", source_line).strip()
@@ -621,7 +616,11 @@ def build_ass(selected: List[Seg], all_segs: List[Seg], realistic: bool = False)
                 normalized_line[start:start + 14]
                 for start in range(0, len(normalized_line), 14)
             )
-        return r"\N".join(wrapped_lines)
+        escaped_lines = [
+            line.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
+            for line in wrapped_lines
+        ]
+        return r"\N".join(escaped_lines)
 
     header = _ASS_HEADER
     dialogue: list[str] = []
