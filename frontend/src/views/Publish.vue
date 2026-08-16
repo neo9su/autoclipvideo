@@ -190,7 +190,7 @@
             </div>
             <span v-if="publishedGroupIds.has(g.id)" class="group-published-badge">✓ 已发布</span>
             <div class="group-item-actions" @click.stop>
-              <button class="gact-btn" title="预览视频" @click="previewGroup = g">▶</button>
+              <button class="gact-btn" title="预览视频" @click="openGroupPreview(g)">▶</button>
               <button class="gact-btn gact-orange" title="重新剪辑" @click="openReclipModal(g)">↺ 重剪</button>
               <button class="gact-btn gact-red" title="删除分组" @click="confirmDeleteGroup(g)">✕</button>
             </div>
@@ -204,36 +204,36 @@
             <div :class="['vsw-option', selectedPublishVersion === 'director' && 'vsw-active']"
                  @click="setPublishVersion('director')">
               <span class="vsw-label">🎬 导演版</span>
-              <span class="vsw-preview-btn" @click.stop="previewGroup = selectedGroup; previewVersion = 'director'">▶ 预览</span>
+              <span class="vsw-preview-btn" @click.stop="openGroupPreview(selectedGroup, 'director')">▶ 预览</span>
             </div>
             <div :class="['vsw-option', selectedPublishVersion === 'classic' && 'vsw-active']"
                  @click="setPublishVersion('classic')">
               <span class="vsw-label">📹 经典版</span>
-              <span class="vsw-preview-btn" @click.stop="previewGroup = selectedGroup; previewVersion = 'classic'">▶ 预览</span>
+              <span class="vsw-preview-btn" @click.stop="openGroupPreview(selectedGroup, 'classic')">▶ 预览</span>
             </div>
             <div v-if="selectedGroup && selectedGroup.creative_status === 2 && selectedGroup.creative_available"
                  :class="['vsw-option', selectedPublishVersion === 'creative' && 'vsw-active']"
                  @click="setPublishVersion('creative')">
               <span class="vsw-label">✍️ 自编版</span>
-              <span class="vsw-preview-btn" @click.stop="previewGroup = selectedGroup; previewVersion = 'creative'">▶ 预览</span>
+              <span class="vsw-preview-btn" @click.stop="openGroupPreview(selectedGroup, 'creative')">▶ 预览</span>
             </div>
             <div v-if="selectedGroup && selectedGroup.realistic_status === 2 && selectedGroup.realistic_available"
                  :class="['vsw-option', selectedPublishVersion === 'realistic' && 'vsw-active']"
                  @click="setPublishVersion('realistic')">
               <span class="vsw-label">🧾 直出版</span>
-              <span class="vsw-preview-btn" @click.stop="previewGroup = selectedGroup; previewVersion = 'realistic'">▶ 预览</span>
+              <span class="vsw-preview-btn" @click.stop="openGroupPreview(selectedGroup, 'realistic')">▶ 预览</span>
             </div>
             <div v-if="selectedGroup && selectedGroup.conservative_status === 2 && selectedGroup.conservative_available"
                  :class="['vsw-option', selectedPublishVersion === 'conservative' && 'vsw-active']"
                  @click="setPublishVersion('conservative')">
               <span class="vsw-label">🛡️ 保守版</span>
-              <span class="vsw-preview-btn" @click.stop="previewGroup = selectedGroup; previewVersion = 'conservative'">▶ 预览</span>
+              <span class="vsw-preview-btn" @click.stop="openGroupPreview(selectedGroup, 'conservative')">▶ 预览</span>
             </div>
             <div v-if="selectedGroup && selectedGroup.qianchuan_status === 2 && selectedGroup.qianchuan_available"
                  :class="['vsw-option', selectedPublishVersion === 'qianchuan' && 'vsw-active']"
                  @click="setPublishVersion('qianchuan')">
               <span class="vsw-label">📣 千川投流</span>
-              <span class="vsw-preview-btn" @click.stop="previewGroup = selectedGroup; previewVersion = 'qianchuan'">▶ 预览</span>
+              <span class="vsw-preview-btn" @click.stop="openGroupPreview(selectedGroup, 'qianchuan')">▶ 预览</span>
             </div>
           </div>
         </template>
@@ -368,18 +368,25 @@
           </div>
           <button class="preview-close" aria-label="关闭预览" @click="closeGroupPreview">✕</button>
         </div>
+        <div v-if="previewVideoUrl && previewLoading" class="preview-loading" role="status">正在加载视频…</div>
         <video
-          v-if="previewVideoUrl"
+          v-if="previewVideoUrl && !previewError"
+          ref="previewVideo"
           class="preview-video"
           :src="previewVideoUrl"
           :key="`${previewGroup.id}-${previewVersion}`"
           controls
-          autoplay
+          muted
           playsinline
           preload="metadata"
-          @error="previewError = true"
+          @loadeddata="previewLoading = false"
+          @canplay="previewLoading = false"
+          @error="onPreviewError"
         ></video>
-        <div v-if="previewError" class="preview-error">视频加载失败</div>
+        <div v-if="previewError" class="preview-error">
+          {{ previewErrorMessage }}
+          <button class="preview-retry" @click="retryGroupPreview">重试</button>
+        </div>
       </div>
     </div>
 
@@ -575,7 +582,7 @@
 
 <script setup>
 import { REMOTE_API_BASE } from '../remoteApi.js'
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import {
   getRooms, getGroups, getGroup, getPublishTasks, createPublishTask, retryPublishTask, cancelPublishTask, bulkCancelPublishTasks,
   getProducts, getPublishAccounts, createPublishAccount, deletePublishAccount, loginPublishAccount,
@@ -611,6 +618,9 @@ const selectedScheme = ref('')
 const previewGroup = ref(null)   // group being previewed in video modal
 const previewVersion = ref('director')  // 'director' | 'classic' | 'creative' | 'qianchuan'
 const previewError = ref(false)
+const previewLoading = ref(false)
+const previewErrorMessage = ref('视频加载失败，请检查该版本的视频文件')
+const previewVideo = ref(null)
 const reclipModal = ref(null)    // {group, feedback, saving, submitted}
 const selectedPublishVersion = ref('both')
 const apiBase = REMOTE_API_BASE
@@ -1188,32 +1198,72 @@ const selectedGroup = computed(() =>
 
 const previewVideoUrl = computed(() => {
   if (!previewGroup.value) return ''
-  if (previewVersion.value === 'classic') return `${BASE_URL}/api/groups/${previewGroup.value.id}/download`
-  if (previewVersion.value === 'director') return `${BASE_URL}/api/groups/${previewGroup.value.id}/director-download`
-  if (previewVersion.value === 'creative') return `${BASE_URL}/api/groups/${previewGroup.value.id}/creative-download`
-  if (previewVersion.value === 'realistic') return `${BASE_URL}/api/groups/${previewGroup.value.id}/realistic-download`
-  if (previewVersion.value === 'conservative') return `${BASE_URL}/api/groups/${previewGroup.value.id}/conservative-download`
-  if (previewVersion.value === 'qianchuan') return `${BASE_URL}/api/groups/${previewGroup.value.id}/qianchuan-download`
-  return `${BASE_URL}/api/groups/${previewGroup.value.id}/download`
+  const endpointByVersion = {
+    classic: 'download',
+    director: 'director-download',
+    creative: 'creative-download',
+    realistic: 'realistic-download',
+    conservative: 'conservative-download',
+    qianchuan: 'qianchuan-download',
+  }
+  const endpoint = endpointByVersion[previewVersion.value] || endpointByVersion.classic
+  return `${apiBase}/api/groups/${previewGroup.value.id}/${endpoint}`
 })
+
+function openGroupPreview(group, version = null) {
+  if (!group) return
+  previewError.value = false
+  previewLoading.value = true
+  previewGroup.value = group
+  previewVersion.value = version || preferredPreviewVersion(group)
+}
+
+function preferredPreviewVersion(group) {
+  return group.qianchuan_status === 2 && group.qianchuan_available ? 'qianchuan' : group.conservative_status === 2 && group.conservative_available ? 'conservative' : group.realistic_status === 2 && group.realistic_available ? 'realistic' : group.director_status === 2 && group.director_available ? 'director' : group.creative_status === 2 && group.creative_available ? 'creative' : 'classic'
+}
+
+async function retryGroupPreview() {
+  if (!previewGroup.value) return
+  previewError.value = false
+  previewLoading.value = true
+  await nextTick()
+  previewVideo.value?.load()
+}
+
+function onPreviewError(event) {
+  previewLoading.value = false
+  previewError.value = true
+  const mediaError = event?.target?.error
+  previewErrorMessage.value = mediaError?.code === 4
+    ? '该版本的视频格式或下载响应不可播放'
+    : '视频加载失败，请检查该版本的视频文件'
+}
 
 watch(previewGroup, (g) => {
   previewError.value = false
+  previewLoading.value = Boolean(g)
   if (!g) return
-  previewVersion.value = g.qianchuan_status === 2 && g.qianchuan_available ? 'qianchuan' : g.conservative_status === 2 && g.conservative_available ? 'conservative' : g.realistic_status === 2 && g.realistic_available ? 'realistic' : g.director_status === 2 && g.director_available ? 'director' : g.creative_status === 2 && g.creative_available ? 'creative' : 'classic'
+  previewVersion.value = preferredPreviewVersion(g)
 })
 
 watch(previewVersion, () => {
-  previewError.value = false
+  if (previewGroup.value) {
+    previewError.value = false
+    previewLoading.value = true
+  }
 })
 
 function closeGroupPreview() {
+  previewVideo.value?.pause()
+  previewVideo.value?.removeAttribute('src')
+  previewVideo.value?.load()
   previewGroup.value = null
   previewError.value = false
+  previewLoading.value = false
 }
 
 function groupVideoUrl(groupId) {
-  return `${BASE_URL}/api/groups/${groupId}/download`
+  return `${apiBase}/api/groups/${groupId}/download`
 }
 
 async function setPublishVersion(version) {
@@ -1222,7 +1272,7 @@ async function setPublishVersion(version) {
   selectedPublishVersion.value = version
   g.publish_versions = version
   try {
-    await fetch(`${BASE_URL}/api/groups/${g.id}/publish-versions`, {
+    await fetch(`${apiBase}/api/groups/${g.id}/publish-versions`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ publish_versions: version }),
@@ -1545,7 +1595,9 @@ label { display: block; font-size: 12px; color: #888; margin: 12px 0 4px; }
 .preview-close { flex: 0 0 auto; background: #2a2a2a; border: 1px solid #555; border-radius: 4px; color: #ccc; cursor: pointer; font-size: 16px; line-height: 1; padding: 3px 7px; }
 .preview-close:hover { color: #fff; background: #3a3a3a; }
 .preview-video { width: 100%; height: auto; max-height: calc(100vh - 130px); min-height: 180px; display: block; background: #000; object-fit: contain; }
-.preview-error { padding: 28px 16px; color: #fe2c55; text-align: center; font-size: 13px; background: #111; }
+.preview-loading { min-height: 180px; display: flex; align-items: center; justify-content: center; color: #aaa; background: #111; font-size: 13px; }
+.preview-error { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 28px 16px; color: #fe2c55; text-align: center; font-size: 13px; background: #111; }
+.preview-retry { padding: 6px 14px; color: #ddd; background: #2a2a2a; border: 1px solid #555; border-radius: 4px; cursor: pointer; }
 .reclip-modal { background: #1a1a1a; border: 1px solid #333; border-radius: 12px; padding: 20px; width: min(400px, 95vw); }
 .group-item:last-child { border-bottom: none; }
 .group-item:hover { background: #1a1a1a; }
