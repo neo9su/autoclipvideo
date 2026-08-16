@@ -876,7 +876,7 @@ async def _auto_merge_group(db, group_id: int) -> bool:
 
     # Check per-pipeline statuses (0=not started, 1=running, 2=done, -1=failed)
     async with db.execute(
-        "SELECT classic_status, director_status, creative_status, qianchuan_status FROM clip_groups WHERE id = ?", (group_id,)
+        "SELECT classic_status, director_status, creative_status, realistic_status, conservative_status, qianchuan_status FROM clip_groups WHERE id = ?", (group_id,)
     ) as cur:
         grp = await cur.fetchone()
     if not grp:
@@ -900,7 +900,57 @@ async def _auto_merge_group(db, group_id: int) -> bool:
         from api_v2 import _run_qianchuan_pipeline
         asyncio.create_task(_run_qianchuan_pipeline(group_id))
         triggered = True
+    for variant in ("realistic", "conservative"):
+        if (grp[f"{variant}_status"] or 0) in (0, -1, -3):
+            asyncio.create_task(_run_variant_pipeline(group_id, variant))
+            triggered = True
     return triggered
+
+
+async def _run_variant_pipeline(group_id: int, variant: str) -> None:
+    """Generate a publishable variant through the recording clip engine."""
+    if variant not in ("realistic", "conservative"):
+        raise ValueError("unsupported publish variant")
+    status_field = f"{variant}_status"
+    error_field = f"{variant}_error"
+    output_field = f"{variant}_final_video"
+    try:
+        async with aio_connect() as db:
+            await db.execute(f"UPDATE clip_groups SET {status_field}=1, {error_field}=NULL WHERE id=?", (group_id,))
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT r.id, r.filename, r.room_id, r.start_time FROM recordings r WHERE r.group_id=? AND r.clipped=2 ORDER BY r.start_time ASC",
+                (group_id,),
+            ) as cur:
+                recordings = await cur.fetchall()
+            async with db.execute("SELECT wig_model, wig_color FROM clip_groups WHERE id=?", (group_id,)) as cur:
+                group = await cur.fetchone()
+        if not recordings:
+            raise RuntimeError("no source recordings in group")
+        from editor import edit_recording
+        generated = []
+        for recording in recordings:
+            source_path = os.path.join(RECORDINGS_DIR, recording["filename"])
+            srt_path = os.path.splitext(source_path)[0] + ".srt"
+            if not os.path.isfile(source_path) or not os.path.isfile(srt_path):
+                continue
+            output = await edit_recording(
+                source_path, srt_path, room_name="publish-variant", record_date=(recording["start_time"] or "")[:10].replace("-", ""),
+                room_id=recording["room_id"], clip_engine=variant,
+            )
+            if output:
+                generated.append(output)
+        if not generated:
+            raise RuntimeError("clip engine produced no output")
+        output_path = generated[0]
+        async with aio_connect() as db:
+            await db.execute(f"UPDATE clip_groups SET {status_field}=2, {output_field}=? WHERE id=?", (output_path, group_id))
+            await db.commit()
+    except Exception as exc:
+        logger.error("%s pipeline group %s failed: %s", variant, group_id, exc)
+        async with aio_connect() as db:
+            await db.execute(f"UPDATE clip_groups SET {status_field}=-1, {error_field}=? WHERE id=?", (str(exc)[:400], group_id))
+            await db.commit()
 
 
 async def _extract_srt_for_director(group_id: int) -> Optional[str]:

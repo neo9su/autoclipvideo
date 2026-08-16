@@ -134,7 +134,7 @@ async def _execute_task(task: dict, broadcast_fn: Optional[Callable] = None):
             async with aio_connect() as db:
                 db.row_factory = aiosqlite.Row
                 async with db.execute(
-                    "SELECT merged_filename, qianchuan_final_video, creative_final_video, director_final_video FROM clip_groups WHERE id = ?",
+                    "SELECT merged_filename, qianchuan_final_video, realistic_final_video, conservative_final_video, creative_final_video, director_final_video FROM clip_groups WHERE id = ?",
                     (group_id,),
                 ) as cur:
                     group = await cur.fetchone()
