@@ -550,17 +550,6 @@ onUnmounted(() => clearInterval(timer))
 .bulk-btn.dismiss { background: rgba(107,114,128,0.1); border-color: rgba(107,114,128,0.3); color: #9ca3af; }
 .bulk-btn.dismiss:not(:disabled):hover { background: rgba(107,114,128,0.25); }
 .meta-paused { color: #fbbf24; }
-.section-actions { display: flex; align-items: center; gap: 6px; }
-.bulk-btn {
-  border: 1px solid #333; border-radius: 5px; cursor: pointer;
-  font-size: 11px; padding: 4px 9px; transition: all 0.15s;
-}
-.bulk-btn:disabled { cursor: not-allowed; opacity: 0.55; }
-.bulk-btn.retry { background: rgba(96,165,250,0.1); border-color: rgba(96,165,250,0.3); color: #60a5fa; }
-.bulk-btn.retry:hover:not(:disabled) { background: rgba(96,165,250,0.25); }
-.bulk-btn.dismiss { background: rgba(107,114,128,0.1); border-color: rgba(107,114,128,0.3); color: #9ca3af; }
-.bulk-btn.dismiss:hover:not(:disabled) { background: rgba(107,114,128,0.25); }
-
 /* ── Overall progress ── */
 .transcribe-overall { margin-bottom: 12px; padding: 10px 14px; background: #111; border-radius: 8px; border: 1px solid #222; }
 .overall-stats { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 12px; }
