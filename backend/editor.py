@@ -419,25 +419,38 @@ _XQNT_FONT_FILE = "WenYue-XinQingNianTi-W8-J-2.otf"
 
 def resolve_subtitle_font_path(fonts_dir: Optional[str] = None) -> str:
     """Return the bundled 新青年体 font, failing clearly when unavailable."""
-    candidates = []
+    candidates: list[Path] = []
     if fonts_dir:
-        candidates.append(Path(fonts_dir) / _XQNT_FONT_FILE)
+        candidates.extend(_find_subtitle_font_candidates(Path(fonts_dir)))
     candidates.extend([
         Path(__file__).resolve().parent / "assets" / "fonts" / _XQNT_FONT_FILE,
         Path("C:/Windows/Fonts") / _XQNT_FONT_FILE,
     ])
+    candidates.extend(_find_subtitle_font_candidates(Path("C:/Windows/Fonts")))
     for candidate in candidates:
         if candidate.is_file() and candidate.stat().st_size > 0:
             return str(candidate)
-        # Windows deployments sometimes preserve the asset under a different
-        # case.  Resolve that safely without accepting a different font file.
-        if candidate.parent.is_dir():
-            expected_name = candidate.name.casefold()
-            for sibling in candidate.parent.iterdir():
-                if sibling.name.casefold() == expected_name and sibling.is_file() and sibling.stat().st_size > 0:
-                    return str(sibling)
     searched = ", ".join(str(candidate) for candidate in candidates)
     raise FileNotFoundError(f"新青年体 font unavailable; searched: {searched}")
+
+
+def _find_subtitle_font_candidates(fonts_dir: Path) -> list[Path]:
+    """Find XinQingNianTi files despite Windows case/name variations."""
+    if not fonts_dir.is_dir():
+        return []
+    expected = _XQNT_FONT_FILE.casefold()
+    candidates = [fonts_dir / _XQNT_FONT_FILE]
+    try:
+        candidates.extend(
+            path for path in fonts_dir.iterdir()
+            if path.is_file()
+            and path.suffix.casefold() in {".otf", ".ttf"}
+            and "xinqingnianti" in path.stem.casefold().replace("-", "").replace("_", "")
+            and path.name.casefold() != expected
+        )
+    except OSError:
+        return candidates
+    return candidates
 
 # ── Highlight keywords: product descriptors + scene nouns ─────────────────────
 # ASS colors: &HAABBGGRR& (AA=00 opaque, bytes in B-G-R order)
@@ -2783,7 +2796,6 @@ async def _edit_via_gpu(
     room_id: int,
     selected: List["Seg"],
     segs: List["Seg"],
-    subtitle_segs: Optional[List["Seg"]],
     out_path: str,
     on_progress=None,
     mp4_path: Optional[str] = None,   # local path; enables auto-upload on 404
@@ -2796,9 +2808,7 @@ async def _edit_via_gpu(
     uploaded automatically and the job is retried.
     Returns out_path on success, None on failure.
     """
-    # ``segs`` is merged/split for shot selection.  Subtitles must use the
-    # complete original SRT cue list so no speech text is dropped.
-    ass_content = build_ass(selected, subtitle_segs or segs, realistic=realistic)
+    ass_content = build_ass(selected, segs, realistic=realistic)
     best_seg = max(selected, key=lambda s: s.score) if any(s.score > 0 for s in selected) \
                else selected[max(0, len(selected) // 4)]
 
@@ -2978,7 +2988,6 @@ async def _fast_local_clip(
     mp4: str,
     selected: List[Seg],
     segs: List[Seg],
-    subtitle_segs: Optional[List[Seg]],
     out: str,
     on_progress=None,
 ) -> bool:
@@ -2988,7 +2997,7 @@ async def _fast_local_clip(
     Stream-copy segment extraction + concat + single re-encode pass.
     Skips all transitions and pre-processing.  ~10-30s vs 30+ minutes.
     """
-    ass_content = build_ass(selected, subtitle_segs or segs)
+    ass_content = build_ass(selected, segs)
     has_subs = "Dialogue:" in ass_content
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -3113,14 +3122,14 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
         logger.error(f"SRT not found: {srt_path}")
         return None
 
-    # Preserve the complete cue list for subtitle rendering.  Selection uses
-    # a separate derived scene list and must never be its subtitle source.
-    subtitle_segs = parse_srt(srt_path)
-    if not subtitle_segs:
+    # Keep raw timed cues as the authoritative subtitle source. Selection may
+    # merge/split cues for shot scoring, but must never replace subtitle text.
+    source_segs = parse_srt(srt_path)
+    if not source_segs:
         logger.warning(f"Empty SRT: {srt_path}")
         return None
-    # Parse + merge short segments + smart split + score
-    segs = _merge_short_segs(subtitle_segs)
+    segs = source_segs
+    segs = _merge_short_segs(segs)
     # Phase 2: Smart shot splitting — split long segments (>8s) at speech boundaries
     segs = _split_long_segments(segs, srt_path)
     for seg in segs:
@@ -3271,7 +3280,7 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
             try:
                 mp4_filename = os.path.basename(mp4_path)
                 gpu_result = await _edit_via_gpu(
-                    mp4_filename, room_id, selected, segs, subtitle_segs, out_path, on_progress,
+                    mp4_filename, room_id, selected, source_segs, out_path, on_progress,
                     mp4_path=mp4_path,
                     realistic=clip_engine in ("realistic", "conservative"),
                 )
@@ -3298,7 +3307,7 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
                 raise
 
     reject_local_media("clip generation")
-    if await _fast_local_clip(mp4_path, selected, segs, subtitle_segs, out_path, on_progress=on_progress):
+    if await _fast_local_clip(mp4_path, selected, source_segs, out_path, on_progress=on_progress):
         try:
             if on_progress:
                 await on_progress("thumbnail", 0, 1)
@@ -3340,13 +3349,13 @@ async def edit_recording_multi(
         logger.error(f"SRT not found: {srt_path}")
         return []
 
-    # Keep original SRT cues separate from the scene-selection segments.
-    subtitle_segs = parse_srt(srt_path)
-    if not subtitle_segs:
+    # Parse + merge short segments + score once
+    source_segs = parse_srt(srt_path)
+    if not source_segs:
         logger.warning(f"Empty SRT: {srt_path}")
         return []
-    # Parse + merge short segments + score once
-    segs = _merge_short_segs(subtitle_segs)
+    segs = source_segs
+    segs = _merge_short_segs(segs)
     for seg in segs:
         score_and_tag(seg)
 
@@ -3495,7 +3504,7 @@ async def edit_recording_multi(
             try:
                 mp4_filename = os.path.basename(mp4_path)
                 gpu_result = await _edit_via_gpu(
-                    mp4_filename, _room_id_v, selected, segs, subtitle_segs, out_path, on_progress,
+                    mp4_filename, _room_id_v, selected, source_segs, out_path, on_progress,
                     mp4_path=mp4_path,
                     realistic=clip_engine in ("realistic", "conservative"),
                 )
@@ -3527,7 +3536,7 @@ async def edit_recording_multi(
         logger.info(f"Using fast local fallback for variant {k+1} of {os.path.basename(mp4_path)}")
         if on_progress:
             await on_progress("build", k, count)
-        if await _fast_local_clip(mp4_path, selected, segs, subtitle_segs, out_path, on_progress=on_progress):
+        if await _fast_local_clip(mp4_path, selected, source_segs, out_path, on_progress=on_progress):
             try:
                 if on_progress:
                     await on_progress("thumbnail", k, count)

@@ -22,18 +22,32 @@ def test_parse_srt_preserves_multiline_and_bom(tmp_path):
     assert segments[1].text == "第一行 第二行"
 
 
-def test_realistic_ass_keeps_all_text_and_uses_requested_style(tmp_path):
+def test_realistic_and_conservative_ass_keep_all_text_and_use_requested_style():
     selected = [Seg(idx=1, start=10, end=14, text="完整内容", transition="cut:0")]
     source = [Seg(idx=1, start=10, end=14, text="自然 蓬松 完整内容")]
 
+    for realistic in (True, False):
+        ass = build_ass(selected, source, realistic=realistic)
+
+        assert "WenYue XinQingNianTi" in ass
+        assert "完整内容" in ass
+        assert "自然" in ass
+        assert "&H00FFFFFF" in ass
+        assert "\\3c&H00000000&\\bord1" in ass
+        assert "&H000000FF" in ass
+
+
+def test_ass_uses_every_original_cue_when_scene_text_was_merged():
+    selected = [Seg(idx=1, start=10, end=16, text="合并后的评分文本", transition="cut:0")]
+    source = [
+        Seg(idx=1, start=10, end=12, text="第一句"),
+        Seg(idx=2, start=12, end=14, text="第二句"),
+        Seg(idx=3, start=14, end=16, text="第三句"),
+    ]
+
     ass = build_ass(selected, source, realistic=True)
 
-    assert "WenYue XinQingNianTi" in ass
-    assert "完整内容" in ass
-    assert "自然" in ass
-    assert "&H00FFFFFF" in ass
-    assert "\\3c&H00000000&\\bord1" in ass
-    assert "&H000000FF" in ass
+    assert all(text in ass for text in ("第一句", "第二句", "第三句"))
 
 
 def test_realistic_ass_renders_every_original_cue_in_selected_window():
