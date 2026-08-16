@@ -91,24 +91,29 @@ _SUBTITLE_FONT_FILE = "WenYue-XinQingNianTi-W8-J-2.otf"
 
 def _require_subtitle_font() -> str:
     """Return the configured 新青年体 directory or fail before encoding."""
+    search_dirs = []
+    for directory in (FONTS_DIR, os.path.join(STORAGE_DIR, "fonts"), r"C:\Windows\Fonts"):
+        if directory and Path(directory) not in search_dirs:
+            search_dirs.append(Path(directory))
+
     candidates = []
-    if FONTS_DIR:
-        candidates.append(Path(FONTS_DIR) / _SUBTITLE_FONT_FILE)
-    candidates.append(Path(STORAGE_DIR) / "fonts" / _SUBTITLE_FONT_FILE)
-    search_dirs = [Path(FONTS_DIR), Path(STORAGE_DIR) / "fonts"]
+    normalized_name = _SUBTITLE_FONT_FILE.casefold().replace("-", "").replace("_", "")
     for directory in search_dirs:
-        if directory.is_dir():
-            candidates.extend(sorted(directory.glob("*XinQingNianTi*.otf")))
-            candidates.extend(sorted(directory.glob("*XinQingNianTi*.ttf")))
+        if not directory.is_dir():
+            continue
+        try:
+            for candidate in directory.iterdir():
+                normalized_stem = candidate.stem.casefold().replace("-", "").replace("_", "")
+                if (candidate.is_file() and candidate.suffix.casefold() in {".otf", ".ttf"}
+                        and (candidate.name.casefold() == _SUBTITLE_FONT_FILE.casefold()
+                             or normalized_name in normalized_stem)):
+                    candidates.append(candidate)
+        except OSError:
+            continue
     for candidate in candidates:
-        if candidate.is_file() and candidate.stat().st_size > 0:
+        if candidate.stat().st_size > 0:
             return str(candidate.parent)
-        if candidate.parent.is_dir():
-            expected_name = candidate.name.casefold()
-            for sibling in candidate.parent.iterdir():
-                if sibling.name.casefold() == expected_name and sibling.is_file() and sibling.stat().st_size > 0:
-                    return str(sibling.parent)
-    searched = ", ".join(str(candidate) for candidate in candidates)
+    searched = ", ".join(str(directory) for directory in search_dirs)
     raise RuntimeError(f"新青年体 font unavailable; searched: {searched}")
 
 # CosyVoice2 model directory.

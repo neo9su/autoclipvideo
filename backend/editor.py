@@ -439,13 +439,14 @@ def _find_subtitle_font_candidates(fonts_dir: Path) -> list[Path]:
     if not fonts_dir.is_dir():
         return []
     expected = _XQNT_FONT_FILE.casefold()
+    normalized_stem = re.sub(r"[^a-z0-9]", "", Path(_XQNT_FONT_FILE).stem.casefold())
     candidates = [fonts_dir / _XQNT_FONT_FILE]
     try:
         candidates.extend(
             path for path in fonts_dir.iterdir()
             if path.is_file()
             and path.suffix.casefold() in {".otf", ".ttf"}
-            and "xinqingnianti" in path.stem.casefold().replace("-", "").replace("_", "")
+            and normalized_stem in re.sub(r"[^a-z0-9]", "", path.stem.casefold())
             and path.name.casefold() != expected
         )
     except OSError:
@@ -605,13 +606,21 @@ def build_ass(selected: List[Seg], all_segs: List[Seg], realistic: bool = False)
     only the configured incoming transition duration.
     """
     def _format_subtitle_text(text: str) -> str:
-        """Preserve all source text while normalizing ASS line breaks."""
-        source_lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.splitlines()]
-        normalized = r"\N".join(line for line in source_lines if line)
-        if not normalized:
-            return ""
-        max_chars = 14
-        return r"\N".join(normalized[i:i + max_chars] for i in range(0, len(normalized), max_chars))
+        """Preserve source text while adding safe ASS line breaks."""
+        wrapped_lines: list[str] = []
+        for source_line in text.splitlines():
+            normalized_line = re.sub(r"[ \t]+", " ", source_line).strip()
+            if not normalized_line:
+                continue
+            wrapped_lines.extend(
+                normalized_line[start:start + 14]
+                for start in range(0, len(normalized_line), 14)
+            )
+        escaped_lines = [
+            line.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
+            for line in wrapped_lines
+        ]
+        return r"\N".join(escaped_lines)
 
     header = _ASS_HEADER
     dialogue: list[str] = []
@@ -1739,12 +1748,14 @@ def parse_srt(path: str) -> List[Seg]:
     segs = []
     for block in re.split(r"\n\s*\n", content.strip()):
         lines = [line.strip() for line in block.splitlines() if line.strip()]
-        if len(lines) < 3:
+        if len(lines) < 2:
             continue
         try:
-            index_position = next(position for position, line in enumerate(lines) if line.isdigit())
-            timestamp_position = index_position + 1
-            arrow = lines[timestamp_position].split("-->")
+            timestamp_position = next(
+                position for position, line in enumerate(lines)
+                if "-->" in line
+            )
+            arrow = lines[timestamp_position].split("-->", 1)
             if len(arrow) != 2:
                 raise ValueError("invalid SRT timestamp separator")
             start = _ts_to_sec(arrow[0])
@@ -1752,7 +1763,11 @@ def parse_srt(path: str) -> List[Seg]:
             text = " ".join(lines[timestamp_position + 1:]).strip()
             if end <= start or not text:
                 continue
-            segs.append(Seg(idx=int(lines[index_position]), start=start, end=end, text=text))
+            # Cue numbers are optional in valid SRT variants.  Keep a stable
+            # deterministic id for blocks that omit or corrupt the number.
+            index_text = lines[timestamp_position - 1] if timestamp_position else ""
+            cue_index = int(index_text) if index_text.isdigit() else len(segs) + 1
+            segs.append(Seg(idx=cue_index, start=start, end=end, text=text))
         except (ValueError, IndexError):
             continue
     return sorted(segs, key=lambda segment: (segment.start, segment.end, segment.idx))
