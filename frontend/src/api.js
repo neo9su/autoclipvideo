@@ -186,34 +186,11 @@ export async function retryDirector(id) {
   return res.json()
 }
 
-export async function retryStyles(id, version = undefined) {
-  const options = { method: 'POST' }
-  if (version) {
-    options.headers = { 'Content-Type': 'application/json' }
-    options.body = JSON.stringify({ version })
-  }
-  const res = await fetchWithTimeout(`${BASE}/api/groups/${id}/retry-styles`, options)
-  if (!res.ok) throw new Error(await res.text())
-  return res.json()
-}
-
-export async function retryQianchuan(id) {
-  const res = await fetchWithTimeout(`${BASE}/api/groups/${id}/retry-qianchuan`, { method: 'POST' })
-  if (!res.ok) throw new Error(await res.text())
-  return res.json()
-}
-
-export async function retryDirector(id) {
-  const res = await fetchWithTimeout(`${BASE}/api/groups/${id}/retry-director`, { method: 'POST' })
-  if (!res.ok) throw new Error(await res.text())
-  return res.json()
-}
-
-export async function retryStyle(id, version) {
+export async function retryStyles(id, version) {
+  const body = version ? JSON.stringify({ version }) : undefined
   const res = await fetchWithTimeout(`${BASE}/api/groups/${id}/retry-styles`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ version }),
+    ...(body ? { headers: { 'Content-Type': 'application/json' }, body } : {}),
   })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
