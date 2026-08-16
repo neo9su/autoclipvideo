@@ -1734,7 +1734,7 @@ async def retry_publish_styles(group_id: int, body: dict = Body({})):
         await db.commit()
     from transcribe import _run_variant_pipeline
     for version in versions:
-        asyncio.create_task(_run_variant_pipeline(group_id, version))
+        asyncio.create_task(_run_variant_pipeline(group_id, version, status_claimed=True))
     return {"group_id": group_id, "status": "queued", "versions": versions}
 
 
