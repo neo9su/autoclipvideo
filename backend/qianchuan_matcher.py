@@ -12,6 +12,11 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import aiosqlite
 
 try:
+    from media_contract import resolve_srt_file
+except Exception:  # pragma: no cover
+    resolve_srt_file = None  # type: ignore
+
+try:
     from director_matcher import SemanticMatcher
 except Exception:  # pragma: no cover
     SemanticMatcher = None  # type: ignore
@@ -169,11 +174,13 @@ async def load_group_context(db_path: str, group_id: int, product_id: Optional[s
         ) as cur:
             recs = await cur.fetchall()
 
-    recordings_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "recordings"))
     srt_texts: List[str] = []
     for rec in recs:
-        srt_path = os.path.join(recordings_dir, os.path.splitext(rec["filename"])[0] + ".srt")
-        if not os.path.exists(srt_path):
+        # Resolve the database filename through the storage contract.  Joining
+        # a Windows-style relative path to the Linux container recordings
+        # directory silently creates a wrong basename and loses valid SRTs.
+        srt_path = resolve_srt_file(rec["filename"]) if resolve_srt_file else None
+        if not srt_path:
             continue
         try:
             with open(srt_path, encoding="utf-8") as f:
