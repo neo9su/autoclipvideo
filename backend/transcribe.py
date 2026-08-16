@@ -907,7 +907,7 @@ async def _auto_merge_group(db, group_id: int) -> bool:
     return triggered
 
 
-async def _run_variant_pipeline(group_id: int, variant: str) -> None:
+async def _run_variant_pipeline(group_id: int, variant: str, status_claimed: bool = False) -> None:
     """Generate a publishable variant through the recording clip engine."""
     if variant not in ("realistic", "conservative"):
         raise ValueError("unsupported publish variant")
@@ -916,11 +916,19 @@ async def _run_variant_pipeline(group_id: int, variant: str) -> None:
     output_field = f"{variant}_final_video"
     try:
         async with aio_connect() as db:
-            await db.execute(f"UPDATE clip_groups SET {status_field}=1, {error_field}=NULL WHERE id=? AND {status_field} IN (0, 1, -1, -3)", (group_id,))
+            if status_claimed:
+                await db.execute(
+                    f"UPDATE clip_groups SET {error_field}=NULL WHERE id=? AND {status_field}=1",
+                    (group_id,),
+                )
+            else:
+                await db.execute(f"UPDATE clip_groups SET {status_field}=1, {error_field}=NULL WHERE id=? AND {status_field} IN (0, 1, -1, -3)", (group_id,))
             await db.commit()
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                "SELECT r.id, r.filename, r.room_id, r.start_time FROM recordings r WHERE r.group_id=? AND r.clipped=2 ORDER BY r.start_time ASC",
+                "SELECT r.id, r.filename, r.room_id, r.start_time FROM recordings r "
+                "WHERE r.group_id=? AND (r.clipped=2 OR r.clip_filename IS NOT NULL) "
+                "ORDER BY r.start_time ASC",
                 (group_id,),
             ) as cur:
                 recordings = await cur.fetchall()
@@ -1274,6 +1282,12 @@ async def _run_director_pipeline_inner(group_id: int):
                 pass
             if existing_script:
                 script = existing_script
+            elif result.get("script"):
+                # The generator returns a validated fallback script together
+                # with success=False when the LLM response is malformed.  It
+                # is still usable for matching and, importantly, makes the
+                # failure visible without leaving the director pipeline stuck.
+                script = result["script"]
             else:
                 return await _fail(f"script generation: {result.get('error', 'unknown')}")
         else:
