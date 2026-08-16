@@ -174,16 +174,8 @@
         <span class="section-badge failed">{{ failedClips.length }}</span>
         <span class="section-hint">点击重试重新入队</span>
         <div class="bulk-actions">
-          <button
-            class="bulk-btn retry"
-            :disabled="bulkAction !== null || retryableFailedClips.length === 0"
-            @click="retryAllFailed"
-          >{{ bulkAction === 'retry' ? '重试中…' : '批量重试' }}</button>
-          <button
-            class="bulk-btn dismiss"
-            :disabled="bulkAction !== null || failedClips.length === 0"
-            @click="dismissAllFailed"
-          >{{ bulkAction === 'dismiss' ? '清除中…' : '批量清除' }}</button>
+          <button class="act-btn retry" :disabled="bulkAction !== null || retryableFailedClips.length === 0" @click="retryAllFailed">{{ bulkAction === 'retry' ? '重试中…' : '批量重试' }}</button>
+          <button class="act-btn dismiss" :disabled="bulkAction !== null || failedClips.length === 0" @click="dismissAllFailed">{{ bulkAction === 'dismiss' ? '清除中…' : '批量清除' }}</button>
         </div>
       </div>
       <div class="job-list">
@@ -220,6 +212,8 @@ const loading = ref(false)
 const maxConcurrent = ref(2)
 const bulkAction = ref(null)
 let timer = null
+
+const retryableFailedClips = computed(() => failedClips.value.filter(job => !job.skip_reason))
 
 const overallPct = computed(() => {
   const { total, session_done } = transcribeMeta.value
@@ -330,50 +324,43 @@ async function dismissJob(recordingId) {
   } catch { showToast('请求失败', 'error') }
 }
 
-const retryableFailedClips = computed(() => failedClips.value.filter(job => !job.skip_reason))
-
-async function runBulkAction(action, recordingIds) {
+async function retryAllFailed() {
+  const recordingIds = retryableFailedClips.value.map(job => job.id)
   if (recordingIds.length === 0) {
-    showToast(action === 'retry' ? '没有可重试的失败任务' : '没有可清除的失败任务', 'info')
+    showToast('没有可重试的失败任务', 'info')
     return
   }
-  bulkAction.value = action
+  bulkAction.value = 'retry'
   try {
-    const endpoint = action === 'retry' ? '/api/clip-queue/bulk-retry' : '/api/clip-queue/bulk-dismiss'
-    const response = await remoteFetch(endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+    const response = await remoteFetch('/api/clip-queue/bulk-retry', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ recording_ids: recordingIds }),
     })
     const payload = await response.json().catch(() => ({}))
-    if (!response.ok) {
-      showToast(payload.detail || '批量操作失败', 'error')
-      return
-    }
-    const actionLabel = action === 'retry' ? '重试' : '清除'
-    const processedCount = action === 'retry' ? (payload.queued || []).length : (payload.cleared || 0)
-    const failedCount = action === 'retry' ? (payload.skipped || []).length : Math.max(0, recordingIds.length - processedCount)
-    showToast(failedCount ? `已${actionLabel} ${processedCount} 项，${failedCount} 项未处理` : `已批量${actionLabel}`, failedCount ? 'error' : 'success')
-    await load()
-  } catch {
-    showToast('批量操作请求失败', 'error')
-  } finally {
-    bulkAction.value = null
-  }
-}
-
-async function retryAllFailed() {
-  await runBulkAction('retry', retryableFailedClips.value.map(job => job.id))
+    if (response.ok) { showToast(`已重新入队 ${payload.queued || 0} 个任务`, 'success'); await load() }
+    else showToast(payload.detail || '批量重试失败', 'error')
+  } catch { showToast('批量重试请求失败', 'error') }
+  finally { bulkAction.value = null }
 }
 
 async function dismissAllFailed() {
-  if (failedClips.value.length === 0) {
+  const recordingIds = failedClips.value.map(job => job.id)
+  if (recordingIds.length === 0) {
     showToast('没有可清除的失败任务', 'info')
     return
   }
-  const count = failedClips.value.length
-  if (!window.confirm(`确定要清除当前 ${count} 项剪辑失败记录吗？此操作不可撤销。`)) return
-  await runBulkAction('dismiss', failedClips.value.map(job => job.id))
+  if (!window.confirm(`确定清除当前 ${recordingIds.length} 个剪辑失败任务吗？`)) return
+  bulkAction.value = 'dismiss'
+  try {
+    const response = await remoteFetch('/api/clip-queue/bulk-dismiss', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ recording_ids: recordingIds }),
+    })
+    const payload = await response.json().catch(() => ({}))
+    if (response.ok) { showToast(`已清除 ${payload.cleared || 0} 个任务`, 'success'); await load() }
+    else showToast(payload.detail || '批量清除失败', 'error')
+  } catch { showToast('批量清除请求失败', 'error') }
+  finally { bulkAction.value = null }
 }
 
 function formatEta(secs) {
@@ -409,6 +396,8 @@ onUnmounted(() => clearInterval(timer))
 .section-badge.running { background: rgba(251,191,36,0.2); color: #fbbf24; }
 .section-badge.queued  { background: rgba(148,163,184,0.15); color: #94a3b8; }
 .section-hint { font-size: 11px; color: #555; margin-left: auto; }
+.bulk-actions { display: flex; gap: 6px; margin-left: 8px; }
+.act-btn:disabled { cursor: not-allowed; opacity: 0.45; }
 
 .job-list { display: flex; flex-direction: column; gap: 8px; }
 
@@ -537,13 +526,6 @@ onUnmounted(() => clearInterval(timer))
 .job-error { font-size: 11px; color: #ef4444; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
 .section-badge.paused { background: rgba(251,191,36,0.15); color: #fbbf24; }
 .section-badge.failed  { background: rgba(239,68,68,0.15);  color: #ef4444; }
-.bulk-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
-.bulk-btn { border: 1px solid #333; cursor: pointer; border-radius: 5px; font-size: 12px; padding: 3px 8px; transition: all 0.15s; }
-.bulk-btn:disabled { cursor: not-allowed; opacity: 0.5; }
-.bulk-btn.retry { background: rgba(96,165,250,0.1); border-color: rgba(96,165,250,0.3); color: #60a5fa; }
-.bulk-btn.retry:hover:not(:disabled) { background: rgba(96,165,250,0.25); }
-.bulk-btn.dismiss { background: rgba(107,114,128,0.1); border-color: rgba(107,114,128,0.3); color: #9ca3af; }
-.bulk-btn.dismiss:hover:not(:disabled) { background: rgba(107,114,128,0.25); }
 .meta-paused { color: #fbbf24; }
 
 /* ── Overall progress ── */

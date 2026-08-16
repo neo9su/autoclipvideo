@@ -2943,6 +2943,48 @@ async def start_clip_queue_job(recording_id: int):
     return {"ok": True, "recording_id": recording_id, "priority": 1}
 
 
+class BulkClipQueueRequest(BaseModel):
+    recording_ids: list[int]
+
+
+@app.post("/api/clip-queue/bulk-retry")
+async def bulk_retry_clip_queue_jobs(request: BulkClipQueueRequest):
+    """Re-enqueue eligible failed clip jobs in one request."""
+    recording_ids = list(dict.fromkeys(request.recording_ids))
+    if len(recording_ids) > 500:
+        raise HTTPException(status_code=400, detail="Too many recording IDs")
+    queued = 0
+    skipped = []
+    for recording_id in recording_ids:
+        try:
+            await retry_clip_queue_job(recording_id)
+            queued += 1
+        except HTTPException as exc:
+            skipped.append({"recording_id": recording_id, "reason": str(exc.detail)})
+    return {"ok": True, "queued": queued, "skipped": skipped}
+
+
+@app.post("/api/clip-queue/bulk-dismiss")
+async def bulk_dismiss_clip_queue_jobs(request: BulkClipQueueRequest):
+    """Dismiss failed clip jobs in one request."""
+    recording_ids = list(dict.fromkeys(request.recording_ids))
+    if len(recording_ids) > 500:
+        raise HTTPException(status_code=400, detail="Too many recording IDs")
+    if not recording_ids:
+        return {"ok": True, "cleared": 0}
+    placeholders = ",".join("?" for _ in recording_ids)
+    async with aio_connect() as db:
+        cursor = await db.execute(
+            f"UPDATE recordings SET clipped = -1, skip_reason = '已手动清除' "
+            f"WHERE id IN ({placeholders}) AND clipped = -1 "
+            "AND (skip_reason IS NULL OR skip_reason != '已手动清除')",
+            recording_ids,
+        )
+        await db.commit()
+        cleared = cursor.rowcount
+    return {"ok": True, "cleared": cleared}
+
+
 @app.post("/api/clip-queue/{recording_id}/retry")
 async def retry_clip_queue_job(recording_id: int):
     """Re-enqueue a failed clip job (clipped=-1)."""
