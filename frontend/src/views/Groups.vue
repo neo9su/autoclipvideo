@@ -1236,6 +1236,9 @@ async function load({ showLoading = true } = {}) {
   if (showLoading) loading.value = true
   try {
     const [nextGroups, nextRooms] = await Promise.all([getGroups(), getRooms()])
+    // A fallback request may have started before the user opened a control.
+    // Do not apply its snapshot after interaction begins.
+    if (!showLoading && hasTargetedRefreshBlock()) return
     const currentById = new Map(groups.value.map(group => [group.id, group]))
     const mergedGroups = nextGroups.map(nextGroup => {
       const currentGroup = currentById.get(nextGroup.id)
@@ -1263,6 +1266,12 @@ async function refreshGroup(groupId) {
   }
   try {
     const nextGroup = await getGroup(groupId)
+    // Re-check after the network round trip so a newly focused control is
+    // never overwritten by an in-flight websocket refresh.
+    if (hasTargetedRefreshBlock()) {
+      pendingGroupRefreshes.add(groupId)
+      return false
+    }
     const currentGroup = groups.value.find(group => group.id === nextGroup.id)
     if (currentGroup) Object.assign(currentGroup, nextGroup)
     if (openId.value === nextGroup.id && detail.value) Object.assign(detail.value, nextGroup)
