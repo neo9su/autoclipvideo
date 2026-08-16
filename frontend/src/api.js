@@ -180,8 +180,25 @@ export async function retryModes(id) {
   return res.json()
 }
 
-export async function retryStyles(id) {
-  const res = await fetchWithTimeout(`${BASE}/api/groups/${id}/retry-styles`, { method: 'POST' })
+export async function retryDirector(id) {
+  const res = await fetchWithTimeout(`${BASE}/api/groups/${id}/retry-director`, { method: 'POST' })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function retryStyles(id, version) {
+  const options = { method: 'POST' }
+  if (version !== undefined) {
+    options.headers = { 'Content-Type': 'application/json' }
+    options.body = JSON.stringify({ version })
+  }
+  const res = await fetchWithTimeout(`${BASE}/api/groups/${id}/retry-styles`, options)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
+export async function retryQianchuan(id) {
+  const res = await fetchWithTimeout(`${BASE}/api/groups/${id}/retry-qianchuan`, { method: 'POST' })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
