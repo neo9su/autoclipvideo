@@ -1206,34 +1206,35 @@ const importPreviewCount = computed(() => {
 })
 
 let pendingRefresh = false
-const pendingGroupRefreshes = new Set()
 let refreshTimer = null
+const pendingGroupRefreshes = new Set()
 
-function hasActiveInteraction({ includeExpanded = true } = {}) {
-  if ((includeExpanded && openId.value) || groupModal.value || customModal.value || reclipModal.value || reviewModal.value ||
+function hasModalInteraction() {
+  return Boolean(groupModal.value || customModal.value || reclipModal.value || reviewModal.value ||
       showUploadModal.value || scriptReviewGroup.value || classicPreviewGroup.value || directorPreviewGroup.value ||
       creativePreviewGroup.value || qianchuanPreviewGroup.value || stylePreview.value || coverPreview.value ||
-      mergeErrorGroup.value || showSuggestions.value) return true
+      mergeErrorGroup.value || showSuggestions.value)
+}
 
+function hasFocusedFormControl() {
   const activeElement = document.activeElement
   return Boolean(activeElement && activeElement !== document.body &&
     activeElement.matches('input, select, textarea, [contenteditable="true"]'))
 }
 
+function hasActiveInteraction() {
+  if (openId.value || hasModalInteraction()) return true
+  return hasFocusedFormControl()
+}
+
+function hasBlockedTargetedRefresh() {
+  return hasModalInteraction() || hasFocusedFormControl()
+}
+
 async function load({ showLoading = true } = {}) {
-  if (!showLoading && (hasActiveInteraction() || document.hidden)) {
-    pendingRefresh = true
-    return
-  }
   if (showLoading) loading.value = true
   try {
     const [nextGroups, nextRooms] = await Promise.all([getGroups(), getRooms()])
-    // A fallback request may have started before the user opened a control.
-    // Never apply its snapshot while the page is being operated.
-    if (!showLoading && (hasActiveInteraction() || document.hidden)) {
-      pendingRefresh = true
-      return
-    }
     const currentById = new Map(groups.value.map(group => [group.id, group]))
     const mergedGroups = nextGroups.map(nextGroup => {
       const currentGroup = currentById.get(nextGroup.id)
@@ -1245,9 +1246,7 @@ async function load({ showLoading = true } = {}) {
     })
     groups.value = mergedGroups
     rooms.value = nextRooms
-    if (showLoading || groups.value.length === 0) {
-      visibleGroupCount.value = Math.min(50, mergedGroups.length)
-    }
+    visibleGroupCount.value = Math.min(50, mergedGroups.length)
   } catch (error) {
     show(error.message || '分组加载失败', 'error')
   } finally {
@@ -1256,16 +1255,13 @@ async function load({ showLoading = true } = {}) {
 }
 
 async function refreshGroup(groupId) {
-  if (groupId == null) return
-  if (hasActiveInteraction({ includeExpanded: false }) || document.hidden) {
-    pendingGroupRefreshes.add(groupId)
+  if (groupId == null || hasBlockedTargetedRefresh() || document.hidden) {
+    if (groupId != null) pendingGroupRefreshes.add(groupId)
     return
   }
   try {
     const nextGroup = await getGroup(groupId)
-    // The user may have opened a control while the request was in flight.
-    // Queue the result rather than changing the live card under that control.
-    if (hasActiveInteraction({ includeExpanded: false }) || document.hidden) {
+    if (hasBlockedTargetedRefresh() || document.hidden) {
       pendingGroupRefreshes.add(groupId)
       return
     }
@@ -1279,11 +1275,8 @@ async function refreshGroup(groupId) {
 
 function requestRefresh(groupId = null) {
   if (groupId != null) {
-    if (hasActiveInteraction({ includeExpanded: false }) || document.hidden) {
-      pendingGroupRefreshes.add(groupId)
-      return
-    }
-    refreshGroup(groupId)
+    pendingGroupRefreshes.add(groupId)
+    flushPendingGroupRefreshes()
     return
   }
   if (hasActiveInteraction() || document.hidden) {
@@ -1294,22 +1287,25 @@ function requestRefresh(groupId = null) {
   if (refreshTimer) return
   refreshTimer = window.setTimeout(() => {
     refreshTimer = null
-    if (hasActiveInteraction() || document.hidden) {
-      pendingRefresh = true
-      return
-    }
     load({ showLoading: false })
   }, 500)
 }
 
-function flushPendingRefresh() {
-  if (hasActiveInteraction() || document.hidden) return
+function flushPendingGroupRefreshes() {
+  if (pendingGroupRefreshes.size === 0 || hasBlockedTargetedRefresh() || document.hidden) return
   const groupIds = [...pendingGroupRefreshes]
   pendingGroupRefreshes.clear()
-  groupIds.forEach(groupId => refreshGroup(groupId))
-  if (!pendingRefresh) return
-  pendingRefresh = false
-  load({ showLoading: false })
+  Promise.all(groupIds.map(groupId => refreshGroup(groupId))).catch(() => {
+    // Individual refreshGroup calls already report best-effort errors.
+  })
+}
+
+function flushPendingRefresh() {
+  flushPendingGroupRefreshes()
+  if (pendingRefresh && !hasActiveInteraction() && !document.hidden) {
+    pendingRefresh = false
+    load({ showLoading: false })
+  }
 }
 
 async function toggleDetail(id) {
