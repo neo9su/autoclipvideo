@@ -1090,11 +1090,14 @@ const importPreviewCount = computed(() => {
 })
 
 let pendingRefresh = false
-const pendingGroupRefreshes = new Set()
 let refreshTimer = null
+const pendingGroupRefreshes = new Set()
+const groupRefreshesInFlight = new Set()
+const pendingGroupRefreshes = new Set()
+const groupRefreshesInFlight = new Set()
 
-function hasBlockingInteraction() {
-  if (groupModal.value || customModal.value || reclipModal.value || reviewModal.value ||
+function hasActiveInteraction() {
+  if (openId.value || groupModal.value || customModal.value || reclipModal.value || reviewModal.value ||
       showUploadModal.value || scriptReviewGroup.value || classicPreviewGroup.value || directorPreviewGroup.value ||
       creativePreviewGroup.value || qianchuanPreviewGroup.value || stylePreview.value || coverPreview.value ||
       mergeErrorGroup.value || showSuggestions.value) return true
@@ -1102,10 +1105,6 @@ function hasBlockingInteraction() {
   const activeElement = document.activeElement
   return Boolean(activeElement && activeElement !== document.body &&
     activeElement.matches('input, select, textarea, [contenteditable="true"]'))
-}
-
-function hasActiveInteraction() {
-  return openId.value != null || hasBlockingInteraction()
 }
 
 async function load({ showLoading = true } = {}) {
@@ -1132,66 +1131,47 @@ async function load({ showLoading = true } = {}) {
 }
 
 async function refreshGroup(groupId) {
-  if (groupId == null || hasBlockingInteraction() || document.hidden) return false
+  if (groupId == null) return
+  if (hasActiveInteraction() || document.hidden) {
+    pendingGroupRefreshes.add(groupId)
+    return
+  }
+  if (groupRefreshesInFlight.has(groupId)) return
+  groupRefreshesInFlight.add(groupId)
   try {
     const nextGroup = await getGroup(groupId)
-    if (hasBlockingInteraction() || document.hidden) return false
-    const currentGroup = groups.value.find(group => String(group.id) === String(nextGroup.id))
-    if (!currentGroup) return true
-    Object.assign(currentGroup, nextGroup)
-    return true
+    const currentGroup = groups.value.find(group => group.id === nextGroup.id)
+    if (currentGroup) Object.assign(currentGroup, nextGroup)
   } catch (error) {
     // Websocket updates are best effort and must not interrupt active work.
     console.warn('分组状态更新失败', error)
-    return null
+  } finally {
+    groupRefreshesInFlight.delete(groupId)
   }
-}
-
-function scheduleRefresh() {
-  if (refreshTimer) return
-  refreshTimer = window.setTimeout(async () => {
-    refreshTimer = null
-    if (pendingGroupRefreshes.size) {
-      const groupIds = [...pendingGroupRefreshes]
-      pendingGroupRefreshes.clear()
-      const refreshResults = await Promise.all(groupIds.map(refreshGroup))
-      refreshResults.forEach((didRefresh, index) => {
-        if (didRefresh === false) pendingGroupRefreshes.add(groupIds[index])
-      })
-      if (pendingGroupRefreshes.size && !hasBlockingInteraction() && !document.hidden) scheduleRefresh()
-      return
-    }
-    if (!pendingRefresh || hasActiveInteraction() || document.hidden) return
-    pendingRefresh = false
-    await load({ showLoading: false })
-  }, 250)
 }
 
 function requestRefresh(groupId = null) {
   if (groupId != null) {
     pendingGroupRefreshes.add(groupId)
-    if (hasBlockingInteraction() || document.hidden) return
-    scheduleRefresh()
-    return
-  }
-  if (hasActiveInteraction() || document.hidden) {
+  } else {
     pendingRefresh = true
-    return
   }
-  pendingRefresh = false
-  scheduleRefresh()
+  if (hasActiveInteraction() || document.hidden) return
+  if (refreshTimer) return
+  refreshTimer = window.setTimeout(() => {
+    refreshTimer = null
+    flushPendingRefresh()
+  }, 500)
 }
 
 function flushPendingRefresh() {
-  if (hasBlockingInteraction() || document.hidden) return
-  if (pendingGroupRefreshes.size) {
-    scheduleRefresh()
-    return
-  }
-  if (pendingRefresh && !hasActiveInteraction()) {
-    pendingRefresh = false
-    load({ showLoading: false })
-  }
+  if ((!pendingRefresh && pendingGroupRefreshes.size === 0) || hasActiveInteraction() || document.hidden) return
+  const groupIds = [...pendingGroupRefreshes]
+  pendingGroupRefreshes.clear()
+  const shouldReloadGroups = pendingRefresh
+  pendingRefresh = false
+  if (shouldReloadGroups) load({ showLoading: false })
+  groupIds.forEach(groupId => refreshGroup(groupId))
 }
 
 async function toggleDetail(id) {
