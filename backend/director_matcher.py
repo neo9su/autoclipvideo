@@ -686,8 +686,8 @@ class SemanticMatcher:
         best_distance = -1.0
         
         if srt_entries:
-            for entry in srt_entries:
-                if entry['idx'] - 1 in used:  # idx 是 1-based, set 是 0-based index
+            for entry_index, entry in enumerate(srt_entries):
+                if entry_index in used:
                     continue
                 t = entry['start']
                 # 确保从这个点开始还有足够的录像剩余时长
