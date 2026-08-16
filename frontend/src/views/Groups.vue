@@ -1093,8 +1093,6 @@ let pendingRefresh = false
 let refreshTimer = null
 const pendingGroupRefreshes = new Set()
 const groupRefreshesInFlight = new Set()
-const pendingGroupRefreshes = new Set()
-const groupRefreshesInFlight = new Set()
 
 function hasActiveInteraction() {
   if (openId.value || groupModal.value || customModal.value || reclipModal.value || reviewModal.value ||
