@@ -1220,6 +1220,19 @@ function hasActiveInteraction() {
     activeElement.matches('input, select, textarea, [contenteditable="true"]'))
 }
 
+// Targeted card updates are safe while a detail card is expanded, but must not
+// overwrite an input/select/modal that the user is currently operating.
+function hasTargetedRefreshBlock() {
+  if (groupModal.value || customModal.value || reclipModal.value || reviewModal.value ||
+      showUploadModal.value || scriptReviewGroup.value || classicPreviewGroup.value || directorPreviewGroup.value ||
+      creativePreviewGroup.value || qianchuanPreviewGroup.value || stylePreview.value || coverPreview.value ||
+      mergeErrorGroup.value || showSuggestions.value) return true
+
+  const activeElement = document.activeElement
+  return Boolean(activeElement && activeElement !== document.body &&
+    activeElement.matches('input, select, textarea, [contenteditable="true"]'))
+}
+
 async function load({ showLoading = true } = {}) {
   if (showLoading) loading.value = true
   try {
@@ -1244,8 +1257,8 @@ async function load({ showLoading = true } = {}) {
 }
 
 async function refreshGroup(groupId) {
-  if (groupId == null) return
-  if (hasActiveInteraction() || document.hidden) {
+  if (groupId == null || document.hidden) return
+  if (hasTargetedRefreshBlock()) {
     pendingGroupRefreshes.add(groupId)
     return
   }
@@ -1272,7 +1285,10 @@ function requestRefresh(groupId = null) {
   if (refreshTimer) return
   refreshTimer = window.setTimeout(() => {
     refreshTimer = null
-    load({ showLoading: false })
+    // Re-check at execution time: focus can move into a control while the
+    // debounce timer is waiting, and a full list replacement would reset it.
+    if (!document.hidden && !hasActiveInteraction()) load({ showLoading: false })
+    else pendingFullRefresh = true
   }, 500)
 }
 
@@ -1294,6 +1310,7 @@ async function toggleDetail(id) {
     openId.value = null
     detail.value = null
     stopProgressPolling()
+    flushPendingRefresh()
     return
   }
   openId.value = id
