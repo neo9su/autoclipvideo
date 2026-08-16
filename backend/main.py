@@ -2064,6 +2064,10 @@ class ImportVideosRequest(BaseModel):
     paths: list[str]
 
 
+class ClipQueueBulkRequest(BaseModel):
+    recording_ids: list[int]
+
+
 class CustomGroupCreate(BaseModel):
     label: str
     wig_model: Optional[str] = None
@@ -2832,6 +2836,67 @@ async def get_clip_queue_api(limit: int = Query(default=200, ge=1, le=500)):
     queue["paused"] = queue["paused"][:limit]
     queue["total_queued"] = len(queue["queued"]) + len(queue["paused"])
     return queue
+
+
+@app.post("/api/clip-queue/bulk-retry")
+async def bulk_retry_clip_queue_jobs(request: ClipQueueBulkRequest):
+    """Re-enqueue the currently visible failed clip jobs that can be retried."""
+    recording_ids = list(dict.fromkeys(request.recording_ids))
+    if not recording_ids:
+        return {"ok": True, "queued": [], "skipped": []}
+
+    placeholders = ",".join("?" for _ in recording_ids)
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            f"SELECT id, filename, clipped, skip_reason, clip_count FROM recordings WHERE id IN ({placeholders})",
+            recording_ids,
+        ) as cur:
+            rows = await cur.fetchall()
+
+    queued = []
+    skipped = []
+    for row in rows:
+        if row["clipped"] != -1 or row["skip_reason"]:
+            skipped.append(row["id"])
+            continue
+        mp4_path = os.path.join(RECORDINGS_DIR, row["filename"])
+        srt_path = os.path.join(RECORDINGS_DIR, os.path.splitext(row["filename"])[0] + ".srt")
+        if not os.path.exists(mp4_path) or not os.path.exists(srt_path):
+            skipped.append(row["id"])
+            continue
+        queued.append((row["id"], mp4_path, srt_path, row["clip_count"] or 1))
+
+    if queued:
+        async with aio_connect() as db:
+            await db.executemany(
+                "UPDATE recordings SET clipped = 0, clip_error = NULL WHERE id = ?",
+                [(recording_id,) for recording_id, *_ in queued],
+            )
+            await db.commit()
+        for recording_id, mp4_path, srt_path, clip_count in queued:
+            asyncio.create_task(_run_editor(recording_id, mp4_path, srt_path, clip_count=clip_count))
+
+    return {"ok": True, "queued": [item[0] for item in queued], "skipped": skipped}
+
+
+@app.post("/api/clip-queue/bulk-dismiss")
+async def bulk_dismiss_clip_queue_jobs(request: ClipQueueBulkRequest):
+    """Dismiss the currently visible failed clip jobs from the failure list."""
+    recording_ids = list(dict.fromkeys(request.recording_ids))
+    if not recording_ids:
+        return {"ok": True, "cleared": 0}
+    placeholders = ",".join("?" for _ in recording_ids)
+    async with aio_connect() as db:
+        cursor = await db.execute(
+            f"UPDATE recordings SET clipped = -1, skip_reason = '已手动清除' "
+            f"WHERE id IN ({placeholders}) AND clipped = -1 "
+            f"AND (skip_reason IS NULL OR skip_reason != '已手动清除')",
+            recording_ids,
+        )
+        await db.commit()
+        cleared = cursor.rowcount
+    return {"ok": True, "cleared": cleared}
 
 
 @app.post("/api/clip-queue/{recording_id}/priority")
