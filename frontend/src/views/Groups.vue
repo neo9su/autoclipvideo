@@ -246,6 +246,12 @@
               <span class="styles-hint">基于经典版生成两种节奏</span>
             </div>
             <div class="styles-actions">
+              <button
+                class="btn-action rose"
+                :disabled="g.ready_count === 0 || stylesBusy[g.id] || g.realistic_status === 1 || g.conservative_status === 1"
+                @click="generateStyles(g)">
+                {{ stylesBusy[g.id] ? '生成中…' : (hasStylesFailure(g) ? '↺ 重试直出版/保守版' : '生成直出版/保守版') }}
+              </button>
               <template v-if="g.realistic_status === 2 && g.realistic_available">
                 <button class="btn-action rose" @click="openStylePreview(g, 'realistic')">▶ 直出版</button>
                 <a :href="`${apiBase}/api/groups/${g.id}/realistic-download`" class="btn-action rose" download>↓</a>
@@ -794,7 +800,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { REMOTE_API_BASE } from '../remoteApi.js'
-import { getGroups, getGroup, getRooms, mergeGroup, retryDirector, retryStyles, retryQianchuan, createGroup, updateGroup, reassignRecording, importGroupVideos, createWS, getThumbnailUrl, createCustomGroup, uploadCustomGroupVideo, deleteGroup, getProcessingProgress, reclipRecording, reclipGroupAll } from '../api.js'
+import { getGroups, getGroup, getRooms, mergeGroup, retryModes, retryDirector, retryStyles, retryQianchuan, createGroup, updateGroup, reassignRecording, importGroupVideos, createWS, getThumbnailUrl, createCustomGroup, uploadCustomGroupVideo, deleteGroup, getProcessingProgress, reclipRecording, reclipGroupAll } from '../api.js'
 import QianchuanUpload from '../components/QianchuanUpload.vue'
 import { useToast } from '../composables/toast.js'
 
@@ -954,7 +960,7 @@ function versionIsReady(group, version) {
 function versionBusy(group, version) {
   return version === 'director' ? Boolean(directorBusy.value[group.id]) :
     version === 'qianchuan' ? Boolean(qianchuanBusy.value[group.id]) :
-      version === 'realistic' || version === 'conservative' ? Boolean(stylesBusy.value[`${group.id}:${version}`]) : false
+      version === 'realistic' || version === 'conservative' ? Boolean(stylesBusy.value[group.id]) : false
 }
 function versionStatusMeta(group, version) {
   const status = versionStatus(group, version)
@@ -990,9 +996,6 @@ async function refreshGroupCard(group) {
   return updated
 }
 async function triggerVersion(group, version) {
-  const busyState = version === 'director' ? directorBusy : version === 'qianchuan' ? qianchuanBusy : stylesBusy
-  const busyKey = version === 'realistic' || version === 'conservative' ? `${group.id}:${version}` : group.id
-  busyState.value[busyKey] = true
   try {
     if (version === 'classic') await mergeGroup(group.id)
     else if (version === 'director') await retryDirector(group.id)
@@ -1003,8 +1006,6 @@ async function triggerVersion(group, version) {
   } catch (error) {
     group[`${version}_error`] = error.message || `${versionLabels[version]}生成失败`
     show(group[`${version}_error`], 'error')
-  } finally {
-    busyState.value[busyKey] = false
   }
 }
 function openStylePreview(group, version) {
@@ -1024,20 +1025,18 @@ function styleStatusClass(status) {
   if (status < 0) return 'failed'
   return 'idle'
 }
+function hasStylesFailure(group) { return Number(group.realistic_status) < 0 || Number(group.conservative_status) < 0 }
 function summarizeStyleError(error) { return String(error).replace(/\s+/g, ' ').slice(0, 160) }
-
-async function retryQianchuanVersion(group) {
-  qianchuanBusy.value[group.id] = true
-  group.qianchuan_error = null
+async function generateStyles(group) {
+  stylesBusy.value[group.id] = true
   try {
-    await retryQianchuan(group.id)
-    show('千川投流版生成已启动', 'info')
-    await refreshGroupCard(group)
+    await retryStyles(group.id)
+    show('直出版+保守版任务已提交', 'info')
+    await load()
   } catch (error) {
-    group.qianchuan_error = error.message || '千川投流版生成失败'
-    show(group.qianchuan_error, 'error')
+    show(error.message || '样式任务提交失败', 'error')
   } finally {
-    qianchuanBusy.value[group.id] = false
+    stylesBusy.value[group.id] = false
   }
 }
 
@@ -1358,6 +1357,16 @@ async function doMerge(g) {
   }
 }
 
+async function doRetryModes(g) {
+  try {
+    await retryModes(g.id)
+    show('导演+自编任务已提交', 'info')
+    await load()
+  } catch (e) {
+    show(e.message || '任务提交失败', 'error')
+  }
+}
+
 function openCreateGroupModal() {
   groupModal.value = {
     mode: 'create',
@@ -1500,6 +1509,30 @@ async function generateVoiceover(group) {
   } finally {
     directorBusy.value[group.id] = null
   }
+}
+
+async function generateQianchuan(group, cardOnly = false) {
+  qianchuanBusy.value[group.id] = true
+  group.qianchuan_error = null
+  group.qianchuan_status = 1
+  try {
+    await retryQianchuan(group.id)
+    show('千川投流版生成已启动', 'info')
+    if (cardOnly) await refreshGroupCard(group)
+    else await load()
+  } catch (e) {
+    if (group.qianchuan_status === 1) group.qianchuan_status = -1
+    group.qianchuan_error = e.message || '千川投流版生成失败'
+    show(group.qianchuan_error, 'error')
+    if (cardOnly) await refreshGroupCard(group).catch(() => {})
+    else await load().catch(() => {})
+  } finally {
+    qianchuanBusy.value[group.id] = false
+  }
+}
+
+async function retryQianchuanVersion(group) {
+  await generateQianchuan(group, true)
 }
 
 async function composeDirectorVideo(group) {
