@@ -16,6 +16,7 @@ import re
 import tempfile
 import time
 import json
+from pathlib import Path
 
 from gpu_execution import reject_local_media, require_remote_gpu
 from dataclasses import dataclass, field
@@ -413,11 +414,28 @@ class Seg:
 # ── Font ──────────────────────────────────────────────────────────────────────
 # Internal family name from the OTF (nameID=1 platformID=3)
 _XQNT_FONT = "WenYue XinQingNianTi (Authorization Required) W8-J"
+_XQNT_FONT_FILE = "WenYue-XinQingNianTi-W8-J-2.otf"
+
+
+def resolve_subtitle_font_path(fonts_dir: Optional[str] = None) -> str:
+    """Return the bundled 新青年体 font, failing clearly when unavailable."""
+    candidates = []
+    if fonts_dir:
+        candidates.append(Path(fonts_dir) / _XQNT_FONT_FILE)
+    candidates.extend([
+        Path(__file__).resolve().parent / "assets" / "fonts" / _XQNT_FONT_FILE,
+        Path("C:/Windows/Fonts") / _XQNT_FONT_FILE,
+    ])
+    for candidate in candidates:
+        if candidate.is_file() and candidate.stat().st_size > 0:
+            return str(candidate)
+    searched = ", ".join(str(candidate) for candidate in candidates)
+    raise FileNotFoundError(f"新青年体 font unavailable; searched: {searched}")
 
 # ── Highlight keywords: product descriptors + scene nouns ─────────────────────
 # ASS colors: &HAABBGGRR& (AA=00 opaque, bytes in B-G-R order)
 # Warm gold #FFCC00 → R=FF G=CC B=00 → BGR 00,CC,FF → &H0000CCFF&
-_HIGHLIGHT_COLOR = "&H0000CCFF&"   # warm gold
+_HIGHLIGHT_COLOR = "&H000000FF&"   # red (ASS BGR)
 
 _HIGHLIGHT_PRODUCT: set[str] = {
     # 效果形容词
@@ -467,14 +485,14 @@ _SORTED_HIGHLIGHT_KWS: list[str] = sorted(_HIGHLIGHT_KW, key=len, reverse=True)
 # Layer 2 (front) : white text, thin dark border bord=2 + subtle shadow
 _BORDER_BLUE   = r"{\1a&HFF&\3a&H80&\3c&H00FF6600&\bord8\shad0}"
 _BORDER_PURPLE = r"{\1a&HFF&\3a&H80&\3c&H00FF0088&\bord5\shad0}"
-_BORDER_TEXT   = r"{\3a&H80&\3c&H00141414&\bord2\shad1}"
+_BORDER_TEXT   = r"{\3a&H00&\3c&H00000000&\bord1\shad0}"
 
 
 # ── ASS subtitle style ────────────────────────────────────────────────────────
 # Single consistent style — 新青年体, no built-in outline (handled by inline layer tags).
 # (style_name, fontname, fontsize, bold, italic, spacing, outline, shadow)
 _SUBTITLE_STYLES = [
-    ("XQN",    _XQNT_FONT, 104, 0, 0, 1, 0, 0),   # 80 × 1.3 = 104
+    ("XQN",    _XQNT_FONT, 104, 0, 0, 0, 1, 0),
     # 右上角大艺术字：高亮关键词弹出层（Alignment=9 右上角，MarginR=60, MarginV=120）
     ("KWPOP",  _XQNT_FONT, 169, 1, 0, 0, 0, 0),   # 130 × 1.3 = 169
 ]
@@ -492,13 +510,13 @@ def _build_ass_styles() -> str:
             # 右上角大艺术字：金色，半透明描边，Alignment=9（右上），MarginR=60，MarginV=120
             lines.append(
                 f"Style: {name},{font},{size},"
-                f"&H0000CCFF,&H000000FF,&H80141414,&H80000000,"
+                f"&H000000FF,&H000000FF,&H80141414,&H80000000,"
                 f"{bold},{italic},0,0,100,100,{spacing},0,1,6,4,9,0,60,120,1\n"
             )
         else:
             lines.append(
                 f"Style: {name},{font},{size},"
-                f"&H00FFFFFF,&H000000FF,&H80141414,&H80000000,"
+                f"&H00FFFFFF,&H000000FF,&H00000000,&H80000000,"
                 f"{bold},{italic},0,0,100,100,{spacing},0,1,{outline},{shadow},2,80,80,120,1\n"
             )
     return "".join(lines)
@@ -528,14 +546,15 @@ def _sec_to_ass(s: float) -> str:
 
 
 def _annotate_text(text: str) -> tuple[str, bool]:
-    """Wrap highlight keywords in gold+bold ASS tags. Returns (tagged_text, had_keyword)."""
+    """Wrap highlight keywords in red ASS tags. Returns (tagged_text, had_keyword)."""
     has_kw = False
     for kw in _SORTED_HIGHLIGHT_KWS:
         if kw in text:
-            open_tag  = "{\\c" + _HIGHLIGHT_COLOR + "\\b1}"
+            open_tag  = "{\\c" + _HIGHLIGHT_COLOR + "}"
             close_tag = "{\\r}"
-            text = text.replace(kw, open_tag + kw + close_tag, 1)
-            has_kw = True
+            if kw in text:
+                text = text.replace(kw, open_tag + kw + close_tag)
+                has_kw = True
     return text, has_kw
 
 
@@ -559,20 +578,20 @@ _ASS_HEADER: str = _make_ass_header()
 
 def build_ass(selected: List[Seg], all_segs: List[Seg], realistic: bool = False) -> str:
     """
-    Generate ASS subtitle string with 3-layer gradient border.
+    Generate complete, chronologically aligned ASS subtitles.
 
-    Each SRT line becomes 3 stacked Dialogue events:
-      Layer 0: blue  outer ring (bord=7, transparent fill)
-      Layer 1: purple inner ring (bord=4, transparent fill)
-      Layer 2: white text       (bord=2, thin dark outline)
-
-    Highlight keywords on Layer 2 are coloured warm-gold + bold.
+    Text is never truncated.  The timeline mirrors the actual transition
+    overlap: realistic/conservative clips use cuts, while other clips subtract
+    only the configured incoming transition duration.
     """
-    MAX_SUB_CHARS = 14  # 每屏最多14字，超出则截断（保留完整词）
-
-    def _truncate(text: str) -> str:
-        """Keep at most MAX_SUB_CHARS characters."""
-        return text[:MAX_SUB_CHARS] if len(text) > MAX_SUB_CHARS else text
+    def _format_subtitle_text(text: str) -> str:
+        """Preserve all source text while normalizing ASS line breaks."""
+        source_lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.splitlines()]
+        normalized = r"\N".join(line for line in source_lines if line)
+        if not normalized:
+            return ""
+        max_chars = 14
+        return r"\N".join(normalized[i:i + max_chars] for i in range(0, len(normalized), max_chars))
 
     header = _ASS_HEADER
     dialogue: list[str] = []
@@ -581,12 +600,16 @@ def build_ass(selected: List[Seg], all_segs: List[Seg], realistic: bool = False)
     rendered_srt_ids: set = set()   # track (srt.idx, sel_seg_idx) to avoid duplicates
     for sel_idx, sel_seg in enumerate(selected):
         offset = cursor
-        # Account for xfade overlap: each segment after the first overlaps
-        # with the previous by FADE_DUR seconds in the final video timeline
         if sel_idx == 0:
-            cursor += sel_seg.duration
+            incoming_overlap = 0.0
         else:
-            cursor += sel_seg.duration - FADE_DUR
+            transition = (sel_seg.transition or "cut:0").split(":", 1)
+            incoming_overlap = float(transition[1]) if len(transition) == 2 else 0.0
+            incoming_overlap = max(0.0, min(incoming_overlap, sel_seg.duration))
+        if sel_idx > 0:
+            cursor += sel_seg.duration - incoming_overlap
+        else:
+            cursor += sel_seg.duration
         for srt in all_segs:
             ov_start = max(srt.start, sel_seg.start)
             ov_end   = min(srt.end,   sel_seg.end)
@@ -598,25 +621,12 @@ def build_ass(selected: List[Seg], all_segs: List[Seg], realistic: bool = False)
             rendered_srt_ids.add(dedup_key)
             t0 = offset + (ov_start - sel_seg.start)
             t1 = offset + (ov_end   - sel_seg.start)
-            raw_text = _truncate(srt.text)
-            annotated, has_kw = ((raw_text, False) if realistic else _annotate_text(raw_text))
-            anim = _ANIM_KW if has_kw else _ANIM_STYLES[line_idx % len(_ANIM_STYLES)]
+            raw_text = _format_subtitle_text(srt.text)
+            annotated, has_kw = _annotate_text(raw_text)
             line_idx += 1
             ts0, ts1 = _sec_to_ass(t0), _sec_to_ass(t1)
-            # Layer 0: white text + keyword highlights (半透明深色描边，无蓝/紫色)
-            dialogue.append(f"Dialogue: 0,{ts0},{ts1},XQN,,0,0,0,,{anim}{_BORDER_TEXT}{annotated}")
-            # Layer 3: 右上角关键词大艺术字弹出（仅含高亮词的句子）
-            if has_kw:
-                kw_match = next((kw for kw in _SORTED_HIGHLIGHT_KWS if kw in raw_text), None)
-                if kw_match:
-                    kw_anim = (r"{\fad(0,200)"
-                               r"\t(0,150,\fscx130\fscy130)"
-                               r"\t(150,300,\fscx95\fscy95)"
-                               r"\t(300,450,\fscx108\fscy108)"
-                               r"\t(450,600,\fscx100\fscy100)}")
-                    dialogue.append(
-                        f"Dialogue: 3,{ts0},{ts1},KWPOP,,0,0,0,,{kw_anim}{kw_match}"
-                    )
+            if raw_text:
+                dialogue.append(f"Dialogue: 0,{ts0},{ts1},XQN,,0,0,0,,{_BORDER_TEXT}{annotated}")
     return header + "\n".join(dialogue) + "\n"
 
 
@@ -1703,23 +1713,29 @@ def _ts_to_sec(ts: str) -> float:
 
 
 def parse_srt(path: str) -> List[Seg]:
-    with open(path, encoding="utf-8") as f:
+    """Parse all valid SRT cues without dropping multiline or reordered blocks."""
+    with open(path, encoding="utf-8-sig", newline=None) as f:
         content = f.read()
     segs = []
-    for block in re.split(r"\n{2,}", content.strip()):
-        lines = [l.strip() for l in block.splitlines() if l.strip()]
+    for block in re.split(r"\n\s*\n", content.strip()):
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
         if len(lines) < 3:
             continue
         try:
-            idx = int(lines[0])
-            arrow = lines[1].split("-->")
+            index_position = next(position for position, line in enumerate(lines) if line.isdigit())
+            timestamp_position = index_position + 1
+            arrow = lines[timestamp_position].split("-->")
+            if len(arrow) != 2:
+                raise ValueError("invalid SRT timestamp separator")
             start = _ts_to_sec(arrow[0])
-            end   = _ts_to_sec(arrow[1])
-            text  = " ".join(lines[2:])
-            segs.append(Seg(idx=idx, start=start, end=end, text=text))
+            end = _ts_to_sec(arrow[1])
+            text = " ".join(lines[timestamp_position + 1:]).strip()
+            if end <= start or not text:
+                continue
+            segs.append(Seg(idx=int(lines[index_position]), start=start, end=end, text=text))
         except (ValueError, IndexError):
             continue
-    return segs
+    return sorted(segs, key=lambda segment: (segment.start, segment.end, segment.idx))
 
 
 # ── Scoring ───────────────────────────────────────────────────────────────────

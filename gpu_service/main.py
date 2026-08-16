@@ -86,6 +86,20 @@ FFMPEG_ASS = _CHOCO_FFMPEG if os.name == "nt" else (_shutil.which("ffmpeg") or "
 # Falls back to the known location inside STORAGE_DIR/fonts.
 _DEFAULT_FONTS_DIR = os.path.join(_DEFAULT_STORAGE, "fonts")
 FONTS_DIR = os.environ.get("FONTS_DIR", _DEFAULT_FONTS_DIR if os.path.isdir(_DEFAULT_FONTS_DIR) else "")
+_SUBTITLE_FONT_FILE = "WenYue-XinQingNianTi-W8-J-2.otf"
+
+
+def _require_subtitle_font() -> str:
+    """Return the configured 新青年体 directory or fail before encoding."""
+    candidates = []
+    if FONTS_DIR:
+        candidates.append(Path(FONTS_DIR) / _SUBTITLE_FONT_FILE)
+    candidates.append(Path(STORAGE_DIR) / "fonts" / _SUBTITLE_FONT_FILE)
+    for candidate in candidates:
+        if candidate.is_file() and candidate.stat().st_size > 0:
+            return str(candidate.parent)
+    searched = ", ".join(str(candidate) for candidate in candidates)
+    raise RuntimeError(f"新青年体 font unavailable; searched: {searched}")
 
 # CosyVoice2 model directory.
 # ModelScope downloads to models/iic/CosyVoice2-0.5B (with symlink).
@@ -591,6 +605,7 @@ async def _do_clip_job(
         with open(ass_path, "w", encoding="utf-8") as f:
             f.write(ass_content)
         has_subs = "Dialogue:" in ass_content
+        subtitle_fonts_dir = _require_subtitle_font() if has_subs else ""
 
         n = len(segments)
         _SF = (
@@ -659,8 +674,8 @@ async def _do_clip_job(
             # Windows path fix: forward slashes + escape drive colon for ffmpeg filter parser
             fwd = ass_path.replace("\\", "/")
             escaped = fwd[:1] + "\\:" + fwd[2:]  # "C:/..." → "C\:/..."
-            if FONTS_DIR:
-                fonts_fwd = FONTS_DIR.replace("\\", "/")
+            if subtitle_fonts_dir:
+                fonts_fwd = subtitle_fonts_dir.replace("\\", "/")
                 # Escape drive colon for FFmpeg filter string (Windows: "D:/..." → "D\:/...")
                 if len(fonts_fwd) > 1 and fonts_fwd[1] == ":":
                     fonts_escaped = fonts_fwd[0] + "\\:" + fonts_fwd[2:]
