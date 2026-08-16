@@ -409,7 +409,8 @@ async def _qianchuan_generate_bg(group_id: int, script: Dict) -> None:
                 detail = {
                     "matched_count": len(matched), "required_count": minimum_matches,
                     "matched_scene_ids": [item.get("script_segment", {}).get("scene_id") for item in matched],
-                    "reason": "recordings unavailable or no usable SRT match",
+                    "reason": getattr(matcher, "match_error", None)
+                    or "strict matching produced fewer usable source-SRT segments than required",
                 }
                 logger.error("Qianchuan shot matching insufficient for group %s: %s", group_id, detail)
                 await _set_qianchuan_error(group_id, -2, "千川镜头匹配不足: " + json.dumps(detail, ensure_ascii=False), review_payload)

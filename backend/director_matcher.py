@@ -14,7 +14,6 @@ import aiosqlite
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 import json
-from srt_resolver import resolve_srt_path
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +77,7 @@ def _ts_to_sec(ts: str) -> float:
 class SemanticMatcher:
     def __init__(self, db_path: str):
         self.db_path = db_path
+        self.match_error: Optional[str] = None
         self.model = None
         
         # 初始化sentence-transformers模型
@@ -113,10 +113,15 @@ class SemanticMatcher:
         时间排斥机制：每段匹配后设置冷却区（±15s），后续段落优先选择
         远离已用区间的时间点，确保画面多样性。
         """
+        self.match_error = None
         try:
             recordings = await self._get_group_recordings(group_id)
             if not recordings:
-                logger.warning(f"No recordings found for group {group_id}")
+                self.match_error = (
+                    f"group {group_id} has no usable source media/SRT; "
+                    "verify the recording row and non-empty source sidecar"
+                )
+                logger.warning(self.match_error)
                 return []
 
             # 已使用的 SRT entry 索引集合（避免重复使用同一段内容）
@@ -191,6 +196,7 @@ class SemanticMatcher:
 
         except Exception as e:
             logger.error(f"Segment matching failed for group {group_id}: {e}")
+            self.match_error = f"source matching failed: {e}"
             return await self._get_fallback_matches(script_segments, group_id)
 
     async def _find_best_srt_match(
@@ -560,8 +566,7 @@ class SemanticMatcher:
     async def _get_group_recordings(self, group_id: int) -> List[Dict]:
         """获取分组的录像数据及 SRT 分段信息（保留每条 SRT 的时间戳）"""
         recordings = []
-        from media_contract import STORAGE_DIR, resolve_media_file
-        recordings_dir = STORAGE_DIR
+        from media_contract import resolve_media_file, resolve_srt_file
 
         try:
             from datetime import datetime
@@ -582,6 +587,9 @@ class SemanticMatcher:
                 clip_filename = row["clip_filename"]
                 clip_path = resolve_media_file(clip_filename) if clip_filename else None
                 source_path = resolve_media_file(source_filename)
+                if not source_path or not source_path.is_file():
+                    logger.warning("Skipping recording %s: source media is absent", source_filename)
+                    continue
                 media_filename = clip_filename if clip_path and clip_path.is_file() else source_filename
                 filepath = clip_path if clip_path and clip_path.is_file() else source_path
                 duration = 30.0
@@ -606,13 +614,16 @@ class SemanticMatcher:
                     except Exception:
                         pass
 
-                srt_path = resolve_srt_path(os.path.join(recordings_dir, source_filename))
+                srt_path = resolve_srt_file(source_filename)
                 if not srt_path:
                     logger.warning("Skipping recording %s: missing or empty SRT", source_filename)
                     continue
                 
                 # 解析 SRT 为结构化段落（保留时间戳）
                 srt_entries = _parse_srt_entries(str(srt_path)) if srt_path else []
+                if not srt_entries:
+                    logger.warning("Skipping recording %s: SRT has no parseable entries", source_filename)
+                    continue
                 # 同时保留全文拼接（向后兼容）
                 transcript_text = " ".join(e['text'] for e in srt_entries)
 
@@ -680,7 +691,7 @@ class SemanticMatcher:
                     continue
                 t = entry['start']
                 # 确保从这个点开始还有足够的录像剩余时长
-                if t + seg_duration > rec_dur:
+                if t >= rec_dur:
                     continue
                 # 计算到所有已用区间的最小距离
                 if rec_ranges:
@@ -706,17 +717,26 @@ class SemanticMatcher:
             else:
                 best_start = 0.0
 
-        duration = min(seg_duration, rec_dur - best_start)
+        available_duration = max(0.0, rec_dur - best_start)
+        duration = min(max(float(seg_duration or 0.0), 3.0), available_duration)
+        if duration <= 0.0 and srt_entries:
+            selected_entry = min(srt_entries, key=lambda entry: abs(entry["start"] - best_start))
+            best_start = min(max(0.0, selected_entry["start"]), max(0.0, rec_dur - 3.0))
+            duration = min(3.0, max(0.0, rec_dur - best_start))
+
+        source_text = ""
+        if srt_entries:
+            source_text = min(srt_entries, key=lambda entry: abs(entry["start"] - best_start)).get("text", "")
 
         return {
             'script_segment': segment,
             'matched_recording_id': rec_id,
             'matched_start_time': best_start,
-            'matched_duration': max(duration, 3.0),  # 至少 3 秒
+            'matched_duration': duration,
             'matched_rec_duration': rec_dur,
             'confidence_score': best_score,
-            'match_reason': 'fallback_dispersed',
-            'matched_source_text': '',
+            'match_reason': 'source_srt_fallback' if source_text else 'fallback_dispersed',
+            'matched_source_text': source_text,
         }
 
     def _calculate_semantic_similarity(self, text1: str, text2: str) -> float:
