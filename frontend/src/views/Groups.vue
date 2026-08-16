@@ -1205,7 +1205,8 @@ const importPreviewCount = computed(() => {
   return txt.split('\n').map(p => p.trim()).filter(p => p.endsWith('.mp4')).length
 })
 
-let pendingRefresh = false
+let pendingFullRefresh = false
+const pendingGroupRefreshes = new Set()
 let refreshTimer = null
 
 function hasActiveInteraction() {
@@ -1243,7 +1244,11 @@ async function load({ showLoading = true } = {}) {
 }
 
 async function refreshGroup(groupId) {
-  if (groupId == null || hasActiveInteraction() || document.hidden) return
+  if (groupId == null) return
+  if (hasActiveInteraction() || document.hidden) {
+    pendingGroupRefreshes.add(groupId)
+    return
+  }
   try {
     const nextGroup = await getGroup(groupId)
     const currentGroup = groups.value.find(group => group.id === nextGroup.id)
@@ -1260,10 +1265,10 @@ function requestRefresh(groupId = null) {
     return
   }
   if (hasActiveInteraction() || document.hidden) {
-    pendingRefresh = true
+    pendingFullRefresh = true
     return
   }
-  pendingRefresh = false
+  pendingFullRefresh = false
   if (refreshTimer) return
   refreshTimer = window.setTimeout(() => {
     refreshTimer = null
@@ -1272,9 +1277,16 @@ function requestRefresh(groupId = null) {
 }
 
 function flushPendingRefresh() {
-  if (!pendingRefresh || hasActiveInteraction() || document.hidden) return
-  pendingRefresh = false
-  load({ showLoading: false })
+  if (hasActiveInteraction() || document.hidden) return
+  const groupIds = [...pendingGroupRefreshes]
+  pendingGroupRefreshes.clear()
+  if (groupIds.length > 0) {
+    groupIds.forEach(groupId => refreshGroup(groupId))
+  }
+  if (pendingFullRefresh) {
+    pendingFullRefresh = false
+    load({ showLoading: false })
+  }
 }
 
 async function toggleDetail(id) {
@@ -1619,7 +1631,7 @@ onMounted(() => {
   // Status polling is only a fallback. Never replace the list during an active edit.
   const t = setInterval(() => {
     if (!document.hidden && !hasActiveInteraction()) requestRefresh()
-    else pendingRefresh = true
+    else pendingFullRefresh = true
   }, 60000)
   const onInteractionEnd = () => {
     window.setTimeout(flushPendingRefresh, 0)
