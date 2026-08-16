@@ -1205,7 +1205,7 @@ const importPreviewCount = computed(() => {
   return txt.split('\n').map(p => p.trim()).filter(p => p.endsWith('.mp4')).length
 })
 
-let pendingFullRefresh = false
+let pendingRefresh = false
 const pendingGroupRefreshes = new Set()
 let refreshTimer = null
 
@@ -1245,7 +1245,7 @@ async function load({ showLoading = true } = {}) {
 
 async function refreshGroup(groupId) {
   if (groupId == null) return
-  if (hasActiveInteraction() || document.hidden) {
+  if (document.hidden) {
     pendingGroupRefreshes.add(groupId)
     return
   }
@@ -1253,6 +1253,9 @@ async function refreshGroup(groupId) {
     const nextGroup = await getGroup(groupId)
     const currentGroup = groups.value.find(group => group.id === nextGroup.id)
     if (currentGroup) Object.assign(currentGroup, nextGroup)
+    if (openId.value === nextGroup.id && !hasActiveInteraction()) {
+      detail.value = nextGroup
+    }
   } catch (error) {
     // Websocket updates are best effort and must not interrupt active work.
     console.warn('分组状态更新失败', error)
@@ -1261,18 +1264,22 @@ async function refreshGroup(groupId) {
 
 function requestRefresh(groupId = null) {
   if (groupId != null) {
-    if (hasActiveInteraction() || document.hidden) {
-      pendingGroupRefreshes.add(groupId)
-      return
-    }
-    refreshGroup(groupId)
+    pendingGroupRefreshes.add(groupId)
+    if (hasActiveInteraction() || document.hidden) return
+    if (refreshTimer) return
+    refreshTimer = window.setTimeout(() => {
+      refreshTimer = null
+      const groupIds = [...pendingGroupRefreshes]
+      pendingGroupRefreshes.clear()
+      groupIds.forEach(refreshGroup)
+    }, 250)
     return
   }
   if (hasActiveInteraction() || document.hidden) {
-    pendingFullRefresh = true
+    pendingRefresh = true
     return
   }
-  pendingFullRefresh = false
+  pendingRefresh = false
   if (refreshTimer) return
   refreshTimer = window.setTimeout(() => {
     refreshTimer = null
@@ -1281,15 +1288,15 @@ function requestRefresh(groupId = null) {
 }
 
 function flushPendingRefresh() {
-  if (hasActiveInteraction() || document.hidden) return
-
-  const groupIds = [...pendingGroupRefreshes]
-  pendingGroupRefreshes.clear()
-  groupIds.forEach(groupId => refreshGroup(groupId))
-
-  if (pendingFullRefresh) {
-    pendingFullRefresh = false
-    load({ showLoading: false })
+  if (document.hidden) return
+  if (pendingGroupRefreshes.size > 0) {
+    const groupIds = [...pendingGroupRefreshes]
+    pendingGroupRefreshes.clear()
+    groupIds.forEach(refreshGroup)
+  }
+  if (pendingRefresh && !hasActiveInteraction()) {
+    pendingRefresh = false
+    requestRefresh()
   }
 }
 
@@ -1298,7 +1305,6 @@ async function toggleDetail(id) {
     openId.value = null
     detail.value = null
     stopProgressPolling()
-    flushPendingRefresh()
     return
   }
   openId.value = id
@@ -1636,7 +1642,7 @@ onMounted(() => {
   // Status polling is only a fallback. Never replace the list during an active edit.
   const t = setInterval(() => {
     if (!document.hidden && !hasActiveInteraction()) requestRefresh()
-    else pendingFullRefresh = true
+    else pendingRefresh = true
   }, 60000)
   const onInteractionEnd = () => {
     window.setTimeout(flushPendingRefresh, 0)
@@ -1647,6 +1653,7 @@ onMounted(() => {
   onUnmounted(() => {
     clearInterval(t)
     if (refreshTimer) clearTimeout(refreshTimer)
+    pendingGroupRefreshes.clear()
     if (wsCleanup) wsCleanup()
     document.removeEventListener('focusout', onInteractionEnd)
     document.removeEventListener('click', onInteractionEnd)
