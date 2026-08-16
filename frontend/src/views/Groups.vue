@@ -96,6 +96,55 @@
           </div>
         </div>
 
+        <!-- Primary five-version generation controls. Keep every trigger visible. -->
+        <div class="five-version-panel">
+          <div class="five-version-heading">
+            <div>
+              <strong>五版本生成</strong>
+              <span>一处生成、查看和重试全部输出版本</span>
+            </div>
+            <span class="five-version-hint">不会刷新整个分组列表</span>
+          </div>
+          <div class="five-version-grid">
+            <div v-for="version in fiveVersions" :key="version.key" class="five-version-item">
+              <div class="five-version-topline">
+                <span class="five-version-name">{{ version.icon }} {{ version.label }}</span>
+                <span :class="['style-status', versionStatusMeta(g, version.key).className]">
+                  {{ versionStatusMeta(g, version.key).label }}
+                </span>
+              </div>
+              <div class="five-version-actions">
+                <button
+                  class="btn-version-trigger"
+                  :class="version.buttonClass"
+                  :disabled="versionTriggerDisabled(g, version.key)"
+                  @click="triggerVersion(g, version.key)">
+                  {{ versionTriggerLabel(g, version.key) }}
+                </button>
+                <button
+                  v-if="versionIsReady(g, version.key)"
+                  class="btn-version-link"
+                  @click="previewVersion(g, version.key)">
+                  ▶ 预览
+                </button>
+                <a
+                  v-if="versionIsReady(g, version.key)"
+                  :href="versionDownloadUrl(g, version.key)"
+                  class="btn-version-link"
+                  download>
+                  ↓ 下载
+                </a>
+              </div>
+              <div v-if="versionStatusMeta(g, version.key).error" class="five-version-error">
+                ⚠ {{ versionStatusMeta(g, version.key).error }}
+              </div>
+              <div v-if="versionStatusMeta(g, version.key).hint" class="five-version-note">
+                {{ versionStatusMeta(g, version.key).hint }}
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- 导演模式操作面板（始终显示） -->
         <div class="director-panel">
           <!-- Vibe 选择器 -->
@@ -887,6 +936,73 @@ const stylePreview = ref(null)
 const stylePreviewError = ref(false)
 const stylesBusy = ref({})
 const styleLabels = { realistic: '直出版', conservative: '保守版' }
+const fiveVersions = [
+  { key: 'classic', icon: '📹', label: '经典版', buttonClass: 'teal' },
+  { key: 'director', icon: '🎬', label: '导演版', buttonClass: 'purple' },
+  { key: 'realistic', icon: '🧾', label: '直出版', buttonClass: 'rose' },
+  { key: 'conservative', icon: '🛡️', label: '保守版', buttonClass: 'orange' },
+  { key: 'qianchuan', icon: '📣', label: '千川版', buttonClass: 'cyan' },
+]
+
+const versionLabels = Object.fromEntries(fiveVersions.map(version => [version.key, version.label]))
+function versionStatus(group, version) {
+  return Number(group[`${version}_status`] ?? 0)
+}
+function versionIsReady(group, version) {
+  return versionStatus(group, version) === 2 && group[`${version}_available`] !== false && group[`${version}_file_status`] !== 'missing'
+}
+function versionBusy(group, version) {
+  return version === 'director' ? Boolean(directorBusy.value[group.id]) :
+    version === 'qianchuan' ? Boolean(qianchuanBusy.value[group.id]) :
+      version === 'realistic' || version === 'conservative' ? Boolean(stylesBusy.value[group.id]) : false
+}
+function versionStatusMeta(group, version) {
+  const status = versionStatus(group, version)
+  const error = group[`${version}_error`]
+  if (status === 1 || versionBusy(group, version)) return { label: '生成中', className: 'running', hint: '任务进行中，请勿重复提交。' }
+  if (status === 2 && versionIsReady(group, version)) return { label: '已完成', className: 'done', hint: '' }
+  if (status < 0 || (status === 2 && !versionIsReady(group, version))) {
+    return { label: '失败', className: 'failed', error: summarizeStyleError(error) || '结果文件缺失，可重试。', hint: '' }
+  }
+  const hint = (version === 'realistic' || version === 'conservative') ? '当前接口会同时提交直出版与保守版。' : ''
+  return { label: '未生成', className: 'idle', hint }
+}
+function versionTriggerDisabled(group, version) {
+  return group.ready_count === 0 || versionBusy(group, version) || versionStatus(group, version) === 1
+}
+function versionTriggerLabel(group, version) {
+  if (versionBusy(group, version) || versionStatus(group, version) === 1) return '生成中…'
+  return versionStatus(group, version) < 0 || (versionStatus(group, version) === 2 && !versionIsReady(group, version)) ? '↺ 重试' : '生成'
+}
+function versionDownloadUrl(group, version) {
+  const suffix = { classic: 'download', director: 'director-download', realistic: 'realistic-download', conservative: 'conservative-download', qianchuan: 'qianchuan-download' }[version]
+  return `${apiBase}/api/groups/${group.id}/${suffix}`
+}
+function previewVersion(group, version) {
+  if (version === 'classic') return openClassicPreview(group)
+  if (version === 'director') return openDirectorPreview(group)
+  if (version === 'qianchuan') return openQianchuanPreview(group)
+  return openStylePreview(group, version)
+}
+async function refreshGroupCard(group) {
+  const updated = await getGroup(group.id)
+  const index = groups.value.findIndex(item => item.id === group.id)
+  if (index >= 0) groups.value.splice(index, 1, { ...groups.value[index], ...updated })
+  return updated
+}
+async function triggerVersion(group, version) {
+  try {
+    if (version === 'classic') await mergeGroup(group.id)
+    else if (version === 'director') await retryModes(group.id)
+    else if (version === 'qianchuan') return generateQianchuan(group, true)
+    else await retryStyles(group.id)
+    show(`${versionLabels[version]}生成任务已提交`, 'info')
+    await refreshGroupCard(group)
+  } catch (error) {
+    group[`${version}_error`] = error.message || `${versionLabels[version]}生成失败`
+    show(group[`${version}_error`], 'error')
+  }
+}
 function openStylePreview(group, version) {
   stylePreview.value = { group, version }
   stylePreviewError.value = false
@@ -1385,7 +1501,7 @@ async function generateVoiceover(group) {
   }
 }
 
-async function generateQianchuan(group) {
+async function generateQianchuan(group, cardOnly = false) {
   qianchuanBusy.value[group.id] = true
   group.qianchuan_error = null
   group.qianchuan_status = 1
@@ -1398,12 +1514,14 @@ async function generateQianchuan(group) {
       throw new Error(group.qianchuan_error)
     }
     show(result.started ? '千川投流版生成已启动' : '千川投流版脚本已生成', 'info')
-    await load()
+    if (cardOnly) await refreshGroupCard(group)
+    else await load()
   } catch (e) {
     if (group.qianchuan_status === 1) group.qianchuan_status = -1
     group.qianchuan_error = e.message || '千川投流版生成失败'
     show(group.qianchuan_error, 'error')
-    await load().catch(() => {})
+    if (cardOnly) await refreshGroupCard(group).catch(() => {})
+    else await load().catch(() => {})
   } finally {
     qianchuanBusy.value[group.id] = false
   }
@@ -1873,6 +1991,24 @@ onUnmounted(() => { wsCleanup?.(); stopProgressPolling(); groupsObserver?.discon
 .style-status.failed { background: rgba(254,44,85,0.14); color: #f87171; }
 .styles-statuses { margin-top: 8px; }
 .styles-error { margin-top: 6px; font-size: 11px; color: #f87171; line-height: 1.5; word-break: break-all; }
+.five-version-panel { padding: 14px 16px; background: linear-gradient(90deg, rgba(99,102,241,.09), rgba(20,184,166,.06)); border-top: 1px solid rgba(129,140,248,.3); border-bottom: 1px solid rgba(129,140,248,.22); }
+.five-version-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 10px; }
+.five-version-heading strong { color: #e0e7ff; font-size: 14px; }
+.five-version-heading span, .five-version-hint, .five-version-note { color: #94a3b8; font-size: 11px; margin-left: 8px; }
+.five-version-hint { margin-left: auto; }
+.five-version-grid { display: grid; grid-template-columns: repeat(5, minmax(140px, 1fr)); gap: 8px; }
+.five-version-item { min-width: 0; padding: 10px; border-radius: 8px; background: rgba(15,23,42,.58); border: 1px solid rgba(148,163,184,.16); }
+.five-version-topline, .five-version-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.five-version-topline { justify-content: space-between; margin-bottom: 8px; }
+.five-version-name { color: #e2e8f0; font-size: 12px; font-weight: 600; }
+.five-version-actions { min-height: 28px; }
+.btn-version-trigger, .btn-version-link { border-radius: 5px; padding: 4px 8px; font-size: 11px; cursor: pointer; white-space: nowrap; border: 1px solid rgba(148,163,184,.25); background: rgba(148,163,184,.1); color: #cbd5e1; text-decoration: none; }
+.btn-version-trigger.teal { color: #5eead4; }.btn-version-trigger.purple { color: #c4b5fd; }.btn-version-trigger.rose { color: #fda4af; }.btn-version-trigger.orange { color: #fdba74; }.btn-version-trigger.cyan { color: #67e8f9; }
+.btn-version-trigger:hover:not(:disabled), .btn-version-link:hover { background: rgba(255,255,255,.1); }
+.btn-version-trigger:disabled { opacity: .45; cursor: not-allowed; }
+.five-version-error { color: #f87171; font-size: 11px; line-height: 1.4; margin-top: 7px; word-break: break-word; }
+@media (max-width: 900px) { .five-version-grid { grid-template-columns: repeat(2, minmax(140px, 1fr)); } }
+@media (max-width: 480px) { .five-version-grid { grid-template-columns: 1fr; } .five-version-heading { align-items: flex-start; flex-direction: column; } .five-version-hint { margin-left: 0; } }
 /* Review modal */
 .review-modal { width: 680px; max-width: 95vw; max-height: 90vh; display: flex; flex-direction: column; }
 .review-loading { text-align: center; color: #666; padding: 30px 0; flex: 1; }
