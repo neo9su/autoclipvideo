@@ -1206,7 +1206,7 @@ const importPreviewCount = computed(() => {
 })
 
 let pendingRefresh = false
-const pendingGroupIds = new Set()
+const pendingRefreshGroupIds = new Set()
 let refreshTimer = null
 const pendingGroupRefreshes = new Set()
 
@@ -1256,12 +1256,38 @@ async function load({ showLoading = true } = {}) {
       return nextGroup
     })
     groups.value = mergedGroups
+    applyGroups(nextGroups)
     rooms.value = nextRooms
-    visibleGroupCount.value = Math.min(50, mergedGroups.length)
   } catch (error) {
     show(error.message || '分组加载失败', 'error')
   } finally {
     if (showLoading) loading.value = false
+  }
+}
+
+function applyGroups(nextGroups) {
+  const currentById = new Map(groups.value.map(group => [group.id, group]))
+  const mergedGroups = nextGroups.map(nextGroup => {
+    const currentGroup = currentById.get(nextGroup.id)
+    if (currentGroup) {
+      Object.assign(currentGroup, nextGroup)
+      return currentGroup
+    }
+    return nextGroup
+  })
+  groups.value = mergedGroups
+  visibleGroupCount.value = Math.min(50, mergedGroups.length)
+}
+
+async function refreshGroupStatuses() {
+  if (hasActiveInteraction() || document.hidden) {
+    pendingRefresh = true
+    return
+  }
+  try {
+    applyGroups(await getGroups())
+  } catch (error) {
+    console.warn('分组状态轮询失败', error)
   }
 }
 
@@ -1664,7 +1690,7 @@ onMounted(() => {
   })
   // Status polling is only a fallback. Never replace the list during an active edit.
   const t = setInterval(() => {
-    if (!document.hidden && !hasActiveInteraction()) requestRefresh()
+    if (!document.hidden && !hasActiveInteraction()) refreshGroupStatuses()
     else pendingRefresh = true
   }, 60000)
   const onInteractionEnd = () => {
