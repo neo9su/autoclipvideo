@@ -1208,6 +1208,7 @@ const importPreviewCount = computed(() => {
 let pendingRefresh = false
 const pendingGroupRefreshes = new Set()
 let refreshTimer = null
+const pendingGroupRefreshes = new Set()
 
 function hasActiveInteraction({ includeExpanded = true } = {}) {
   if ((includeExpanded && openId.value) || groupModal.value || customModal.value || reclipModal.value || reviewModal.value ||
@@ -1256,6 +1257,10 @@ async function refreshGroup(groupId) {
   }
   try {
     const nextGroup = await getGroup(groupId)
+    if (hasActiveInteraction() || document.hidden) {
+      pendingGroupRefreshes.add(groupId)
+      return
+    }
     const currentGroup = groups.value.find(group => group.id === nextGroup.id)
     if (currentGroup) Object.assign(currentGroup, nextGroup)
   } catch (error) {
@@ -1281,6 +1286,10 @@ function requestRefresh(groupId = null) {
   if (refreshTimer) return
   refreshTimer = window.setTimeout(() => {
     refreshTimer = null
+    if (hasActiveInteraction() || document.hidden) {
+      pendingRefresh = true
+      return
+    }
     load({ showLoading: false })
   }, 500)
 }
@@ -1641,6 +1650,7 @@ onMounted(() => {
   }, 60000)
   const onInteractionEnd = () => {
     window.setTimeout(flushPendingRefresh, 0)
+    window.setTimeout(flushPendingGroupRefreshes, 0)
   }
   document.addEventListener('focusout', onInteractionEnd)
   document.addEventListener('click', onInteractionEnd)
