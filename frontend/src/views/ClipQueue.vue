@@ -175,17 +175,15 @@
         <span class="section-hint">点击重试重新入队</span>
         <div class="bulk-actions">
           <button
-            class="act-btn retry"
+            class="bulk-btn retry"
+            :disabled="bulkAction !== null || retryableFailedClips.length === 0"
             @click="retryAllFailed"
-            :disabled="bulkRetrying || bulkClearing"
-            title="重新剪辑所有可重试的失败任务"
-          >{{ bulkRetrying ? '重试中…' : '批量重试' }}</button>
+          >{{ bulkAction === 'retry' ? '重试中…' : '批量重试' }}</button>
           <button
-            class="act-btn dismiss"
+            class="bulk-btn dismiss"
+            :disabled="bulkAction !== null || failedClips.length === 0"
             @click="dismissAllFailed"
-            :disabled="bulkRetrying || bulkClearing"
-            title="清除所有剪辑失败任务"
-          >{{ bulkClearing ? '清除中…' : '批量清除' }}</button>
+          >{{ bulkAction === 'dismiss' ? '清除中…' : '批量清除' }}</button>
         </div>
       </div>
       <div class="job-list">
@@ -220,8 +218,7 @@ const transcribeJobs = ref([])
 const transcribeMeta = ref({ total: 0, session_done: 0, avg_duration_s: 0, eta_seconds: null })
 const loading = ref(false)
 const maxConcurrent = ref(2)
-const bulkRetrying = ref(false)
-const bulkClearing = ref(false)
+const bulkAction = ref(null)
 let timer = null
 
 const overallPct = computed(() => {
@@ -333,61 +330,50 @@ async function dismissJob(recordingId) {
   } catch { showToast('请求失败', 'error') }
 }
 
-async function retryAllFailed() {
-  const retryableJobs = failedClips.value.filter(job => !job.skip_reason)
-  if (retryableJobs.length === 0) {
-    showToast('当前没有可重试的失败任务', 'info')
+const retryableFailedClips = computed(() => failedClips.value.filter(job => !job.skip_reason))
+
+async function runBulkAction(action, recordingIds) {
+  if (recordingIds.length === 0) {
+    showToast(action === 'retry' ? '没有可重试的失败任务' : '没有可清除的失败任务', 'info')
     return
   }
-
-  bulkRetrying.value = true
+  bulkAction.value = action
   try {
-    const responses = await Promise.allSettled(
-      retryableJobs.map(job => remoteFetch(`/api/clip-queue/${job.id}/retry`, { method: 'POST' }))
-    )
-    const succeeded = responses.filter(response => response.status === 'fulfilled' && response.value.ok).length
-    if (succeeded === retryableJobs.length) {
-      showToast(`已批量重新入队 ${succeeded} 项`, 'success')
-    } else if (succeeded > 0) {
-      showToast(`已重新入队 ${succeeded}/${retryableJobs.length} 项，部分任务失败`, 'error')
-    } else {
-      showToast('批量重试失败', 'error')
+    const endpoint = action === 'retry' ? '/api/clip-queue/bulk-retry' : '/api/clip-queue/bulk-dismiss'
+    const response = await remoteFetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ recording_ids: recordingIds }),
+    })
+    const payload = await response.json().catch(() => ({}))
+    if (!response.ok) {
+      showToast(payload.detail || '批量操作失败', 'error')
+      return
     }
+    const actionLabel = action === 'retry' ? '重试' : '清除'
+    const processedCount = action === 'retry' ? (payload.queued || []).length : (payload.cleared || 0)
+    const failedCount = action === 'retry' ? (payload.skipped || []).length : Math.max(0, recordingIds.length - processedCount)
+    showToast(failedCount ? `已${actionLabel} ${processedCount} 项，${failedCount} 项未处理` : `已批量${actionLabel}`, failedCount ? 'error' : 'success')
     await load()
   } catch {
-    showToast('批量重试请求失败', 'error')
+    showToast('批量操作请求失败', 'error')
   } finally {
-    bulkRetrying.value = false
+    bulkAction.value = null
   }
 }
 
+async function retryAllFailed() {
+  await runBulkAction('retry', retryableFailedClips.value.map(job => job.id))
+}
+
 async function dismissAllFailed() {
-  const jobsToDismiss = [...failedClips.value]
-  if (jobsToDismiss.length === 0) {
-    showToast('当前没有可清除的失败任务', 'info')
+  if (failedClips.value.length === 0) {
+    showToast('没有可清除的失败任务', 'info')
     return
   }
-  if (!confirm(`确认清除全部 ${jobsToDismiss.length} 项剪辑失败任务？此操作不可撤销。`)) return
-
-  bulkClearing.value = true
-  try {
-    const responses = await Promise.allSettled(
-      jobsToDismiss.map(job => remoteFetch(`/api/clip-queue/${job.id}/dismiss`, { method: 'POST' }))
-    )
-    const succeeded = responses.filter(response => response.status === 'fulfilled' && response.value.ok).length
-    if (succeeded === jobsToDismiss.length) {
-      showToast(`已批量清除 ${succeeded} 项`, 'success')
-    } else if (succeeded > 0) {
-      showToast(`已清除 ${succeeded}/${jobsToDismiss.length} 项，部分任务失败`, 'error')
-    } else {
-      showToast('批量清除失败', 'error')
-    }
-    await load()
-  } catch {
-    showToast('批量清除请求失败', 'error')
-  } finally {
-    bulkClearing.value = false
-  }
+  const count = failedClips.value.length
+  if (!window.confirm(`确定要清除当前 ${count} 项剪辑失败记录吗？此操作不可撤销。`)) return
+  await runBulkAction('dismiss', failedClips.value.map(job => job.id))
 }
 
 function formatEta(secs) {
@@ -552,7 +538,12 @@ onUnmounted(() => clearInterval(timer))
 .section-badge.paused { background: rgba(251,191,36,0.15); color: #fbbf24; }
 .section-badge.failed  { background: rgba(239,68,68,0.15);  color: #ef4444; }
 .bulk-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
-.bulk-actions .act-btn:disabled { cursor: not-allowed; opacity: 0.5; }
+.bulk-btn { border: 1px solid #333; cursor: pointer; border-radius: 5px; font-size: 12px; padding: 3px 8px; transition: all 0.15s; }
+.bulk-btn:disabled { cursor: not-allowed; opacity: 0.5; }
+.bulk-btn.retry { background: rgba(96,165,250,0.1); border-color: rgba(96,165,250,0.3); color: #60a5fa; }
+.bulk-btn.retry:hover:not(:disabled) { background: rgba(96,165,250,0.25); }
+.bulk-btn.dismiss { background: rgba(107,114,128,0.1); border-color: rgba(107,114,128,0.3); color: #9ca3af; }
+.bulk-btn.dismiss:hover:not(:disabled) { background: rgba(107,114,128,0.25); }
 .meta-paused { color: #fbbf24; }
 
 /* ── Overall progress ── */
