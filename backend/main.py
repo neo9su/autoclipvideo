@@ -1687,19 +1687,52 @@ async def trigger_merge(group_id: int, force: bool = False):
     return {"group_id": group_id, "merge_status": 1}
 
 
+def _requested_publish_versions(body: dict) -> list[str]:
+    """Validate and normalize the style selection for the retry endpoint."""
+    requested = body.get("versions")
+    if requested is None:
+        requested = body.get("version", body.get("variant"))
+    if requested is None:
+        versions = ["realistic", "conservative"]
+    elif isinstance(requested, str):
+        versions = [requested.strip().lower()]
+    elif isinstance(requested, list):
+        versions = [str(value).strip().lower() for value in requested]
+    else:
+        raise ValueError("version(s) must be realistic or conservative")
+    versions = list(dict.fromkeys(versions))
+    if not versions or any(version not in ("realistic", "conservative") for version in versions):
+        raise ValueError("version(s) must be realistic or conservative")
+    return versions
+
+
 @app.post("/api/groups/{group_id}/retry-styles")
-async def retry_publish_styles(group_id: int):
-    """Retry realistic and conservative artifact generation for one group."""
+async def retry_publish_styles(group_id: int, body: dict = Body({})):
+    """Queue one or both publish styles without touching unrequested artifacts.
+
+    The API accepts ``version`` (or ``variant``) for one style and
+    ``versions`` for a list.  Omitting the body retains the historical
+    behaviour and retries both styles.
+    """
+    try:
+        versions = _requested_publish_versions(body)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail="version(s) must be realistic or conservative")
+
     async with aio_connect() as db:
-        await db.execute(
-            "UPDATE clip_groups SET realistic_status = 0, realistic_error = NULL, realistic_final_video = NULL, conservative_status = 0, conservative_error = NULL, conservative_final_video = NULL WHERE id = ?",
-            (group_id,),
-        )
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT id FROM clip_groups WHERE id = ?", (group_id,)) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(status_code=404, detail="Group not found")
+        fields = []
+        for version in versions:
+            fields.extend((f"{version}_status = 0", f"{version}_error = NULL", f"{version}_final_video = NULL"))
+        await db.execute(f"UPDATE clip_groups SET {', '.join(fields)} WHERE id = ?", (group_id,))
         await db.commit()
     from transcribe import _run_variant_pipeline
-    asyncio.create_task(_run_variant_pipeline(group_id, "realistic"))
-    asyncio.create_task(_run_variant_pipeline(group_id, "conservative"))
-    return {"group_id": group_id, "status": "queued", "versions": ["realistic", "conservative"]}
+    for version in versions:
+        asyncio.create_task(_run_variant_pipeline(group_id, version))
+    return {"group_id": group_id, "status": "queued", "versions": versions}
 
 
 @app.post("/api/groups/{group_id}/retry-modes")
@@ -1755,8 +1788,8 @@ async def download_merged(group_id: int, request: Request):
             if not rec:
                 raise HTTPException(status_code=404, detail="No preview available")
             rel_path = rec["clip_filename"]
-    path = os.path.join(os.path.dirname(__file__), "..", "recordings", rel_path)
-    if not os.path.exists(path):
+    path, reason = resolve_artifact_path(rel_path, "classic")
+    if not path:
         raise HTTPException(status_code=404, detail="Classic video file missing (file_missing/stale_path/needs_regeneration)")
     return _stream_video_file(path, request)
 
