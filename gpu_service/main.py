@@ -93,21 +93,21 @@ def _require_subtitle_font() -> str:
     """Return the configured 新青年体 directory or fail before encoding."""
     candidates = []
     if FONTS_DIR:
-        candidates.append(Path(FONTS_DIR) / _SUBTITLE_FONT_FILE)
-    candidates.append(Path(STORAGE_DIR) / "fonts" / _SUBTITLE_FONT_FILE)
-    search_dirs = [Path(FONTS_DIR), Path(STORAGE_DIR) / "fonts"]
-    for directory in search_dirs:
-        if directory.is_dir():
-            candidates.extend(sorted(directory.glob("*XinQingNianTi*.otf")))
-            candidates.extend(sorted(directory.glob("*XinQingNianTi*.ttf")))
-    for candidate in candidates:
-        if candidate.is_file() and candidate.stat().st_size > 0:
-            return str(candidate.parent)
-        if candidate.parent.is_dir():
-            expected_name = candidate.name.casefold()
-            for sibling in candidate.parent.iterdir():
-                if sibling.name.casefold() == expected_name and sibling.is_file() and sibling.stat().st_size > 0:
-                    return str(sibling.parent)
+        candidates.append(Path(FONTS_DIR))
+    candidates.append(Path(STORAGE_DIR) / "fonts")
+    if os.name == "nt":
+        candidates.append(Path(r"C:\Windows\Fonts"))
+    for directory in candidates:
+        if not directory.is_dir():
+            continue
+        exact = directory / _SUBTITLE_FONT_FILE
+        if exact.is_file() and exact.stat().st_size > 0:
+            return str(directory)
+        for candidate in directory.iterdir():
+            if (candidate.is_file()
+                    and candidate.name.lower() == _SUBTITLE_FONT_FILE.lower()
+                    and candidate.stat().st_size > 0):
+                return str(directory)
     searched = ", ".join(str(candidate) for candidate in candidates)
     raise RuntimeError(f"新青年体 font unavailable; searched: {searched}")
 
@@ -649,7 +649,9 @@ async def _do_clip_job(
                 "ffmpeg", "-y",
                 "-ss", f"{pre:.3f}", "-i", mp4_path,
                 "-vf", vf, "-af", af,
-                "-t", f"{padded_dur + 0.1:.3f}",
+                # Do not add an encoding cushion: the merge duration and the
+                # subtitle timeline must describe the same number of samples.
+                "-t", f"{padded_dur:.3f}",
                 "-c:v", "h264_nvenc", "-b:v", "10M",
                 "-c:a", "aac", "-b:a", "128k",
                 seg_out,

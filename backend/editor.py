@@ -421,7 +421,7 @@ def resolve_subtitle_font_path(fonts_dir: Optional[str] = None) -> str:
     """Return the bundled 新青年体 font, failing clearly when unavailable."""
     candidates: list[Path] = []
     if fonts_dir:
-        candidates.append(Path(fonts_dir) / _XQNT_FONT_FILE)
+        candidates.extend(_font_file_candidates(Path(fonts_dir)))
     candidates.extend([
         Path(__file__).resolve().parent / "assets" / "fonts" / _XQNT_FONT_FILE,
         Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts" / _XQNT_FONT_FILE,
@@ -444,6 +444,18 @@ def resolve_subtitle_font_path(fonts_dir: Optional[str] = None) -> str:
             continue
     searched = ", ".join(str(candidate) for candidate in candidates)
     raise FileNotFoundError(f"新青年体 font unavailable; searched: {searched}")
+
+
+def _font_file_candidates(fonts_dir: Path) -> list[Path]:
+    """Find the font on case-sensitive and case-insensitive filesystems."""
+    exact = fonts_dir / _XQNT_FONT_FILE
+    candidates = [exact]
+    if fonts_dir.is_dir():
+        candidates.extend(
+            path for path in fonts_dir.iterdir()
+            if path.is_file() and path.name.lower() == _XQNT_FONT_FILE.lower()
+        )
+    return candidates
 
 # ── Highlight keywords: product descriptors + scene nouns ─────────────────────
 # ASS colors: &HAABBGGRR& (AA=00 opaque, bytes in B-G-R order)
@@ -613,7 +625,6 @@ def build_ass(selected: List[Seg], all_segs: List[Seg], realistic: bool = False)
     dialogue: list[str] = []
     cursor = 0.0
     line_idx = 0
-    rendered_srt_ids: set = set()   # track (srt.idx, sel_seg_idx) to avoid duplicates
     for sel_idx, sel_seg in enumerate(selected):
         offset = cursor
         if sel_idx == 0:
@@ -631,10 +642,6 @@ def build_ass(selected: List[Seg], all_segs: List[Seg], realistic: bool = False)
             ov_end   = min(srt.end,   sel_seg.end)
             if ov_end - ov_start < 0.15:  # require at least 150ms overlap
                 continue
-            dedup_key = (srt.idx, sel_idx)
-            if dedup_key in rendered_srt_ids:
-                continue
-            rendered_srt_ids.add(dedup_key)
             t0 = offset + (ov_start - sel_seg.start)
             t1 = offset + (ov_end   - sel_seg.start)
             raw_text = _format_subtitle_text(srt.text)
@@ -1722,7 +1729,9 @@ async def _gen_person_frames(
 # ── SRT parsing ───────────────────────────────────────────────────────────────
 
 def _ts_to_sec(ts: str) -> float:
-    ts = ts.strip().replace(",", ".")
+    # Ignore optional cue settings after the end timestamp (WebVTT-style
+    # producers occasionally emit them in otherwise valid SRT files).
+    ts = ts.strip().split()[0].replace(",", ".")
     parts = ts.split(":")
     h, m, s = int(parts[0]), int(parts[1]), float(parts[2])
     return h * 3600 + m * 60 + s
@@ -1740,6 +1749,8 @@ def parse_srt(path: str) -> List[Seg]:
         try:
             index_position = next(position for position, line in enumerate(lines) if line.isdigit())
             timestamp_position = index_position + 1
+            if timestamp_position >= len(lines):
+                continue
             arrow = lines[timestamp_position].split("-->")
             if len(arrow) != 2:
                 raise ValueError("invalid SRT timestamp separator")
