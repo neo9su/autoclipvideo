@@ -1090,19 +1090,26 @@ const importPreviewCount = computed(() => {
 })
 
 let pendingRefresh = false
+const pendingGroupRefreshes = new Set()
 let refreshTimer = null
 const pendingGroupRefreshes = new Set()
 const groupRefreshesInFlight = new Set()
 
-function hasActiveInteraction() {
-  if (openId.value || groupModal.value || customModal.value || reclipModal.value || reviewModal.value ||
-      showUploadModal.value || scriptReviewGroup.value || classicPreviewGroup.value || directorPreviewGroup.value ||
-      creativePreviewGroup.value || qianchuanPreviewGroup.value || stylePreview.value || coverPreview.value ||
-      mergeErrorGroup.value || showSuggestions.value) return true
-
+function hasFocusedEditor() {
   const activeElement = document.activeElement
   return Boolean(activeElement && activeElement !== document.body &&
     activeElement.matches('input, select, textarea, [contenteditable="true"]'))
+}
+
+function hasModalInteraction() {
+  return Boolean(groupModal.value || customModal.value || reclipModal.value || reviewModal.value ||
+      showUploadModal.value || scriptReviewGroup.value || classicPreviewGroup.value || directorPreviewGroup.value ||
+      creativePreviewGroup.value || qianchuanPreviewGroup.value || stylePreview.value || coverPreview.value ||
+      mergeErrorGroup.value || showSuggestions.value)
+}
+
+function hasActiveInteraction() {
+  return Boolean(openId.value || hasModalInteraction() || hasFocusedEditor())
 }
 
 async function load({ showLoading = true } = {}) {
@@ -1138,6 +1145,10 @@ async function refreshGroup(groupId) {
   groupRefreshesInFlight.add(groupId)
   try {
     const nextGroup = await getGroup(groupId)
+    if (hasActiveInteraction() || document.hidden) {
+      pendingGroupRefreshes.add(groupId)
+      return
+    }
     const currentGroup = groups.value.find(group => group.id === nextGroup.id)
     if (currentGroup) Object.assign(currentGroup, nextGroup)
   } catch (error) {
