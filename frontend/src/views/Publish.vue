@@ -188,7 +188,7 @@
             </div>
             <span v-if="publishedGroupIds.has(g.id)" class="group-published-badge">✓ 已发布</span>
             <div class="group-item-actions" @click.stop>
-              <button class="gact-btn" title="预览视频" @click="previewGroup = g">▶</button>
+              <button class="gact-btn" title="预览视频" @click="openGroupPreview(g)">▶</button>
               <button class="gact-btn gact-orange" title="重新剪辑" @click="openReclipModal(g)">↺ 重剪</button>
               <button class="gact-btn gact-red" title="删除分组" @click="confirmDeleteGroup(g)">✕</button>
             </div>
@@ -202,24 +202,24 @@
             <div :class="['vsw-option', selectedPublishVersion === 'director' && 'vsw-active']"
                  @click="setPublishVersion('director')">
               <span class="vsw-label">🎬 导演版</span>
-              <span class="vsw-preview-btn" @click.stop="previewGroup = selectedGroup; previewVersion = 'director'">▶ 预览</span>
+              <span class="vsw-preview-btn" @click.stop="openGroupPreview(selectedGroup, 'director')">▶ 预览</span>
             </div>
             <div :class="['vsw-option', selectedPublishVersion === 'classic' && 'vsw-active']"
                  @click="setPublishVersion('classic')">
               <span class="vsw-label">📹 经典版</span>
-              <span class="vsw-preview-btn" @click.stop="previewGroup = selectedGroup; previewVersion = 'classic'">▶ 预览</span>
+              <span class="vsw-preview-btn" @click.stop="openGroupPreview(selectedGroup, 'classic')">▶ 预览</span>
             </div>
             <div v-if="selectedGroup && selectedGroup.creative_status === 2"
                  :class="['vsw-option', selectedPublishVersion === 'creative' && 'vsw-active']"
                  @click="setPublishVersion('creative')">
               <span class="vsw-label">✍️ 自编版</span>
-              <span class="vsw-preview-btn" @click.stop="previewGroup = selectedGroup; previewVersion = 'creative'">▶ 预览</span>
+              <span class="vsw-preview-btn" @click.stop="openGroupPreview(selectedGroup, 'creative')">▶ 预览</span>
             </div>
             <div v-if="selectedGroup && selectedGroup.qianchuan_status === 2"
                  :class="['vsw-option', selectedPublishVersion === 'qianchuan' && 'vsw-active']"
                  @click="setPublishVersion('qianchuan')">
               <span class="vsw-label">📣 千川投流</span>
-              <span class="vsw-preview-btn" @click.stop="previewGroup = selectedGroup; previewVersion = 'qianchuan'">▶ 预览</span>
+              <span class="vsw-preview-btn" @click.stop="openGroupPreview(selectedGroup, 'qianchuan')">▶ 预览</span>
             </div>
           </div>
         </template>
@@ -1178,15 +1178,19 @@ const previewVideoUrl = computed(() => {
   return `${apiBase}/api/groups/${previewGroup.value.id}/download`
 })
 
-watch(previewGroup, (g) => {
-  previewError.value = false
-  if (!g) return
-  previewVersion.value = g.qianchuan_status === 2 && g.qianchuan_available ? 'qianchuan' : g.director_status === 2 && g.director_available ? 'director' : g.creative_status === 2 && g.creative_available ? 'creative' : 'classic'
-})
-
 watch(previewVersion, () => {
   previewError.value = false
 })
+
+function defaultPreviewVersion(group) {
+  return group.qianchuan_status === 2 && group.qianchuan_available ? 'qianchuan' : group.director_status === 2 && group.director_available ? 'director' : group.creative_status === 2 && group.creative_available ? 'creative' : 'classic'
+}
+
+function openGroupPreview(group, version = null) {
+  previewError.value = false
+  previewVersion.value = version || defaultPreviewVersion(group)
+  previewGroup.value = group
+}
 
 function closeGroupPreview() {
   previewGroup.value = null
