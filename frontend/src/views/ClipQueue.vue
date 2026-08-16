@@ -174,8 +174,12 @@
         <span class="section-badge failed">{{ failedClips.length }}</span>
         <span class="section-hint">点击重试重新入队</span>
         <div class="bulk-actions">
-          <button class="act-btn retry" :disabled="bulkAction !== null || retryableFailedClips.length === 0" @click="retryAllFailed">{{ bulkAction === 'retry' ? '重试中…' : '批量重试' }}</button>
-          <button class="act-btn dismiss" :disabled="bulkAction !== null || failedClips.length === 0" @click="dismissAllFailed">{{ bulkAction === 'dismiss' ? '清除中…' : '批量清除' }}</button>
+          <button class="act-btn retry" :disabled="bulkRetrying || bulkClearing || failedClips.length === 0" @click="retryAllFailed">
+            {{ bulkRetrying ? '重试中…' : '批量重试' }}
+          </button>
+          <button class="act-btn dismiss" :disabled="bulkRetrying || bulkClearing || failedClips.length === 0" @click="clearAllFailed">
+            {{ bulkClearing ? '清除中…' : '批量清除' }}
+          </button>
         </div>
       </div>
       <div class="job-list">
@@ -209,11 +213,10 @@ const failedClips = ref([])
 const transcribeJobs = ref([])
 const transcribeMeta = ref({ total: 0, session_done: 0, avg_duration_s: 0, eta_seconds: null })
 const loading = ref(false)
+const bulkRetrying = ref(false)
+const bulkClearing = ref(false)
 const maxConcurrent = ref(2)
-const bulkAction = ref(null)
 let timer = null
-
-const retryableFailedClips = computed(() => failedClips.value.filter(job => !job.skip_reason))
 
 const overallPct = computed(() => {
   const { total, session_done } = transcribeMeta.value
@@ -325,42 +328,57 @@ async function dismissJob(recordingId) {
 }
 
 async function retryAllFailed() {
-  const recordingIds = retryableFailedClips.value.map(job => job.id)
-  if (recordingIds.length === 0) {
-    showToast('没有可重试的失败任务', 'info')
+  const retryableJobs = failedClips.value.filter(job => !job.skip_reason)
+  if (!retryableJobs.length || bulkRetrying.value || bulkClearing.value) {
+    if (!retryableJobs.length) showToast('当前没有可重试的失败任务', 'info')
     return
   }
-  bulkAction.value = 'retry'
+  bulkRetrying.value = true
   try {
-    const response = await remoteFetch('/api/clip-queue/bulk-retry', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ recording_ids: recordingIds }),
+    const r = await remoteFetch('/api/clip-queue/bulk/retry', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: retryableJobs.map(job => job.id) }),
     })
-    const payload = await response.json().catch(() => ({}))
-    if (response.ok) { showToast(`已重新入队 ${payload.queued || 0} 个任务`, 'success'); await load() }
-    else showToast(payload.detail || '批量重试失败', 'error')
-  } catch { showToast('批量重试请求失败', 'error') }
-  finally { bulkAction.value = null }
+    const data = await r.json().catch(() => ({}))
+    if (r.ok) {
+      showToast(`已提交 ${data.queued || 0} 个重试任务`, 'success')
+      await load()
+    } else {
+      showToast(data.detail || '批量重试失败', 'error')
+    }
+  } catch {
+    showToast('请求失败', 'error')
+  } finally {
+    bulkRetrying.value = false
+  }
 }
 
-async function dismissAllFailed() {
-  const recordingIds = failedClips.value.map(job => job.id)
-  if (recordingIds.length === 0) {
-    showToast('没有可清除的失败任务', 'info')
+async function clearAllFailed() {
+  if (!failedClips.value.length || bulkRetrying.value || bulkClearing.value) {
+    if (!failedClips.value.length) showToast('当前没有可清除的失败任务', 'info')
     return
   }
-  if (!window.confirm(`确定清除当前 ${recordingIds.length} 个剪辑失败任务吗？`)) return
-  bulkAction.value = 'dismiss'
+  if (!window.confirm(`确定清除当前 ${failedClips.value.length} 个剪辑失败任务吗？`)) return
+  bulkClearing.value = true
   try {
-    const response = await remoteFetch('/api/clip-queue/bulk-dismiss', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ recording_ids: recordingIds }),
+    const r = await remoteFetch('/api/clip-queue/bulk/dismiss', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: failedClips.value.map(job => job.id) }),
     })
-    const payload = await response.json().catch(() => ({}))
-    if (response.ok) { showToast(`已清除 ${payload.cleared || 0} 个任务`, 'success'); await load() }
-    else showToast(payload.detail || '批量清除失败', 'error')
-  } catch { showToast('批量清除请求失败', 'error') }
-  finally { bulkAction.value = null }
+    const data = await r.json().catch(() => ({}))
+    if (r.ok) {
+      showToast(`已清除 ${data.cleared || 0} 个失败任务`, 'success')
+      await load()
+    } else {
+      showToast(data.detail || '批量清除失败', 'error')
+    }
+  } catch {
+    showToast('请求失败', 'error')
+  } finally {
+    bulkClearing.value = false
+  }
 }
 
 function formatEta(secs) {
@@ -396,8 +414,7 @@ onUnmounted(() => clearInterval(timer))
 .section-badge.running { background: rgba(251,191,36,0.2); color: #fbbf24; }
 .section-badge.queued  { background: rgba(148,163,184,0.15); color: #94a3b8; }
 .section-hint { font-size: 11px; color: #555; margin-left: auto; }
-.bulk-actions { display: flex; gap: 6px; margin-left: 8px; }
-.act-btn:disabled { cursor: not-allowed; opacity: 0.45; }
+.bulk-actions { display: flex; gap: 6px; margin-left: 4px; }
 
 .job-list { display: flex; flex-direction: column; gap: 8px; }
 
@@ -505,6 +522,7 @@ onUnmounted(() => clearInterval(timer))
   font-size: 12px; padding: 3px 8px; transition: all 0.15s;
   display: flex; align-items: center; justify-content: center;
 }
+.act-btn:disabled { cursor: not-allowed; opacity: 0.5; }
 .act-btn.start  { background: rgba(52,211,153,0.1); border-color: rgba(52,211,153,0.3); color: #34d399; }
 .act-btn.start:hover  { background: rgba(52,211,153,0.25); }
 .act-btn.pause  { background: rgba(251,191,36,0.1);  border-color: rgba(251,191,36,0.3);  color: #fbbf24; }

@@ -24,7 +24,7 @@ import httpx
 from datetime import datetime, timedelta
 
 from fastapi import Body, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -2064,10 +2064,6 @@ class ImportVideosRequest(BaseModel):
     paths: list[str]
 
 
-class ClipQueueBulkRequest(BaseModel):
-    recording_ids: list[int] = Field(min_length=1, max_length=500)
-
-
 class CustomGroupCreate(BaseModel):
     label: str
     wig_model: Optional[str] = None
@@ -2316,6 +2312,10 @@ class ReclipRequest(BaseModel):
     date: str        # "YYYY-MM-DD"
     duration_sec: float
     clip_count: int = 1
+
+
+class BulkClipQueueRequest(BaseModel):
+    ids: list[int]
 
 
 @app.post("/api/reclip")
@@ -2838,67 +2838,6 @@ async def get_clip_queue_api(limit: int = Query(default=200, ge=1, le=500)):
     return queue
 
 
-@app.post("/api/clip-queue/bulk-retry")
-async def bulk_retry_clip_queue_jobs(request: ClipQueueBulkRequest):
-    """Re-enqueue the currently visible failed clip jobs that can be retried."""
-    recording_ids = list(dict.fromkeys(request.recording_ids))
-    if not recording_ids:
-        return {"ok": True, "queued": [], "skipped": []}
-
-    placeholders = ",".join("?" for _ in recording_ids)
-    async with aio_connect() as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            f"SELECT id, filename, clipped, skip_reason, clip_count FROM recordings WHERE id IN ({placeholders})",
-            recording_ids,
-        ) as cur:
-            rows = await cur.fetchall()
-
-    queued = []
-    skipped = []
-    for row in rows:
-        if row["clipped"] != -1 or row["skip_reason"]:
-            skipped.append(row["id"])
-            continue
-        mp4_path = os.path.join(RECORDINGS_DIR, row["filename"])
-        srt_path = os.path.join(RECORDINGS_DIR, os.path.splitext(row["filename"])[0] + ".srt")
-        if not os.path.exists(mp4_path) or not os.path.exists(srt_path):
-            skipped.append(row["id"])
-            continue
-        queued.append((row["id"], mp4_path, srt_path, row["clip_count"] or 1))
-
-    if queued:
-        async with aio_connect() as db:
-            await db.executemany(
-                "UPDATE recordings SET clipped = 0, clip_error = NULL WHERE id = ?",
-                [(recording_id,) for recording_id, *_ in queued],
-            )
-            await db.commit()
-        for recording_id, mp4_path, srt_path, clip_count in queued:
-            asyncio.create_task(_run_editor(recording_id, mp4_path, srt_path, clip_count=clip_count))
-
-    return {"ok": True, "queued": [item[0] for item in queued], "skipped": skipped}
-
-
-@app.post("/api/clip-queue/bulk-dismiss")
-async def bulk_dismiss_clip_queue_jobs(request: ClipQueueBulkRequest):
-    """Dismiss the currently visible failed clip jobs from the failure list."""
-    recording_ids = list(dict.fromkeys(request.recording_ids))
-    if not recording_ids:
-        return {"ok": True, "cleared": 0}
-    placeholders = ",".join("?" for _ in recording_ids)
-    async with aio_connect() as db:
-        cursor = await db.execute(
-            f"UPDATE recordings SET clipped = -1, skip_reason = '已手动清除' "
-            f"WHERE id IN ({placeholders}) AND clipped = -1 "
-            f"AND (skip_reason IS NULL OR skip_reason != '已手动清除')",
-            recording_ids,
-        )
-        await db.commit()
-        cleared = cursor.rowcount
-    return {"ok": True, "cleared": cleared}
-
-
 @app.post("/api/clip-queue/{recording_id}/priority")
 async def set_clip_priority(recording_id: int, priority: int):
     """Update the priority of a queued clip job (1=highest, 99=lowest)."""
@@ -2943,39 +2882,31 @@ async def start_clip_queue_job(recording_id: int):
     return {"ok": True, "recording_id": recording_id, "priority": 1}
 
 
-class BulkClipQueueRequest(BaseModel):
-    recording_ids: list[int]
-
-
-@app.post("/api/clip-queue/bulk-retry")
-async def bulk_retry_clip_queue_jobs(request: BulkClipQueueRequest):
-    """Re-enqueue eligible failed clip jobs in one request."""
-    recording_ids = list(dict.fromkeys(request.recording_ids))
-    if len(recording_ids) > 500:
-        raise HTTPException(status_code=400, detail="Too many recording IDs")
-    queued = 0
-    skipped = []
+@app.post("/api/clip-queue/bulk/retry")
+async def retry_failed_clip_jobs(request: BulkClipQueueRequest):
+    """Re-enqueue the currently failed clipping jobs requested by the queue UI."""
+    recording_ids = list(dict.fromkeys(request.ids))[:500]
+    queued = []
+    failed = []
     for recording_id in recording_ids:
         try:
             await retry_clip_queue_job(recording_id)
-            queued += 1
+            queued.append(recording_id)
         except HTTPException as exc:
-            skipped.append({"recording_id": recording_id, "reason": str(exc.detail)})
-    return {"ok": True, "queued": queued, "skipped": skipped}
+            failed.append({"recording_id": recording_id, "detail": exc.detail})
+    return {"ok": not failed, "queued": len(queued), "failed": failed}
 
 
-@app.post("/api/clip-queue/bulk-dismiss")
-async def bulk_dismiss_clip_queue_jobs(request: BulkClipQueueRequest):
-    """Dismiss failed clip jobs in one request."""
-    recording_ids = list(dict.fromkeys(request.recording_ids))
-    if len(recording_ids) > 500:
-        raise HTTPException(status_code=400, detail="Too many recording IDs")
+@app.post("/api/clip-queue/bulk/dismiss")
+async def dismiss_failed_clip_jobs(request: BulkClipQueueRequest):
+    """Hide the currently failed clipping jobs requested by the queue UI."""
+    recording_ids = list(dict.fromkeys(request.ids))[:500]
     if not recording_ids:
         return {"ok": True, "cleared": 0}
     placeholders = ",".join("?" for _ in recording_ids)
     async with aio_connect() as db:
         cursor = await db.execute(
-            f"UPDATE recordings SET clipped = -1, skip_reason = '已手动清除' "
+            f"UPDATE recordings SET skip_reason = '已手动清除' "
             f"WHERE id IN ({placeholders}) AND clipped = -1 "
             "AND (skip_reason IS NULL OR skip_reason != '已手动清除')",
             recording_ids,
