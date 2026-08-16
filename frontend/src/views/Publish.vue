@@ -1191,6 +1191,8 @@ const previewVideoUrl = computed(() => {
   if (previewVersion.value === 'classic') return `${BASE_URL}/api/groups/${previewGroup.value.id}/download`
   if (previewVersion.value === 'director') return `${BASE_URL}/api/groups/${previewGroup.value.id}/director-download`
   if (previewVersion.value === 'creative') return `${BASE_URL}/api/groups/${previewGroup.value.id}/creative-download`
+  if (previewVersion.value === 'realistic') return `${BASE_URL}/api/groups/${previewGroup.value.id}/realistic-download`
+  if (previewVersion.value === 'conservative') return `${BASE_URL}/api/groups/${previewGroup.value.id}/conservative-download`
   if (previewVersion.value === 'qianchuan') return `${BASE_URL}/api/groups/${previewGroup.value.id}/qianchuan-download`
   return `${BASE_URL}/api/groups/${previewGroup.value.id}/download`
 })
