@@ -1206,10 +1206,11 @@ const importPreviewCount = computed(() => {
 })
 
 let pendingRefresh = false
+const pendingGroupRefreshes = new Set()
 let refreshTimer = null
 
-function hasActiveInteraction() {
-  if (openId.value || groupModal.value || customModal.value || reclipModal.value || reviewModal.value ||
+function hasActiveInteraction({ includeExpanded = true } = {}) {
+  if ((includeExpanded && openId.value) || groupModal.value || customModal.value || reclipModal.value || reviewModal.value ||
       showUploadModal.value || scriptReviewGroup.value || classicPreviewGroup.value || directorPreviewGroup.value ||
       creativePreviewGroup.value || qianchuanPreviewGroup.value || stylePreview.value || coverPreview.value ||
       mergeErrorGroup.value || showSuggestions.value) return true
@@ -1220,9 +1221,19 @@ function hasActiveInteraction() {
 }
 
 async function load({ showLoading = true } = {}) {
+  if (!showLoading && (hasActiveInteraction() || document.hidden)) {
+    pendingRefresh = true
+    return
+  }
   if (showLoading) loading.value = true
   try {
     const [nextGroups, nextRooms] = await Promise.all([getGroups(), getRooms()])
+    // A fallback request may have started before the user opened a control.
+    // Never apply its snapshot while the page is being operated.
+    if (!showLoading && (hasActiveInteraction() || document.hidden)) {
+      pendingRefresh = true
+      return
+    }
     const currentById = new Map(groups.value.map(group => [group.id, group]))
     const mergedGroups = nextGroups.map(nextGroup => {
       const currentGroup = currentById.get(nextGroup.id)
@@ -1234,7 +1245,9 @@ async function load({ showLoading = true } = {}) {
     })
     groups.value = mergedGroups
     rooms.value = nextRooms
-    visibleGroupCount.value = Math.min(50, mergedGroups.length)
+    if (showLoading || groups.value.length === 0) {
+      visibleGroupCount.value = Math.min(50, mergedGroups.length)
+    }
   } catch (error) {
     show(error.message || '分组加载失败', 'error')
   } finally {
@@ -1243,9 +1256,19 @@ async function load({ showLoading = true } = {}) {
 }
 
 async function refreshGroup(groupId) {
-  if (groupId == null || hasActiveInteraction() || document.hidden) return
+  if (groupId == null) return
+  if (hasActiveInteraction({ includeExpanded: false }) || document.hidden) {
+    pendingGroupRefreshes.add(groupId)
+    return
+  }
   try {
     const nextGroup = await getGroup(groupId)
+    // The user may have opened a control while the request was in flight.
+    // Queue the result rather than changing the live card under that control.
+    if (hasActiveInteraction({ includeExpanded: false }) || document.hidden) {
+      pendingGroupRefreshes.add(groupId)
+      return
+    }
     const currentGroup = groups.value.find(group => group.id === nextGroup.id)
     if (currentGroup) Object.assign(currentGroup, nextGroup)
   } catch (error) {
@@ -1256,6 +1279,10 @@ async function refreshGroup(groupId) {
 
 function requestRefresh(groupId = null) {
   if (groupId != null) {
+    if (hasActiveInteraction({ includeExpanded: false }) || document.hidden) {
+      pendingGroupRefreshes.add(groupId)
+      return
+    }
     refreshGroup(groupId)
     return
   }
@@ -1267,12 +1294,20 @@ function requestRefresh(groupId = null) {
   if (refreshTimer) return
   refreshTimer = window.setTimeout(() => {
     refreshTimer = null
+    if (hasActiveInteraction() || document.hidden) {
+      pendingRefresh = true
+      return
+    }
     load({ showLoading: false })
   }, 500)
 }
 
 function flushPendingRefresh() {
-  if (!pendingRefresh || hasActiveInteraction() || document.hidden) return
+  if (hasActiveInteraction() || document.hidden) return
+  const groupIds = [...pendingGroupRefreshes]
+  pendingGroupRefreshes.clear()
+  groupIds.forEach(groupId => refreshGroup(groupId))
+  if (!pendingRefresh) return
   pendingRefresh = false
   load({ showLoading: false })
 }
