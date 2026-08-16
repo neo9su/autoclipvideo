@@ -1205,7 +1205,6 @@ const importPreviewCount = computed(() => {
   return txt.split('\n').map(p => p.trim()).filter(p => p.endsWith('.mp4')).length
 })
 
-let pendingFullRefresh = false
 const pendingGroupRefreshes = new Set()
 let refreshTimer = null
 
@@ -1257,52 +1256,47 @@ async function load({ showLoading = true } = {}) {
 }
 
 async function refreshGroup(groupId) {
-  if (groupId == null || document.hidden) return
+  if (groupId == null || document.hidden) return false
   if (hasTargetedRefreshBlock()) {
     pendingGroupRefreshes.add(groupId)
-    return
+    return false
   }
   try {
     const nextGroup = await getGroup(groupId)
     const currentGroup = groups.value.find(group => group.id === nextGroup.id)
     if (currentGroup) Object.assign(currentGroup, nextGroup)
+    if (openId.value === nextGroup.id && detail.value) Object.assign(detail.value, nextGroup)
+    return true
   } catch (error) {
     // Websocket updates are best effort and must not interrupt active work.
     console.warn('分组状态更新失败', error)
+    return false
   }
 }
 
 function requestRefresh(groupId = null) {
   if (groupId != null) {
-    refreshGroup(groupId)
+    pendingGroupRefreshes.add(groupId)
+    flushPendingGroupRefreshes()
     return
   }
-  if (hasActiveInteraction() || document.hidden) {
-    pendingFullRefresh = true
-    return
-  }
-  pendingFullRefresh = false
-  if (refreshTimer) return
-  refreshTimer = window.setTimeout(() => {
-    refreshTimer = null
-    // Re-check at execution time: focus can move into a control while the
-    // debounce timer is waiting, and a full list replacement would reset it.
-    if (!document.hidden && !hasActiveInteraction()) load({ showLoading: false })
-    else pendingFullRefresh = true
-  }, 500)
+  groups.value.forEach(group => pendingGroupRefreshes.add(group.id))
+  flushPendingGroupRefreshes()
 }
 
-function flushPendingRefresh() {
-  if (hasActiveInteraction() || document.hidden) return
-  const groupIds = [...pendingGroupRefreshes]
-  pendingGroupRefreshes.clear()
-  if (groupIds.length > 0) {
-    groupIds.forEach(groupId => refreshGroup(groupId))
-  }
-  if (pendingFullRefresh) {
-    pendingFullRefresh = false
-    load({ showLoading: false })
-  }
+function flushPendingGroupRefreshes() {
+  if (hasTargetedRefreshBlock() || document.hidden || refreshTimer || pendingGroupRefreshes.size === 0) return
+  refreshTimer = window.setTimeout(async () => {
+    refreshTimer = null
+    const groupIds = [...pendingGroupRefreshes]
+    pendingGroupRefreshes.clear()
+    await Promise.all(groupIds.map(groupId => refreshGroup(groupId)))
+    if (pendingGroupRefreshes.size > 0) flushPendingGroupRefreshes()
+  }, 300)
+}
+
+function flushPendingRefreshesAfterInteraction() {
+  window.setTimeout(flushPendingGroupRefreshes, 0)
 }
 
 async function toggleDetail(id) {
@@ -1310,7 +1304,6 @@ async function toggleDetail(id) {
     openId.value = null
     detail.value = null
     stopProgressPolling()
-    flushPendingRefresh()
     return
   }
   openId.value = id
@@ -1648,21 +1641,17 @@ onMounted(() => {
   // Status polling is only a fallback. Never replace the list during an active edit.
   const t = setInterval(() => {
     if (!document.hidden && !hasActiveInteraction()) requestRefresh()
-    else pendingFullRefresh = true
   }, 60000)
-  const onInteractionEnd = () => {
-    window.setTimeout(flushPendingRefresh, 0)
-  }
-  document.addEventListener('focusout', onInteractionEnd)
-  document.addEventListener('click', onInteractionEnd)
-  document.addEventListener('visibilitychange', onInteractionEnd)
+  document.addEventListener('focusout', flushPendingRefreshesAfterInteraction)
+  document.addEventListener('click', flushPendingRefreshesAfterInteraction)
+  document.addEventListener('visibilitychange', flushPendingRefreshesAfterInteraction)
   onUnmounted(() => {
     clearInterval(t)
     if (refreshTimer) clearTimeout(refreshTimer)
     if (wsCleanup) wsCleanup()
-    document.removeEventListener('focusout', onInteractionEnd)
-    document.removeEventListener('click', onInteractionEnd)
-    document.removeEventListener('visibilitychange', onInteractionEnd)
+    document.removeEventListener('focusout', flushPendingRefreshesAfterInteraction)
+    document.removeEventListener('click', flushPendingRefreshesAfterInteraction)
+    document.removeEventListener('visibilitychange', flushPendingRefreshesAfterInteraction)
   })
 })
 
