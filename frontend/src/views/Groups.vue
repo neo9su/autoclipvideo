@@ -986,8 +986,8 @@ function previewVersion(group, version) {
 }
 async function refreshGroupCard(group) {
   const updated = await getGroup(group.id)
-  const currentGroup = groups.value.find(item => item.id === group.id)
-  if (currentGroup) Object.assign(currentGroup, updated)
+  const index = groups.value.findIndex(item => item.id === group.id)
+  if (index >= 0) groups.value.splice(index, 1, { ...groups.value[index], ...updated })
   return updated
 }
 async function triggerVersion(group, version) {
@@ -1205,49 +1205,37 @@ const importPreviewCount = computed(() => {
   return txt.split('\n').map(p => p.trim()).filter(p => p.endsWith('.mp4')).length
 })
 
-let pendingRefresh = false
-const pendingRefreshGroupIds = new Set()
-let refreshTimer = null
+let pendingFullRefresh = false
 const pendingGroupRefreshes = new Set()
+let refreshTimer = null
 
-function hasModalInteraction() {
-  return Boolean(groupModal.value || customModal.value || reclipModal.value || reviewModal.value ||
+function hasActiveInteraction() {
+  if (openId.value || groupModal.value || customModal.value || reclipModal.value || reviewModal.value ||
       showUploadModal.value || scriptReviewGroup.value || classicPreviewGroup.value || directorPreviewGroup.value ||
       creativePreviewGroup.value || qianchuanPreviewGroup.value || stylePreview.value || coverPreview.value ||
-      mergeErrorGroup.value || showSuggestions.value)
-}
+      mergeErrorGroup.value || showSuggestions.value) return true
 
-function hasFocusedFormControl() {
   const activeElement = document.activeElement
   return Boolean(activeElement && activeElement !== document.body &&
     activeElement.matches('input, select, textarea, [contenteditable="true"]'))
 }
 
-function hasActiveInteraction() {
-  if (openId.value || hasModalInteraction()) return true
-  return hasFocusedFormControl()
-}
-
-function hasBlockedTargetedRefresh() {
-  return hasModalInteraction() || hasFocusedFormControl()
-}
-
 async function load({ showLoading = true } = {}) {
-  if (!showLoading && (hasActiveInteraction() || document.hidden)) {
-    pendingRefresh = true
-    return
-  }
   if (showLoading) loading.value = true
   try {
     const [nextGroups, nextRooms] = await Promise.all([getGroups(), getRooms()])
-    // A refresh can finish after the user starts editing. Do not apply a late
-    // response over an active modal or form interaction.
-    if (hasActiveInteraction()) {
-      pendingRefresh = true
-      return
-    }
-    applyGroups(nextGroups, true)
+    const currentById = new Map(groups.value.map(group => [group.id, group]))
+    const mergedGroups = nextGroups.map(nextGroup => {
+      const currentGroup = currentById.get(nextGroup.id)
+      if (currentGroup) {
+        Object.assign(currentGroup, nextGroup)
+        return currentGroup
+      }
+      return nextGroup
+    })
+    groups.value = mergedGroups
     rooms.value = nextRooms
+    visibleGroupCount.value = Math.min(50, mergedGroups.length)
   } catch (error) {
     show(error.message || '分组加载失败', 'error')
   } finally {
@@ -1255,50 +1243,14 @@ async function load({ showLoading = true } = {}) {
   }
 }
 
-function applyGroups(nextGroups, resetVisibleCount = false) {
-  const currentById = new Map(groups.value.map(group => [group.id, group]))
-  const mergedGroups = nextGroups.map(nextGroup => {
-    const currentGroup = currentById.get(nextGroup.id)
-    if (currentGroup) {
-      Object.assign(currentGroup, nextGroup)
-      return currentGroup
-    }
-    return nextGroup
-  })
-  // Keep the array and existing card objects stable during status updates so
-  // focused controls and expanded cards are not recreated.
-  groups.value.splice(0, groups.value.length, ...mergedGroups)
-  if (resetVisibleCount) visibleGroupCount.value = Math.min(50, mergedGroups.length)
-}
-
-async function refreshGroupStatuses() {
-  if (hasActiveInteraction() || document.hidden) {
-    pendingRefresh = true
-    return
-  }
-  try {
-    const nextGroups = await getGroups()
-    if (hasActiveInteraction() || document.hidden) {
-      pendingRefresh = true
-      return
-    }
-    applyGroups(nextGroups)
-  } catch (error) {
-    console.warn('分组状态轮询失败', error)
-  }
-}
-
 async function refreshGroup(groupId) {
-  if (groupId == null || hasBlockedTargetedRefresh() || document.hidden) {
-    if (groupId != null) pendingGroupRefreshes.add(groupId)
+  if (groupId == null) return
+  if (hasActiveInteraction() || document.hidden) {
+    pendingGroupRefreshes.add(groupId)
     return
   }
   try {
     const nextGroup = await getGroup(groupId)
-    if (hasBlockedTargetedRefresh() || document.hidden) {
-      pendingGroupRefreshes.add(groupId)
-      return
-    }
     const currentGroup = groups.value.find(group => group.id === nextGroup.id)
     if (currentGroup) Object.assign(currentGroup, nextGroup)
   } catch (error) {
@@ -1309,39 +1261,34 @@ async function refreshGroup(groupId) {
 
 function requestRefresh(groupId = null) {
   if (groupId != null) {
-    pendingGroupRefreshes.add(groupId)
-    flushPendingGroupRefreshes()
+    if (hasActiveInteraction() || document.hidden) {
+      pendingGroupRefreshes.add(groupId)
+      return
+    }
+    refreshGroup(groupId)
     return
   }
   if (hasActiveInteraction() || document.hidden) {
-    pendingRefresh = true
+    pendingFullRefresh = true
     return
   }
-  pendingRefresh = false
+  pendingFullRefresh = false
   if (refreshTimer) return
   refreshTimer = window.setTimeout(() => {
     refreshTimer = null
-    if (hasActiveInteraction() || document.hidden) {
-      pendingRefresh = true
-      return
-    }
     load({ showLoading: false })
   }, 500)
 }
 
-function flushPendingGroupRefreshes() {
-  if (pendingGroupRefreshes.size === 0 || hasBlockedTargetedRefresh() || document.hidden) return
+function flushPendingRefresh() {
+  if (hasActiveInteraction() || document.hidden) return
+
   const groupIds = [...pendingGroupRefreshes]
   pendingGroupRefreshes.clear()
-  Promise.all(groupIds.map(groupId => refreshGroup(groupId))).catch(() => {
-    // Individual refreshGroup calls already report best-effort errors.
-  })
-}
+  groupIds.forEach(groupId => refreshGroup(groupId))
 
-function flushPendingRefresh() {
-  flushPendingGroupRefreshes()
-  if (pendingRefresh && !hasActiveInteraction() && !document.hidden) {
-    pendingRefresh = false
+  if (pendingFullRefresh) {
+    pendingFullRefresh = false
     load({ showLoading: false })
   }
 }
@@ -1351,6 +1298,7 @@ async function toggleDetail(id) {
     openId.value = null
     detail.value = null
     stopProgressPolling()
+    flushPendingRefresh()
     return
   }
   openId.value = id
@@ -1687,8 +1635,8 @@ onMounted(() => {
   })
   // Status polling is only a fallback. Never replace the list during an active edit.
   const t = setInterval(() => {
-    if (!document.hidden && !hasActiveInteraction()) refreshGroupStatuses()
-    else pendingRefresh = true
+    if (!document.hidden && !hasActiveInteraction()) requestRefresh()
+    else pendingFullRefresh = true
   }, 60000)
   const onInteractionEnd = () => {
     window.setTimeout(flushPendingRefresh, 0)
