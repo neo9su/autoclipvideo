@@ -3640,7 +3640,10 @@ async def create_publish_task(body: PublishTaskCreate):
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
     from video_path_resolver import resolve_publish_video
-    requested_version = group["publish_versions"] or "both"
+    requested_version = body.publish_version or group["publish_versions"] or "both"
+    valid_versions = {"classic", "director", "creative", "realistic", "conservative", "qianchuan", "both"}
+    if requested_version not in valid_versions:
+        raise HTTPException(status_code=422, detail="publish_version must be a supported version or 'both'")
     video_path, selected_version, checked_paths, available_versions = resolve_publish_video(
         dict(group), requested_version
     )

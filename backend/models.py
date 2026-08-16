@@ -69,6 +69,7 @@ class PublishTaskCreate(BaseModel):
     tags: Optional[str] = None
     product_id: Optional[int] = None
     product_ids: Optional[List[int]] = None
+    publish_version: Optional[str] = None
     auto_meta: bool = False              # trigger LLM meta generation
     no_cart: bool = False                # 无车发布：跳过小黄车挂载步骤
 
