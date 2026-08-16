@@ -1205,24 +1205,12 @@ const importPreviewCount = computed(() => {
   return txt.split('\n').map(p => p.trim()).filter(p => p.endsWith('.mp4')).length
 })
 
+let pendingRefresh = false
 const pendingGroupRefreshes = new Set()
 let refreshTimer = null
 
-function hasActiveInteraction() {
-  if (openId.value || groupModal.value || customModal.value || reclipModal.value || reviewModal.value ||
-      showUploadModal.value || scriptReviewGroup.value || classicPreviewGroup.value || directorPreviewGroup.value ||
-      creativePreviewGroup.value || qianchuanPreviewGroup.value || stylePreview.value || coverPreview.value ||
-      mergeErrorGroup.value || showSuggestions.value) return true
-
-  const activeElement = document.activeElement
-  return Boolean(activeElement && activeElement !== document.body &&
-    activeElement.matches('input, select, textarea, [contenteditable="true"]'))
-}
-
-// Targeted card updates are safe while a detail card is expanded, but must not
-// overwrite an input/select/modal that the user is currently operating.
-function hasTargetedRefreshBlock() {
-  if (groupModal.value || customModal.value || reclipModal.value || reviewModal.value ||
+function hasActiveInteraction({ includeExpanded = true } = {}) {
+  if ((includeExpanded && openId.value) || groupModal.value || customModal.value || reclipModal.value || reviewModal.value ||
       showUploadModal.value || scriptReviewGroup.value || classicPreviewGroup.value || directorPreviewGroup.value ||
       creativePreviewGroup.value || qianchuanPreviewGroup.value || stylePreview.value || coverPreview.value ||
       mergeErrorGroup.value || showSuggestions.value) return true
@@ -1233,12 +1221,13 @@ function hasTargetedRefreshBlock() {
 }
 
 async function load({ showLoading = true } = {}) {
+  if (!showLoading && (hasActiveInteraction() || document.hidden)) {
+    pendingRefresh = true
+    return
+  }
   if (showLoading) loading.value = true
   try {
     const [nextGroups, nextRooms] = await Promise.all([getGroups(), getRooms()])
-    // A fallback request may have started before the user opened a control.
-    // Do not apply its snapshot after interaction begins.
-    if (!showLoading && hasTargetedRefreshBlock()) return
     const currentById = new Map(groups.value.map(group => [group.id, group]))
     const mergedGroups = nextGroups.map(nextGroup => {
       const currentGroup = currentById.get(nextGroup.id)
@@ -1250,7 +1239,9 @@ async function load({ showLoading = true } = {}) {
     })
     groups.value = mergedGroups
     rooms.value = nextRooms
-    visibleGroupCount.value = Math.min(50, mergedGroups.length)
+    if (showLoading || groups.value.length === 0) {
+      visibleGroupCount.value = Math.min(50, mergedGroups.length)
+    }
   } catch (error) {
     show(error.message || '分组加载失败', 'error')
   } finally {
@@ -1259,53 +1250,49 @@ async function load({ showLoading = true } = {}) {
 }
 
 async function refreshGroup(groupId) {
-  if (groupId == null || document.hidden) return false
-  if (hasTargetedRefreshBlock()) {
-    pendingGroupRefreshes.add(groupId)
-    return false
+  if (groupId == null || hasActiveInteraction({ includeExpanded: false }) || document.hidden) {
+    if (groupId != null) pendingGroupRefreshes.add(groupId)
+    return
   }
   try {
     const nextGroup = await getGroup(groupId)
-    // Re-check after the network round trip so a newly focused control is
-    // never overwritten by an in-flight websocket refresh.
-    if (hasTargetedRefreshBlock()) {
-      pendingGroupRefreshes.add(groupId)
-      return false
-    }
     const currentGroup = groups.value.find(group => group.id === nextGroup.id)
     if (currentGroup) Object.assign(currentGroup, nextGroup)
-    if (openId.value === nextGroup.id && detail.value) Object.assign(detail.value, nextGroup)
-    return true
   } catch (error) {
     // Websocket updates are best effort and must not interrupt active work.
     console.warn('分组状态更新失败', error)
-    return false
   }
 }
 
 function requestRefresh(groupId = null) {
   if (groupId != null) {
-    pendingGroupRefreshes.add(groupId)
-    flushPendingGroupRefreshes()
+    if (hasActiveInteraction({ includeExpanded: false }) || document.hidden) {
+      pendingGroupRefreshes.add(groupId)
+      return
+    }
+    refreshGroup(groupId)
     return
   }
-  groups.value.forEach(group => pendingGroupRefreshes.add(group.id))
-  flushPendingGroupRefreshes()
-}
-
-function flushPendingGroupRefreshes() {
-  if (hasTargetedRefreshBlock() || document.hidden || refreshTimer || pendingGroupRefreshes.size === 0) return
-  refreshTimer = window.setTimeout(async () => {
+  if (hasActiveInteraction() || document.hidden) {
+    pendingRefresh = true
+    return
+  }
+  pendingRefresh = false
+  if (refreshTimer) return
+  refreshTimer = window.setTimeout(() => {
     refreshTimer = null
-    const groupIds = [...pendingGroupRefreshes]
-    pendingGroupRefreshes.clear()
-    await Promise.all(groupIds.map(groupId => refreshGroup(groupId)))
-    if (pendingGroupRefreshes.size > 0) flushPendingGroupRefreshes()
-  }, 300)
+    load({ showLoading: false })
+  }, 500)
 }
 
-function flushPendingRefreshesAfterInteraction() {
-  window.setTimeout(flushPendingGroupRefreshes, 0)
+function flushPendingRefresh() {
+  if (hasActiveInteraction() || document.hidden) return
+  const groupIds = [...pendingGroupRefreshes]
+  pendingGroupRefreshes.clear()
+  groupIds.forEach(groupId => refreshGroup(groupId))
+  if (!pendingRefresh) return
+  pendingRefresh = false
+  load({ showLoading: false })
 }
 
 async function toggleDetail(id) {
@@ -1650,17 +1637,21 @@ onMounted(() => {
   // Status polling is only a fallback. Never replace the list during an active edit.
   const t = setInterval(() => {
     if (!document.hidden && !hasActiveInteraction()) requestRefresh()
+    else pendingRefresh = true
   }, 60000)
-  document.addEventListener('focusout', flushPendingRefreshesAfterInteraction)
-  document.addEventListener('click', flushPendingRefreshesAfterInteraction)
-  document.addEventListener('visibilitychange', flushPendingRefreshesAfterInteraction)
+  const onInteractionEnd = () => {
+    window.setTimeout(flushPendingRefresh, 0)
+  }
+  document.addEventListener('focusout', onInteractionEnd)
+  document.addEventListener('click', onInteractionEnd)
+  document.addEventListener('visibilitychange', onInteractionEnd)
   onUnmounted(() => {
     clearInterval(t)
     if (refreshTimer) clearTimeout(refreshTimer)
     if (wsCleanup) wsCleanup()
-    document.removeEventListener('focusout', flushPendingRefreshesAfterInteraction)
-    document.removeEventListener('click', flushPendingRefreshesAfterInteraction)
-    document.removeEventListener('visibilitychange', flushPendingRefreshesAfterInteraction)
+    document.removeEventListener('focusout', onInteractionEnd)
+    document.removeEventListener('click', onInteractionEnd)
+    document.removeEventListener('visibilitychange', onInteractionEnd)
   })
 })
 
