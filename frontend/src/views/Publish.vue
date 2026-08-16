@@ -340,7 +340,7 @@
     </div>
 
     <!-- Video preview modal -->
-    <div v-if="previewGroup" class="preview-overlay" @click.self="previewGroup = null">
+    <div v-if="previewGroup" class="preview-overlay" @click.self="closeGroupPreview">
       <div class="preview-modal">
         <div class="preview-header">
           <span>{{ previewGroup.label }}</span>
@@ -350,9 +350,23 @@
             <button v-if="previewGroup.creative_status === 2 && previewGroup.creative_available" :class="['ptab', previewVersion === 'creative' && 'ptab-active']" @click="previewVersion = 'creative'">✍️ 自编版</button>
             <button v-if="previewGroup.qianchuan_status === 2 && previewGroup.qianchuan_available" :class="['ptab', previewVersion === 'qianchuan' && 'ptab-active']" @click="previewVersion = 'qianchuan'">📣 千川投流</button>
           </div>
-          <button class="preview-close" @click="previewGroup = null">✕</button>
+          <button class="preview-close" aria-label="关闭视频预览" @click="closeGroupPreview">✕</button>
         </div>
-        <video class="preview-video" :src="previewVideoUrl" :key="previewVersion" controls autoplay playsinline></video>
+        <video
+          v-if="!previewError"
+          class="preview-video"
+          :src="previewVideoUrl"
+          :key="`${previewGroup.id}-${previewVersion}`"
+          controls
+          autoplay
+          playsinline
+          @error="previewError = true"
+          @loadeddata="previewError = false"
+        ></video>
+        <div v-else class="preview-error" role="alert">
+          <div>视频加载失败</div>
+          <button class="btn-secondary btn-sm" @click="retryGroupPreview">重试</button>
+        </div>
       </div>
     </div>
 
@@ -583,6 +597,7 @@ const metaSchemes = ref([])
 const selectedScheme = ref('')
 const previewGroup = ref(null)   // group being previewed in video modal
 const previewVersion = ref('director')  // 'director' | 'classic' | 'creative' | 'qianchuan'
+const previewError = ref(false)
 const reclipModal = ref(null)    // {group, feedback, saving, submitted}
 const selectedPublishVersion = ref('both')
 const apiBase = REMOTE_API_BASE
@@ -1156,20 +1171,34 @@ const selectedGroup = computed(() =>
 
 const previewVideoUrl = computed(() => {
   if (!previewGroup.value) return ''
-  if (previewVersion.value === 'classic') return `${BASE_URL}/api/groups/${previewGroup.value.id}/download`
-  if (previewVersion.value === 'director') return `${BASE_URL}/api/groups/${previewGroup.value.id}/director-download`
-  if (previewVersion.value === 'creative') return `${BASE_URL}/api/groups/${previewGroup.value.id}/creative-download`
-  if (previewVersion.value === 'qianchuan') return `${BASE_URL}/api/groups/${previewGroup.value.id}/qianchuan-download`
-  return `${BASE_URL}/api/groups/${previewGroup.value.id}/download`
+  if (previewVersion.value === 'classic') return `${apiBase}/api/groups/${previewGroup.value.id}/download`
+  if (previewVersion.value === 'director') return `${apiBase}/api/groups/${previewGroup.value.id}/director-download`
+  if (previewVersion.value === 'creative') return `${apiBase}/api/groups/${previewGroup.value.id}/creative-download`
+  if (previewVersion.value === 'qianchuan') return `${apiBase}/api/groups/${previewGroup.value.id}/qianchuan-download`
+  return `${apiBase}/api/groups/${previewGroup.value.id}/download`
 })
 
 watch(previewGroup, (g) => {
+  previewError.value = false
   if (!g) return
   previewVersion.value = g.qianchuan_status === 2 && g.qianchuan_available ? 'qianchuan' : g.director_status === 2 && g.director_available ? 'director' : g.creative_status === 2 && g.creative_available ? 'creative' : 'classic'
 })
 
+watch(previewVersion, () => {
+  previewError.value = false
+})
+
+function closeGroupPreview() {
+  previewGroup.value = null
+  previewError.value = false
+}
+
+function retryGroupPreview() {
+  previewError.value = false
+}
+
 function groupVideoUrl(groupId) {
-  return `${BASE_URL}/api/groups/${groupId}/download`
+  return `${apiBase}/api/groups/${groupId}/download`
 }
 
 async function setPublishVersion(version) {
@@ -1178,7 +1207,7 @@ async function setPublishVersion(version) {
   selectedPublishVersion.value = version
   g.publish_versions = version
   try {
-    await fetch(`${BASE_URL}/api/groups/${g.id}/publish-versions`, {
+    await fetch(`${apiBase}/api/groups/${g.id}/publish-versions`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ publish_versions: version }),
@@ -1493,12 +1522,13 @@ label { display: block; font-size: 12px; color: #888; margin: 12px 0 4px; }
 .gact-orange:hover { background: rgba(249,115,22,0.1); }
 .gact-red { color: #fe2c55; border-color: #fe2c55; }
 .gact-red:hover { background: rgba(254,44,85,0.1); }
-.preview-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.85); z-index: 200; display: flex; align-items: center; justify-content: center; }
-.preview-modal { background: #111; border: 1px solid #333; border-radius: 12px; width: min(420px, 95vw); overflow: hidden; }
+.preview-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.85); z-index: 1000; display: flex; align-items: center; justify-content: center; padding: 16px; box-sizing: border-box; }
+.preview-modal { background: #111; border: 1px solid #555; border-radius: 12px; width: min(860px, 95vw); max-height: 90vh; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,0.6); }
 .preview-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid #222; font-size: 13px; font-weight: 600; }
 .preview-close { background: none; border: none; color: #888; cursor: pointer; font-size: 16px; padding: 0 4px; }
 .preview-close:hover { color: #fff; }
-.preview-video { width: 100%; max-height: 70vh; display: block; background: #000; }
+.preview-video { width: 100%; max-height: calc(90vh - 58px); min-height: 180px; display: block; background: #000; object-fit: contain; }
+.preview-error { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; min-height: 180px; padding: 24px; color: #fe2c55; }
 .reclip-modal { background: #1a1a1a; border: 1px solid #333; border-radius: 12px; padding: 20px; width: min(400px, 95vw); }
 .group-item:last-child { border-bottom: none; }
 .group-item:hover { background: #1a1a1a; }
