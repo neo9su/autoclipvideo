@@ -143,6 +143,12 @@
             <a v-if="selectedTask.video_path && selectedTask.video_path.includes('qianchuan')" :href="`${apiBase}/api/groups/${selectedTask.group_id}/qianchuan-download`" class="dl-btn dl-qianchuan" target="_blank" title="千川投流">
               📣 千川
             </a>
+            <a v-if="selectedTask.video_path && selectedTask.video_path.includes('realistic')" :href="`${apiBase}/api/groups/${selectedTask.group_id}/realistic-download`" class="dl-btn dl-realistic" target="_blank" title="直出版" download>
+              🎥 直出版
+            </a>
+            <a v-if="selectedTask.video_path && selectedTask.video_path.includes('conservative')" :href="`${apiBase}/api/groups/${selectedTask.group_id}/conservative-download`" class="dl-btn dl-conservative" target="_blank" title="保守版" download>
+              🛡️ 保守版
+            </a>
           </div>
         </div>
         <!-- Manual publish mark button -->

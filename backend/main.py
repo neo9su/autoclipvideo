@@ -1669,7 +1669,7 @@ async def trigger_merge(group_id: int, force: bool = False):
             group = await cur.fetchone()
     if not group:
         raise HTTPException(status_code=404, detail="Group not found")
-    if not force and group["classic_status"] == 1 and group["director_status"] == 1 and (group["creative_status"] or 0) == 1:
+    if not force and all((group[f"{version}_status"] or 0) == 1 for version in ("classic", "director", "creative", "realistic", "conservative")):
         raise HTTPException(status_code=409, detail="All pipelines already in progress")
     # Reset all three pipelines and clear errors; force=True resets even completed ones
     async with aio_connect() as db:
@@ -1677,8 +1677,11 @@ async def trigger_merge(group_id: int, force: bool = False):
             await db.execute(
                 """UPDATE clip_groups SET
                    quality_issue = NULL, director_error = NULL, merge_error = NULL, creative_error = NULL,
+                   realistic_error = NULL, conservative_error = NULL,
                    classic_status = 0, director_status = 0, creative_status = 0,
+                   realistic_status = 0, conservative_status = 0,
                    merged_filename = NULL, director_final_video = NULL, creative_final_video = NULL,
+                   realistic_final_video = NULL, conservative_final_video = NULL,
                    merge_status = 0, merged_at = NULL
                    WHERE id = ?""",
                 (group_id,)
@@ -1687,9 +1690,12 @@ async def trigger_merge(group_id: int, force: bool = False):
             await db.execute(
                 """UPDATE clip_groups SET
                    quality_issue = NULL, director_error = NULL, merge_error = NULL, creative_error = NULL,
+                   realistic_error = NULL, conservative_error = NULL,
                    classic_status  = 0,
                    director_status = 0,
-                   creative_status = 0
+                   creative_status = 0,
+                   realistic_status = 0,
+                   conservative_status = 0
                    WHERE id = ?""",
                 (group_id,)
             )
@@ -1728,7 +1734,10 @@ async def retry_director_creative(group_id: int):
             """UPDATE clip_groups SET
                director_status = 0, director_error = NULL,
                creative_status = 0, creative_error = NULL,
-               director_final_video = NULL, creative_final_video = NULL
+               realistic_status = 0, realistic_error = NULL,
+               conservative_status = 0, conservative_error = NULL,
+               director_final_video = NULL, creative_final_video = NULL,
+               realistic_final_video = NULL, conservative_final_video = NULL
                WHERE id = ?""",
             (group_id,),
         )
@@ -3805,6 +3814,7 @@ async def batch_schedule_tasks(body: BatchScheduleCreate):
         db.row_factory = aiosqlite.Row
         sql = """
             SELECT g.id, g.label, g.merged_filename, g.director_final_video,
+                   g.realistic_final_video, g.conservative_final_video,
                    g.creative_final_video, g.qianchuan_final_video, g.publish_versions, g.room_id
             FROM clip_groups g
             WHERE (g.merge_status = 2 OR g.classic_status = 2 OR g.director_status = 2 OR g.realistic_status = 2 OR g.conservative_status = 2 OR g.creative_status = 2 OR g.qianchuan_status = 2)
