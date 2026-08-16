@@ -569,7 +569,8 @@ class SemanticMatcher:
                 db.row_factory = aiosqlite.Row
                 async with db.execute(
                     "SELECT id, filename, clip_filename, start_time, end_time FROM recordings"
-                    " WHERE group_id = ? AND clipped = 2 AND local_deleted = 0"
+                    " WHERE group_id = ? AND clipped = 2"
+                    " AND (local_deleted = 0 OR local_deleted IS NULL)"
                     " ORDER BY start_time",
                     (group_id,),
                 ) as cursor:

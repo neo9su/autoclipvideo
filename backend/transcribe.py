@@ -1274,6 +1274,12 @@ async def _run_director_pipeline_inner(group_id: int):
                 pass
             if existing_script:
                 script = existing_script
+            elif result.get("script"):
+                # The generator returns a validated fallback script together
+                # with success=False when the LLM response is malformed.  It
+                # is still usable for matching and, importantly, makes the
+                # failure visible without leaving the director pipeline stuck.
+                script = result["script"]
             else:
                 return await _fail(f"script generation: {result.get('error', 'unknown')}")
         else:
