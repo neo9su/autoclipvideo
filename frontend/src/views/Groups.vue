@@ -986,8 +986,8 @@ function previewVersion(group, version) {
 }
 async function refreshGroupCard(group) {
   const updated = await getGroup(group.id)
-  const index = groups.value.findIndex(item => item.id === group.id)
-  if (index >= 0) groups.value.splice(index, 1, { ...groups.value[index], ...updated })
+  const currentGroup = groups.value.find(item => item.id === group.id)
+  if (currentGroup) Object.assign(currentGroup, updated)
   return updated
 }
 async function triggerVersion(group, version) {
@@ -1206,6 +1206,7 @@ const importPreviewCount = computed(() => {
 })
 
 let pendingRefresh = false
+const pendingGroupIds = new Set()
 let refreshTimer = null
 const pendingGroupRefreshes = new Set()
 
@@ -1232,6 +1233,10 @@ function hasBlockedTargetedRefresh() {
 }
 
 async function load({ showLoading = true } = {}) {
+  if (!showLoading && (hasActiveInteraction() || document.hidden)) {
+    pendingRefresh = true
+    return
+  }
   if (showLoading) loading.value = true
   try {
     const [nextGroups, nextRooms] = await Promise.all([getGroups(), getRooms()])
@@ -1287,6 +1292,10 @@ function requestRefresh(groupId = null) {
   if (refreshTimer) return
   refreshTimer = window.setTimeout(() => {
     refreshTimer = null
+    if (hasActiveInteraction() || document.hidden) {
+      pendingRefresh = true
+      return
+    }
     load({ showLoading: false })
   }, 500)
 }
