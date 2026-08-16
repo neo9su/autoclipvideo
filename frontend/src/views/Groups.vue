@@ -1092,7 +1092,6 @@ const importPreviewCount = computed(() => {
 let pendingRefresh = false
 const pendingGroupRefreshes = new Set()
 let refreshTimer = null
-const pendingGroupRefreshes = new Set()
 const groupRefreshesInFlight = new Set()
 
 function hasFocusedEditor() {
