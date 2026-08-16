@@ -2928,6 +2928,52 @@ async def dismiss_clip_job(recording_id: int):
     return {"ok": True, "recording_id": recording_id}
 
 
+@app.post("/api/clip-queue/bulk-retry")
+async def retry_failed_clip_jobs():
+    """Re-enqueue failed clips that still have the source media and subtitles."""
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT r.*, rm.name as room_name FROM recordings r "
+            "JOIN rooms rm ON r.room_id = rm.id "
+            "WHERE r.clipped = -1 AND (r.skip_reason IS NULL OR r.skip_reason = '')"
+        ) as cur:
+            records = await cur.fetchall()
+
+    retried = 0
+    skipped = 0
+    for rec in records:
+        mp4_path = os.path.join(RECORDINGS_DIR, rec["filename"])
+        srt_path = os.path.join(RECORDINGS_DIR, os.path.splitext(rec["filename"])[0] + ".srt")
+        if not os.path.exists(mp4_path) or not os.path.exists(srt_path):
+            skipped += 1
+            continue
+        async with aio_connect() as db:
+            await db.execute(
+                "UPDATE recordings SET clipped = 0, clip_error = NULL WHERE id = ? AND clipped = -1",
+                (rec["id"],),
+            )
+            await db.commit()
+        asyncio.create_task(_run_editor(
+            rec["id"], mp4_path, srt_path, clip_count=rec["clip_count"] or 1
+        ))
+        retried += 1
+    return {"ok": True, "retried": retried, "skipped": skipped, "total": len(records)}
+
+
+@app.post("/api/clip-queue/bulk-dismiss")
+async def dismiss_failed_clip_jobs():
+    """Dismiss every currently visible failed clip, preserving manual dismiss semantics."""
+    async with aio_connect() as db:
+        cursor = await db.execute(
+            "UPDATE recordings SET clipped = -1, skip_reason = '已手动清除' "
+            "WHERE clipped = -1 AND (skip_reason IS NULL OR skip_reason != '已手动清除')"
+        )
+        await db.commit()
+        dismissed = cursor.rowcount
+    return {"ok": True, "dismissed": dismissed}
+
+
 # ── 画质增强 ──────────────────────────────────────────────────────────────────
 
 ENHANCE_OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "..", "enhance_output")
