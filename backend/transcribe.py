@@ -935,7 +935,11 @@ async def _run_variant_pipeline(group_id: int, variant: str) -> None:
             if not os.path.isfile(source_path) or not os.path.isfile(srt_path):
                 continue
             output = await edit_recording(
-                source_path, srt_path, room_name="publish-variant", record_date=(recording["start_time"] or "")[:10].replace("-", ""),
+                # Keep the two publish styles in separate namespaces.  The
+                # editor's sequence-based filename allocation is not atomic,
+                # so concurrent realistic/conservative jobs could otherwise
+                # select the same output path.
+                source_path, srt_path, room_name=f"publish-variant-{variant}", record_date=(recording["start_time"] or "")[:10].replace("-", ""),
                 room_id=recording["room_id"], clip_engine=variant,
             )
             if output:
