@@ -1240,6 +1240,12 @@ async function load({ showLoading = true } = {}) {
   if (showLoading) loading.value = true
   try {
     const [nextGroups, nextRooms] = await Promise.all([getGroups(), getRooms()])
+    // A refresh can finish after the user starts editing. Do not apply a late
+    // response over an active modal or form interaction.
+    if (hasActiveInteraction()) {
+      pendingRefresh = true
+      return
+    }
     const currentById = new Map(groups.value.map(group => [group.id, group]))
     const mergedGroups = nextGroups.map(nextGroup => {
       const currentGroup = currentById.get(nextGroup.id)
