@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 from pathlib import Path, PureWindowsPath
 from typing import Mapping, Optional
+from urllib.parse import quote
 
 
 BACKEND_DIR = Path(__file__).resolve().parent
@@ -16,6 +17,24 @@ def path_basename(value: object) -> str:
     if not raw:
         return ""
     return Path(raw.replace("\\", "/")).name or PureWindowsPath(raw).name
+
+
+def build_content_disposition(filename: object) -> str:
+    """Build a safe inline disposition for filenames from recording metadata.
+
+    Starlette rejects response headers containing non-Latin-1 characters. Keep
+    the legacy filename parameter ASCII-only and carry the original name in
+    RFC 5987's UTF-8 ``filename*`` parameter.
+    """
+    basename = path_basename(filename) or "video.mp4"
+    ascii_name = basename.encode("ascii", "ignore").decode("ascii")
+    ascii_name = "".join(char if char.isalnum() or char in "._-" else "_" for char in ascii_name)
+    if not ascii_name or ascii_name in {".", ".."}:
+        ascii_name = "video.mp4"
+    if "." not in ascii_name:
+        ascii_name += ".mp4"
+    encoded_name = quote(basename, safe="._-")
+    return f'inline; filename="{ascii_name}"; filename*=UTF-8\'\'{encoded_name}'
 
 
 def _candidate_paths(path: object) -> list[Path]:

@@ -38,7 +38,7 @@ from gpu_execution import require_remote_gpu
 from thumbnail import generate_thumbnail
 from meta_generator import generate_meta, match_product
 from publish_scheduler import poll_publish_tasks
-from video_path_resolver import resolve_artifact_path
+from video_path_resolver import build_content_disposition, resolve_artifact_path
 from srt_resolver import resolve_srt_path
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -1726,13 +1726,52 @@ async def retry_publish_styles(group_id: int, body: dict = Body({})):
                 raise HTTPException(status_code=404, detail="Group not found")
         fields = []
         for version in versions:
-            fields.extend((f"{version}_status = 0", f"{version}_error = NULL", f"{version}_final_video = NULL"))
+            # Mark the job running before returning. This makes a queued retry
+            # observable even if the event loop is briefly busy and prevents a
+            # successful request from leaving the UI at the pending state.
+            fields.extend((f"{version}_status = 1", f"{version}_error = NULL", f"{version}_final_video = NULL"))
         await db.execute(f"UPDATE clip_groups SET {', '.join(fields)} WHERE id = ?", (group_id,))
         await db.commit()
     from transcribe import _run_variant_pipeline
     for version in versions:
         asyncio.create_task(_run_variant_pipeline(group_id, version))
     return {"group_id": group_id, "status": "queued", "versions": versions}
+
+
+@app.post("/api/groups/{group_id}/retry-director")
+async def retry_director(group_id: int):
+    """Explicitly retry the director pipeline without touching other styles."""
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT id FROM clip_groups WHERE id = ?", (group_id,)) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(status_code=404, detail="Group not found")
+        await db.execute(
+            "UPDATE clip_groups SET director_status = 0, director_error = NULL, director_final_video = NULL WHERE id = ?",
+            (group_id,),
+        )
+        await db.commit()
+    from transcribe import _run_director_pipeline
+    asyncio.create_task(_run_director_pipeline(group_id))
+    return {"group_id": group_id, "status": "queued", "version": "director"}
+
+
+@app.post("/api/groups/{group_id}/retry-qianchuan")
+async def retry_qianchuan(group_id: int):
+    """Explicitly retry qianchuan generation and preserve all other artifacts."""
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT id FROM clip_groups WHERE id = ?", (group_id,)) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(status_code=404, detail="Group not found")
+        await db.execute(
+            "UPDATE clip_groups SET qianchuan_status = 0, qianchuan_error = NULL, qianchuan_final_video = NULL WHERE id = ?",
+            (group_id,),
+        )
+        await db.commit()
+    from api_v2 import _run_qianchuan_pipeline
+    asyncio.create_task(_run_qianchuan_pipeline(group_id))
+    return {"group_id": group_id, "status": "queued", "version": "qianchuan"}
 
 
 @app.post("/api/groups/{group_id}/retry-modes")
@@ -1870,7 +1909,7 @@ def _stream_video_file(path: str, request: Request):
     headers = {
         "Accept-Ranges": "bytes",
         "Content-Length": str(content_length),
-        "Content-Disposition": f'inline; filename="{os.path.basename(path)}"',
+        "Content-Disposition": build_content_disposition(os.path.basename(path)),
     }
     if status_code == 206:
         headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
