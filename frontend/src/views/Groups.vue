@@ -1089,16 +1089,76 @@ const importPreviewCount = computed(() => {
   return txt.split('\n').map(p => p.trim()).filter(p => p.endsWith('.mp4')).length
 })
 
-async function load() {
-  loading.value = true
+let pendingRefresh = false
+let refreshTimer = null
+
+function hasActiveInteraction() {
+  if (openId.value || groupModal.value || customModal.value || reclipModal.value || reviewModal.value ||
+      showUploadModal.value || scriptReviewGroup.value || classicPreviewGroup.value || directorPreviewGroup.value ||
+      creativePreviewGroup.value || qianchuanPreviewGroup.value || stylePreview.value || coverPreview.value ||
+      mergeErrorGroup.value || showSuggestions.value) return true
+
+  const activeElement = document.activeElement
+  return Boolean(activeElement && activeElement !== document.body &&
+    activeElement.matches('input, select, textarea, [contenteditable="true"]'))
+}
+
+async function load({ showLoading = true } = {}) {
+  if (showLoading) loading.value = true
   try {
-    ;[groups.value, rooms.value] = await Promise.all([getGroups(), getRooms()])
-    visibleGroupCount.value = Math.min(50, groups.value.length)
+    const [nextGroups, nextRooms] = await Promise.all([getGroups(), getRooms()])
+    const currentById = new Map(groups.value.map(group => [group.id, group]))
+    const mergedGroups = nextGroups.map(nextGroup => {
+      const currentGroup = currentById.get(nextGroup.id)
+      if (currentGroup) {
+        Object.assign(currentGroup, nextGroup)
+        return currentGroup
+      }
+      return nextGroup
+    })
+    groups.value = mergedGroups
+    rooms.value = nextRooms
+    visibleGroupCount.value = Math.min(50, mergedGroups.length)
   } catch (error) {
     show(error.message || '分组加载失败', 'error')
   } finally {
-    loading.value = false
+    if (showLoading) loading.value = false
   }
+}
+
+async function refreshGroup(groupId) {
+  if (groupId == null || hasActiveInteraction() || document.hidden) return
+  try {
+    const nextGroup = await getGroup(groupId)
+    const currentGroup = groups.value.find(group => group.id === nextGroup.id)
+    if (currentGroup) Object.assign(currentGroup, nextGroup)
+  } catch (error) {
+    // Websocket updates are best effort and must not interrupt active work.
+    console.warn('分组状态更新失败', error)
+  }
+}
+
+function requestRefresh(groupId = null) {
+  if (groupId != null) {
+    refreshGroup(groupId)
+    return
+  }
+  if (hasActiveInteraction() || document.hidden) {
+    pendingRefresh = true
+    return
+  }
+  pendingRefresh = false
+  if (refreshTimer) return
+  refreshTimer = window.setTimeout(() => {
+    refreshTimer = null
+    load({ showLoading: false })
+  }, 500)
+}
+
+function flushPendingRefresh() {
+  if (!pendingRefresh || hasActiveInteraction() || document.hidden) return
+  pendingRefresh = false
+  load({ showLoading: false })
 }
 
 async function toggleDetail(id) {
@@ -1407,9 +1467,9 @@ onMounted(() => {
   wsCleanup = createWS((msg) => {
     if (msg.type === 'merged') {
       show('视频合并完成', 'success')
-      load()
+      requestRefresh(msg.group_id)
     } else if (['transcribed', 'clipped'].includes(msg.type)) {
-      load()
+      requestRefresh(msg.group_id)
       if (openId.value) getProcessingProgress().then(p => { progressMap.value = p })
     } else if (msg.type === 'clip_progress' && msg.recording_id != null) {
       progressMap.value = {
@@ -1420,27 +1480,43 @@ onMounted(() => {
       directorBusy.value[msg.group_id] = null
       const n = msg.matched_count ? `，匹配 ${msg.matched_count} 个片段` : ''
       show(`导演视频合成完成${n}`, 'success')
-      load()
+      requestRefresh(msg.group_id)
     } else if (msg.type === 'director_error') {
       directorBusy.value[msg.group_id] = null
       show(msg.error || '合成失败', 'error')
-      load()
+      requestRefresh(msg.group_id)
     } else if (msg.type === 'director_voice_done') {
       show('配音生成完成', 'success')
-      load()
+      requestRefresh(msg.group_id)
     } else if (msg.type === 'qianchuan_done') {
       qianchuanBusy.value[msg.group_id] = false
       show('千川投流版生成完成', 'success')
-      load()
+      requestRefresh(msg.group_id)
     } else if (msg.type === 'qianchuan_error') {
       qianchuanBusy.value[msg.group_id] = false
       show(msg.error || '千川投流版生成失败', 'error')
-      load()
+      requestRefresh(msg.group_id)
     }
   })
-  // Poll every 15s for merge status updates
-  const t = setInterval(load, 15000)
-  onUnmounted(() => clearInterval(t))
+  // Status polling is only a fallback. Never replace the list during an active edit.
+  const t = setInterval(() => {
+    if (!document.hidden && !hasActiveInteraction()) requestRefresh()
+    else pendingRefresh = true
+  }, 60000)
+  const onInteractionEnd = () => {
+    window.setTimeout(flushPendingRefresh, 0)
+  }
+  document.addEventListener('focusout', onInteractionEnd)
+  document.addEventListener('click', onInteractionEnd)
+  document.addEventListener('visibilitychange', onInteractionEnd)
+  onUnmounted(() => {
+    clearInterval(t)
+    if (refreshTimer) clearTimeout(refreshTimer)
+    if (wsCleanup) wsCleanup()
+    document.removeEventListener('focusout', onInteractionEnd)
+    document.removeEventListener('click', onInteractionEnd)
+    document.removeEventListener('visibilitychange', onInteractionEnd)
+  })
 })
 
 // ── Human Review ─────────────────────────────────────────────────────────────
