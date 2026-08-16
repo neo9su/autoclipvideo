@@ -1,6 +1,22 @@
 from pathlib import Path
 
-from backend.video_path_resolver import resolve_artifact_path, resolve_publish_video
+from backend.video_path_resolver import (
+    build_content_disposition,
+    resolve_artifact_path,
+    resolve_publish_video,
+)
+
+
+def test_content_disposition_is_ascii_safe_and_preserves_utf8_name():
+    header = build_content_disposition("直出版-测试 视频.mp4")
+    assert header.startswith('inline; filename="')
+    assert all(ord(char) < 128 for char in header.split("; filename*=")[0])
+    assert "filename*=UTF-8''" in header
+    assert "%E7%9B%B4%E5%87%BA%E7%89%88" in header
+
+
+def test_content_disposition_uses_safe_fallback_for_empty_name():
+    assert build_content_disposition("") == 'inline; filename="video.mp4"; filename*=UTF-8\'\'video.mp4'
 
 
 def test_publish_resolver_supports_realistic_and_conservative(tmp_path, monkeypatch):

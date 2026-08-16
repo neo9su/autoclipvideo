@@ -916,7 +916,8 @@ async def _run_variant_pipeline(group_id: int, variant: str) -> None:
     output_field = f"{variant}_final_video"
     try:
         async with aio_connect() as db:
-            await db.execute(f"UPDATE clip_groups SET {status_field}=1, {error_field}=NULL WHERE id=?", (group_id,))
+            await db.execute(f"UPDATE clip_groups SET {status_field}=1, {error_field}=NULL WHERE id=? AND {status_field} IN (0, 1, -1, -3)", (group_id,))
+            await db.commit()
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 "SELECT r.id, r.filename, r.room_id, r.start_time FROM recordings r WHERE r.group_id=? AND r.clipped=2 ORDER BY r.start_time ASC",
@@ -948,7 +949,7 @@ async def _run_variant_pipeline(group_id: int, variant: str) -> None:
             raise RuntimeError("clip engine produced no output")
         output_path = generated[0]
         async with aio_connect() as db:
-            await db.execute(f"UPDATE clip_groups SET {status_field}=2, {output_field}=? WHERE id=?", (output_path, group_id))
+            await db.execute(f"UPDATE clip_groups SET {status_field}=2, {error_field}=NULL, {output_field}=? WHERE id=?", (output_path, group_id))
             await db.commit()
     except Exception as exc:
         logger.error("%s pipeline group %s failed: %s", variant, group_id, exc)
