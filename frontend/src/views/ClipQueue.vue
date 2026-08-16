@@ -172,6 +172,22 @@
       <div class="section-header">
         <span class="section-title">剪辑失败</span>
         <span class="section-badge failed">{{ failedClips.length }}</span>
+        <div class="section-actions">
+          <button
+            class="act-btn retry bulk-action"
+            :disabled="bulkRetrying || bulkClearing || retryableFailedClips.length === 0"
+            @click="retryAllFailed"
+            title="重试所有可重试的失败剪辑">
+            {{ bulkRetrying ? '重试中…' : '批量重试' }}
+          </button>
+          <button
+            class="act-btn dismiss bulk-action"
+            :disabled="bulkRetrying || bulkClearing"
+            @click="clearAllFailed"
+            title="清除所有失败剪辑">
+            {{ bulkClearing ? '清除中…' : '批量清除' }}
+          </button>
+        </div>
         <span class="section-hint">点击重试重新入队</span>
       </div>
       <div class="job-list">
@@ -206,7 +222,11 @@ const transcribeJobs = ref([])
 const transcribeMeta = ref({ total: 0, session_done: 0, avg_duration_s: 0, eta_seconds: null })
 const loading = ref(false)
 const maxConcurrent = ref(2)
+const bulkRetrying = ref(false)
+const bulkClearing = ref(false)
 let timer = null
+
+const retryableFailedClips = computed(() => failedClips.value.filter(job => !job.skip_reason))
 
 const overallPct = computed(() => {
   const { total, session_done } = transcribeMeta.value
@@ -317,6 +337,61 @@ async function dismissJob(recordingId) {
   } catch { showToast('请求失败', 'error') }
 }
 
+async function retryAllFailed() {
+  const failedJobs = retryableFailedClips.value
+  if (failedJobs.length === 0) {
+    showToast('当前没有可重试的失败剪辑', 'info')
+    return
+  }
+
+  bulkRetrying.value = true
+  try {
+    const results = await Promise.allSettled(
+      failedJobs.map(job => remoteFetch(`/api/clip-queue/${job.id}/retry`, { method: 'POST' }))
+    )
+    const succeeded = results.filter(result => result.status === 'fulfilled' && result.value.ok).length
+    const failed = results.length - succeeded
+    if (failed === 0) {
+      showToast(`已重新入队 ${succeeded} 个剪辑任务`, 'success')
+    } else {
+      showToast(`已重新入队 ${succeeded} 个，${failed} 个重试失败`, 'error')
+    }
+    await load()
+  } catch {
+    showToast('批量重试请求失败', 'error')
+  } finally {
+    bulkRetrying.value = false
+  }
+}
+
+async function clearAllFailed() {
+  const failedJobs = failedClips.value
+  if (failedJobs.length === 0) {
+    showToast('当前没有可清除的失败剪辑', 'info')
+    return
+  }
+  if (!window.confirm(`确定要清除当前 ${failedJobs.length} 个失败剪辑吗？此操作不会删除录像文件。`)) return
+
+  bulkClearing.value = true
+  try {
+    const results = await Promise.allSettled(
+      failedJobs.map(job => remoteFetch(`/api/clip-queue/${job.id}/dismiss`, { method: 'POST' }))
+    )
+    const succeeded = results.filter(result => result.status === 'fulfilled' && result.value.ok).length
+    const failed = results.length - succeeded
+    if (failed === 0) {
+      showToast(`已清除 ${succeeded} 个失败剪辑`, 'success')
+    } else {
+      showToast(`已清除 ${succeeded} 个，${failed} 个清除失败`, 'error')
+    }
+    await load()
+  } catch {
+    showToast('批量清除请求失败', 'error')
+  } finally {
+    bulkClearing.value = false
+  }
+}
+
 function formatEta(secs) {
   if (secs == null || secs < 0) return ''
   if (secs < 60) return `${secs}s`
@@ -345,6 +420,7 @@ onUnmounted(() => clearInterval(timer))
 
 .section { margin-bottom: 24px; }
 .section-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.section-actions { display: flex; align-items: center; gap: 6px; margin-left: 4px; }
 .section-title { font-size: 14px; font-weight: 600; color: #ccc; }
 .section-badge { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 10px; }
 .section-badge.running { background: rgba(251,191,36,0.2); color: #fbbf24; }
@@ -467,6 +543,9 @@ onUnmounted(() => clearInterval(timer))
 .act-btn.retry:hover  { background: rgba(96,165,250,0.25); }
 .act-btn.dismiss { background: rgba(107,114,128,0.1); border-color: rgba(107,114,128,0.3); color: #9ca3af; }
 .act-btn.dismiss:hover { background: rgba(107,114,128,0.25); }
+.act-btn:disabled { cursor: not-allowed; opacity: 0.45; }
+.act-btn:disabled:hover { background: inherit; }
+.bulk-action { padding: 4px 10px; }
 
 /* ── Paused card ── */
 .job-card.paused-card { display: flex; align-items: center; gap: 14px; border-color: rgba(251,191,36,0.2); opacity: 0.85; }
