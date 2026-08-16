@@ -68,12 +68,6 @@ _rooms_cache: tuple[float, list[dict]] | None = None
 _groups_cache: tuple[float, list[dict]] | None = None
 
 
-class BulkClipRequest(BaseModel):
-    """Validated recording ids submitted by the clip failure queue actions."""
-
-    recording_ids: list[int] = Field(min_length=1, max_length=500)
-
-
 async def broadcast(message: dict):
     payload = json.dumps(message, ensure_ascii=False, separators=(",", ":"))
     dead = set()
@@ -2071,7 +2065,7 @@ class ImportVideosRequest(BaseModel):
 
 
 class ClipQueueBulkRequest(BaseModel):
-    recording_ids: list[int]
+    recording_ids: list[int] = Field(min_length=1, max_length=500)
 
 
 class CustomGroupCreate(BaseModel):
@@ -2983,53 +2977,6 @@ async def retry_clip_queue_job(recording_id: int):
     return {"ok": True, "recording_id": recording_id, "status": "queued"}
 
 
-async def _retry_failed_clip(recording_id: int) -> tuple[bool, str]:
-    """Reset one failed clip and schedule it, returning a safe failure reason."""
-    async with aio_connect() as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT * FROM recordings WHERE id = ? AND clipped = -1 "
-            "AND (skip_reason IS NULL OR skip_reason = '')",
-            (recording_id,),
-        ) as cur:
-            recording = await cur.fetchone()
-    if not recording:
-        return False, "not_failed"
-
-    mp4_path = os.path.join(RECORDINGS_DIR, recording["filename"])
-    srt_path = os.path.join(RECORDINGS_DIR, os.path.splitext(recording["filename"])[0] + ".srt")
-    if not os.path.exists(mp4_path):
-        return False, "mp4_missing"
-    if not os.path.exists(srt_path):
-        return False, "srt_missing"
-
-    async with aio_connect() as db:
-        await db.execute("UPDATE recordings SET clipped = 0, clip_error = NULL WHERE id = ?", (recording_id,))
-        await db.commit()
-    asyncio.create_task(_run_editor(recording_id, mp4_path, srt_path, clip_count=recording["clip_count"] or 1))
-    return True, "queued"
-
-
-@app.post("/api/clip-queue/bulk-retry")
-async def bulk_retry_clip_jobs(request: BulkClipRequest):
-    """Re-enqueue the eligible failed clips submitted by the queue UI."""
-    recording_ids = list(dict.fromkeys(recording_id for recording_id in request.recording_ids if recording_id > 0))
-    processed_count = 0
-    failure_reasons: dict[str, int] = {}
-    for recording_id in recording_ids:
-        processed, reason = await _retry_failed_clip(recording_id)
-        if processed:
-            processed_count += 1
-        else:
-            failure_reasons[reason] = failure_reasons.get(reason, 0) + 1
-    return {
-        "ok": True,
-        "processed_count": processed_count,
-        "failed_count": len(recording_ids) - processed_count,
-        "failure_reasons": failure_reasons,
-    }
-
-
 @app.post("/api/clip-queue/{recording_id}/dismiss")
 async def dismiss_clip_job(recording_id: int):
     """Permanently dismiss a failed clip job so it no longer appears in the failed list."""
@@ -3044,33 +2991,6 @@ async def dismiss_clip_job(recording_id: int):
         )
         await db.commit()
     return {"ok": True, "recording_id": recording_id}
-
-
-@app.post("/api/clip-queue/bulk-dismiss")
-async def bulk_dismiss_clip_jobs(request: BulkClipRequest):
-    """Hide the submitted failed clips from the queue without deleting recordings."""
-    recording_ids = list(dict.fromkeys(recording_id for recording_id in request.recording_ids if recording_id > 0))
-    placeholders = ",".join("?" for _ in recording_ids)
-    async with aio_connect() as db:
-        async with db.execute(
-            f"SELECT COUNT(*) FROM recordings WHERE id IN ({placeholders}) AND clipped = -1 "
-            "AND (skip_reason IS NULL OR skip_reason != '已手动清除')",
-            recording_ids,
-        ) as cur:
-            (processed_count,) = await cur.fetchone()
-        if processed_count:
-            await db.execute(
-                f"UPDATE recordings SET clipped = -1, skip_reason = '已手动清除' "
-                f"WHERE id IN ({placeholders}) AND clipped = -1 "
-                "AND (skip_reason IS NULL OR skip_reason != '已手动清除')",
-                recording_ids,
-            )
-            await db.commit()
-    return {
-        "ok": True,
-        "processed_count": processed_count,
-        "failed_count": len(recording_ids) - processed_count,
-    }
 
 
 # ── 画质增强 ──────────────────────────────────────────────────────────────────

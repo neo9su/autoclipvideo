@@ -351,8 +351,9 @@ async function runBulkAction(action, recordingIds) {
       return
     }
     const actionLabel = action === 'retry' ? '重试' : '清除'
-    const failedCount = payload.failed_count || 0
-    showToast(failedCount ? `已${actionLabel} ${payload.processed_count || 0} 项，${failedCount} 项未处理` : `已批量${actionLabel}`, failedCount ? 'error' : 'success')
+    const processedCount = action === 'retry' ? (payload.queued || []).length : (payload.cleared || 0)
+    const failedCount = action === 'retry' ? (payload.skipped || []).length : Math.max(0, recordingIds.length - processedCount)
+    showToast(failedCount ? `已${actionLabel} ${processedCount} 项，${failedCount} 项未处理` : `已批量${actionLabel}`, failedCount ? 'error' : 'success')
     await load()
   } catch {
     showToast('批量操作请求失败', 'error')
