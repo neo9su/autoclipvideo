@@ -110,6 +110,7 @@ async def test_transcribe_queue_includes_finished_unsynced_recording_with_file(b
             end_time=ended_at,
             size_bytes=source_path.stat().st_size,
             duration_seconds=28.0,
+            duration_sec=28.0,
             duration_status="eligible",
         )
 

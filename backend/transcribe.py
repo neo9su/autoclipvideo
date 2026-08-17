@@ -394,8 +394,9 @@ async def poll_transcriptions(broadcast_fn=None):
                 async with db.execute(
                     """SELECT * FROM recordings
                        WHERE synced = 0 AND transcribed = 0 AND local_deleted = 0
+                         AND duration_sec >= ? AND duration_status = 'eligible'
                          AND end_time IS NOT NULL AND end_time != start_time"""
-                ) as cur:
+                    , (MIN_RECORDING_DURATION,)) as cur:
                     unsynced = await cur.fetchall()
 
             has_work = bool(pending or unsynced)
@@ -650,14 +651,13 @@ async def _run_editor(recording_id: int, mp4_path: str, srt_path: str, clip_dura
 
     # ── Duration guard ────────────────────────────────────────────────────────
     duration = await _get_video_duration(mp4_path)
-    duration_status = classify_duration(duration)
-    if duration_status != "accepted":
-        reason = "too_short" if duration_status == "too_short" else "duration_unavailable"
+    duration_status, reason = classify_duration(duration)
+    if duration_status != "eligible":
         logger.warning(f"[skip] Recording {recording_id} ({os.path.basename(mp4_path)}): {reason}")
         async with aio_connect() as db:
             await db.execute(
-                "UPDATE recordings SET clipped = -1, skip_reason = ?, transcribe_error = ? WHERE id = ?",
-                (reason, "时长不足" if reason == "too_short" else "时长不可用", recording_id),
+                "UPDATE recordings SET clipped = -1, duration_seconds = ?, duration_status = ?, skip_reason = ?, transcribe_error = ? WHERE id = ?",
+                (duration if duration_status == "too_short" else None, duration_status, reason, "时长不足" if reason == "too_short" else "时长不可用", recording_id),
             )
             await db.commit()
         return

@@ -1,16 +1,11 @@
 """Single source of truth for source-recording duration eligibility."""
 
 import asyncio
-import json
-import logging
 import os
 
 MIN_RECORDING_DURATION = 28.0
 TOO_SHORT_REASON = "too_short"
 UNAVAILABLE_REASON = "duration_unavailable"
-
-logger = logging.getLogger(__name__)
-
 
 def classify_duration(duration: object) -> tuple[str, str | None]:
     """Classify a probed duration; invalid values are never treated as short."""
@@ -18,11 +13,17 @@ def classify_duration(duration: object) -> tuple[str, str | None]:
         value = float(duration)
     except (TypeError, ValueError):
         return "unavailable", UNAVAILABLE_REASON
-    if value != value or value <= 0:
+    if value != value or value <= 0 or value == float("inf") or value == float("-inf"):
         return "unavailable", UNAVAILABLE_REASON
     if value < MIN_RECORDING_DURATION:
         return "too_short", TOO_SHORT_REASON
     return "eligible", None
+
+
+def is_processable_duration(duration: object) -> bool:
+    """Return whether a recording is safe to enter any processing queue."""
+    status, _ = classify_duration(duration)
+    return status == "eligible"
 
 
 async def probe_duration(path: str) -> float | None:

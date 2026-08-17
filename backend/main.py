@@ -40,7 +40,7 @@ from meta_generator import generate_meta, match_product
 from publish_scheduler import poll_publish_tasks
 from video_path_resolver import build_content_disposition, resolve_artifact_path
 from srt_resolver import resolve_srt_path
-from duration_policy import MIN_RECORDING_DURATION
+from duration_policy import MIN_RECORDING_DURATION, classify_duration, probe_duration
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -993,11 +993,15 @@ async def upload_recording(room_id: int, file: UploadFile = File(...), srt: Opti
             f.write(chunk)
             size_bytes += len(chunk)
 
+    probed_duration = await probe_duration(filepath)
+    duration = probed_duration if probed_duration is not None else duration_sec
+    duration_status, duration_reason = classify_duration(duration)
+
     start_time = now.isoformat()
     async with aio_connect() as db:
         cur = await db.execute(
-            "INSERT INTO recordings (room_id, filename, start_time, end_time, size_bytes, synced, clip_count) VALUES (?, ?, ?, ?, ?, 0, ?)",
-            (room_id, filename, start_time, start_time, size_bytes, clip_count),
+            "INSERT INTO recordings (room_id, filename, start_time, end_time, size_bytes, synced, clip_count, duration_seconds, duration_status, skip_reason) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)",
+            (room_id, filename, start_time, start_time, size_bytes, clip_count, duration, duration_status, duration_reason),
         )
         await db.commit()
         recording_id = cur.lastrowid
@@ -1013,8 +1017,8 @@ async def upload_recording(room_id: int, file: UploadFile = File(...), srt: Opti
             f.write(srt_content)
         async with aio_connect() as db:
             await db.execute(
-                "UPDATE recordings SET transcribed = 2, synced = 1 WHERE id = ?",
-                (recording_id,),
+            "UPDATE recordings SET transcribed = 2, synced = 1, duration_sec = ? WHERE id = ?",
+                (duration, recording_id),
             )
             await db.commit()
         # Upload MP4 to GPU server first so clip-jobs can find the file, then edit
@@ -1027,8 +1031,8 @@ async def upload_recording(room_id: int, file: UploadFile = File(...), srt: Opti
     if job_id:
         async with aio_connect() as db:
             await db.execute(
-                "UPDATE recordings SET transcribed = 1, synced = 1, gpu_job_id = ? WHERE id = ?",
-                (job_id, recording_id),
+                "UPDATE recordings SET transcribed = 1, synced = 1, gpu_job_id = ?, duration_sec = ? WHERE id = ?",
+                (job_id, duration, recording_id),
             )
             await db.commit()
     else:
@@ -1053,7 +1057,7 @@ async def list_recordings(room_id: int):
     async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT * FROM recordings WHERE room_id = ? AND duration_sec >= ? ORDER BY start_time DESC LIMIT 500",
+            "SELECT * FROM recordings WHERE room_id = ? AND duration_sec >= ? AND duration_status = 'eligible' ORDER BY start_time DESC LIMIT 500",
             (room_id, MIN_RECORDING_DURATION)
         ) as cur:
             rows = await cur.fetchall()
@@ -1092,7 +1096,7 @@ async def list_all_recordings(
     page = max(1, page)
     offset = (page - 1) * limit
     status_filter = _STATUS_WHERE[status] if status in _STATUS_WHERE else "1=1"
-    where = f"WHERE ({status_filter}) AND r.duration_sec >= {MIN_RECORDING_DURATION}"
+    where = f"WHERE ({status_filter}) AND r.duration_sec >= {MIN_RECORDING_DURATION} AND r.duration_status = 'eligible'"
     col = _SORT_COLS.get(sort, "r.start_time")
     direction = "ASC" if order.lower() == "asc" else "DESC"
     async with aio_connect() as db:
@@ -1155,8 +1159,9 @@ async def list_clips():
             JOIN rooms rm ON r.room_id = rm.id
             LEFT JOIN recording_clips rc ON rc.recording_id = r.id AND rc.variant_idx = 0
             WHERE r.clipped = 2 AND r.clip_filename IS NOT NULL
+              AND r.duration_sec >= ? AND r.duration_status = 'eligible'
             ORDER BY r.start_time DESC
-        """) as cur:
+        """, (MIN_RECORDING_DURATION,)) as cur:
             rows = await cur.fetchall()
     
     # Fetch clip sizes from GPU service and scan local clips directory
@@ -1272,8 +1277,12 @@ async def list_recording_clips(recording_id: int):
     async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT * FROM recording_clips WHERE recording_id = ? ORDER BY variant_idx ASC",
-            (recording_id,)
+            """SELECT rc.* FROM recording_clips rc
+               JOIN recordings r ON r.id = rc.recording_id
+               WHERE rc.recording_id = ? AND r.duration_sec >= ?
+                 AND r.duration_status = 'eligible'
+               ORDER BY rc.variant_idx ASC""",
+            (recording_id, MIN_RECORDING_DURATION),
         ) as cur:
             rows = await cur.fetchall()
     return [dict(r) for r in rows]
@@ -2893,14 +2902,15 @@ async def get_transcribe_queue(limit: int = Query(default=100, ge=1, le=500)):
                       r.end_time, r.gpu_job_id, r.synced, r.local_deleted, r.size_bytes,
                       rm.name as room_name
                FROM recordings r LEFT JOIN rooms rm ON r.room_id = rm.id
-               WHERE (r.transcribed IN (0, 1) AND (r.synced = 1 OR r.gpu_job_id IS NOT NULL))
+               WHERE r.duration_sec >= ? AND r.duration_status = 'eligible'
+                 AND ((r.transcribed IN (0, 1) AND (r.synced = 1 OR r.gpu_job_id IS NOT NULL))
                   OR (r.transcribed = 0
                       AND r.synced = 0
                       AND r.local_deleted = 0
                       AND r.end_time IS NOT NULL
-                      AND r.end_time != r.start_time)
+                      AND r.end_time != r.start_time))
                ORDER BY r.id ASC
-               LIMIT ?""", (limit,)
+               LIMIT ?""", (MIN_RECORDING_DURATION, limit)
         ) as cur:
             rows = await cur.fetchall()
 
