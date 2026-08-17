@@ -75,6 +75,27 @@ async def test_absent_source_media_and_srt_is_explicitly_reported() -> None:
 
 
 @pytest.mark.asyncio
+async def test_matcher_error_reporting_survives_lightweight_matcher_construction() -> None:
+    """Error reporting must work for recovery-created matcher instances too."""
+    matcher = object.__new__(SemanticMatcher)
+    matcher.model = None
+
+    async def recordings(_group_id: int):
+        return []
+
+    matcher._get_group_recordings = recordings
+    matches = await matcher.match_segments_to_recordings(
+        [{"scene_id": 1, "voiceover_text": "脚本", "duration": 2.0}], 2088
+    )
+
+    assert matches == []
+    assert matcher.match_error == (
+        "group 2088 has no usable source media/SRT; "
+        "verify the recording row and non-empty source sidecar"
+    )
+
+
+@pytest.mark.asyncio
 async def test_thumbnail_only_failure_remains_visible_to_qianchuan_matching() -> None:
     import sys
 
