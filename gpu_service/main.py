@@ -434,17 +434,36 @@ def _do_transcribe(job_id: str):
         model = _get_model()
         with _SuppressStdout():
             segments, info = model.transcribe(mp4_path, **ASR_CONFIG.transcribe_options())
-        with open(srt_path, "w", encoding="utf-8") as f:
+        # Never let an in-process worker that was recovered by the watchdog
+        # overwrite the next attempt's SRT.  ``asyncio.to_thread`` cannot
+        # interrupt native Whisper work, so recovery is cooperative here:
+        # write an attempt-specific temporary file and publish it only while
+        # this exact in-memory job object is still current.
+        temporary_srt_path = f"{srt_path}.{job_id}.{id(job)}.tmp"
+        with open(temporary_srt_path, "w", encoding="utf-8") as f:
             for i, seg in enumerate(segments, 1):
-                if i == 1 or i % 10 == 0:
+                if (i == 1 or i % 10 == 0) and _jobs.get(job_id) is job and job.get("status") == "processing":
                     _db_touch_job(job_id)
                 start, end = aligned_segment_bounds(seg)
                 f.write(f"{i}\n")
                 f.write(f"{_fmt_ts(start)} --> {_fmt_ts(end)}\n")
                 f.write(f"{seg.text.strip()}\n\n")
+        if _jobs.get(job_id) is not job or job.get("status") != "processing":
+            try:
+                os.remove(temporary_srt_path)
+            except FileNotFoundError:
+                pass
+            return
+        os.replace(temporary_srt_path, srt_path)
         job["status"] = "done"
         _db_update_job(job_id, "done")
     except Exception as e:
+        try:
+            os.remove(f"{srt_path}.{job_id}.{id(job)}.tmp")
+        except FileNotFoundError:
+            pass
+        if _jobs.get(job_id) is not job:
+            return
         job["status"] = "error"
         job["error"] = str(e)
         _db_update_job(job_id, "error", str(e))
@@ -463,7 +482,8 @@ async def _run_with_lock(job_id: str):
         _db_update_job(job_id, "error", f"Timed out after {_TRANSCRIBE_TIMEOUT}s")
     finally:
         heartbeat_task.cancel()
-        _transcription_tasks.pop(job_id, None)
+        if _transcription_tasks.get(job_id) is asyncio.current_task():
+            _transcription_tasks.pop(job_id, None)
 
 
 def _job_age_seconds(job: dict, now: float | None = None) -> float:
@@ -492,8 +512,17 @@ def _recover_stale_jobs() -> list[str]:
         task = _transcription_tasks.get(job_id)
         if task and not task.done():
             task.cancel()
+        _transcription_tasks.pop(job_id, None)
+        _remove_idempotency_aliases(job_id, job)
         recovered.append(job_id)
     return recovered
+
+
+def _remove_idempotency_aliases(job_id: str, job: dict) -> None:
+    """Allow a recovered upload to be submitted again without losing history."""
+    for key, stored_job in list(_jobs.items()):
+        if key != job_id and stored_job is job:
+            _jobs.pop(key, None)
 
 
 async def _job_watchdog_loop() -> None:
@@ -1438,7 +1467,16 @@ async def create_job(
         while chunk := await file.read(1024 * 1024):
             await f.write(chunk)
 
-    _jobs[job_id] = {"job_id": job_id, "status": "processing", "mp4_path": mp4_path, "srt_path": srt_path, "error": None}
+    created_at = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+    _jobs[job_id] = {
+        "job_id": job_id,
+        "status": "processing",
+        "mp4_path": mp4_path,
+        "srt_path": srt_path,
+        "error": None,
+        "created_at": created_at,
+        "heartbeat_at": created_at,
+    }
     if idempotency_key:
         _jobs[idempotency_key] = _jobs[job_id]
     _db_insert_job(job_id, mp4_path, srt_path)
@@ -1474,6 +1512,7 @@ async def recover_stale_job(request: Request, job_id: str):
     if task and not task.done():
         task.cancel()
     _transcription_tasks.pop(job_id, None)
+    _remove_idempotency_aliases(job_id, job)
     return {"job_id": job_id, "status": "error", "recovered": True, "age_seconds": age}
 
 
