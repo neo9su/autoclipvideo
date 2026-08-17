@@ -1738,6 +1738,12 @@ async def retry_publish_styles(group_id: int, body: dict = Body({})):
     return {"group_id": group_id, "status": "queued", "versions": versions}
 
 
+@app.post("/api/groups/{group_id}/retry-styles/{version}")
+async def retry_publish_style(group_id: int, version: str):
+    """Queue exactly one publish style for an independent UI retry action."""
+    return await retry_publish_styles(group_id, {"version": version})
+
+
 @app.post("/api/groups/{group_id}/retry-director")
 async def retry_director(group_id: int):
     """Explicitly retry the director pipeline without touching other styles."""

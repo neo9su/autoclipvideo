@@ -56,7 +56,15 @@
             <button class="btn-del" @click="doDeleteGroup(g)" title="删除分组">✕</button>
           </div>
           <div class="group-actions">
-            <!-- Version generation is handled by the five-version panel below. -->
+            <!-- 三模式触发按钮 -->
+            <button
+              v-if="g.classic_status !== 1 && g.director_status !== 1 && (g.creative_status || 0) !== 1 && (g.qianchuan_status || 0) !== 1"
+              class="btn-action"
+              :disabled="g.ready_count === 0"
+              @click="doMerge(g)">
+              {{ (g.classic_status === 2 || g.director_status === 2 || g.creative_status === 2 || g.qianchuan_status === 2) ? '↺ 重新合并' : '剪辑并合并' }}
+            </button>
+            <button v-else class="btn-action yellow" disabled>处理中…</button>
             <!-- 经典版结果 -->
             <template v-if="classicIsReady(g)">
               <button class="btn-action teal" style="margin-right:2px" @click="openClassicPreview(g)">▶ 经典版</button>
@@ -220,35 +228,6 @@
           <div class="qianchuan-hint">{{ qianchuanStatusMeta(g).hint }}</div>
           <div v-if="g.qianchuan_status === 2 && g.qianchuan_file_status !== 'ready'" class="qianchuan-error">⚠ 千川结果文件缺失（stale_path），请重新生成</div>
           <div v-if="g.qianchuan_error" class="qianchuan-error">⚠ {{ summarizeQianchuanError(g.qianchuan_error) }}</div>
-        </div>
-
-        <!-- 直出版 / 保守版操作面板 -->
-        <div class="styles-panel">
-          <div class="styles-header">
-            <div class="styles-title-row">
-              <span class="styles-title">直出版 + 保守版</span>
-              <span class="styles-hint">基于经典版生成两种节奏</span>
-            </div>
-            <div class="styles-actions">
-              <span class="styles-generation-note">请在上方分别触发直出版或保守版</span>
-              <template v-if="g.realistic_status === 2 && g.realistic_available">
-                <button class="btn-action rose" @click="openStylePreview(g, 'realistic')">▶ 直出版</button>
-                <a :href="`${apiBase}/api/groups/${g.id}/realistic-download`" class="btn-action rose" download>↓</a>
-              </template>
-              <template v-if="g.conservative_status === 2 && g.conservative_available">
-                <button class="btn-action orange" @click="openStylePreview(g, 'conservative')">▶ 保守版</button>
-                <a :href="`${apiBase}/api/groups/${g.id}/conservative-download`" class="btn-action orange" download>↓</a>
-              </template>
-            </div>
-          </div>
-          <div class="styles-statuses">
-            <span :class="['style-status', styleStatusClass(g.realistic_status)]">直出版：{{ styleStatusLabel(g.realistic_status) }}</span>
-            <span :class="['style-status', styleStatusClass(g.conservative_status)]">保守版：{{ styleStatusLabel(g.conservative_status) }}</span>
-          </div>
-          <div v-if="g.realistic_status === 2 && g.realistic_file_status !== 'ready'" class="styles-error">⚠ 直出版文件缺失，请重新生成</div>
-          <div v-if="g.conservative_status === 2 && g.conservative_file_status !== 'ready'" class="styles-error">⚠ 保守版文件缺失，请重新生成</div>
-          <div v-if="g.realistic_error" class="styles-error">⚠ 直出版：{{ summarizeStyleError(g.realistic_error) }}</div>
-          <div v-if="g.conservative_error" class="styles-error">⚠ 保守版：{{ summarizeStyleError(g.conservative_error) }}</div>
         </div>
 
         <!-- 封面生成面板 -->
@@ -936,12 +915,11 @@ function classicStatus(group) {
   return Number(group.classic_status ?? 0)
 }
 function classicIsReady(group) {
-  return Number(group.merge_status) === 2 && Boolean(group.merged_filename) &&
-    group.classic_available !== false && group.classic_file_status === 'ready'
+  return Number(group.merge_status) === 2 && Boolean(group.merged_filename) && group.classic_available !== false
 }
 function versionIsReady(group, version) {
   if (version === 'classic') return classicIsReady(group)
-  return versionStatus(group, version) === 2 && group[`${version}_available`] !== false && group[`${version}_file_status`] === 'ready'
+  return versionStatus(group, version) === 2 && group[`${version}_available`] !== false && group[`${version}_file_status`] !== 'missing'
 }
 function versionBusy(group, version) {
   return Boolean(retryBusy.value[`${group.id}:${version}`]) ||
@@ -1044,23 +1022,7 @@ function styleStatusClass(status) {
   if (status < 0) return 'failed'
   return 'idle'
 }
-function hasStylesFailure(group) { return Number(group.realistic_status) < 0 || Number(group.conservative_status) < 0 }
-function summarizeStyleError(error) {
-  if (!error) return ''
-  return String(error).replace(/\s+/g, ' ').slice(0, 160)
-}
-async function generateStyles(group) {
-  stylesBusy.value[group.id] = true
-  try {
-    await retryStyles(group.id)
-    show('直出版+保守版任务已提交', 'info')
-    await load()
-  } catch (error) {
-    show(error.message || '样式任务提交失败', 'error')
-  } finally {
-    stylesBusy.value[group.id] = false
-  }
-}
+function summarizeStyleError(error) { return String(error).replace(/\s+/g, ' ').slice(0, 160) }
 
 // Re-clip (single recording)
 const reclipModal = ref(null)
