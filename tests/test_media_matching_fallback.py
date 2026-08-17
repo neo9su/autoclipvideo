@@ -64,3 +64,31 @@ async def test_absent_source_media_and_srt_is_explicitly_reported() -> None:
         [{"voiceover_text": "脚本", "duration": 2.0}], 4663
     ) == []
     assert "no usable source media/SRT" in matcher.match_error
+
+
+@pytest.mark.asyncio
+async def test_synced_transcribed_source_is_eligible_without_clip_artifact() -> None:
+    """A policy-blocked optional thumbnail must not hide a valid source SRT."""
+    matcher = object.__new__(SemanticMatcher)
+    matcher.model = None
+
+    async def recordings(_group_id: int):
+        return [{
+            "recording_id": 7172,
+            "duration": 42.0,
+            "clip_filename": None,
+            "thumbnail": None,
+            "transcribed": 2,
+            "synced": 1,
+            "clip_error": "local media execution is disabled: thumbnail generation",
+            "srt_entries": [{"idx": 1, "start": 1.0, "end": 6.0, "text": "最终效果展示"}],
+            "transcript_text": "最终效果展示",
+        }]
+
+    matcher._get_group_recordings = recordings
+    matches = await matcher.match_segments_to_recordings(
+        [{"scene_id": 1, "voiceover_text": "最终效果", "duration": 4.0}], 4663
+    )
+
+    assert matches
+    assert matches[0]["matched_recording_id"] == 7172

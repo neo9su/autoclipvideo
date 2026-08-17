@@ -1576,7 +1576,7 @@ async def list_groups():
             SELECT g.*,
                    rm.name as room_name,
                    COUNT(DISTINCT r.id) as clip_count,
-                   SUM(CASE WHEN r.clipped = 2 THEN 1 ELSE 0 END) as ready_count,
+                   SUM(CASE WHEN (r.clipped = 2 OR (r.transcribed = 2 AND r.synced = 1 AND COALESCE(r.local_deleted, 0) = 0)) THEN 1 ELSE 0 END) as ready_count,
                    COUNT(DISTINCT CASE WHEN pt.status IN ('done','publishing','pending','scheduled') THEN pt.id END) as published_count
             FROM clip_groups g
             LEFT JOIN rooms rm ON g.room_id = rm.id

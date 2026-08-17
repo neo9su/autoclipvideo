@@ -573,8 +573,8 @@ class SemanticMatcher:
             async with aiosqlite.connect(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
                 async with db.execute(
-                    "SELECT id, filename, clip_filename, start_time, end_time FROM recordings"
-                    " WHERE group_id = ? AND clipped = 2"
+                    "SELECT id, filename, clip_filename, start_time, end_time, transcribed, synced, local_deleted FROM recordings"
+                    " WHERE group_id = ? AND transcribed = 2 AND synced = 1"
                     " AND (local_deleted = 0 OR local_deleted IS NULL)"
                     " ORDER BY start_time",
                     (group_id,),
@@ -582,6 +582,11 @@ class SemanticMatcher:
                     rows = await cursor.fetchall()
 
             for row in rows:
+                # Clip/thumbnail artifacts are presentation metadata. A
+                # synced remote transcription remains a valid Qianchuan source
+                # even when local thumbnail generation was policy-blocked.
+                if row["transcribed"] != 2 or row["synced"] != 1 or row["local_deleted"]:
+                    continue
                 # 计算实际文件时长（用 ffprobe，而非数据库的 start/end time）
                 source_filename = row["filename"]
                 clip_filename = row["clip_filename"]
@@ -590,6 +595,10 @@ class SemanticMatcher:
                 if not source_path or not source_path.is_file():
                     logger.warning("Skipping recording %s: source media is absent", source_filename)
                     continue
+                # A thumbnail is presentation metadata, not source media.  In
+                # GPU-only deployments thumbnail generation is intentionally
+                # rejected locally, so a synced/transcribed recording must
+                # remain eligible even when no clipped variant exists yet.
                 media_filename = clip_filename if clip_path and clip_path.is_file() else source_filename
                 filepath = clip_path if clip_path and clip_path.is_file() else source_path
                 duration = 30.0
