@@ -55,6 +55,8 @@ async def _insert_recording(db_path: str, **values) -> None:
         "synced": 0,
         "transcribed": 0,
         "local_deleted": 0,
+        "duration_seconds": 60.0,
+        "duration_status": "accepted",
     }
     defaults.update(values)
     columns = ", ".join(defaults)
@@ -109,6 +111,8 @@ async def test_transcribe_queue_includes_finished_unsynced_recording_with_file(b
             start_time=started_at,
             end_time=ended_at,
             size_bytes=source_path.stat().st_size,
+            duration_seconds=28.0,
+            duration_status="accepted",
         )
 
         response = await backend_main.get_transcribe_queue()
@@ -117,6 +121,37 @@ async def test_transcribe_queue_includes_finished_unsynced_recording_with_file(b
         assert response["jobs"][0]["status"] == "待上传"
     finally:
         source_path.unlink(missing_ok=True)
+        Path(db_path).unlink(missing_ok=True)
+
+
+async def test_transcribe_queue_excludes_short_and_unavailable_recordings(backend_main) -> None:
+    fd, db_path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.unlink(db_path)
+    try:
+        await _create_queue_test_db(backend_main, db_path)
+        await _insert_recording(
+            db_path,
+            id=105,
+            filename="short_recording.mp4",
+            duration_seconds=27.99,
+            duration_status="too_short",
+            skip_reason="时长不足",
+        )
+        await _insert_recording(
+            db_path,
+            id=106,
+            filename="unavailable_recording.mp4",
+            duration_seconds=None,
+            duration_status="duration_unavailable",
+            skip_reason="时长不可用",
+        )
+
+        response = await backend_main.get_transcribe_queue()
+
+        assert response["jobs"] == []
+        assert response["total"] == response["session_done"]
+    finally:
         Path(db_path).unlink(missing_ok=True)
 
 
@@ -224,6 +259,7 @@ async def main_test() -> None:
     backend_main = _load_backend_main()
     await test_transcribe_queue_excludes_ghost_open_recording(backend_main)
     await test_transcribe_queue_includes_finished_unsynced_recording_with_file(backend_main)
+    await test_transcribe_queue_excludes_short_and_unavailable_recordings(backend_main)
     await test_stale_open_cleanup_keeps_recent_active_recording(backend_main)
     await test_stale_job_recovery_resets_only_matching_recording(backend_main)
     test_transcription_watchdog_contract_is_present()

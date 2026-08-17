@@ -118,6 +118,8 @@ def _is_finished_unsynced_upload_candidate(row) -> bool:
         return False
     if not row["end_time"] or row["end_time"] == row["start_time"]:
         return False
+    if row["duration_status"] != "accepted":
+        return False
     return _recording_file_exists(row["filename"])
 
 
@@ -992,16 +994,29 @@ async def upload_recording(room_id: int, file: UploadFile = File(...), srt: Opti
             f.write(chunk)
             size_bytes += len(chunk)
 
+    # Never trust client metadata: probe the stored media before allowing any
+    # transcription or editing work. Failed probes are retained but unavailable.
+    from duration_policy import classify_duration, duration_reason
+    from transcribe import _get_video_duration
+    probed_duration = await _get_video_duration(filepath)
+    duration_status = classify_duration(probed_duration)
+    skip_reason = duration_reason(probed_duration) or None
+
     start_time = now.isoformat()
     async with aio_connect() as db:
         cur = await db.execute(
-            "INSERT INTO recordings (room_id, filename, start_time, end_time, size_bytes, synced, clip_count) VALUES (?, ?, ?, ?, ?, 0, ?)",
-            (room_id, filename, start_time, start_time, size_bytes, clip_count),
+            "INSERT INTO recordings (room_id, filename, start_time, end_time, size_bytes, synced, clip_count, duration_seconds, duration_status, skip_reason) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)",
+            (room_id, filename, start_time, start_time, size_bytes, clip_count, probed_duration or None, duration_status, skip_reason),
         )
         await db.commit()
         recording_id = cur.lastrowid
 
     asyncio.create_task(_generate_upload_thumb(recording_id, filepath))
+
+    if duration_status != "accepted":
+        return {"id": recording_id, "filename": filename, "size_bytes": size_bytes,
+                "gpu_job_id": None, "duration_status": duration_status,
+                "skip_reason": skip_reason}
 
     # If SRT is provided, skip GPU transcription and trigger clipping immediately
     if srt is not None:
@@ -1052,7 +1067,7 @@ async def list_recordings(room_id: int):
     async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT * FROM recordings WHERE room_id = ? ORDER BY start_time DESC LIMIT 500",
+            "SELECT * FROM recordings WHERE room_id = ? AND duration_status = 'accepted' ORDER BY start_time DESC LIMIT 500",
             (room_id,)
         ) as cur:
             rows = await cur.fetchall()
@@ -1060,17 +1075,17 @@ async def list_recordings(room_id: int):
 
 
 _STATUS_WHERE = {
-    "transcribe_running": "r.transcribed = 1",
-    "transcribe_pending": "r.transcribed = 0 AND r.local_deleted = 0 AND r.end_time IS NOT NULL",
-    "transcribe_failed":  "r.transcribed = -1 AND (r.skip_reason IS NULL OR r.skip_reason = '')",
-    "clip_running":       "r.clipped = 1",
-    "clip_pending":       "r.transcribed = 2 AND r.clipped = 0",
-    "clip_failed":        "r.clipped = -1 AND (r.skip_reason IS NULL OR r.skip_reason != '已手动清除')",
-    "running":            "(r.transcribed = 1 OR r.clipped = 1)",
+    "transcribe_running": "r.transcribed = 1 AND r.duration_status = 'accepted'",
+    "transcribe_pending": "r.transcribed = 0 AND r.local_deleted = 0 AND r.end_time IS NOT NULL AND r.duration_status = 'accepted'",
+    "transcribe_failed":  "r.transcribed = -1 AND (r.skip_reason IS NULL OR r.skip_reason = '') AND r.duration_status = 'accepted'",
+    "clip_running":       "r.clipped = 1 AND r.duration_status = 'accepted'",
+    "clip_pending":       "r.transcribed = 2 AND r.clipped = 0 AND r.duration_status = 'accepted'",
+    "clip_failed":        "r.clipped = -1 AND (r.skip_reason IS NULL OR r.skip_reason != '已手动清除') AND r.duration_status = 'accepted'",
+    "running":            "(r.transcribed = 1 OR r.clipped = 1) AND r.duration_status = 'accepted'",
     # top-level filter bar shortcuts
-    "success":  "r.clipped = 2",
-    "failed":   "((r.transcribed = -1 OR r.clipped = -1) AND (r.skip_reason IS NULL OR r.skip_reason = ''))",
-    "active":   "(r.transcribed = 1 OR r.clipped = 1)",
+    "success":  "r.clipped = 2 AND r.duration_status = 'accepted'",
+    "failed":   "((r.transcribed = -1 OR r.clipped = -1) AND (r.skip_reason IS NULL OR r.skip_reason = '') AND r.duration_status = 'accepted')",
+    "active":   "(r.transcribed = 1 OR r.clipped = 1) AND r.duration_status = 'accepted'",
 }
 
 _SORT_COLS = {
@@ -1126,12 +1141,14 @@ async def bulk_recording_clips(ids: str = ""):
         # Only return the latest retry's clips (highest id per recording+variant)
         async with db.execute(
             f"""SELECT rc.* FROM recording_clips rc
+                JOIN recordings r ON r.id = rc.recording_id
                 INNER JOIN (
                     SELECT recording_id, variant_idx, MAX(id) as max_id
                     FROM recording_clips
                     WHERE recording_id IN ({placeholders})
                     GROUP BY recording_id, variant_idx
                 ) latest ON rc.id = latest.max_id
+                WHERE r.duration_status = 'accepted'
                 ORDER BY rc.recording_id, rc.variant_idx ASC""",
             id_list,
         ) as cur:
@@ -1153,6 +1170,7 @@ async def list_clips():
             JOIN rooms rm ON r.room_id = rm.id
             LEFT JOIN recording_clips rc ON rc.recording_id = r.id AND rc.variant_idx = 0
             WHERE r.clipped = 2 AND r.clip_filename IS NOT NULL
+              AND r.duration_status = 'accepted'
             ORDER BY r.start_time DESC
         """) as cur:
             rows = await cur.fetchall()
@@ -1617,7 +1635,7 @@ async def get_group(group_id: int):
         async with db.execute(
             """SELECT id, filename, clip_filename, thumbnail, start_time, end_time,
                       session_label, has_tryon, has_promotion, transcribed, clipped, transcribe_error
-               FROM recordings WHERE group_id = ? ORDER BY start_time ASC""",
+               FROM recordings WHERE group_id = ? AND duration_status = 'accepted' ORDER BY start_time ASC""",
             (group_id,)
         ) as cur:
             recs = await cur.fetchall()
@@ -1764,12 +1782,6 @@ async def retry_publish_styles(group_id: int, body: dict = Body({})):
     for version in versions:
         asyncio.create_task(_run_variant_pipeline(group_id, version, status_claimed=True))
     return {"group_id": group_id, "status": "queued", "versions": versions}
-
-
-@app.post("/api/groups/{group_id}/retry-styles/{version}")
-async def retry_publish_style(group_id: int, version: str):
-    """Queue exactly one publish style for an independent UI retry action."""
-    return await retry_publish_styles(group_id, {"version": version})
 
 
 @app.post("/api/groups/{group_id}/retry-director")
@@ -2268,16 +2280,35 @@ async def upload_custom_group_video(group_id: int, file: UploadFile = File(...),
             f.write(chunk)
             size_bytes += len(chunk)
 
+    # Probe the stored bytes, never client-supplied metadata, before allowing
+    # this alternate upload path to enter transcription or clipping.
+    from duration_policy import classify_duration, duration_reason
+    from transcribe import _get_video_duration
+    duration = await _get_video_duration(filepath)
+    duration_status = classify_duration(duration)
+    skip_reason = duration_reason(duration) or None
+
     start_time = now.isoformat()
     async with aio_connect() as db:
         cur = await db.execute(
-            "INSERT INTO recordings (room_id, filename, start_time, end_time, size_bytes, synced, clip_count, group_id) VALUES (?, ?, ?, ?, ?, 0, ?, ?)",
-            (room_id, filename, start_time, start_time, size_bytes, clip_count, group_id),
+            "INSERT INTO recordings (room_id, filename, start_time, end_time, size_bytes, synced, clip_count, group_id, duration_seconds, duration_status, skip_reason) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)",
+            (room_id, filename, start_time, start_time, size_bytes, clip_count, group_id,
+             duration or None, duration_status, skip_reason),
         )
         await db.commit()
         recording_id = cur.lastrowid
 
     asyncio.create_task(_generate_upload_thumb(recording_id, filepath))
+
+    if duration_status != "accepted":
+        return {
+            "id": recording_id,
+            "filename": filename,
+            "size_bytes": size_bytes,
+            "gpu_job_id": None,
+            "duration_status": duration_status,
+            "skip_reason": skip_reason,
+        }
 
     from comfyui_client import free_vram
     await free_vram()
@@ -2338,22 +2369,28 @@ async def import_group_videos(group_id: int, body: ImportVideosRequest):
 
             filename = os.path.basename(abs_path)
             size = os.path.getsize(abs_path)
+            from duration_policy import classify_duration, duration_reason
+            from transcribe import _get_video_duration
+            duration = await _get_video_duration(abs_path)
+            duration_status = classify_duration(duration)
+            skip_reason = duration_reason(duration) or None
 
             # Upsert: if already in DB, update group_id; else insert
             async with db.execute("SELECT id FROM recordings WHERE filename = ?", (filename,)) as cur:
                 existing = await cur.fetchone()
             if existing:
                 await db.execute(
-                    "UPDATE recordings SET group_id = ?, local_deleted = 0 WHERE id = ?",
-                    (group_id, existing["id"]),
+                    "UPDATE recordings SET group_id = ?, local_deleted = 0, duration_seconds = ?, duration_status = ?, skip_reason = ? WHERE id = ?",
+                    (group_id, duration or None, duration_status, skip_reason, existing["id"]),
                 )
             else:
                 imported_at = datetime.utcnow().isoformat()
                 await db.execute(
                     """INSERT INTO recordings
-                       (room_id, filename, start_time, end_time, size_bytes, group_id, synced, transcribed, clipped, local_deleted, segment_index)
-                       VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0)""",
-                    (room_id, filename, imported_at, imported_at, size, group_id),
+                       (room_id, filename, start_time, end_time, size_bytes, group_id, synced, transcribed, clipped, local_deleted, segment_index, duration_seconds, duration_status, skip_reason)
+                       VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, ?, ?, ?, ?)""",
+                    (room_id, filename, imported_at, imported_at, size, group_id,
+                     duration or None, duration_status, skip_reason),
                 )
             imported += 1
 
@@ -2892,14 +2929,16 @@ async def get_transcribe_queue(limit: int = Query(default=100, ge=1, le=500)):
         async with db.execute(
             """SELECT r.id, r.filename, r.transcribed, r.transcribe_error, r.start_time,
                       r.end_time, r.gpu_job_id, r.synced, r.local_deleted, r.size_bytes,
+                      r.duration_seconds, r.duration_status, r.skip_reason,
                       rm.name as room_name
                FROM recordings r LEFT JOIN rooms rm ON r.room_id = rm.id
-               WHERE (r.transcribed IN (0, 1) AND (r.synced = 1 OR r.gpu_job_id IS NOT NULL))
+               WHERE r.duration_status = 'accepted'
+                 AND ((r.transcribed IN (0, 1) AND (r.synced = 1 OR r.gpu_job_id IS NOT NULL))
                   OR (r.transcribed = 0
                       AND r.synced = 0
                       AND r.local_deleted = 0
                       AND r.end_time IS NOT NULL
-                      AND r.end_time != r.start_time)
+                      AND r.end_time != r.start_time))
                ORDER BY r.id ASC
                LIMIT ?""", (limit,)
         ) as cur:
@@ -2953,6 +2992,8 @@ async def get_transcribe_queue(limit: int = Query(default=100, ge=1, le=500)):
             "pct": pct,
             "queue_pos": pos,
             "size_bytes": row["size_bytes"],
+            "duration_seconds": row["duration_seconds"],
+            "duration_status": row["duration_status"],
         })
 
     waiting_jobs = sum(1 for job in jobs if job["level"] != "running")
@@ -3421,12 +3462,12 @@ async def get_stats():
         db.row_factory = aiosqlite.Row
         rows = await db.execute_fetchall("""
             SELECT
-                SUM(CASE WHEN transcribed = 0 AND local_deleted = 0 AND end_time IS NOT NULL THEN 1 ELSE 0 END) AS transcribe_pending,
-                SUM(CASE WHEN transcribed = 1 THEN 1 ELSE 0 END)               AS transcribe_running,
-                SUM(CASE WHEN transcribed = -1 THEN 1 ELSE 0 END)              AS transcribe_failed,
-                SUM(CASE WHEN transcribed = 2 AND clipped = 0 THEN 1 ELSE 0 END) AS clip_pending,
-                SUM(CASE WHEN clipped = 1 THEN 1 ELSE 0 END)                   AS clip_running,
-                SUM(CASE WHEN clipped = -1 THEN 1 ELSE 0 END)                  AS clip_failed
+                SUM(CASE WHEN transcribed = 0 AND local_deleted = 0 AND end_time IS NOT NULL AND duration_status = 'accepted' THEN 1 ELSE 0 END) AS transcribe_pending,
+                SUM(CASE WHEN transcribed = 1 AND duration_status = 'accepted' THEN 1 ELSE 0 END) AS transcribe_running,
+                SUM(CASE WHEN transcribed = -1 AND duration_status = 'accepted' THEN 1 ELSE 0 END) AS transcribe_failed,
+                SUM(CASE WHEN transcribed = 2 AND clipped = 0 AND duration_status = 'accepted' THEN 1 ELSE 0 END) AS clip_pending,
+                SUM(CASE WHEN clipped = 1 AND duration_status = 'accepted' THEN 1 ELSE 0 END) AS clip_running,
+                SUM(CASE WHEN clipped = -1 AND duration_status = 'accepted' THEN 1 ELSE 0 END) AS clip_failed
             FROM recordings
         """)
         r = dict(rows[0])
