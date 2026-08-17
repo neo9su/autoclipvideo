@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "backend"))
 
-from editor import Seg, build_ass, parse_srt, resolve_subtitle_font_path
+from editor import Seg, build_ass, parse_srt, resolve_subtitle_font_path, _conservative_keyword_cues
 
 
 def test_parse_srt_preserves_multiline_and_bom(tmp_path):
@@ -126,3 +126,24 @@ def test_ass_escapes_source_override_characters_without_dropping_text():
     ass = build_ass(selected, source_cues, realistic=True)
 
     assert "保留\\\\路径 \\{原文\\}" in ass
+
+
+def test_conservative_ass_is_two_lines_and_uses_yellow_white_outline_for_keywords():
+    text = "这是一个很长的显白自然字幕内容用于检查保守版安全边距"
+    cue = Seg(idx=1, start=0, end=3, text=text)
+
+    ass = build_ass([cue], [cue], conservative=True)
+    dialogue = next(line for line in ass.splitlines() if line.startswith("Dialogue:"))
+    rendered = dialogue.split(",,0,0,0,,", 1)[1]
+    assert rendered.count(r"\N") <= 1
+    assert r"{\c&H0000FFFF&\3c&H00FFFFFF&\bord3\b1}" in ass
+    assert "显白" in ass and "自然" in ass
+
+
+def test_conservative_keyword_cues_are_timed_once_per_displayed_keyword():
+    cue = Seg(idx=7, start=10, end=12, text="显白自然")
+
+    cues = _conservative_keyword_cues([cue], [cue])
+    assert [item["keyword"] for item in cues] == ["自然", "显白"]
+    assert [item["time"] for item in cues] == [0.08, 0.08]
+    assert all(item["reason"] == "conservative_keyword_emphasis" for item in cues)
