@@ -2277,16 +2277,35 @@ async def upload_custom_group_video(group_id: int, file: UploadFile = File(...),
             f.write(chunk)
             size_bytes += len(chunk)
 
+    # Probe the stored bytes, never client-supplied metadata, before allowing
+    # this alternate upload path to enter transcription or clipping.
+    from duration_policy import classify_duration, duration_reason
+    from transcribe import _get_video_duration
+    duration = await _get_video_duration(filepath)
+    duration_status = classify_duration(duration)
+    skip_reason = duration_reason(duration) or None
+
     start_time = now.isoformat()
     async with aio_connect() as db:
         cur = await db.execute(
-            "INSERT INTO recordings (room_id, filename, start_time, end_time, size_bytes, synced, clip_count, group_id) VALUES (?, ?, ?, ?, ?, 0, ?, ?)",
-            (room_id, filename, start_time, start_time, size_bytes, clip_count, group_id),
+            "INSERT INTO recordings (room_id, filename, start_time, end_time, size_bytes, synced, clip_count, group_id, duration_seconds, duration_status, skip_reason) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)",
+            (room_id, filename, start_time, start_time, size_bytes, clip_count, group_id,
+             duration or None, duration_status, skip_reason),
         )
         await db.commit()
         recording_id = cur.lastrowid
 
     asyncio.create_task(_generate_upload_thumb(recording_id, filepath))
+
+    if duration_status != "accepted":
+        return {
+            "id": recording_id,
+            "filename": filename,
+            "size_bytes": size_bytes,
+            "gpu_job_id": None,
+            "duration_status": duration_status,
+            "skip_reason": skip_reason,
+        }
 
     from comfyui_client import free_vram
     await free_vram()
