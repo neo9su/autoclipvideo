@@ -655,6 +655,7 @@ async def lifespan(app: FastAPI):
         )
         tasks.extend([
             asyncio.create_task(_run_startup_recovery()),
+            asyncio.create_task(_start_room_monitors()),
             asyncio.create_task(poll_transcriptions(broadcast_fn=broadcast)),
             asyncio.create_task(backfill_auto_merge()),
             asyncio.create_task(poll_publish_tasks(broadcast_fn=broadcast)),
@@ -666,7 +667,8 @@ async def lifespan(app: FastAPI):
             asyncio.create_task(_periodic_qianchuan_dispatch()),
             asyncio.create_task(_periodic_clip_dispatch()),
         ])
-        await monitor.start_all()
+        # Room monitor startup may touch the database and stream services. Keep
+        # it in the worker task set so lifespan yields without waiting for it.
     yield
     for task in tasks:
         task.cancel()
@@ -677,6 +679,16 @@ async def lifespan(app: FastAPI):
             pass
     for room_id in list(monitor._tasks.keys()):
         await monitor.remove_room(room_id)
+
+
+async def _start_room_monitors() -> None:
+    """Start stream monitors without delaying API readiness."""
+    try:
+        await monitor.start_all()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("Room monitor startup failed; API workers remain available")
 
 
 async def _run_startup_recovery() -> None:
@@ -733,7 +745,7 @@ async def health():
         )
         # Probe remote backend liveness (best-effort, non-blocking)
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with httpx.AsyncClient(timeout=1.5) as client:
                 resp = await client.get(f"{REMOTE_BACKEND_URL}/")
                 result["remote_backend_reachable"] = resp.status_code < 500
         except Exception:
@@ -2624,7 +2636,7 @@ async def gpu_status():
         # unreachable.  Keep this probe remote-only; there is no local fallback.
         async def _aio_get(url):
             try:
-                async with httpx.AsyncClient(timeout=5) as _s:
+                async with httpx.AsyncClient(timeout=1.5) as _s:
                     _r = await _s.get(url)
                     try:
                         _body = _r.json()

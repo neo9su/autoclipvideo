@@ -115,6 +115,16 @@ class SemanticMatcher:
             '场景展示': ['日常', '约会', '工作', '场合']
         }
     
+    def _set_match_error(self, message: Optional[str]) -> None:
+        """Persist a diagnostic even for recovery-created lightweight instances."""
+        self.match_error = message
+
+    def _source_eligibility_sql(self) -> str:
+        """Return the source predicate appropriate for this matcher policy."""
+        if getattr(self, "allow_thumbnail_optional_sources", False):
+            return qianchuan_source_eligibility_sql("recordings")
+        return "recordings.clipped = 2 AND recordings.duration_status = 'accepted'"
+
     async def match_segments_to_recordings(self, script_segments: List[Dict],
                                          group_id: int) -> List[Dict]:
         """
@@ -127,12 +137,12 @@ class SemanticMatcher:
         时间排斥机制：每段匹配后设置冷却区（±15s），后续段落优先选择
         远离已用区间的时间点，确保画面多样性。
         """
-        self.match_error = None
+        self._set_match_error(None)
         try:
             await self._ensure_model_loaded()
             recordings = await self._get_group_recordings(group_id)
             if not recordings:
-                self.match_error = (
+                self._set_match_error(
                     f"group {group_id} has no usable source media/SRT; "
                     "verify the recording row and non-empty source sidecar"
                 )
@@ -211,7 +221,7 @@ class SemanticMatcher:
 
         except Exception as e:
             logger.error(f"Segment matching failed for group {group_id}: {e}")
-            self.match_error = f"source matching failed: {e}"
+            self._set_match_error(f"source matching failed: {e}")
             return await self._get_fallback_matches(script_segments, group_id)
 
     async def _ensure_model_loaded(self) -> None:
@@ -612,11 +622,9 @@ class SemanticMatcher:
             async with aiosqlite.connect(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
                 async with db.execute(
-                    "SELECT id, filename, clip_filename, start_time, end_time, clip_error "
-                    "FROM recordings AS r WHERE group_id = ? AND "
-                    f"{qianchuan_source_eligibility_sql('r')} "
-                    "AND duration_status = 'accepted' "
-                    "AND (local_deleted = 0 OR local_deleted IS NULL)"
+                    "SELECT id, filename, clip_filename, clip_error, start_time, end_time FROM recordings"
+                    f" WHERE group_id = ? AND {self._source_eligibility_sql()}"
+                    " AND (local_deleted = 0 OR local_deleted IS NULL)"
                     " ORDER BY start_time",
                     (group_id,),
                 ) as cursor:
@@ -677,9 +685,8 @@ class SemanticMatcher:
                     "duration": duration,
                 })
 
-        except Exception as exc:
-            self.match_error = f"source media lookup failed for group {group_id}: {exc}"
-            logger.error(self.match_error)
+        except Exception as e:
+            logger.error(f"Failed to get recordings for group {group_id}: {e}")
 
         return recordings
 
