@@ -456,8 +456,9 @@ def _find_subtitle_font_candidates(fonts_dir: Path) -> list[Path]:
 # ── Highlight keywords: product descriptors + scene nouns ─────────────────────
 # ASS colors: &HAABBGGRR& (AA=00 opaque, bytes in B-G-R order)
 # Warm gold #FFCC00 → R=FF G=CC B=00 → BGR 00,CC,FF → &H0000CCFF&
-_HIGHLIGHT_COLOR = "&H000000FF&"   # legacy red (ASS BGR)
-_CONSERVATIVE_HIGHLIGHT_COLOR = "&H0000CCFF&"  # yellow (#FFCC00, ASS BGR)
+_HIGHLIGHT_COLOR = "&H000000FF&"   # red (ASS BGR)
+_CONSERVATIVE_KEYWORD_COLOR = "&H0000CCFF&"  # yellow (#FFCC00, ASS BGR)
+_CONSERVATIVE_KEYWORD_STROKE = "&H00FFFFFF&"
 
 _HIGHLIGHT_PRODUCT: set[str] = {
     # 效果形容词
@@ -497,53 +498,6 @@ _HIGHLIGHT_KW: set[str] = _HIGHLIGHT_PRODUCT | _HIGHLIGHT_SCENE | _HIGHLIGHT_ACT
 
 # Longest-first so "真人发丝" matches before "真发", "高颅顶" before "颅顶" etc.
 _SORTED_HIGHLIGHT_KWS: list[str] = sorted(_HIGHLIGHT_KW, key=len, reverse=True)
-
-
-def build_conservative_sound_cues(
-    selected: List[Seg], all_segs: List[Seg], sfx_path: Optional[str] = None
-) -> list[dict]:
-    """Return one idempotent emphasis cue for each displayed conservative keyword.
-
-    Cue identity follows the same source-cue/selected-window pair used by ASS
-    rendering, so retries cannot add a second sound for the same displayed cue.
-    The renderer may omit the cue when its audio backend has no SFX asset.
-    """
-    from video_editing_skills import ensure_sfx_asset
-
-    sfx = ensure_sfx_asset("emphasis_pop", sfx_path)
-    if not sfx:
-        return []
-    cues: list[dict] = []
-    rendered: set[tuple[int, int]] = set()
-    cursor = 0.0
-    for selected_index, selected_seg in enumerate(selected):
-        incoming = 0.0
-        if selected_index:
-            parts = (selected_seg.transition or "cut:0").split(":", 1)
-            incoming = max(0.0, min(float(parts[1]) if len(parts) == 2 else 0.0, selected_seg.duration))
-            cursor += selected_seg.duration - incoming
-        else:
-            cursor += selected_seg.duration
-        offset = cursor - selected_seg.duration if selected_index == 0 else cursor - selected_seg.duration + incoming
-        for cue in all_segs:
-            overlap_start = max(cue.start, selected_seg.start)
-            overlap_end = min(cue.end, selected_seg.end)
-            if overlap_end - overlap_start < 0.15 or not any(kw in cue.text for kw in _SORTED_HIGHLIGHT_KWS):
-                continue
-            identity = (cue.idx, selected_index)
-            if identity in rendered:
-                continue
-            rendered.add(identity)
-            keyword = next(kw for kw in _SORTED_HIGHLIGHT_KWS if kw in cue.text)
-            cues.append({
-                "time": round(max(0.0, offset + overlap_start - selected_seg.start + 0.12), 3),
-                "keyword": keyword,
-                "sfx_path": sfx,
-                "gain_db": -15,
-                "reason": "conservative_keyword_emphasis",
-                "cue_id": f"conservative:{cue.idx}:{selected_index}",
-            })
-    return cues
 
 
 # ── Gradient border constants (3-layer stacking) ──────────────────────────────
@@ -621,8 +575,9 @@ def _annotate_text(text: str, conservative: bool = False) -> tuple[str, bool]:
         if kw in text:
             if conservative:
                 open_tag = (
-                    "{\\c" + _CONSERVATIVE_HIGHLIGHT_COLOR
-                    + "\\3c&H00FFFFFF&\\bord3\\shad0}"
+                    "{\\c" + _CONSERVATIVE_KEYWORD_COLOR
+                    + "\\3c" + _CONSERVATIVE_KEYWORD_STROKE
+                    + "\\bord3}"
                 )
             else:
                 open_tag = "{\\c" + _HIGHLIGHT_COLOR + "}"
@@ -666,32 +621,28 @@ def build_ass(
     """
     def _format_subtitle_text(text: str) -> str:
         """Preserve source text while adding safe ASS line breaks."""
-        normalized_lines: list[str] = []
-        for source_line in text.splitlines():
-            normalized_line = re.sub(r"[ \t]+", " ", source_line).strip()
-            if not normalized_line:
-                continue
-            normalized_lines.append(normalized_line)
+        wrapped_lines: list[str] = []
+        normalized_lines = [
+            re.sub(r"[ \t]+", " ", source_line).strip()
+            for source_line in text.splitlines()
+            if re.sub(r"[ \t]+", " ", source_line).strip()
+        ]
         if conservative:
-            compact_text = " ".join(normalized_lines)
-            if len(compact_text) > 14:
-                # A conservative cue is one screen: retain all copy but never
-                # emit a third ASS line, including when source SRT has multiple
-                # physical lines already.
-                midpoint = (len(compact_text) + 1) // 2
-                for keyword in _SORTED_HIGHLIGHT_KWS:
-                    keyword_start = compact_text.find(keyword)
-                    if keyword_start < midpoint < keyword_start + len(keyword):
-                        midpoint = keyword_start + len(keyword)
-                wrapped_lines = [compact_text[:midpoint], compact_text[midpoint:]]
+            # Conservative captions are deliberately constrained to two
+            # lines.  Flatten source line breaks first so malformed upstream
+            # cues cannot create a third rendered line.
+            normalized_text = " ".join(normalized_lines)
+            if len(normalized_text) <= 14:
+                wrapped_lines.append(normalized_text)
             else:
-                wrapped_lines = normalized_lines
+                split_at = min(14, max(1, (len(normalized_text) + 1) // 2))
+                wrapped_lines.extend((normalized_text[:split_at], normalized_text[split_at:]))
         else:
-            wrapped_lines = [
-                normalized_line[start:start + 14]
-                for normalized_line in normalized_lines
-                for start in range(0, len(normalized_line), 14)
-            ]
+            for normalized_line in normalized_lines:
+                wrapped_lines.extend(
+                    normalized_line[start:start + 14]
+                    for start in range(0, len(normalized_line), 14)
+                )
         escaped_lines = [
             line.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
             for line in wrapped_lines
@@ -733,6 +684,51 @@ def build_ass(
             if raw_text:
                 dialogue.append(f"Dialogue: 0,{ts0},{ts1},XQN,,0,0,0,,{_BORDER_TEXT}{annotated}")
     return header + "\n".join(dialogue) + "\n"
+
+
+def build_conservative_sound_cues(
+    selected: List[Seg],
+    all_segs: List[Seg],
+    *,
+    sfx_path: Optional[str] = None,
+) -> List[dict]:
+    """Return one idempotent emphasis cue for each displayed conservative keyword."""
+    from video_editing_skills import ensure_sfx_asset
+
+    sfx = ensure_sfx_asset("emphasis_pop", sfx_path)
+    if not sfx:
+        return []
+    cues: list[dict] = []
+    seen: set[tuple[int, str, int]] = set()
+    cursor = 0.0
+    for index, segment in enumerate(selected):
+        if index:
+            cursor += segment.duration
+        for source in all_segs:
+            overlap_start = max(source.start, segment.start)
+            overlap_end = min(source.end, segment.end)
+            if overlap_end - overlap_start < 0.15:
+                continue
+            text = source.text or ""
+            matches = sorted(
+                ((text.find(keyword), keyword) for keyword in _SORTED_HIGHLIGHT_KWS if keyword in text),
+                key=lambda match: (match[0], -len(match[1])),
+            )
+            for _, keyword in matches:
+                key = (source.idx, keyword, index)
+                if key in seen:
+                    continue
+                seen.add(key)
+                cue_time = cursor + max(0.0, overlap_start - segment.start) + 0.05
+                cues.append({
+                    "time": round(cue_time, 3),
+                    "keyword": keyword,
+                    "sfx_path": sfx,
+                    "gain_db": -15,
+                    "reason": "conservative_keyword",
+                    "idempotency_key": f"conservative:{source.idx}:{keyword}:{index}",
+                })
+    return cues
 
 
 FADE_DUR = 1.5       # video-to-video direct crossfade (seconds)
@@ -2928,9 +2924,9 @@ async def _edit_via_gpu(
             for s in selected
         ],
         "preserve_original_audio": realistic,
+        "sound_cues": sound_cues,
         "ass_content": ass_content,
         "thumb_seek": best_seg.start + 1.0,
-        "sound_cues": sound_cues,
     }
 
     import aiohttp as _aiohttp
@@ -3084,7 +3080,6 @@ async def _fast_local_clip(
     segs: List[Seg],
     out: str,
     on_progress=None,
-    conservative: bool = False,
 ) -> bool:
     reject_local_media("local clip encoder")
     """
@@ -3092,7 +3087,7 @@ async def _fast_local_clip(
     Stream-copy segment extraction + concat + single re-encode pass.
     Skips all transitions and pre-processing.  ~10-30s vs 30+ minutes.
     """
-    ass_content = build_ass(selected, segs, conservative=conservative)
+    ass_content = build_ass(selected, segs)
     has_subs = "Dialogue:" in ass_content
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -3403,10 +3398,7 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
                 raise
 
     reject_local_media("clip generation")
-    if await _fast_local_clip(
-        mp4_path, selected, source_segs, out_path, on_progress=on_progress,
-        conservative=clip_engine == "conservative",
-    ):
+    if await _fast_local_clip(mp4_path, selected, source_segs, out_path, on_progress=on_progress):
         try:
             if on_progress:
                 await on_progress("thumbnail", 0, 1)
@@ -3606,6 +3598,7 @@ async def edit_recording_multi(
                     mp4_filename, _room_id_v, selected, source_segs, out_path, on_progress,
                     mp4_path=mp4_path,
                     realistic=clip_engine in ("realistic", "conservative"),
+                    conservative=clip_engine == "conservative",
                 )
                 if gpu_result:
                     try:

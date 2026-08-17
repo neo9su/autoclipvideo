@@ -734,7 +734,7 @@ async def _do_clip_job(
     ass_content: str,
     thumb_seek: float,
     preserve_original_audio: bool = False,
-    sound_cues: list | None = None,
+    sound_cues: Optional[list] = None,
 ):
     """Full NVENC clip pipeline: preprocess → xfade merge → subtitle burn → thumbnail."""
     out_dir = os.path.join(STORAGE_DIR, "clips", job_id)
@@ -806,38 +806,43 @@ async def _do_clip_job(
         _update_clip_job(job_id, phase="final", pct=75)
         final_out = os.path.join(out_dir, "clip.mp4")
 
+        cue_inputs: list[str] = []
+        cue_filters: list[str] = []
+        valid_sound_cues = [
+            cue for cue in (sound_cues or [])
+            if isinstance(cue, dict)
+            and cue.get("sfx_path")
+            and os.path.isfile(str(cue["sfx_path"]))
+        ]
+        for cue_index, cue in enumerate(valid_sound_cues):
+            if not isinstance(cue, dict) or not cue.get("sfx_path"):
+                continue
+            cue_path = str(cue["sfx_path"])
+            input_index = 1 + len(cue_inputs)
+            # The control plane only passes trusted, pre-generated effect paths;
+            # still use the normal ffmpeg input list so cue timing is explicit.
+            cue_inputs.append(f"[{input_index}:a]")
+            delay_ms = max(0, int(float(cue.get("time") or 0) * 1000))
+            gain_db = float(cue.get("gain_db", -15))
+            cue_filters.append(
+                f"[{input_index}:a]adelay={delay_ms}:all=1,volume={gain_db}dB[kwcue{cue_index}]"
+            )
+
         audio_filter = (
-            "[0:a]aformat=sample_fmts=fltp:channel_layouts=stereo[aout]"
+            "[0:a]aformat=sample_fmts=fltp:channel_layouts=stereo[baseaudio]"
             if preserve_original_audio else
             "[0:a]acompressor=threshold=-25dB:ratio=3:attack=5:release=100:makeup=4dB,"
-            "aformat=sample_fmts=fltp:channel_layouts=stereo[aout]"
+            "aformat=sample_fmts=fltp:channel_layouts=stereo[baseaudio]"
         )
-
-        # Conservative keyword cues are mixed once, after the clip timeline is
-        # assembled.  cue_id deduplication keeps retries idempotent.
-        cue_inputs = []
-        cue_filters = []
-        seen_cue_ids = set()
-        for cue in sound_cues or []:
-            cue_id = str(cue.get("cue_id") or "")
-            sfx_path = str(cue.get("sfx_path") or "")
-            if not sfx_path or not os.path.exists(sfx_path) or cue_id in seen_cue_ids:
-                continue
-            seen_cue_ids.add(cue_id)
-            input_index = 2 + len(cue_inputs)
-            cue_inputs.append(sfx_path)
-            delay = max(0, int(float(cue.get("time") or 0) * 1000))
-            cue_filters.append(f"[{input_index}:a]adelay={delay}:all=1,volume={float(cue.get('gain_db', -15))}dB[cue{input_index}]")
-
-        for sfx_path in cue_inputs:
-            cmd.extend(["-i", sfx_path])
-        if cue_filters:
-            cue_labels = "".join(f"[cue{2 + index}]" for index in range(len(cue_inputs)))
-            cue_filters.append(f"[aout]{cue_labels}amix=inputs={len(cue_inputs) + 1}:duration=first:dropout_transition=0[aout_mix]")
-            audio_filter = audio_filter + ";" + ";".join(cue_filters)
-            audio_map = "[aout_mix]"
+        if cue_inputs:
+            cue_labels = [f"[kwcue{i}]" for i in range(len(cue_inputs))]
+            audio_filter += ";" + ";".join(cue_filters)
+            audio_filter += (
+                f";[baseaudio]{''.join(cue_labels)}amix=inputs={len(cue_labels) + 1}:"
+                "duration=first:dropout_transition=0:normalize=0[aout]"
+            )
         else:
-            audio_map = "[aout]"
+            audio_filter = audio_filter.replace("[baseaudio]", "[aout]")
 
         if has_subs:
             # Windows path fix: forward slashes + escape drive colon for ffmpeg filter parser
@@ -854,13 +859,14 @@ async def _do_clip_job(
             else:
                 video_filter = f"[0:v]ass=filename='{escaped}',format=yuv420p[vout]"
             filter_complex = f"{audio_filter};{video_filter}"
-            vmap, amap = "[vout]", audio_map
+            vmap, amap = "[vout]", "[aout]"
         else:
             filter_complex = audio_filter
-            vmap, amap = "0:v", audio_map
+            vmap, amap = "0:v", "[aout]"
 
         rc = await _run_ffmpeg(
             FFMPEG_ASS, "-y", "-i", merged,
+            *sum((["-i", str(cue["sfx_path"])] for cue in valid_sound_cues), []),
             "-filter_complex", filter_complex,
             "-map", vmap, "-map", amap,
             "-pix_fmt", "yuv420p",
@@ -903,7 +909,7 @@ async def _run_clip_job(
     ass_content: str,
     thumb_seek: float,
     preserve_original_audio: bool = False,
-    sound_cues: list | None = None,
+    sound_cues: Optional[list] = None,
 ):
     async with _clip_sem:
         await _do_clip_job(

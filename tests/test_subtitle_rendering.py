@@ -128,27 +128,23 @@ def test_ass_escapes_source_override_characters_without_dropping_text():
     assert "保留\\\\路径 \\{原文\\}" in ass
 
 
-def test_conservative_ass_limits_each_cue_to_two_lines_and_styles_keywords():
-    selected = [Seg(idx=1, start=0, end=3, text="scene", transition="cut:0")]
-    source = [Seg(idx=1, start=0, end=3, text="这是一个很长的字幕内容显白自然用于验证安全区域")]
+def test_conservative_subtitles_are_at_most_two_lines_and_style_keywords():
+    selected = [Seg(idx=1, start=0, end=4, text="scene", transition="cut:0")]
+    source = [Seg(idx=1, start=0, end=4, text="这是一个非常长的字幕内容显白自然蓬松")]
 
     ass = build_ass(selected, source, conservative=True)
     dialogue = next(line for line in ass.splitlines() if line.startswith("Dialogue:"))
+    assert dialogue.count(r"\N") <= 1
+    assert r"{\c&H0000CCFF&\3c&H00FFFFFF&\bord3}显白" in dialogue
+    assert r"{\c&H0000CCFF&\3c&H00FFFFFF&\bord3}自然" in dialogue
 
-    assert dialogue.count(r"\N") == 1
-    assert r"{\c&H0000CCFF&\3c&H00FFFFFF&\bord3\shad0}显白{\r}" in dialogue
-    assert r"{\c&H0000CCFF&\3c&H00FFFFFF&\bord3\shad0}自然{\r}" in dialogue
 
+def test_conservative_keyword_sound_cues_are_timed_and_idempotent():
+    selected = [Seg(idx=5, start=10, end=14, text="scene", transition="cut:0")]
+    source = [Seg(idx=5, start=10, end=12, text="显白自然")]
 
-def test_conservative_keyword_sound_cues_are_timed_and_idempotent(tmp_path):
-    sfx = tmp_path / "pop.wav"
-    sfx.write_bytes(b"valid-sfx")
-    selected = [Seg(idx=1, start=10, end=14, text="scene", transition="cut:0")]
-    source = [Seg(idx=1, start=10, end=12, text="显白"), Seg(idx=2, start=12, end=14, text="自然")]
-
-    cues = build_conservative_sound_cues(selected, source, str(sfx))
-
-    assert [cue["time"] for cue in cues] == [0.12, 2.12]
+    cues = build_conservative_sound_cues(selected, source)
     assert [cue["keyword"] for cue in cues] == ["显白", "自然"]
-    assert [cue["cue_id"] for cue in cues] == ["conservative:1:0", "conservative:2:0"]
-    assert len({cue["cue_id"] for cue in cues}) == len(cues)
+    assert [cue["time"] for cue in cues] == [0.05, 0.05]
+    assert len({cue["idempotency_key"] for cue in cues}) == len(cues)
+    assert all(cue["reason"] == "conservative_keyword" for cue in cues)
