@@ -4971,6 +4971,17 @@ async def _periodic_qianchuan_dispatch():
                     """SELECT id FROM clip_groups
                        WHERE classic_status = 2
                          AND qianchuan_status IN (0, -1, -3, -4)
+                         AND EXISTS (
+                           SELECT 1 FROM recordings
+                           WHERE recordings.group_id = clip_groups.id
+                             AND recordings.synced = 1
+                             AND recordings.transcribed = 2
+                             AND recordings.duration_status = 'accepted'
+                             AND (recordings.local_deleted = 0 OR recordings.local_deleted IS NULL)
+                             AND (recordings.clipped = 2 OR
+                                  (recordings.clipped = -1 AND recordings.clip_error LIKE
+                                   '%local media execution is disabled: thumbnail generation%'))
+                         )
                          AND (qianchuan_error IS NULL OR qianchuan_error = '' OR (
                            qianchuan_error NOT LIKE '%no recordings%'
                            AND qianchuan_error NOT LIKE '%recording files missing%'

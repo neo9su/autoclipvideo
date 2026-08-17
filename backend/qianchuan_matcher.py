@@ -166,10 +166,19 @@ async def load_group_context(db_path: str, group_id: int, product_id: Optional[s
             ) as cur:
                 products = [dict(r) for r in await cur.fetchall()]
 
+        async with db.execute("PRAGMA table_info(recordings)") as cur:
+            recording_columns = {row[1] for row in await cur.fetchall()}
+        clip_error_clause = (
+            " OR (clipped = -1 AND clip_error LIKE "
+            "'%local media execution is disabled: thumbnail generation%')"
+            if "clip_error" in recording_columns else ""
+        )
         async with db.execute(
-            """SELECT filename FROM recordings
-               WHERE group_id = ? AND transcribed = 2 AND duration_status = 'accepted'
-               ORDER BY id DESC LIMIT 5""",
+            "SELECT filename FROM recordings "
+            "WHERE group_id = ? AND synced = 1 AND transcribed = 2 "
+            "AND duration_status = 'accepted' AND (clipped = 2"
+            + clip_error_clause
+            + ") ORDER BY id DESC LIMIT 5",
             (group_id,),
         ) as cur:
             recs = await cur.fetchall()
@@ -276,6 +285,18 @@ class QianchuanMatcher(SemanticMatcher):
 
     async def match_qianchuan_segments(self, script_segments: List[Dict], group_id: int) -> List[Dict]:
         matched = await self.match_segments_to_recordings(script_segments, group_id)
+        if len(matched) < len(script_segments):
+            matched_scene_ids = {
+                item.get("script_segment", {}).get("scene_id") for item in matched
+            }
+            missing_scene_ids = [
+                segment.get("scene_id") for segment in script_segments
+                if segment.get("scene_id") not in matched_scene_ids
+            ]
+            self.match_error = (
+                f"group {group_id} matched {len(matched)}/{len(script_segments)} scenes; "
+                f"missing scene ids: {missing_scene_ids}"
+            )
         for item in matched:
             seg = item.get("script_segment") or {}
             text = " ".join([seg.get("text") or seg.get("voiceover_text") or "", " ".join(seg.get("visual_keywords") or [])])
