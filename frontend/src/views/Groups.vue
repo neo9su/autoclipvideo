@@ -219,9 +219,22 @@
                 title="上传参考视频进行学习分析">
                 📤 学习素材
               </button>
+              <button
+                v-if="g.qianchuan_status !== 2"
+                class="btn-qianchuan"
+                :disabled="qianchuanBusy[g.id] || g.qianchuan_status === 1"
+                @click="generateQianchuan(g)">
+                {{ qianchuanBusy[g.id] || g.qianchuan_status === 1 ? '生成中…' : (isQianchuanFailure(g.qianchuan_status) ? '↺ 重试千川版' : '生成千川版') }}
+              </button>
               <template v-if="g.qianchuan_status === 2 && g.qianchuan_available">
                 <button class="btn-action cyan" @click="openQianchuanPreview(g)">▶ 预览</button>
                 <a :href="`${apiBase}/api/groups/${g.id}/qianchuan-download`" class="btn-action cyan" download>↓ 下载</a>
+                <button
+                  class="btn-action orange"
+                  :disabled="qianchuanBusy[g.id]"
+                  @click="generateQianchuan(g)">
+                  {{ qianchuanBusy[g.id] ? '生成中…' : '↺ 重新生成' }}
+                </button>
               </template>
             </div>
           </div>
@@ -919,8 +932,7 @@ function classicIsReady(group) {
 }
 function versionIsReady(group, version) {
   if (version === 'classic') return classicIsReady(group)
-  const file_status = group[`${version}_file_status`]
-  return versionStatus(group, version) === 2 && file_status === 'ready'
+  return versionStatus(group, version) === 2 && group[`${version}_available`] !== false && group[`${version}_file_status`] !== 'missing'
 }
 function versionBusy(group, version) {
   return Boolean(retryBusy.value[`${group.id}:${version}`]) ||
@@ -930,36 +942,33 @@ function versionBusy(group, version) {
 }
 function versionStatusMeta(group, version) {
   const status = versionStatus(group, version)
-  const error = version === 'classic' ? (group.merge_error || group.classic_error) : group[`${version}_error`]
+  const error = versionError(group, version)
+  const prerequisiteReason = versionPrerequisiteReason(group, version)
   if (status === 1 || versionBusy(group, version)) return { label: '生成中', className: 'running', hint: '任务进行中，请勿重复提交。' }
   if (status === 2 && versionIsReady(group, version)) return { label: '已完成', className: 'done', hint: '' }
-  if (version === 'qianchuan' && status === -2) {
-    return {
-      label: '不可用',
-      className: 'blocked',
-      error: summarizeQianchuanError(error),
-      hint: '补充可匹配的录像和 SRT 后再重试。',
-      disabledReason: '缺少可匹配的千川录像或 SRT，请补充素材后重试。',
-    }
-  }
   if (status < 0 || (status === 2 && !versionIsReady(group, version))) {
     return {
       label: '失败',
       className: 'failed',
       error: summarizeStyleError(error) || '结果文件缺失，可重试。',
       hint: '',
-      disabledReason: '',
+      disabledReason: prerequisiteReason,
     }
   }
-  return { label: '未生成', className: 'idle', hint: '', disabledReason: versionPrerequisiteReason(group, version) }
+  return { label: '未生成', className: 'idle', hint: '', disabledReason: prerequisiteReason }
+}
+function versionError(group, version) {
+  if (version === 'classic') return group.merge_error || group.classic_error
+  return group[`${version}_error`]
+}
+function summarizeStyleError(error) {
+  if (!error) return ''
+  return String(error).replace(/\\s+/g, ' ').slice(0, 160)
 }
 function versionTriggerDisabled(group, version) {
   return Boolean(versionPrerequisiteReason(group, version)) || versionBusy(group, version) || versionStatus(group, version) === 1
 }
 function versionPrerequisiteReason(group, version) {
-  if (group[`${version}_available`] === false && version !== 'qianchuan') {
-    return `${versionLabels[version]}当前不可用，请先完成对应前置步骤。`
-  }
   if (version === 'qianchuan' && Number(group.qianchuan_status) === -2) {
     return '缺少可匹配的千川录像或 SRT，请补充素材后重试。'
   }
@@ -1026,8 +1035,6 @@ function styleStatusClass(status) {
   if (status < 0) return 'failed'
   return 'idle'
 }
-function summarizeStyleError(error) { return String(error).replace(/\s+/g, ' ').slice(0, 160) }
-
 // Re-clip (single recording)
 const reclipModal = ref(null)
 const reclipSaving = ref(false)
@@ -1074,11 +1081,6 @@ function formatQianchuanScore(score) {
   const value = Number(score)
   if (!Number.isFinite(value)) return '—'
   return value <= 1 ? `${Math.round(value * 100)}%` : value.toFixed(1)
-}
-
-function summarizeStyleError(error) {
-  if (!error) return ''
-  return String(error).replace(/\s+/g, ' ').slice(0, 160)
 }
 
 function summarizeQianchuanError(error) {
@@ -2012,7 +2014,6 @@ onUnmounted(() => { wsCleanup?.(); stopProgressPolling(); groupsObserver?.discon
 .btn-version-trigger:disabled { opacity: .45; cursor: not-allowed; }
 .five-version-error, .five-version-disabled-reason { color: #f87171; font-size: 11px; line-height: 1.4; margin-top: 7px; word-break: break-word; }
 .five-version-disabled-reason { color: #fbbf24; }
-.style-status.blocked { color: #fbbf24; border-color: rgba(251,191,36,.35); background: rgba(251,191,36,.08); }
 .styles-generation-note { color: #94a3b8; font-size: 11px; }
 @media (max-width: 900px) { .five-version-grid { grid-template-columns: repeat(2, minmax(140px, 1fr)); } }
 @media (max-width: 480px) { .five-version-grid { grid-template-columns: 1fr; } .five-version-heading { align-items: flex-start; flex-direction: column; } .five-version-hint { margin-left: 0; } }
