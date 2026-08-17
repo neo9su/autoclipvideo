@@ -1,6 +1,7 @@
 {
-  "dry_run": true,
   "threshold_seconds": 28.0,
-  "items": [],
-  "total_reclaimable_bytes": 0
+  "dry_run": true,
+  "count": 0,
+  "total_reclaimable_bytes": 0,
+  "items": []
 }

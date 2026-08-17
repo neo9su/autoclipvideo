@@ -1136,12 +1136,14 @@ async def bulk_recording_clips(ids: str = ""):
         # Only return the latest retry's clips (highest id per recording+variant)
         async with db.execute(
             f"""SELECT rc.* FROM recording_clips rc
+                JOIN recordings r ON r.id = rc.recording_id
                 INNER JOIN (
                     SELECT recording_id, variant_idx, MAX(id) as max_id
                     FROM recording_clips
                     WHERE recording_id IN ({placeholders})
                     GROUP BY recording_id, variant_idx
                 ) latest ON rc.id = latest.max_id
+                WHERE r.duration_status = 'accepted'
                 ORDER BY rc.recording_id, rc.variant_idx ASC""",
             id_list,
         ) as cur:
@@ -1163,6 +1165,7 @@ async def list_clips():
             JOIN rooms rm ON r.room_id = rm.id
             LEFT JOIN recording_clips rc ON rc.recording_id = r.id AND rc.variant_idx = 0
             WHERE r.clipped = 2 AND r.clip_filename IS NOT NULL
+              AND r.duration_status = 'accepted'
             ORDER BY r.start_time DESC
         """) as cur:
             rows = await cur.fetchall()
@@ -1624,7 +1627,7 @@ async def get_group(group_id: int):
         async with db.execute(
             """SELECT id, filename, clip_filename, thumbnail, start_time, end_time,
                       session_label, has_tryon, has_promotion, transcribed, clipped, transcribe_error
-               FROM recordings WHERE group_id = ? ORDER BY start_time ASC""",
+               FROM recordings WHERE group_id = ? AND duration_status = 'accepted' ORDER BY start_time ASC""",
             (group_id,)
         ) as cur:
             recs = await cur.fetchall()

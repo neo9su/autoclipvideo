@@ -6,7 +6,6 @@ this report and require an explicit confirmation token.
 """
 import argparse
 import json
-import os
 import sqlite3
 from pathlib import Path
 import sys
@@ -34,7 +33,7 @@ def build_inventory(db_path: str, recordings_dir: str) -> dict:
             except (OSError, ValueError, subprocess.SubprocessError):
                 duration = None
         status = classify_duration(duration)
-        if status == "accepted" or status == "duration_unavailable":
+        if status != "too_short":
             continue
         size = path.stat().st_size if path and path.is_file() else int(row["size_bytes"] or 0)
         items.append({"recording_id": row["id"], "path": str(path) if path else None, "duration_seconds": duration, "size_bytes": size})

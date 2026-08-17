@@ -94,12 +94,12 @@ async def _get_pending_unsynced(room_id: int) -> list:
     for row in rows:
         d = dict(row)
         duration = await probe_duration(os.path.join(RECORDINGS_DIR, d["filename"]))
-        status, reason = classify_duration(duration)
-        if status != "eligible":
+        status = classify_duration(duration)
+        if status != "accepted":
             async with aio_connect() as db:
                 await db.execute(
                     "UPDATE recordings SET duration_seconds=?, duration_status=?, skip_reason=? WHERE id=?",
-                    (duration if status == "too_short" else None, status, reason, d["id"]),
+                    (duration if status == "too_short" else None, status, status, d["id"]),
                 )
                 await db.commit()
             continue
