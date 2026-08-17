@@ -118,6 +118,8 @@
                   class="btn-version-trigger"
                   :class="version.buttonClass"
                   :disabled="versionTriggerDisabled(g, version.key)"
+                  :title="versionTriggerDisabled(g, version.key) ? versionStatusMeta(g, version.key).disabledReason : `${versionTriggerLabel(g, version.key)}${version.label}`"
+                  :aria-label="`${version.label}：${versionTriggerLabel(g, version.key)}`"
                   @click="triggerVersion(g, version.key)">
                   {{ versionTriggerLabel(g, version.key) }}
                 </button>
@@ -140,6 +142,9 @@
               </div>
               <div v-if="versionStatusMeta(g, version.key).hint" class="five-version-note">
                 {{ versionStatusMeta(g, version.key).hint }}
+              </div>
+              <div v-if="versionStatusMeta(g, version.key).disabledReason" class="five-version-disabled-reason">
+                🔒 {{ versionStatusMeta(g, version.key).disabledReason }}
               </div>
             </div>
           </div>
@@ -246,12 +251,7 @@
               <span class="styles-hint">基于经典版生成两种节奏</span>
             </div>
             <div class="styles-actions">
-              <button
-                class="btn-action rose"
-                :disabled="g.ready_count === 0 || stylesBusy[g.id] || g.realistic_status === 1 || g.conservative_status === 1"
-                @click="generateStyles(g)">
-                {{ stylesBusy[g.id] ? '生成中…' : (hasStylesFailure(g) ? '↺ 重试直出版/保守版' : '生成直出版/保守版') }}
-              </button>
+              <span class="styles-generation-note">请在上方分别触发直出版或保守版</span>
               <template v-if="g.realistic_status === 2 && g.realistic_available">
                 <button class="btn-action rose" @click="openStylePreview(g, 'realistic')">▶ 直出版</button>
                 <a :href="`${apiBase}/api/groups/${g.id}/realistic-download`" class="btn-action rose" download>↓</a>
@@ -961,7 +961,7 @@ function classicIsReady(group) {
 }
 function versionIsReady(group, version) {
   if (version === 'classic') return classicIsReady(group)
-  return versionStatus(group, version) === 2 && group[`${version}_available`] !== false && group[`${version}_file_status`] !== 'missing'
+  return versionStatus(group, version) === 2 && group[`${version}_available`] !== false && group[`${version}_file_status`] === 'ready'
 }
 function versionBusy(group, version) {
   return Boolean(retryBusy.value[`${group.id}:${version}`]) ||
@@ -977,10 +977,15 @@ function versionStatusMeta(group, version) {
   if (status < 0 || (status === 2 && !versionIsReady(group, version))) {
     return { label: '失败', className: 'failed', error: summarizeStyleError(error) || '结果文件缺失，可重试。', hint: '' }
   }
-  return { label: '未生成', className: 'idle', hint: '' }
+  return { label: '未生成', className: 'idle', hint: '', disabledReason: versionPrerequisiteReason(group, version) }
 }
 function versionTriggerDisabled(group, version) {
-  return group.ready_count === 0 || versionBusy(group, version) || versionStatus(group, version) === 1
+  return Boolean(versionPrerequisiteReason(group, version)) || versionBusy(group, version) || versionStatus(group, version) === 1
+}
+function versionPrerequisiteReason(group, version) {
+  if (version === 'qianchuan' && Number(group.qianchuan_status) === -2) return '缺少可匹配的千川录像或 SRT，请补充素材后重试。'
+  if (Number(group.ready_count || 0) > 0) return ''
+  return '暂无可用剪辑，请先完成转录和剪辑。'
 }
 function versionTriggerLabel(group, version) {
   if (versionBusy(group, version) || versionStatus(group, version) === 1) return '生成中…'
@@ -2032,7 +2037,9 @@ onUnmounted(() => { wsCleanup?.(); stopProgressPolling(); groupsObserver?.discon
 .btn-version-trigger.teal { color: #5eead4; }.btn-version-trigger.purple { color: #c4b5fd; }.btn-version-trigger.rose { color: #fda4af; }.btn-version-trigger.orange { color: #fdba74; }.btn-version-trigger.cyan { color: #67e8f9; }
 .btn-version-trigger:hover:not(:disabled), .btn-version-link:hover { background: rgba(255,255,255,.1); }
 .btn-version-trigger:disabled { opacity: .45; cursor: not-allowed; }
-.five-version-error { color: #f87171; font-size: 11px; line-height: 1.4; margin-top: 7px; word-break: break-word; }
+.five-version-error, .five-version-disabled-reason { color: #f87171; font-size: 11px; line-height: 1.4; margin-top: 7px; word-break: break-word; }
+.five-version-disabled-reason { color: #fbbf24; }
+.styles-generation-note { color: #94a3b8; font-size: 11px; }
 @media (max-width: 900px) { .five-version-grid { grid-template-columns: repeat(2, minmax(140px, 1fr)); } }
 @media (max-width: 480px) { .five-version-grid { grid-template-columns: 1fr; } .five-version-heading { align-items: flex-start; flex-direction: column; } .five-version-hint { margin-left: 0; } }
 /* Review modal */
