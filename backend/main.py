@@ -1683,7 +1683,7 @@ async def trigger_merge(group_id: int, force: bool = False):
     async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT COUNT(*) as done FROM recordings WHERE group_id = ? AND clipped = 2",
+            "SELECT COUNT(*) as done FROM recordings WHERE group_id = ? AND clipped = 2 AND duration_status = 'accepted'",
             (group_id,),
         ) as cur:
             row = await cur.fetchone()
@@ -1866,7 +1866,7 @@ async def download_merged(group_id: int, request: Request):
             rel_path = group["merged_filename"]
         else:
             async with db.execute(
-                "SELECT clip_filename FROM recordings WHERE group_id = ? AND clip_filename IS NOT NULL AND clipped = 2 ORDER BY id DESC LIMIT 1",
+                "SELECT clip_filename FROM recordings WHERE group_id = ? AND clip_filename IS NOT NULL AND clipped = 2 AND duration_status = 'accepted' ORDER BY id DESC LIMIT 1",
                 (group_id,),
             ) as cur:
                 rec = await cur.fetchone()
