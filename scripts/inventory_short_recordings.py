@@ -25,13 +25,21 @@ def build_inventory(db_path: str, recordings_dir: str) -> dict:
     items = []
     for row in rows:
         path = (root / row["filename"]).resolve() if row["filename"] else None
+        # Inventory must never follow a database path outside the configured
+        # recordings mount, even in a read-only dry run.
+        if path and (path != root and root not in path.parents):
+            path = None
         duration = row["duration_seconds"]
-        if duration is None and path and path.is_file():
+        # A stored duration is useful metadata, but an inventory must only
+        # count a file after probing the actual media on disk.
+        if path and path.is_file():
             try:
                 probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)], capture_output=True, text=True, timeout=10, check=True)
                 duration = float(probe.stdout.strip())
             except (OSError, ValueError, subprocess.SubprocessError):
                 duration = None
+        else:
+            duration = None
         status = classify_duration(duration)
         if status != "too_short":
             continue

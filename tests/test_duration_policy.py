@@ -23,7 +23,7 @@ def test_invalid_duration_is_unavailable_and_not_processable():
         assert not is_processable_duration(value)
 
 
-def test_inventory_is_dry_run_and_only_lists_verified_short_files(tmp_path):
+def test_inventory_is_dry_run_and_only_lists_verified_short_files(tmp_path, monkeypatch):
     db_path = tmp_path / "recordings.db"
     media_dir = tmp_path / "recordings"
     media_dir.mkdir()
@@ -39,6 +39,11 @@ def test_inventory_is_dry_run_and_only_lists_verified_short_files(tmp_path):
     )
     connection.commit()
     connection.close()
+
+    class Probe:
+        stdout = "27.99\n"
+
+    monkeypatch.setattr("scripts.inventory_short_recordings.subprocess.run", lambda *args, **kwargs: Probe())
 
     inventory = build_inventory(str(db_path), str(media_dir))
 
