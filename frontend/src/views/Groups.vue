@@ -957,6 +957,9 @@ function versionTriggerDisabled(group, version) {
   return Boolean(versionPrerequisiteReason(group, version)) || versionBusy(group, version) || versionStatus(group, version) === 1
 }
 function versionPrerequisiteReason(group, version) {
+  if (group[`${version}_available`] === false && version !== 'qianchuan') {
+    return `${versionLabels[version]}当前不可用，请先完成对应前置步骤。`
+  }
   if (version === 'qianchuan' && Number(group.qianchuan_status) === -2) {
     return '缺少可匹配的千川录像或 SRT，请补充素材后重试。'
   }
@@ -1071,6 +1074,11 @@ function formatQianchuanScore(score) {
   const value = Number(score)
   if (!Number.isFinite(value)) return '—'
   return value <= 1 ? `${Math.round(value * 100)}%` : value.toFixed(1)
+}
+
+function summarizeStyleError(error) {
+  if (!error) return ''
+  return String(error).replace(/\s+/g, ' ').slice(0, 160)
 }
 
 function summarizeQianchuanError(error) {
