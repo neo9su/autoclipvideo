@@ -12,6 +12,8 @@ def has_upload_capacity(
     """Return whether an upload can be accepted without exhausting storage."""
     if free_gb < 0 or minimum_free_gb < 0 or headroom_gb < 0:
         return False
+    if file_size_bytes is not None and file_size_bytes < 0:
+        return False
     upload_gb = (file_size_bytes or 0) / (1024**3)
     required_free_gb = max(minimum_free_gb, upload_gb + headroom_gb)
     return free_gb >= required_free_gb

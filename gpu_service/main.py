@@ -49,8 +49,12 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 import shutil as _shutil
-from asr_config import ASR_CONFIG, aligned_segment_bounds
-from disk_policy import has_upload_capacity
+try:
+    from asr_config import ASR_CONFIG, aligned_segment_bounds
+    from disk_policy import has_upload_capacity
+except ImportError:
+    from .asr_config import ASR_CONFIG, aligned_segment_bounds
+    from .disk_policy import has_upload_capacity
 
 _DEFAULT_STORAGE = (
     r"F:\douyin_recordings" if os.name == "nt" else "/data/douyin-recordings"
@@ -1126,8 +1130,17 @@ _voice_refs = _load_voice_refs()
 # healthy volume usable when its free space is below the old 80/100 GB policy.
 DISK_QUOTA_GB = float(os.environ.get("DISK_QUOTA_GB", "100"))
 DISK_GUARD_GB = float(os.environ.get("DISK_GUARD_GB", "10"))
-DISK_MIN_FREE_GB = float(os.environ.get("DISK_MIN_FREE_GB", "20"))
-DISK_UPLOAD_HEADROOM_GB = float(os.environ.get("DISK_UPLOAD_HEADROOM_GB", "5"))
+def _positive_float(name: str, default: float) -> float:
+    """Read a positive storage setting without allowing an unsafe value."""
+    try:
+        value = float(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return value if value >= 0 else default
+
+
+DISK_MIN_FREE_GB = _positive_float("DISK_MIN_FREE_GB", 20.0)
+DISK_UPLOAD_HEADROOM_GB = _positive_float("DISK_UPLOAD_HEADROOM_GB", 5.0)
 
 def _get_disk_free_gb() -> float:
     """Return free space on STORAGE_DIR drive in GB."""
