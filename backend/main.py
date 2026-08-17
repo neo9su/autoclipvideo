@@ -666,7 +666,11 @@ async def lifespan(app: FastAPI):
             asyncio.create_task(_periodic_qianchuan_dispatch()),
             asyncio.create_task(_periodic_clip_dispatch()),
         ])
-        await monitor.start_all()
+        # Room startup performs network discovery and can take longer than the
+        # health endpoint timeout.  Let the API serve first, then start monitors
+        # as a supervised background task without changing GPU-only policy.
+        monitor_start_task = asyncio.create_task(_start_monitors_background())
+        tasks.append(monitor_start_task)
     yield
     for task in tasks:
         task.cancel()
@@ -690,6 +694,16 @@ async def _run_startup_recovery() -> None:
         raise
     except Exception:
         logger.exception("Startup recovery failed; background workers remain available")
+
+
+async def _start_monitors_background() -> None:
+    """Start room monitors without delaying health/status availability."""
+    try:
+        await monitor.start_all()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("Room monitor startup failed; monitor restart can retry it")
 
 
 APP_VERSION = "MVP1.04.2026032501"
@@ -738,7 +752,7 @@ async def health():
         )
         # Probe remote backend liveness (best-effort, non-blocking)
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with httpx.AsyncClient(timeout=1.0) as client:
                 resp = await client.get(f"{REMOTE_BACKEND_URL}/")
                 result["remote_backend_reachable"] = resp.status_code < 500
         except Exception:
@@ -2631,7 +2645,7 @@ async def gpu_status():
         # unreachable.  Keep this probe remote-only; there is no local fallback.
         async def _aio_get(url):
             try:
-                async with httpx.AsyncClient(timeout=5) as _s:
+                async with httpx.AsyncClient(timeout=1.0) as _s:
                     _r = await _s.get(url)
                     try:
                         _body = _r.json()
