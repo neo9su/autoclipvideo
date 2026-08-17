@@ -1706,6 +1706,31 @@ def _requested_publish_versions(body: dict) -> list[str]:
     return versions
 
 
+async def _queue_publish_style(group_id: int, version: str):
+    """Queue exactly one publish style and leave its sibling untouched."""
+    if version not in ("realistic", "conservative"):
+        raise HTTPException(status_code=400, detail="version must be realistic or conservative")
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT id FROM clip_groups WHERE id = ?", (group_id,)) as cur:
+            if not await cur.fetchone():
+                raise HTTPException(status_code=404, detail="Group not found")
+        await db.execute(
+            f"UPDATE clip_groups SET {version}_status = 1, {version}_error = NULL, {version}_final_video = NULL WHERE id = ?",
+            (group_id,),
+        )
+        await db.commit()
+    from transcribe import _run_variant_pipeline
+    asyncio.create_task(_run_variant_pipeline(group_id, version, status_claimed=True))
+    return {"group_id": group_id, "status": "queued", "versions": [version]}
+
+
+@app.post("/api/groups/{group_id}/retry-styles/{version}")
+async def retry_publish_style(group_id: int, version: str):
+    """Queue a single realistic or conservative output."""
+    return await _queue_publish_style(group_id, version)
+
+
 @app.post("/api/groups/{group_id}/retry-styles")
 async def retry_publish_styles(group_id: int, body: dict = Body({})):
     """Queue one or both publish styles without touching unrequested artifacts.

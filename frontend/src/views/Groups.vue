@@ -124,13 +124,6 @@
                   {{ versionTriggerLabel(g, version.key) }}
                 </button>
                 <button
-                  v-if="versionNeedsRetry(g, version.key)"
-                  class="btn-version-link btn-version-retry"
-                  :disabled="versionBusy(g, version.key) || Boolean(versionPrerequisiteReason(g, version.key))"
-                  @click="triggerVersion(g, version.key)">
-                  ↺ 重试
-                </button>
-                <button
                   v-if="versionIsReady(g, version.key)"
                   class="btn-version-link"
                   @click="previewVersion(g, version.key)">
@@ -250,7 +243,6 @@
           <div v-if="g.qianchuan_error" class="qianchuan-error">⚠ {{ summarizeQianchuanError(g.qianchuan_error) }}</div>
         </div>
 
-        <!-- Five-version generation controls above are the only generation entry point. -->
         <!-- 封面生成面板 -->
         <div class="cover-panel" v-if="g.classic_status === 2 || g.director_status === 2 || g.creative_status === 2 || g.qianchuan_status === 2">
           <div class="cover-panel-header">
@@ -961,10 +953,6 @@ function versionStatusMeta(group, version) {
 function versionTriggerDisabled(group, version) {
   return Boolean(versionPrerequisiteReason(group, version)) || versionBusy(group, version) || versionStatus(group, version) === 1
 }
-function versionNeedsRetry(group, version) {
-  const status = versionStatus(group, version)
-  return status < 0 || (status === 2 && !versionIsReady(group, version))
-}
 function versionPrerequisiteReason(group, version) {
   if (version === 'qianchuan' && Number(group.qianchuan_status) === -2) {
     return '缺少可匹配的千川录像或 SRT，请补充素材后重试。'
@@ -1032,9 +1020,6 @@ function styleStatusClass(status) {
   if (status < 0) return 'failed'
   return 'idle'
 }
-function hasStylesFailure(group) { return Number(group.realistic_status) < 0 || Number(group.conservative_status) < 0 }
-function summarizeStyleError(error) { return String(error).replace(/\s+/g, ' ').slice(0, 160) }
-
 // Re-clip (single recording)
 const reclipModal = ref(null)
 const reclipSaving = ref(false)
