@@ -43,3 +43,13 @@ and `http://127.0.0.1:8878/status`, followed by five calls to control-plane
 `/api/gpu/status`; each should show the current remote PID and a fresh `health`
 probe. The macOS guard in `gpu_service_src/gpu_service.py` and backend remote-GPU
 policy prevent local media fallback.
+
+## Disk admission settings
+
+Transcription uploads use the actual upload size plus a safety reserve. They do
+not require the entire historical batch limit to be free. The defaults are
+`DISK_MIN_FREE_GB=10` and `DISK_UPLOAD_RESERVE_GB=1`; override either setting in
+the GPU service environment when the volume or workload requires it.
+`BATCH_UPLOAD_LIMIT_GB` remains a documented batch-size limit for callers, not
+the minimum free-space threshold for every upload. Completed outputs remain
+eligible for the existing disk guard cleanup policy.
