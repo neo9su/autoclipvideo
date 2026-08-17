@@ -1756,7 +1756,7 @@ async def backfill_auto_merge():
                    WHERE classic_status = 2
                      AND director_status IN (0, -1, -3)
                      AND (creative_status IN (0, -1, -3) OR creative_status IS NULL)
-                     AND EXISTS (SELECT 1 FROM recordings WHERE recordings.group_id = clip_groups.id AND recordings.local_deleted = 0 AND recordings.clipped = 2)
+                   AND EXISTS (SELECT 1 FROM recordings WHERE recordings.group_id = clip_groups.id AND recordings.local_deleted = 0 AND recordings.clipped = 2 AND recordings.duration_status = 'accepted')
                    ORDER BY id DESC"""
             ) as cur:
                 raw_director = [dict(r) for r in await cur.fetchall()]
@@ -1769,7 +1769,8 @@ async def backfill_auto_merge():
                 gid = g['id']
                 async with db.execute(
                     """SELECT filename FROM recordings 
-                       WHERE group_id = ? AND local_deleted = 0 AND clipped = 2 
+                       WHERE group_id = ? AND local_deleted = 0 AND clipped = 2
+                         AND duration_status = 'accepted'
                        LIMIT 1""", (gid,)
                 ) as rcur:
                     rows = await rcur.fetchall()
@@ -1791,7 +1792,7 @@ async def backfill_auto_merge():
                    WHERE classic_status = 2
                      AND director_status = 2
                      AND (creative_status IN (0, -1, -3) OR creative_status IS NULL)
-                     AND EXISTS (SELECT 1 FROM recordings WHERE recordings.group_id = clip_groups.id AND recordings.local_deleted = 0 AND recordings.clipped = 2)
+                   AND EXISTS (SELECT 1 FROM recordings WHERE recordings.group_id = clip_groups.id AND recordings.local_deleted = 0 AND recordings.clipped = 2 AND recordings.duration_status = 'accepted')
                    ORDER BY id DESC"""
             ) as cur:
                 raw_creative = [dict(r) for r in await cur.fetchall()]
@@ -1802,7 +1803,8 @@ async def backfill_auto_merge():
                 gid = g['id']
                 async with db.execute(
                     """SELECT filename FROM recordings 
-                       WHERE group_id = ? AND local_deleted = 0 AND clipped = 2 
+                       WHERE group_id = ? AND local_deleted = 0 AND clipped = 2
+                         AND duration_status = 'accepted'
                        LIMIT 1""", (gid,)
                 ) as rcur:
                     rows = await rcur.fetchall()
@@ -2007,7 +2009,7 @@ async def backfill_auto_merge():
                     """SELECT id FROM clip_groups
                        WHERE classic_status = 2
                          AND director_status = -3
-                         AND EXISTS (SELECT 1 FROM recordings WHERE recordings.group_id = clip_groups.id AND recordings.local_deleted = 0 AND recordings.clipped = 2)
+                         AND EXISTS (SELECT 1 FROM recordings WHERE recordings.group_id = clip_groups.id AND recordings.local_deleted = 0 AND recordings.clipped = 2 AND recordings.duration_status = 'accepted')
                        ORDER BY id DESC"""
                 ) as cur:
                     orphaned_director = [r["id"] for r in await cur.fetchall()]
@@ -2017,7 +2019,7 @@ async def backfill_auto_merge():
                        WHERE classic_status = 2
                          AND director_status = 2
                          AND creative_status = -3
-                         AND EXISTS (SELECT 1 FROM recordings WHERE recordings.group_id = clip_groups.id AND recordings.local_deleted = 0 AND recordings.clipped = 2)
+                         AND EXISTS (SELECT 1 FROM recordings WHERE recordings.group_id = clip_groups.id AND recordings.local_deleted = 0 AND recordings.clipped = 2 AND recordings.duration_status = 'accepted')
                        ORDER BY id DESC"""
                 ) as cur:
                     orphaned_creative = [r["id"] for r in await cur.fetchall()]
