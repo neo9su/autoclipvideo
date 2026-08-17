@@ -257,3 +257,62 @@ def test_preflight_single_flight(tmp_path):
     second = TaskStore(tmp_path / 'x.db')
     assert first.startup_preflight('first')['ok']
     assert not second.startup_preflight('second')['ok']
+
+
+def test_heartbeat_repairs_missed_final_child_rollup_and_is_idempotent(tmp_path):
+    store = TaskStore(tmp_path / 'x.db')
+    store.upsert_issue(163, 'parent', 'queued')
+    for child_id in range(181, 188):
+        store.upsert_issue(child_id, f'child {child_id}', 'done' if child_id != 187 else 'queued')
+    store.register_decomposition(163, range(181, 188))
+    store.conn.execute(
+        "UPDATE decompositions SET completed_child_issue_ids=?,status='active' WHERE parent_issue_id=163",
+        (json.dumps(list(range(181, 187))),),
+    )
+    store.upsert_issue(187, 'child 187', 'queued', {'execution_complete': True})
+
+    first = store.reconcile_decompositions()
+    event_count = store.conn.execute("SELECT count(*) FROM events WHERE kind='decomposition_converged'").fetchone()[0]
+    second = store.reconcile_decompositions()
+
+    assert first == {'repaired': 1, 'completed': 1, 'blocked': 0}
+    assert second == {'repaired': 0, 'completed': 0, 'blocked': 0}
+    assert store.conn.execute('SELECT state FROM issues WHERE id=163').fetchone()[0] == 'done'
+    assert json.loads(store.conn.execute('SELECT completed_child_issue_ids FROM decompositions WHERE parent_issue_id=163').fetchone()[0]) == list(range(181, 188))
+    assert store.conn.execute("SELECT count(*) FROM events WHERE kind='decomposition_converged'").fetchone()[0] == event_count == 1
+
+
+def test_heartbeat_uses_verified_merged_artifact_for_queued_child(tmp_path):
+    store = TaskStore(tmp_path / 'x.db')
+    store.upsert_issue(192, 'parent', 'queued')
+    store.upsert_issue(193, 'queued child', 'queued')
+    store.register_decomposition(192, [193])
+    store.claim(193, 'worker', 60, 'run-193', 1)
+    store.conn.execute(
+        "INSERT INTO runs(id,issue_id,state,started_at,generation) VALUES(?,?,?,?,?)",
+        ('run-193', 193, 'interrupted', time.time(), 1),
+    )
+    store.conn.execute(
+        "INSERT INTO artifacts(run_id,generation,kind,value,verified,created_at) VALUES(?,?,?,?,?,?)",
+        ('run-193', 1, 'merged_pr', 'pr-193', 1, time.time()),
+    )
+
+    report = store.reconcile_decompositions()
+
+    assert report['completed'] == 1
+    assert store.conn.execute('SELECT state FROM issues WHERE id=192').fetchone()[0] == 'done'
+    assert store.conn.execute('SELECT state FROM issues WHERE id=193').fetchone()[0] == 'done'
+
+
+def test_heartbeat_uses_merged_pr_scan_evidence_without_dispatch(tmp_path):
+    store = TaskStore(tmp_path / 'x.db')
+    store.upsert_issue(194, 'parent', 'queued')
+    store.upsert_issue(195, 'queued child', 'queued')
+    store.register_decomposition(194, [195])
+    runner = Runner(RunnerConfig(db=tmp_path / 'x.db'), store, adapter=type('Adapter', (), {
+        'scan': lambda self: [{'number': 195, 'title': 'queued child', 'state': 'OPEN', 'pullRequests': [{'state': 'MERGED'}]}]
+    })())
+
+    assert runner.heartbeat() == {'repaired': 1, 'completed': 1, 'blocked': 0}
+    assert runner.run_once(195) is None
+    assert store.conn.execute('SELECT state FROM issues WHERE id=194').fetchone()[0] == 'done'

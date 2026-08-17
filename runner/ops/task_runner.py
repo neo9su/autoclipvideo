@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS deploy_records (run_id TEXT NOT NULL, generation INTE
 CREATE TABLE IF NOT EXISTS outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', created_at REAL NOT NULL, delivered_at REAL);
 CREATE TABLE IF NOT EXISTS alerts (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'open', payload TEXT NOT NULL DEFAULT '{}', created_at REAL NOT NULL, updated_at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS coordinator_lock (name TEXT PRIMARY KEY, owner TEXT NOT NULL, acquired_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS decompositions (parent_issue_id INTEGER PRIMARY KEY, child_issue_ids TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active', completed_child_issue_ids TEXT NOT NULL DEFAULT '[]', blocked_child_issue_ids TEXT NOT NULL DEFAULT '[]', updated_at REAL NOT NULL);
 '''
 
 @dataclass
@@ -105,6 +106,7 @@ class TaskStore:
             CREATE TABLE IF NOT EXISTS outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, payload TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', created_at REAL NOT NULL, delivered_at REAL);
             CREATE TABLE IF NOT EXISTS alerts (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'open', payload TEXT NOT NULL DEFAULT '{}', created_at REAL NOT NULL, updated_at REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS coordinator_lock (name TEXT PRIMARY KEY, owner TEXT NOT NULL, acquired_at REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS decompositions (parent_issue_id INTEGER PRIMARY KEY, child_issue_ids TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active', completed_child_issue_ids TEXT NOT NULL DEFAULT '[]', blocked_child_issue_ids TEXT NOT NULL DEFAULT '[]', updated_at REAL NOT NULL);
         ''')
 
     def close(self): self.conn.close()
@@ -194,6 +196,98 @@ class TaskStore:
             records.append({"issue_id": issue_id, "issue_state": issue_state, "run_id": run_id, "run_state": run_state, "generation": generation, "session_state": session_state, "quarantined": quarantined, "reasons": problems})
         return {"records": records, "quarantined": sum(item["quarantined"] for item in records)}
 
+    @staticmethod
+    def _payload_json(payload):
+        if isinstance(payload, dict):
+            return payload
+        try:
+            return json.loads(payload or '{}')
+        except (TypeError, json.JSONDecodeError):
+            return {}
+
+    def _completion_evidence(self, issue_id: int, issue_state: str, payload) -> bool:
+        """Return true only for durable completion evidence, never queue state alone."""
+        details = self._payload_json(payload)
+        if issue_state in {'done', 'closed'}:
+            return True
+        if details.get('execution_complete') or details.get('executionComplete'):
+            return True
+        if any(details.get(name) is True for name in ('pr_merged', 'prMerged', 'merged_pr', 'mergedPr', 'merged')):
+            return True
+        pull_requests = details.get('pullRequests') or details.get('pull_requests') or []
+        if any((request.get('mergedAt') or request.get('merged_at') or str(request.get('state', '')).lower() == 'merged') for request in pull_requests if isinstance(request, dict)):
+            return True
+        run = self.conn.execute(
+            "SELECT 1 FROM runs WHERE issue_id=? AND state='succeeded' ORDER BY finished_at DESC LIMIT 1",
+            (issue_id,),
+        ).fetchone()
+        if run:
+            return True
+        artifact = self.conn.execute(
+            "SELECT 1 FROM artifacts a JOIN runs r ON r.id=a.run_id AND r.generation=a.generation "
+            "WHERE r.issue_id=? AND a.verified=1 AND lower(a.kind) IN ('pr','pull_request','merged_pr','merge') LIMIT 1",
+            (issue_id,),
+        ).fetchone()
+        return bool(artifact)
+
+    def reconcile_decompositions(self, remote_issues=None) -> dict:
+        """Repair parent rollups from current state; safe to call on every heartbeat.
+
+        The transaction and conditional updates make overlapping ticks converge to
+        one result.  Completion is recomputed, so a missed child event is repaired
+        without emitting duplicate lifecycle events or starting another worker.
+        """
+        remote_by_id = {int(item['number']): item for item in (remote_issues or []) if item.get('number') is not None}
+        repaired = completed = blocked = 0
+        self.conn.execute('BEGIN IMMEDIATE')
+        try:
+            rows = self.conn.execute('SELECT * FROM decompositions WHERE status != "done"').fetchall()
+            for decomposition in rows:
+                parent_id = decomposition['parent_issue_id']
+                child_ids = self._payload_json(decomposition['child_issue_ids'])
+                parent = self.conn.execute('SELECT state,payload FROM issues WHERE id=?', (parent_id,)).fetchone()
+                if not parent:
+                    continue
+                completed_ids, blocked_ids = [], []
+                for child_id in child_ids:
+                    child = self.conn.execute('SELECT state,payload FROM issues WHERE id=?', (child_id,)).fetchone()
+                    remote = remote_by_id.get(int(child_id), {})
+                    child_state = child['state'] if child else remote.get('state', '')
+                    child_payload = child['payload'] if child else remote
+                    if self._completion_evidence(child_id, child_state, child_payload) or self._completion_evidence(child_id, remote.get('state', ''), remote):
+                        completed_ids.append(child_id)
+                        if child and child_state not in {'done', 'closed'} and self._completion_evidence(child_id, remote.get('state', ''), remote):
+                            self.conn.execute("UPDATE issues SET state='done',updated_at=? WHERE id=? AND state NOT IN ('done','closed')", (time.time(), child_id))
+                    elif child_state in {'blocked', 'recovery_needed', 'quarantined'}:
+                        blocked_ids.append(child_id)
+                new_status = 'done' if len(completed_ids) == len(child_ids) and child_ids else 'blocked' if blocked_ids and len(completed_ids) + len(blocked_ids) == len(child_ids) else 'active'
+                old_completed = self._payload_json(decomposition['completed_child_issue_ids'])
+                old_blocked = self._payload_json(decomposition['blocked_child_issue_ids'])
+                changed = new_status != decomposition['status'] or sorted(old_completed) != sorted(completed_ids) or sorted(old_blocked) != sorted(blocked_ids)
+                if not changed:
+                    continue
+                now = time.time()
+                self.conn.execute(
+                    'UPDATE decompositions SET status=?,completed_child_issue_ids=?,blocked_child_issue_ids=?,updated_at=? WHERE parent_issue_id=? AND status=?',
+                    (new_status, json.dumps(sorted(completed_ids)), json.dumps(sorted(blocked_ids)), now, parent_id, decomposition['status']),
+                )
+                if new_status == 'done':
+                    state_changed = self.conn.execute("UPDATE issues SET state='done',updated_at=? WHERE id=? AND state NOT IN ('done','closed')", (now, parent_id)).rowcount
+                    completed += 1
+                    if state_changed:
+                        self.event('decomposition_converged', parent_id, payload={'child_issue_ids': sorted(completed_ids)})
+                elif new_status == 'blocked':
+                    state_changed = self.conn.execute("UPDATE issues SET state='blocked',updated_at=? WHERE id=? AND state NOT IN ('done','closed','blocked')", (now, parent_id)).rowcount
+                    blocked += 1
+                    if state_changed:
+                        self.event('decomposition_blocked', parent_id, payload={'child_issue_ids': sorted(blocked_ids)})
+                repaired += 1
+            self.conn.execute('COMMIT')
+        except Exception:
+            self.conn.execute('ROLLBACK')
+            raise
+        return {'repaired': repaired, 'completed': completed, 'blocked': blocked}
+
     def is_current(self, run_id: str, generation: int) -> bool:
         row = self.conn.execute("SELECT generation,state FROM runs WHERE id=?", (run_id,)).fetchone()
         return bool(row and row[0] == generation and row[1] in {"running", "accepted_idle"})
@@ -276,6 +370,16 @@ class TaskStore:
         if existing and existing[0] in {"done", "running"}:
             state = existing[0]
         self.conn.execute("INSERT INTO issues(id,title,state,payload,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,payload=excluded.payload,updated_at=excluded.updated_at", (issue_id,title,state,json.dumps(payload or {}),now))
+
+    def register_decomposition(self, parent_issue_id: int, child_issue_ids) -> None:
+        """Persist a decomposition definition without resetting its progress."""
+        child_ids = sorted({int(child_id) for child_id in child_issue_ids})
+        now = time.time()
+        self.conn.execute(
+            "INSERT INTO decompositions(parent_issue_id,child_issue_ids,updated_at) VALUES(?,?,?) "
+            "ON CONFLICT(parent_issue_id) DO UPDATE SET child_issue_ids=excluded.child_issue_ids,updated_at=excluded.updated_at",
+            (parent_issue_id, json.dumps(child_ids), now),
+        )
     def claim(self, issue_id, owner, ttl, run_id=None, generation=1):
         now=time.time(); self.conn.execute("BEGIN IMMEDIATE")
         try:
@@ -410,7 +514,7 @@ class GitHubAdapter:
     def __init__(self, command="gh"): self.command=command
     def scan(self):
         try:
-            out=subprocess.check_output([self.command,"issue","list","--json","number,title,state","--state","open"], text=True)
+            out=subprocess.check_output([self.command,"issue","list","--json","number,title,state,pullRequests","--state","open"], text=True)
             return json.loads(out)
         except (OSError, subprocess.CalledProcessError, json.JSONDecodeError): return []
 
@@ -428,7 +532,19 @@ class Runner:
                 number = i.get("number")
                 title = i.get("title", f"Issue {number}")
                 if number is not None: self.store.upsert_issue(number, title, "queued", i)
+            self.store.reconcile_decompositions(issues)
         return issues
+
+    def heartbeat(self, dry_run=False):
+        """Run the idempotent lifecycle repair pass used by each heartbeat tick."""
+        issues = self.adapter.scan()
+        if dry_run:
+            return {'dry_run': True, 'issues': len(issues)}
+        for issue in issues:
+            number = issue.get('number')
+            if number is not None:
+                self.store.upsert_issue(number, issue.get('title', f'Issue {number}'), issue.get('state', 'queued'), issue)
+        return self.store.reconcile_decompositions(issues)
 
     def status(self):
         """Return the persisted runner state for the CLI and API callers."""
@@ -523,6 +639,8 @@ def main(argv=None):
     sub.add_parser("preflight", help="fail-closed coordinator startup checks")
     reconcile=sub.add_parser("reconcile", help="report and quarantine ambiguous non-terminal records")
     reconcile.add_argument("--worktree", type=Path)
+    heartbeat=sub.add_parser("heartbeat", help="repair parent rollups and merged completion evidence")
+    heartbeat.add_argument("--dry-run", action="store_true")
     args=p.parse_args(argv); dry_run=args.command == "run-once" and args.dry_run; cfg=RunnerConfig(db=args.db or RunnerConfig().db); store=TaskStore(cfg.db, readonly=dry_run); runner=Runner(cfg, store=store)
     if args.command == "run-once": result=runner.run_once(args.issue, dry_run=dry_run)
     elif args.command == "recover": result=runner.recover(dry_run=args.dry_run)
@@ -533,6 +651,7 @@ def main(argv=None):
             print(json.dumps(result, indent=2, default=str)); return 2
     elif args.command == "scan": result=runner.scan(dry_run=args.dry_run)
     elif args.command == "reconcile": result=store.reconcile(args.worktree)
+    elif args.command == "heartbeat": result=runner.heartbeat(dry_run=args.dry_run)
     else: result=getattr(runner,args.command)()
     print(json.dumps(result,indent=2,default=str)); return 0
 if __name__ == "__main__": raise SystemExit(main())
