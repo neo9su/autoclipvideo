@@ -38,18 +38,11 @@ Watchdog `/status` persists restart counts, last exit codes, health and PID data
 in `watchdog_state.json`. The control plane's 8899 status continues to probe the
 remote health endpoint rather than treating stale watchdog cache as truth.
 
-A healthy recovery check is five consecutive calls to `http://127.0.0.1:8877/health`
-and `http://127.0.0.1:8878/status`, followed by five calls to control-plane
-`/api/gpu/status`; each should show the current remote PID and a fresh `health`
-probe. The macOS guard in `gpu_service_src/gpu_service.py` and backend remote-GPU
-policy prevent local media fallback.
+Disk cleanup runs periodically and before rejecting work. Configure the reserve with
+`DISK_MIN_FREE_GB` (default `20` GB); it is the free space retained after an
+upload, not a required 80/100 GB batch size. `DISK_QUOTA_GB` and
+`DISK_GUARD_GB` continue to control cleanup of generated outputs.
 
-## Disk admission settings
-
-Transcription uploads use the actual upload size plus a safety reserve. They do
-not require the entire historical batch limit to be free. The defaults are
-`DISK_MIN_FREE_GB=10` and `DISK_UPLOAD_RESERVE_GB=1`; override either setting in
-the GPU service environment when the volume or workload requires it.
-`BATCH_UPLOAD_LIMIT_GB` remains a documented batch-size limit for callers, not
-the minimum free-space threshold for every upload. Completed outputs remain
-eligible for the existing disk guard cleanup policy.
+For the canonical Windows deployment, update the service environment through
+the watchdog-owned service configuration and restart only that service. Do not
+start a second copy with `start_all.bat`.

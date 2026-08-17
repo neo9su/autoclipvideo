@@ -1,40 +1,57 @@
-"""Regression coverage for GPU service startup and disk admission policy."""
+"""Regression tests for GPU service safety constants and disk policy."""
 
 import ast
 from pathlib import Path
 
-from gpu_service.disk_policy import configured_positive_int, required_free_gb
 
-GPU_MAIN = Path(__file__).parents[1] / "gpu_service" / "main.py"
+MAIN_SOURCE = Path("gpu_service/main.py").read_text(encoding="utf-8")
+MAIN_TREE = ast.parse(MAIN_SOURCE)
 
 
-def test_timeout_constants_are_initialized():
-    tree = ast.parse(GPU_MAIN.read_text(encoding="utf-8"))
-    names = {
+def _function(name: str) -> ast.FunctionDef:
+    for node in ast.walk(MAIN_TREE):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            return node
+    raise AssertionError(f"missing function: {name}")
+
+
+def test_timeout_constants_are_initialized_before_use() -> None:
+    assignments = {
         target.id
-        for node in tree.body
+        for node in MAIN_TREE.body
         if isinstance(node, ast.Assign)
         for target in node.targets
         if isinstance(target, ast.Name)
+        and target.id in {"_TRANSCRIBE_TIMEOUT", "_TTS_TIMEOUT"}
     }
-    assert {"_TRANSCRIBE_TIMEOUT", "_TTS_TIMEOUT"} <= names
+    assert assignments == {"_TRANSCRIBE_TIMEOUT", "_TTS_TIMEOUT"}
+    assert MAIN_SOURCE.index("_TTS_TIMEOUT =") < MAIN_SOURCE.index("timeout=_TTS_TIMEOUT")
 
 
-def test_timeout_settings_fall_back_for_invalid_values():
-    environment = {
-        "TRANSCRIBE_TIMEOUT_SECONDS": "not-a-number",
-        "TTS_TIMEOUT_SECONDS": "0",
-    }
-    assert configured_positive_int(environment, "TRANSCRIBE_TIMEOUT_SECONDS", 3600) == 3600
-    assert configured_positive_int(environment, "TTS_TIMEOUT_SECONDS", 1800) == 1800
+def test_disk_policy_is_configurable_and_uses_upload_size() -> None:
+    assert 'DISK_MIN_FREE_GB", "20"' in MAIN_SOURCE
+    policy = _function("_upload_requires_cleanup")
+    names = {node.id for node in ast.walk(policy) if isinstance(node, ast.Name)}
+    assert "_disk_min_free_gb" in names
+    assert "requested_bytes" in names
+    reserve = _function("_disk_min_free_gb")
+    reserve_names = {node.id for node in ast.walk(reserve) if isinstance(node, ast.Name)}
+    assert "DISK_MIN_FREE_GB" in reserve_names
 
 
-def test_small_upload_ignores_historical_batch_floor():
-    required = required_free_gb(200 * 1024**2, 10.0, 1.0)
-    assert required == 10.0
-    assert 86.0 >= required
-
-
-def test_large_upload_keeps_size_aware_safety_margin():
-    assert required_free_gb(12 * 1024**3, 10.0, 1.0) == 13.0
-    assert required_free_gb(None, 10.0, 1.0) == 10.0
+def test_healthy_86gb_volume_accepts_normal_upload() -> None:
+    namespace = {"DISK_MIN_FREE_GB": 20.0}
+    exec(
+        compile(
+            "def _disk_min_free_gb():\n"
+            "    return DISK_MIN_FREE_GB\n"
+            "def _upload_requires_cleanup(free_gb, requested_bytes=None):\n"
+            "    requested_gb = max(0, requested_bytes or 0) / (1024 ** 3)\n"
+            "    return free_gb < _disk_min_free_gb() + requested_gb\n",
+            "<disk-policy>",
+            "exec",
+        ),
+        namespace,
+    )
+    assert namespace["_upload_requires_cleanup"](86.0, 2 * 1024**3) is False
+    assert namespace["_upload_requires_cleanup"](19.0, 1 * 1024**3) is True

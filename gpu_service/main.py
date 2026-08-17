@@ -50,7 +50,6 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 import shutil as _shutil
 from asr_config import ASR_CONFIG, aligned_segment_bounds
-from disk_policy import configured_positive_float, configured_positive_int, required_free_gb
 
 _DEFAULT_STORAGE = (
     r"F:\douyin_recordings" if os.name == "nt" else "/data/douyin-recordings"
@@ -145,8 +144,8 @@ _cosyvoice = None       # Singleton CosyVoice2 model
 
 # GPU concurrency: one transcription at a time (shares VRAM with ComfyUI)
 _gpu_sem: asyncio.Semaphore = asyncio.Semaphore(1)
-_TRANSCRIBE_TIMEOUT = configured_positive_int(os.environ, "TRANSCRIBE_TIMEOUT_SECONDS", 3600)
-_TTS_TIMEOUT = configured_positive_int(os.environ, "TTS_TIMEOUT_SECONDS", 1800)
+_TRANSCRIBE_TIMEOUT = int(os.environ.get("TRANSCRIBE_TIMEOUT_SECONDS", "3600"))
+_TTS_TIMEOUT = int(os.environ.get("TTS_TIMEOUT_SECONDS", "1800"))
 _STALE_JOB_SECONDS = int(os.environ.get("STALE_JOB_SECONDS", "3600"))
 _TRANSCRIBE_HEARTBEAT_SECONDS = int(os.environ.get("TRANSCRIBE_HEARTBEAT_SECONDS", "60"))
 _WATCHDOG_INTERVAL_SECONDS = int(os.environ.get("JOB_WATCHDOG_INTERVAL_SECONDS", "60"))
@@ -1110,15 +1109,24 @@ _clip_jobs = _load_clip_jobs()
 _tts_jobs = _load_tts_jobs()
 _voice_refs = _load_voice_refs()
 
-# Disk space management thresholds
-DISK_QUOTA_GB = float(os.environ.get("DISK_QUOTA_GB", "100"))      # max data files (clips, audio_concat, etc.)
-DISK_GUARD_GB = float(os.environ.get("DISK_GUARD_GB", "10"))       # safety margin below quota for incoming uploads
-# These settings control admission safety, not a requirement to keep an entire
-# historical batch free. The previous 80GB floor rejected uploads with ~86GB
-# available even when the current file was small.
-DISK_MIN_FREE_GB = configured_positive_float(os.environ, "DISK_MIN_FREE_GB", 10.0)
-DISK_UPLOAD_RESERVE_GB = configured_positive_float(os.environ, "DISK_UPLOAD_RESERVE_GB", 1.0)
-BATCH_UPLOAD_LIMIT_GB = configured_positive_float(os.environ, "BATCH_UPLOAD_LIMIT_GB", 80.0)  # documented max batch size
+# Disk space management thresholds. DISK_MIN_FREE_GB is a reserve, not an
+# upload-size limit, so a healthy volume with tens of GB free remains usable.
+DISK_QUOTA_GB = float(os.environ.get("DISK_QUOTA_GB", "100"))
+DISK_GUARD_GB = float(os.environ.get("DISK_GUARD_GB", "10"))
+DISK_MIN_FREE_GB = float(os.environ.get("DISK_MIN_FREE_GB", "20"))
+
+
+def _disk_min_free_gb() -> float:
+    """Return the validated free-space reserve used before accepting work."""
+    if DISK_MIN_FREE_GB < 0:
+        raise RuntimeError("DISK_MIN_FREE_GB must not be negative")
+    return DISK_MIN_FREE_GB
+
+
+def _upload_requires_cleanup(free_gb: float, requested_bytes: int | None = None) -> bool:
+    """Whether an upload would consume the configured free-space reserve."""
+    requested_gb = max(0, requested_bytes or 0) / (1024 ** 3)
+    return free_gb < _disk_min_free_gb() + requested_gb
 
 def _get_disk_free_gb() -> float:
     """Return free space on STORAGE_DIR drive in GB."""
@@ -1456,19 +1464,22 @@ async def create_job(
     mp4_path = os.path.join(room_dir, _raw_filename)
     srt_path = os.path.join(room_dir, job_id + ".srt")
 
-    # Check disk space before accepting upload
+    # Preserve the configured reserve after the upload. Comparing against a
+    # total-volume quota incorrectly rejected healthy ~86 GB disks.
+    requested_bytes = file.size if isinstance(file.size, int) and file.size >= 0 else None
     free_gb = _get_disk_free_gb()
-    required_free = required_free_gb(file.size, DISK_MIN_FREE_GB, DISK_UPLOAD_RESERVE_GB)
-    if free_gb < required_free:
-        logger.warning(f"Low disk space: {free_gb:.1f}GB free, requested {file.size or 'unknown'} bytes")
-        # Try to trigger cleanup
+    if _upload_requires_cleanup(free_gb, requested_bytes):
+        logger.warning(
+            "Low disk space: %.1fGB free, requested %s bytes, reserve %.1fGB",
+            free_gb, requested_bytes if requested_bytes is not None else "unknown", _disk_min_free_gb(),
+        )
         asyncio.create_task(_cleanup_old_jobs())
-        await asyncio.sleep(5)  # Wait for cleanup
+        await asyncio.sleep(5)
         free_gb = _get_disk_free_gb()
-        if free_gb < required_free:
+        if _upload_requires_cleanup(free_gb, requested_bytes):
             raise HTTPException(
-                status_code=507, 
-                detail=f"Insufficient disk space: {free_gb:.1f}GB free, need at least {required_free:.1f}GB for upload"
+                status_code=507,
+                detail=f"Insufficient disk space: {free_gb:.1f}GB free; upload must preserve {_disk_min_free_gb():.1f}GB reserve",
             )
 
     async with aiofiles.open(mp4_path, "wb") as f:
@@ -1648,14 +1659,14 @@ async def create_clip_job(request: Request, req: ClipJobRequest):
         else:
             raise HTTPException(status_code=404, detail=f"MP4 not found on server: {mp4_path}")
     
-    # Check disk space before starting clip job
+    # Need a configurable reserve for clip output and recovery.
     free_gb = _get_disk_free_gb()
-    if free_gb < DISK_MIN_FREE_GB:
-        logger.warning(f"Low disk space: {free_gb:.1f}GB free, cannot start clip job")
+    if free_gb < _disk_min_free_gb():
+        logger.warning("Low disk space: %.1fGB free, cannot start clip job", free_gb)
         _clip_jobs.pop(job_id, None)
         raise HTTPException(
             status_code=507,
-            detail=f"Insufficient disk space: {free_gb:.1f}GB free"
+            detail=f"Insufficient disk space: {free_gb:.1f}GB free; reserve is {_disk_min_free_gb():.1f}GB",
         )
     if not req.segments:
         raise HTTPException(status_code=422, detail="segments list is empty")
