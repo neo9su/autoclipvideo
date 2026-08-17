@@ -942,13 +942,28 @@ function versionBusy(group, version) {
 }
 function versionStatusMeta(group, version) {
   const status = versionStatus(group, version)
-  const error = group[`${version}_error`]
+  const error = versionError(group, version)
+  const prerequisiteReason = versionPrerequisiteReason(group, version)
   if (status === 1 || versionBusy(group, version)) return { label: '生成中', className: 'running', hint: '任务进行中，请勿重复提交。' }
   if (status === 2 && versionIsReady(group, version)) return { label: '已完成', className: 'done', hint: '' }
   if (status < 0 || (status === 2 && !versionIsReady(group, version))) {
-    return { label: '失败', className: 'failed', error: summarizeStyleError(error) || '结果文件缺失，可重试。', hint: '', disabledReason: '' }
+    return {
+      label: '失败',
+      className: 'failed',
+      error: summarizeStyleError(error) || '结果文件缺失，可重试。',
+      hint: '',
+      disabledReason: prerequisiteReason,
+    }
   }
-  return { label: '未生成', className: 'idle', hint: '', disabledReason: versionPrerequisiteReason(group, version) }
+  return { label: '未生成', className: 'idle', hint: '', disabledReason: prerequisiteReason }
+}
+function versionError(group, version) {
+  if (version === 'classic') return group.merge_error || group.classic_error
+  return group[`${version}_error`]
+}
+function summarizeStyleError(error) {
+  if (!error) return ''
+  return String(error).replace(/\\s+/g, ' ').slice(0, 160)
 }
 function versionTriggerDisabled(group, version) {
   return Boolean(versionPrerequisiteReason(group, version)) || versionBusy(group, version) || versionStatus(group, version) === 1

@@ -187,7 +187,9 @@ export async function retryDirector(id) {
 }
 
 export async function retryStyles(id, version) {
-  const endpoint = version ? `/api/groups/${id}/retry-styles/${encodeURIComponent(version)}` : `/api/groups/${id}/retry-styles`
+  const endpoint = version
+    ? `/api/groups/${id}/retry-styles/${encodeURIComponent(version)}`
+    : `/api/groups/${id}/retry-styles`
   const res = await fetchWithTimeout(`${BASE}${endpoint}`, { method: 'POST' })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
