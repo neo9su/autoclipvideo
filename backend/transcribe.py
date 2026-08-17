@@ -330,14 +330,15 @@ async def poll_transcriptions(broadcast_fn=None):
             # Case 1: normal pending (clipped=0)
             async with db.execute(
                 "SELECT id, filename, clip_count FROM recordings "
-                "WHERE transcribed=2 AND clipped=0 AND local_deleted=0"
+                "WHERE transcribed=2 AND clipped=0 AND local_deleted=0 "
+                "AND duration_status='accepted'"
             ) as cur:
                 pending = await cur.fetchall()
             # Case 2: stuck mid-clipping (clipped=1, no clip_filename)
             async with db.execute(
                 "SELECT id, filename, clip_count FROM recordings "
                 "WHERE transcribed=2 AND clipped=1 AND clip_filename IS NULL "
-                "AND local_deleted=0 AND clip_error IS NULL"
+                "AND local_deleted=0 AND clip_error IS NULL AND duration_status='accepted'"
             ) as cur:
                 stuck = await cur.fetchall()
         # Reset stuck jobs back to pending

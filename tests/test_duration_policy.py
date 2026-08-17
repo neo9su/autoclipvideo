@@ -3,7 +3,9 @@ import json
 import sqlite3
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(PROJECT_ROOT / "backend"))
 from duration_policy import classify_duration, is_processable_duration
 from scripts.inventory_short_recordings import build_inventory
 
