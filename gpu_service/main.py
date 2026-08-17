@@ -734,6 +734,7 @@ async def _do_clip_job(
     ass_content: str,
     thumb_seek: float,
     preserve_original_audio: bool = False,
+    sound_cues: Optional[list] = None,
 ):
     """Full NVENC clip pipeline: preprocess → xfade merge → subtitle burn → thumbnail."""
     out_dir = os.path.join(STORAGE_DIR, "clips", job_id)
@@ -805,12 +806,43 @@ async def _do_clip_job(
         _update_clip_job(job_id, phase="final", pct=75)
         final_out = os.path.join(out_dir, "clip.mp4")
 
+        cue_inputs: list[str] = []
+        cue_filters: list[str] = []
+        valid_sound_cues = [
+            cue for cue in (sound_cues or [])
+            if isinstance(cue, dict)
+            and cue.get("sfx_path")
+            and os.path.isfile(str(cue["sfx_path"]))
+        ]
+        for cue_index, cue in enumerate(valid_sound_cues):
+            if not isinstance(cue, dict) or not cue.get("sfx_path"):
+                continue
+            cue_path = str(cue["sfx_path"])
+            input_index = 1 + len(cue_inputs)
+            # The control plane only passes trusted, pre-generated effect paths;
+            # still use the normal ffmpeg input list so cue timing is explicit.
+            cue_inputs.append(f"[{input_index}:a]")
+            delay_ms = max(0, int(float(cue.get("time") or 0) * 1000))
+            gain_db = float(cue.get("gain_db", -15))
+            cue_filters.append(
+                f"[{input_index}:a]adelay={delay_ms}:all=1,volume={gain_db}dB[kwcue{cue_index}]"
+            )
+
         audio_filter = (
-            "[0:a]aformat=sample_fmts=fltp:channel_layouts=stereo[aout]"
+            "[0:a]aformat=sample_fmts=fltp:channel_layouts=stereo[baseaudio]"
             if preserve_original_audio else
             "[0:a]acompressor=threshold=-25dB:ratio=3:attack=5:release=100:makeup=4dB,"
-            "aformat=sample_fmts=fltp:channel_layouts=stereo[aout]"
+            "aformat=sample_fmts=fltp:channel_layouts=stereo[baseaudio]"
         )
+        if cue_inputs:
+            cue_labels = [f"[kwcue{i}]" for i in range(len(cue_inputs))]
+            audio_filter += ";" + ";".join(cue_filters)
+            audio_filter += (
+                f";[baseaudio]{''.join(cue_labels)}amix=inputs={len(cue_labels) + 1}:"
+                "duration=first:dropout_transition=0:normalize=0[aout]"
+            )
+        else:
+            audio_filter = audio_filter.replace("[baseaudio]", "[aout]")
 
         if has_subs:
             # Windows path fix: forward slashes + escape drive colon for ffmpeg filter parser
@@ -834,6 +866,7 @@ async def _do_clip_job(
 
         rc = await _run_ffmpeg(
             FFMPEG_ASS, "-y", "-i", merged,
+            *sum((["-i", str(cue["sfx_path"])] for cue in valid_sound_cues), []),
             "-filter_complex", filter_complex,
             "-map", vmap, "-map", amap,
             "-pix_fmt", "yuv420p",
@@ -876,11 +909,13 @@ async def _run_clip_job(
     ass_content: str,
     thumb_seek: float,
     preserve_original_audio: bool = False,
+    sound_cues: Optional[list] = None,
 ):
     async with _clip_sem:
         await _do_clip_job(
             job_id, mp4_path, segments, ass_content, thumb_seek,
             preserve_original_audio=preserve_original_audio,
+            sound_cues=sound_cues,
         )
 
 
@@ -1656,6 +1691,7 @@ class ClipJobRequest(BaseModel):
     idempotency_key: str = ""
     execution_node: str = "remote-gpu"
     preserve_original_audio: bool = False
+    sound_cues: list = []
 
 
 @app.post("/clip-jobs", status_code=201)
@@ -1706,6 +1742,7 @@ async def create_clip_job(request: Request, req: ClipJobRequest):
         _run_clip_job(
             job_id, mp4_path, req.segments, req.ass_content, req.thumb_seek,
             preserve_original_audio=req.preserve_original_audio,
+            sound_cues=req.sound_cues,
         )
     )
     return {"job_id": job_id, "status": "queued"}

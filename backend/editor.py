@@ -457,6 +457,8 @@ def _find_subtitle_font_candidates(fonts_dir: Path) -> list[Path]:
 # ASS colors: &HAABBGGRR& (AA=00 opaque, bytes in B-G-R order)
 # Warm gold #FFCC00 → R=FF G=CC B=00 → BGR 00,CC,FF → &H0000CCFF&
 _HIGHLIGHT_COLOR = "&H000000FF&"   # red (ASS BGR)
+_CONSERVATIVE_KEYWORD_COLOR = "&H0000CCFF&"  # yellow (#FFCC00, ASS BGR)
+_CONSERVATIVE_KEYWORD_STROKE = "&H00FFFFFF&"
 
 _HIGHLIGHT_PRODUCT: set[str] = {
     # 效果形容词
@@ -566,12 +568,19 @@ def _sec_to_ass(s: float) -> str:
     return f"{h}:{m:02d}:{sec:05.2f}"
 
 
-def _annotate_text(text: str) -> tuple[str, bool]:
+def _annotate_text(text: str, conservative: bool = False) -> tuple[str, bool]:
     """Wrap highlight keywords in red ASS tags. Returns (tagged_text, had_keyword)."""
     has_kw = False
     for kw in _SORTED_HIGHLIGHT_KWS:
         if kw in text:
-            open_tag  = "{\\c" + _HIGHLIGHT_COLOR + "}"
+            if conservative:
+                open_tag = (
+                    "{\\c" + _CONSERVATIVE_KEYWORD_COLOR
+                    + "\\3c" + _CONSERVATIVE_KEYWORD_STROKE
+                    + "\\bord3}"
+                )
+            else:
+                open_tag = "{\\c" + _HIGHLIGHT_COLOR + "}"
             close_tag = "{\\r}"
             if kw in text:
                 text = text.replace(kw, open_tag + kw + close_tag)
@@ -597,7 +606,12 @@ _ANIM_KW = r"{\fad(150,100)\t(0,200,\fscx112\fscy112)\t(200,400,\fscx100\fscy100
 _ASS_HEADER: str = _make_ass_header()
 
 
-def build_ass(selected: List[Seg], all_segs: List[Seg], realistic: bool = False) -> str:
+def build_ass(
+    selected: List[Seg],
+    all_segs: List[Seg],
+    realistic: bool = False,
+    conservative: bool = False,
+) -> str:
     """
     Generate complete, chronologically aligned ASS subtitles.
 
@@ -608,14 +622,27 @@ def build_ass(selected: List[Seg], all_segs: List[Seg], realistic: bool = False)
     def _format_subtitle_text(text: str) -> str:
         """Preserve source text while adding safe ASS line breaks."""
         wrapped_lines: list[str] = []
-        for source_line in text.splitlines():
-            normalized_line = re.sub(r"[ \t]+", " ", source_line).strip()
-            if not normalized_line:
-                continue
-            wrapped_lines.extend(
-                normalized_line[start:start + 14]
-                for start in range(0, len(normalized_line), 14)
-            )
+        normalized_lines = [
+            re.sub(r"[ \t]+", " ", source_line).strip()
+            for source_line in text.splitlines()
+            if re.sub(r"[ \t]+", " ", source_line).strip()
+        ]
+        if conservative:
+            # Conservative captions are deliberately constrained to two
+            # lines.  Flatten source line breaks first so malformed upstream
+            # cues cannot create a third rendered line.
+            normalized_text = " ".join(normalized_lines)
+            if len(normalized_text) <= 14:
+                wrapped_lines.append(normalized_text)
+            else:
+                split_at = min(14, max(1, (len(normalized_text) + 1) // 2))
+                wrapped_lines.extend((normalized_text[:split_at], normalized_text[split_at:]))
+        else:
+            for normalized_line in normalized_lines:
+                wrapped_lines.extend(
+                    normalized_line[start:start + 14]
+                    for start in range(0, len(normalized_line), 14)
+                )
         escaped_lines = [
             line.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
             for line in wrapped_lines
@@ -651,12 +678,57 @@ def build_ass(selected: List[Seg], all_segs: List[Seg], realistic: bool = False)
             t0 = offset + (ov_start - sel_seg.start)
             t1 = offset + (ov_end   - sel_seg.start)
             raw_text = _format_subtitle_text(srt.text)
-            annotated, has_kw = _annotate_text(raw_text)
+            annotated, has_kw = _annotate_text(raw_text, conservative=conservative)
             line_idx += 1
             ts0, ts1 = _sec_to_ass(t0), _sec_to_ass(t1)
             if raw_text:
                 dialogue.append(f"Dialogue: 0,{ts0},{ts1},XQN,,0,0,0,,{_BORDER_TEXT}{annotated}")
     return header + "\n".join(dialogue) + "\n"
+
+
+def build_conservative_sound_cues(
+    selected: List[Seg],
+    all_segs: List[Seg],
+    *,
+    sfx_path: Optional[str] = None,
+) -> List[dict]:
+    """Return one idempotent emphasis cue for each displayed conservative keyword."""
+    from video_editing_skills import ensure_sfx_asset
+
+    sfx = ensure_sfx_asset("emphasis_pop", sfx_path)
+    if not sfx:
+        return []
+    cues: list[dict] = []
+    seen: set[tuple[int, str, int]] = set()
+    cursor = 0.0
+    for index, segment in enumerate(selected):
+        if index:
+            cursor += segment.duration
+        for source in all_segs:
+            overlap_start = max(source.start, segment.start)
+            overlap_end = min(source.end, segment.end)
+            if overlap_end - overlap_start < 0.15:
+                continue
+            text = source.text or ""
+            matches = sorted(
+                ((text.find(keyword), keyword) for keyword in _SORTED_HIGHLIGHT_KWS if keyword in text),
+                key=lambda match: (match[0], -len(match[1])),
+            )
+            for _, keyword in matches:
+                key = (source.idx, keyword, index)
+                if key in seen:
+                    continue
+                seen.add(key)
+                cue_time = cursor + max(0.0, overlap_start - segment.start) + 0.05
+                cues.append({
+                    "time": round(cue_time, 3),
+                    "keyword": keyword,
+                    "sfx_path": sfx,
+                    "gain_db": -15,
+                    "reason": "conservative_keyword",
+                    "idempotency_key": f"conservative:{source.idx}:{keyword}:{index}",
+                })
+    return cues
 
 
 FADE_DUR = 1.5       # video-to-video direct crossfade (seconds)
@@ -2815,6 +2887,7 @@ async def _edit_via_gpu(
     on_progress=None,
     mp4_path: Optional[str] = None,   # local path; enables auto-upload on 404
     realistic: bool = False,
+    conservative: bool = False,
 ) -> Optional[str]:
     require_remote_gpu("clip generation")
     """
@@ -2823,7 +2896,8 @@ async def _edit_via_gpu(
     uploaded automatically and the job is retried.
     Returns out_path on success, None on failure.
     """
-    ass_content = build_ass(selected, segs, realistic=realistic)
+    ass_content = build_ass(selected, segs, realistic=realistic, conservative=conservative)
+    sound_cues = build_conservative_sound_cues(selected, segs) if conservative else []
     best_seg = max(selected, key=lambda s: s.score) if any(s.score > 0 for s in selected) \
                else selected[max(0, len(selected) // 4)]
 
@@ -2850,6 +2924,7 @@ async def _edit_via_gpu(
             for s in selected
         ],
         "preserve_original_audio": realistic,
+        "sound_cues": sound_cues,
         "ass_content": ass_content,
         "thumb_seek": best_seg.start + 1.0,
     }
@@ -3298,6 +3373,7 @@ async def edit_recording(mp4_path: str, srt_path: str, room_name: str = "unknown
                     mp4_filename, room_id, selected, source_segs, out_path, on_progress,
                     mp4_path=mp4_path,
                     realistic=clip_engine in ("realistic", "conservative"),
+                    conservative=clip_engine == "conservative",
                 )
                 if gpu_result:
                     # GPU succeeded — generate thumbnail locally from original mp4
@@ -3522,6 +3598,7 @@ async def edit_recording_multi(
                     mp4_filename, _room_id_v, selected, source_segs, out_path, on_progress,
                     mp4_path=mp4_path,
                     realistic=clip_engine in ("realistic", "conservative"),
+                    conservative=clip_engine == "conservative",
                 )
                 if gpu_result:
                     try:
