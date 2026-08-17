@@ -992,16 +992,29 @@ async def upload_recording(room_id: int, file: UploadFile = File(...), srt: Opti
             f.write(chunk)
             size_bytes += len(chunk)
 
+    # Never trust client metadata: probe the stored media before allowing any
+    # transcription or editing work. Failed probes are retained but unavailable.
+    from duration_policy import classify_duration, duration_reason
+    from transcribe import _get_video_duration
+    probed_duration = await _get_video_duration(filepath)
+    duration_status = classify_duration(probed_duration)
+    skip_reason = duration_reason(probed_duration) or None
+
     start_time = now.isoformat()
     async with aio_connect() as db:
         cur = await db.execute(
-            "INSERT INTO recordings (room_id, filename, start_time, end_time, size_bytes, synced, clip_count) VALUES (?, ?, ?, ?, ?, 0, ?)",
-            (room_id, filename, start_time, start_time, size_bytes, clip_count),
+            "INSERT INTO recordings (room_id, filename, start_time, end_time, size_bytes, synced, clip_count, duration_seconds, duration_status, skip_reason) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)",
+            (room_id, filename, start_time, start_time, size_bytes, clip_count, probed_duration or None, duration_status, skip_reason),
         )
         await db.commit()
         recording_id = cur.lastrowid
 
     asyncio.create_task(_generate_upload_thumb(recording_id, filepath))
+
+    if duration_status != "accepted":
+        return {"id": recording_id, "filename": filename, "size_bytes": size_bytes,
+                "gpu_job_id": None, "duration_status": duration_status,
+                "skip_reason": skip_reason}
 
     # If SRT is provided, skip GPU transcription and trigger clipping immediately
     if srt is not None:
@@ -1126,12 +1139,14 @@ async def bulk_recording_clips(ids: str = ""):
         # Only return the latest retry's clips (highest id per recording+variant)
         async with db.execute(
             f"""SELECT rc.* FROM recording_clips rc
+                JOIN recordings r ON r.id = rc.recording_id
                 INNER JOIN (
                     SELECT recording_id, variant_idx, MAX(id) as max_id
                     FROM recording_clips
                     WHERE recording_id IN ({placeholders})
                     GROUP BY recording_id, variant_idx
                 ) latest ON rc.id = latest.max_id
+                WHERE r.duration_status = 'accepted'
                 ORDER BY rc.recording_id, rc.variant_idx ASC""",
             id_list,
         ) as cur:
@@ -1153,6 +1168,7 @@ async def list_clips():
             JOIN rooms rm ON r.room_id = rm.id
             LEFT JOIN recording_clips rc ON rc.recording_id = r.id AND rc.variant_idx = 0
             WHERE r.clipped = 2 AND r.clip_filename IS NOT NULL
+              AND r.duration_status = 'accepted'
             ORDER BY r.start_time DESC
         """) as cur:
             rows = await cur.fetchall()
@@ -1614,7 +1630,7 @@ async def get_group(group_id: int):
         async with db.execute(
             """SELECT id, filename, clip_filename, thumbnail, start_time, end_time,
                       session_label, has_tryon, has_promotion, transcribed, clipped, transcribe_error
-               FROM recordings WHERE group_id = ? ORDER BY start_time ASC""",
+               FROM recordings WHERE group_id = ? AND duration_status = 'accepted' ORDER BY start_time ASC""",
             (group_id,)
         ) as cur:
             recs = await cur.fetchall()

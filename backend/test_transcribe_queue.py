@@ -109,6 +109,8 @@ async def test_transcribe_queue_includes_finished_unsynced_recording_with_file(b
             start_time=started_at,
             end_time=ended_at,
             size_bytes=source_path.stat().st_size,
+            duration_seconds=28.0,
+            duration_status="accepted",
         )
 
         response = await backend_main.get_transcribe_queue()
