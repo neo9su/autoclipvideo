@@ -29,6 +29,31 @@ except ImportError:
 _matcher_instance: Optional["SemanticMatcher"] = None
 
 
+def _is_thumbnail_only_clip_failure(clip_error: Optional[str]) -> bool:
+    """Return whether clipping failed only while creating an optional thumbnail.
+
+    Thumbnails are presentation artifacts.  They must not hide a source whose
+    upload and transcription have already completed, but other clip failures
+    still require the normal recovery path.
+    """
+    return bool(clip_error and "local media execution is disabled: thumbnail generation" in clip_error)
+
+
+def qianchuan_source_eligibility_sql(alias: str = "recordings") -> str:
+    """SQL predicate for sources usable by transcription-backed matching.
+
+    The source media and SRT are authoritative for matching.  A thumbnail
+    failure is explicitly optional, while unrelated clip failures remain
+    excluded.
+    """
+    return (
+        f"{alias}.synced = 1 AND {alias}.transcribed = 2 AND "
+        f"({alias}.clipped = 2 OR "
+        f"({alias}.clipped = -1 AND {alias}.clip_error LIKE "
+        "'%local media execution is disabled: thumbnail generation%'))"
+    )
+
+
 def get_matcher(db_path: str) -> "SemanticMatcher":
     global _matcher_instance
     if _matcher_instance is None:
@@ -75,6 +100,8 @@ def _ts_to_sec(ts: str) -> float:
 
 
 class SemanticMatcher:
+    allow_thumbnail_optional_sources = False
+
     def __init__(self, db_path: str):
         self.db_path = db_path
         self.match_error: Optional[str] = None
@@ -572,9 +599,15 @@ class SemanticMatcher:
             from datetime import datetime
             async with aiosqlite.connect(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
+                source_predicate = (
+                    qianchuan_source_eligibility_sql()
+                    if self.allow_thumbnail_optional_sources
+                    else "clipped = 2"
+                )
                 async with db.execute(
-                    "SELECT id, filename, clip_filename, start_time, end_time, transcribed, synced, local_deleted FROM recordings"
-                    " WHERE group_id = ? AND transcribed = 2 AND synced = 1"
+                    "SELECT id, filename, clip_filename, start_time, end_time, clip_error FROM recordings"
+                    " WHERE group_id = ? AND "
+                    f"{source_predicate}"
                     " AND (local_deleted = 0 OR local_deleted IS NULL)"
                     " ORDER BY start_time",
                     (group_id,),
@@ -582,11 +615,6 @@ class SemanticMatcher:
                     rows = await cursor.fetchall()
 
             for row in rows:
-                # Clip/thumbnail artifacts are presentation metadata. A
-                # synced remote transcription remains a valid Qianchuan source
-                # even when local thumbnail generation was policy-blocked.
-                if row["transcribed"] != 2 or row["synced"] != 1 or row["local_deleted"]:
-                    continue
                 # 计算实际文件时长（用 ffprobe，而非数据库的 start/end time）
                 source_filename = row["filename"]
                 clip_filename = row["clip_filename"]
@@ -595,10 +623,6 @@ class SemanticMatcher:
                 if not source_path or not source_path.is_file():
                     logger.warning("Skipping recording %s: source media is absent", source_filename)
                     continue
-                # A thumbnail is presentation metadata, not source media.  In
-                # GPU-only deployments thumbnail generation is intentionally
-                # rejected locally, so a synced/transcribed recording must
-                # remain eligible even when no clipped variant exists yet.
                 media_filename = clip_filename if clip_path and clip_path.is_file() else source_filename
                 filepath = clip_path if clip_path and clip_path.is_file() else source_path
                 duration = 30.0
@@ -643,6 +667,7 @@ class SemanticMatcher:
                     "transcript_text": transcript_text,
                     "srt_entries": srt_entries,
                     "duration": duration,
+                    "thumbnail_optional": _is_thumbnail_only_clip_failure(row["clip_error"]),
                 })
 
         except Exception as e:

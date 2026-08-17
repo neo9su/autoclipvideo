@@ -1961,7 +1961,10 @@ async def backfill_auto_merge():
                                SELECT 1 FROM recordings
                                WHERE recordings.group_id = clip_groups.id
                                  AND recordings.local_deleted = 0
-                                 AND recordings.clipped = 2
+                                 AND recordings.synced = 1
+                                 AND recordings.transcribed = 2
+                                 AND (recordings.clipped = 2 OR
+                                      (recordings.clipped = -1 AND recordings.clip_error LIKE '%local media execution is disabled: thumbnail generation%'))
                              )
                            ORDER BY id DESC"""
                     ) as cur:

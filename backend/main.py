@@ -1576,7 +1576,10 @@ async def list_groups():
             SELECT g.*,
                    rm.name as room_name,
                    COUNT(DISTINCT r.id) as clip_count,
-                   SUM(CASE WHEN (r.clipped = 2 OR (r.transcribed = 2 AND r.synced = 1 AND COALESCE(r.local_deleted, 0) = 0)) THEN 1 ELSE 0 END) as ready_count,
+                   SUM(CASE WHEN r.synced = 1 AND r.transcribed = 2 AND
+                                  (r.clipped = 2 OR
+                                   (r.clipped = -1 AND r.clip_error LIKE '%local media execution is disabled: thumbnail generation%'))
+                            THEN 1 ELSE 0 END) as ready_count,
                    COUNT(DISTINCT CASE WHEN pt.status IN ('done','publishing','pending','scheduled') THEN pt.id END) as published_count
             FROM clip_groups g
             LEFT JOIN rooms rm ON g.room_id = rm.id
@@ -3100,6 +3103,52 @@ async def retry_clip_queue_job(recording_id: int):
     asyncio.create_task(_run_editor(recording_id, mp4_path, srt_path,
                                     clip_count=rec["clip_count"] or 1))
     return {"ok": True, "recording_id": recording_id, "status": "queued"}
+
+
+@app.post("/api/clip-queue/{recording_id}/recover-qianchuan-source")
+async def recover_qianchuan_source(recording_id: int):
+    """Reconcile a thumbnail-only failure without deleting or re-editing media.
+
+    The remote-GPU policy intentionally rejects local thumbnail generation.
+    Once upload and transcription have completed, qianchuan can safely use the
+    original MP4/SRT as its source while the optional thumbnail is retried by a
+    GPU-specific job separately.
+    """
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, group_id, synced, transcribed, clipped, clip_error "
+            "FROM recordings WHERE id = ?",
+            (recording_id,),
+        ) as cur:
+            rec = await cur.fetchone()
+        if not rec:
+            raise HTTPException(status_code=404, detail="Recording not found")
+        if rec["synced"] != 1 or rec["transcribed"] != 2:
+            raise HTTPException(status_code=409, detail="Recording is not synced and transcribed")
+        if rec["clipped"] == 2:
+            return {"ok": True, "recording_id": recording_id, "status": "already_ready"}
+        if "local media execution is disabled: thumbnail generation" not in (rec["clip_error"] or ""):
+            raise HTTPException(status_code=409, detail="Recording failure is not thumbnail-only")
+        await db.execute(
+            "UPDATE recordings SET clipped = -1, clip_error = ? WHERE id = ?",
+            ("local media execution is disabled: thumbnail generation", recording_id),
+        )
+        await db.commit()
+
+    if rec["group_id"]:
+        try:
+            from api_v2 import _run_qianchuan_pipeline
+            asyncio.create_task(_run_qianchuan_pipeline(rec["group_id"]))
+        except ImportError:
+            logger.warning("Qianchuan pipeline unavailable during source recovery for %s", recording_id)
+    return {
+        "ok": True,
+        "recording_id": recording_id,
+        "group_id": rec["group_id"],
+        "status": "qianchuan_source_ready",
+        "thumbnail": "optional_remote_gpu_retry",
+    }
 
 
 async def _parse_bulk_clip_ids(body: dict) -> list[int]:
