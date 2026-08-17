@@ -40,9 +40,7 @@ def _is_thumbnail_only_clip_failure(clip_error: Optional[str]) -> bool:
 def qianchuan_source_eligibility_sql(alias: str = "recordings") -> str:
     """Build the predicate for synced/transcribed sources usable by Qianchuan."""
     return (
-        f"{alias}.synced = 1 AND {alias}.transcribed = 2 "
-        f"AND {alias}.duration_status = 'accepted' "
-        f"AND ({alias}.local_deleted = 0 OR {alias}.local_deleted IS NULL) AND "
+        f"{alias}.synced = 1 AND {alias}.transcribed = 2 AND "
         f"({alias}.clipped = 2 OR "
         f"({alias}.clipped = -1 AND {alias}.clip_error LIKE "
         "'%local media execution is disabled: thumbnail generation%'))"
@@ -95,6 +93,8 @@ def _ts_to_sec(ts: str) -> float:
 
 
 class SemanticMatcher:
+    allow_thumbnail_optional_sources = False
+
     def __init__(self, db_path: str):
         self.db_path = db_path
         self.match_error: Optional[str] = None
@@ -611,11 +611,20 @@ class SemanticMatcher:
 
         try:
             from datetime import datetime
+            source_clip_predicate = "clipped = 2"
+            if self.allow_thumbnail_optional_sources:
+                source_clip_predicate = (
+                    "(clipped = 2 OR (clipped = -1 AND clip_error LIKE "
+                    "'%local media execution is disabled: thumbnail generation%'))"
+                )
             async with aiosqlite.connect(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
                 async with db.execute(
-                    "SELECT id, filename, clip_filename, start_time, end_time FROM recordings"
-                    f" WHERE group_id = ? AND {qianchuan_source_eligibility_sql()}"
+                    "SELECT id, filename, clip_filename, start_time, end_time, clipped, clip_error "
+                    "FROM recordings WHERE group_id = ? AND synced = 1 AND transcribed = 2 "
+                    "AND duration_status = 'accepted' AND "
+                    f"{source_clip_predicate} "
+                    " AND (local_deleted = 0 OR local_deleted IS NULL)"
                     " ORDER BY start_time",
                     (group_id,),
                 ) as cursor:
@@ -671,6 +680,11 @@ class SemanticMatcher:
                     "recording_id": row["id"],
                     "filename": media_filename,
                     "source_filename": source_filename,
+                    "thumbnail_optional": (
+                        row["clipped"] == -1
+                        and self.allow_thumbnail_optional_sources
+                        and _is_thumbnail_only_clip_failure(row["clip_error"])
+                    ),
                     "transcript_text": transcript_text,
                     "srt_entries": srt_entries,
                     "duration": duration,

@@ -5,6 +5,7 @@
 import asyncio
 import json
 import logging
+from contextlib import suppress
 from typing import Dict, List, Optional, Any
 
 from fastapi import APIRouter, HTTPException, Depends
@@ -50,6 +51,7 @@ voice_director = VoiceDirector()
 
 # 同时最多 1 个 compose-video 任务（libx264/videotoolbox 占满 CPU）
 _COMPOSE_SEM = asyncio.Semaphore(1)
+_QIANCHUAN_TASKS: set[asyncio.Task] = set()
 
 
 def _build_qianchuan_script_segments(script: Dict, audio_segments: List[Dict]) -> List[Dict]:
@@ -73,6 +75,20 @@ def _build_qianchuan_script_segments(script: Dict, audio_segments: List[Dict]) -
             "scene_id": scene_id,
         })
     return normalized_segments
+
+
+def _track_qianchuan_task(task: asyncio.Task) -> None:
+    """Keep background tasks observable and prevent unhandled task warnings."""
+    _QIANCHUAN_TASKS.add(task)
+    task.add_done_callback(_QIANCHUAN_TASKS.discard)
+
+    def report_failure(completed_task: asyncio.Task) -> None:
+        if completed_task.cancelled():
+            return
+        with suppress(Exception):
+            completed_task.result()
+
+    task.add_done_callback(report_failure)
 
 class ScriptGenerationRequest(BaseModel):
     group_id: int
@@ -284,7 +300,7 @@ async def generate_qianchuan(request: QianchuanGenerateRequest):
             script=script, score=match.get("score"), metadata=metadata, review=policy,
         )
 
-    asyncio.create_task(_qianchuan_generate_bg(request.group_id, script))
+    _track_qianchuan_task(asyncio.create_task(_qianchuan_generate_bg(request.group_id, script)))
     return QianchuanGenerateResponse(
         success=True, started=True, group_id=request.group_id, status=1,
         script=script, score=match.get("score"), metadata=metadata, review=policy,
