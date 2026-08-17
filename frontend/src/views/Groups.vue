@@ -932,7 +932,8 @@ function classicIsReady(group) {
 }
 function versionIsReady(group, version) {
   if (version === 'classic') return classicIsReady(group)
-  return versionStatus(group, version) === 2 && group[`${version}_available`] !== false && group[`${version}_file_status`] !== 'missing'
+  const fileStatus = group[`${version}_file_status`]
+  return versionStatus(group, version) === 2 && fileStatus === 'ready'
 }
 function versionBusy(group, version) {
   return Boolean(retryBusy.value[`${group.id}:${version}`]) ||
@@ -946,6 +947,15 @@ function versionStatusMeta(group, version) {
   const prerequisiteReason = versionPrerequisiteReason(group, version)
   if (status === 1 || versionBusy(group, version)) return { label: '生成中', className: 'running', hint: '任务进行中，请勿重复提交。' }
   if (status === 2 && versionIsReady(group, version)) return { label: '已完成', className: 'done', hint: '' }
+  if (version === 'qianchuan' && status === -2) {
+    return {
+      label: '不可用',
+      className: 'blocked',
+      error: summarizeQianchuanError(error),
+      hint: '补充可匹配的录像和 SRT 后再重试。',
+      disabledReason: '缺少可匹配的千川录像或 SRT，请补充素材后重试。',
+    }
+  }
   if (status < 0 || (status === 2 && !versionIsReady(group, version))) {
     return {
       label: '失败',
@@ -969,6 +979,9 @@ function versionTriggerDisabled(group, version) {
   return Boolean(versionPrerequisiteReason(group, version)) || versionBusy(group, version) || versionStatus(group, version) === 1
 }
 function versionPrerequisiteReason(group, version) {
+  if (group[`${version}_available`] === false && version !== 'qianchuan') {
+    return `${versionLabels[version]}当前不可用，请先完成对应前置步骤。`
+  }
   if (version === 'qianchuan' && Number(group.qianchuan_status) === -2) {
     return '缺少可匹配的千川录像或 SRT，请补充素材后重试。'
   }
