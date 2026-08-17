@@ -50,6 +50,7 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 import shutil as _shutil
 from asr_config import ASR_CONFIG, aligned_segment_bounds
+from disk_policy import configured_positive_float, configured_positive_int
 
 _DEFAULT_STORAGE = (
     r"F:\douyin_recordings" if os.name == "nt" else "/data/douyin-recordings"
@@ -144,11 +145,11 @@ _cosyvoice = None       # Singleton CosyVoice2 model
 
 # GPU concurrency: one transcription at a time (shares VRAM with ComfyUI)
 _gpu_sem: asyncio.Semaphore = asyncio.Semaphore(1)
-_TRANSCRIBE_TIMEOUT = int(os.environ.get("TRANSCRIBE_TIMEOUT_SECONDS", "3600"))
-_TTS_TIMEOUT = int(os.environ.get("TTS_TIMEOUT_SECONDS", "1800"))
-_STALE_JOB_SECONDS = int(os.environ.get("STALE_JOB_SECONDS", "3600"))
-_TRANSCRIBE_HEARTBEAT_SECONDS = int(os.environ.get("TRANSCRIBE_HEARTBEAT_SECONDS", "60"))
-_WATCHDOG_INTERVAL_SECONDS = int(os.environ.get("JOB_WATCHDOG_INTERVAL_SECONDS", "60"))
+_TRANSCRIBE_TIMEOUT = configured_positive_int(os.environ, "TRANSCRIBE_TIMEOUT_SECONDS", 3600)
+_TTS_TIMEOUT = configured_positive_int(os.environ, "TTS_TIMEOUT_SECONDS", 1800)
+_STALE_JOB_SECONDS = configured_positive_int(os.environ, "STALE_JOB_SECONDS", 3600)
+_TRANSCRIBE_HEARTBEAT_SECONDS = configured_positive_int(os.environ, "TRANSCRIBE_HEARTBEAT_SECONDS", 60)
+_WATCHDOG_INTERVAL_SECONDS = configured_positive_int(os.environ, "JOB_WATCHDOG_INTERVAL_SECONDS", 60)
 # NVENC concurrency: 2 concurrent — NVENC is a dedicated hardware unit, no VRAM cost
 _clip_sem: asyncio.Semaphore = asyncio.Semaphore(2)
 
@@ -1111,9 +1112,9 @@ _voice_refs = _load_voice_refs()
 
 # Disk space management thresholds. DISK_MIN_FREE_GB is a reserve, not an
 # upload-size limit, so a healthy volume with tens of GB free remains usable.
-DISK_QUOTA_GB = float(os.environ.get("DISK_QUOTA_GB", "100"))
-DISK_GUARD_GB = float(os.environ.get("DISK_GUARD_GB", "10"))
-DISK_MIN_FREE_GB = float(os.environ.get("DISK_MIN_FREE_GB", "20"))
+DISK_QUOTA_GB = configured_positive_float(os.environ, "DISK_QUOTA_GB", 100.0)
+DISK_GUARD_GB = configured_positive_float(os.environ, "DISK_GUARD_GB", 10.0)
+DISK_MIN_FREE_GB = configured_positive_float(os.environ, "DISK_MIN_FREE_GB", 20.0)
 
 
 def _disk_min_free_gb() -> float:
