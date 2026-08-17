@@ -570,14 +570,19 @@ class Runner:
         issues = self.adapter.scan()
         if dry_run:
             return {'dry_run': True, 'issues': len(issues)}
-        for issue in issues:
-            number = issue.get('number')
-            if number is not None:
-                remote_state = issue.get('state', 'queued')
-                local_state = 'queued' if str(remote_state).lower() == 'open' else remote_state
-                self.store.upsert_issue(number, issue.get('title', f'Issue {number}'), local_state, issue)
-        self.store.reconcile_completed_issues(issues)
-        return self.store.reconcile_decompositions(issues)
+        if not self.store.acquire_coordinator(self.owner):
+            return {'repaired': 0, 'completed': 0, 'blocked': 0, 'skipped': 'coordinator_busy'}
+        try:
+            for issue in issues:
+                number = issue.get('number')
+                if number is not None:
+                    remote_state = issue.get('state', 'queued')
+                    local_state = 'queued' if str(remote_state).lower() == 'open' else remote_state
+                    self.store.upsert_issue(number, issue.get('title', f'Issue {number}'), local_state, issue)
+            self.store.reconcile_completed_issues(issues)
+            return self.store.reconcile_decompositions(issues)
+        finally:
+            self.store.release_coordinator(self.owner)
 
     def status(self):
         """Return the persisted runner state for the CLI and API callers."""
