@@ -738,6 +738,11 @@ async def health():
         "version": APP_VERSION,
         "remote_backend_url": REMOTE_BACKEND_URL,
     }
+    from duration_policy import MAX_RECORDING_DURATION_SECONDS, MIN_RECORDING_DURATION_SECONDS
+    result["recording_policy"] = {
+        "min_duration_seconds": MIN_RECORDING_DURATION_SECONDS,
+        "max_segment_duration_seconds": MAX_RECORDING_DURATION_SECONDS,
+    }
     if IS_CONTROL_PLANE:
         result["qianchuan_entry"] = f"{REMOTE_BACKEND_URL}/api/v2/qianchuan/status"
         result["director_entry"] = f"{REMOTE_BACKEND_URL}/api/v2/director/status"
@@ -1041,7 +1046,8 @@ async def upload_recording(room_id: int, file: UploadFile = File(...), srt: Opti
         await db.commit()
         recording_id = cur.lastrowid
 
-    asyncio.create_task(_generate_upload_thumb(recording_id, filepath))
+    if duration_status == "accepted":
+        asyncio.create_task(_generate_upload_thumb(recording_id, filepath))
 
     if duration_status != "accepted":
         return {"id": recording_id, "filename": filename, "size_bytes": size_bytes,
@@ -2342,7 +2348,8 @@ async def upload_custom_group_video(group_id: int, file: UploadFile = File(...),
         await db.commit()
         recording_id = cur.lastrowid
 
-    asyncio.create_task(_generate_upload_thumb(recording_id, filepath))
+    if duration_status == "accepted":
+        asyncio.create_task(_generate_upload_thumb(recording_id, filepath))
 
     if duration_status != "accepted":
         return {
@@ -2424,17 +2431,17 @@ async def import_group_videos(group_id: int, body: ImportVideosRequest):
                 existing = await cur.fetchone()
             if existing:
                 await db.execute(
-                    "UPDATE recordings SET group_id = ?, local_deleted = 0, duration_seconds = ?, duration_status = ?, skip_reason = ? WHERE id = ?",
-                    (group_id, duration or None, duration_status, skip_reason, existing["id"]),
+                    "UPDATE recordings SET group_id = ?, local_deleted = ?, duration_seconds = ?, duration_status = ?, skip_reason = ? WHERE id = ?",
+                    (group_id, int(duration_status == "too_short"), duration or None, duration_status, skip_reason, existing["id"]),
                 )
             else:
                 imported_at = datetime.utcnow().isoformat()
                 await db.execute(
                     """INSERT INTO recordings
                        (room_id, filename, start_time, end_time, size_bytes, group_id, synced, transcribed, clipped, local_deleted, segment_index, duration_seconds, duration_status, skip_reason)
-                       VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, ?, ?, ?, ?)""",
+                       VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, ?, 0, ?, ?, ?, ?)""",
                     (room_id, filename, imported_at, imported_at, size, group_id,
-                     duration or None, duration_status, skip_reason),
+                     int(duration_status == "too_short"), duration or None, duration_status, skip_reason),
                 )
             imported += 1
 

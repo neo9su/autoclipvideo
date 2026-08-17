@@ -7,9 +7,9 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 RECORDINGS_DIR = os.path.join(os.path.dirname(__file__), "..", "recordings")
-from duration_policy import MAX_RECORDING_DURATION_SECONDS, classify_duration, probe_duration
+from duration_policy import classify_duration, probe_duration, recording_segment_duration
 
-SEGMENT_DURATION = MAX_RECORDING_DURATION_SECONDS
+SEGMENT_DURATION = recording_segment_duration()
 
 
 from douyin_live import get_stream_url, check_live_status  # noqa: F401
@@ -35,6 +35,20 @@ class RoomRecorder:
     def get_segment_filename(self) -> str:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         return f"{self.room_id}_{ts}_{self.segment_index:03d}.mp4"
+
+    @staticmethod
+    def build_ffmpeg_command(stream_url: str, filepath: str) -> list[str]:
+        """Build the bounded stream-copy command used for every room segment."""
+        return [
+            "ffmpeg",
+            "-hide_banner", "-loglevel", "warning",
+            "-i", stream_url,
+            "-c", "copy",
+            "-t", str(SEGMENT_DURATION),
+            "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+            "-y",
+            filepath,
+        ]
 
     async def start(self, stream_url: str):
         if self.recording:
@@ -103,16 +117,7 @@ class RoomRecorder:
 
             logger.info(f"[{self.room_name}] Recording segment {self.segment_index}: {filename}")
 
-            cmd = [
-                "ffmpeg",
-                "-hide_banner", "-loglevel", "warning",
-                "-i", stream_url,
-                "-c", "copy",
-                "-t", str(SEGMENT_DURATION),
-                "-movflags", "frag_keyframe+empty_moov+default_base_moof",
-                "-y",
-                filepath,
-            ]
+            cmd = self.build_ffmpeg_command(stream_url, filepath)
 
             try:
                 self._proc = await asyncio.create_subprocess_exec(
