@@ -1,5 +1,5 @@
 from gpu_execution import reject_local_media
-from duration_policy import classify_duration, MIN_RECORDING_DURATION
+from duration_policy import MIN_RECORDING_DURATION, classify_duration
 import asyncio
 import calendar
 import heapq
@@ -40,7 +40,8 @@ async def _get_video_duration(mp4_path: str) -> float:
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
         )
         stdout, _ = await proc.communicate()
-        return float(stdout.strip())
+        duration = float(stdout.strip())
+        return duration if duration >= 0 else 0.0
     except Exception:
         return 0.0
 
@@ -328,14 +329,14 @@ async def poll_transcriptions(broadcast_fn=None):
             # Case 1: normal pending (clipped=0)
             async with db.execute(
                 "SELECT id, filename, clip_count FROM recordings "
-                "WHERE transcribed=2 AND clipped=0 AND local_deleted=0"
+                "WHERE transcribed=2 AND clipped=0 AND local_deleted=0 AND duration_sec >= ?", (MIN_RECORDING_DURATION,)
             ) as cur:
                 pending = await cur.fetchall()
             # Case 2: stuck mid-clipping (clipped=1, no clip_filename)
             async with db.execute(
                 "SELECT id, filename, clip_count FROM recordings "
                 "WHERE transcribed=2 AND clipped=1 AND clip_filename IS NULL "
-                "AND local_deleted=0 AND clip_error IS NULL"
+                "AND local_deleted=0 AND clip_error IS NULL AND duration_sec >= ?", (MIN_RECORDING_DURATION,)
             ) as cur:
                 stuck = await cur.fetchall()
         # Reset stuck jobs back to pending
@@ -387,7 +388,7 @@ async def poll_transcriptions(broadcast_fn=None):
             async with aio_connect() as db:
                 db.row_factory = aiosqlite.Row
                 async with db.execute(
-                    "SELECT * FROM recordings WHERE transcribed = 1 AND gpu_job_id IS NOT NULL"
+                    "SELECT * FROM recordings WHERE transcribed = 1 AND gpu_job_id IS NOT NULL AND duration_sec >= ?", (MIN_RECORDING_DURATION,)
                 ) as cur:
                     pending = await cur.fetchall()
                 async with db.execute(
@@ -396,23 +397,6 @@ async def poll_transcriptions(broadcast_fn=None):
                          AND end_time IS NOT NULL AND end_time != start_time"""
                 ) as cur:
                     unsynced = await cur.fetchall()
-
-            eligible_unsynced = []
-            for rec in unsynced:
-                filepath = os.path.join(RECORDINGS_DIR, rec["filename"])
-                duration = await _get_video_duration(filepath) if os.path.isfile(filepath) else 0.0
-                decision = classify_duration(duration)
-                async with aio_connect() as update_db:
-                    await update_db.execute(
-                        "UPDATE recordings SET duration_seconds = ?, duration_status = ?, skip_reason = CASE WHEN ? = 'too_short' THEN 'too_short' WHEN ? = 'unavailable' THEN 'duration_unavailable' ELSE NULL END WHERE id = ?",
-                        (duration if duration > 0 else None, decision.status, decision.status, decision.status, rec["id"]),
-                    )
-                    if decision.status == "too_short":
-                        await update_db.execute("UPDATE recordings SET transcribed = -1 WHERE id = ?", (rec["id"],))
-                    await update_db.commit()
-                if decision.eligible:
-                    eligible_unsynced.append(rec)
-            unsynced = eligible_unsynced
 
             has_work = bool(pending or unsynced)
 
@@ -666,22 +650,21 @@ async def _run_editor(recording_id: int, mp4_path: str, srt_path: str, clip_dura
 
     # ── Duration guard ────────────────────────────────────────────────────────
     duration = await _get_video_duration(mp4_path)
-    decision = classify_duration(duration)
-    if not decision.eligible:
-        reason = "too_short" if decision.status == "too_short" else "duration_unavailable"
-        message = f"录像时长过短（{duration:.2f}秒 < {MIN_RECORDING_DURATION:.0f}秒）" if decision.status == "too_short" else "时长不可用，等待有效媒体探测"
+    duration_status = classify_duration(duration)
+    if duration_status != "accepted":
+        reason = "too_short" if duration_status == "too_short" else "duration_unavailable"
         logger.warning(f"[skip] Recording {recording_id} ({os.path.basename(mp4_path)}): {reason}")
         async with aio_connect() as db:
             await db.execute(
-                "UPDATE recordings SET clipped = -1, transcribed = CASE WHEN ? = 'duration_unavailable' THEN transcribed ELSE -1 END, duration_seconds = ?, duration_status = ?, skip_reason = ?, transcribe_error = ? WHERE id = ?",
-                (reason, duration if duration > 0 else None, decision.status, reason, message, recording_id),
+                "UPDATE recordings SET clipped = -1, skip_reason = ?, transcribe_error = ? WHERE id = ?",
+                (reason, "时长不足" if reason == "too_short" else "时长不可用", recording_id),
             )
             await db.commit()
         return
 
     async with aio_connect() as db:
         await db.execute(
-            "UPDATE recordings SET clipped = 1, duration_seconds = ?, duration_status = 'valid', skip_reason = NULL WHERE id = ?", (duration, recording_id)
+            "UPDATE recordings SET clipped = 1 WHERE id = ?", (recording_id,)
         )
         await db.commit()
 

@@ -175,8 +175,7 @@ async def init_db():
             "ALTER TABLE recordings ADD COLUMN upload_bytes INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE recordings ADD COLUMN download_bytes INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE recordings ADD COLUMN temp_file_count INTEGER NOT NULL DEFAULT 0",
-            "ALTER TABLE recordings ADD COLUMN duration_seconds REAL",
-            "ALTER TABLE recordings ADD COLUMN duration_status TEXT",
+            "ALTER TABLE recordings ADD COLUMN duration_sec REAL",
             # VibeVoice
             "ALTER TABLE clip_groups ADD COLUMN vibe TEXT DEFAULT 'trendy'",
             # Voice cloning: one voice reference per live room

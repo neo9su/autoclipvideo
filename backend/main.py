@@ -31,7 +31,7 @@ from fastapi.staticfiles import StaticFiles
 from db import init_db, DB_PATH, aio_connect
 from models import RoomCreate, Room, Recording, ProductCreate, ProductUpdate, PublishAccountCreate, PublishTaskCreate, BatchScheduleCreate
 from monitor import MonitorManager
-from transcribe import poll_transcriptions, _run_editor, _get_video_duration, _clip_progress, get_clip_queue, update_job_priority, cancel_clip_job, pause_clip_job, resume_clip_job, _job_submit_times, _job_durations, _poll_state, flush_poll, POLL_INTERVAL, RECORDINGS_DIR, backfill_auto_merge
+from transcribe import poll_transcriptions, _run_editor, _clip_progress, get_clip_queue, update_job_priority, cancel_clip_job, pause_clip_job, resume_clip_job, _job_submit_times, _job_durations, _poll_state, flush_poll, POLL_INTERVAL, RECORDINGS_DIR, backfill_auto_merge
 from analyzer import merge_group
 from sync import sync_file
 from gpu_execution import require_remote_gpu
@@ -40,7 +40,7 @@ from meta_generator import generate_meta, match_product
 from publish_scheduler import poll_publish_tasks
 from video_path_resolver import build_content_disposition, resolve_artifact_path
 from srt_resolver import resolve_srt_path
-from duration_policy import MIN_RECORDING_DURATION, classify_duration
+from duration_policy import MIN_RECORDING_DURATION
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -96,11 +96,6 @@ def _recording_file_exists(filename: str | None) -> bool:
     """Return True when the recording source file is present locally."""
     path = _recording_file_path(filename)
     return bool(path and os.path.exists(path))
-
-
-async def _probe_recording_duration(filepath: str) -> float:
-    """Probe a recording without treating probe failure as a short recording."""
-    return await _get_video_duration(filepath)
 
 
 def _parse_recording_time(value: str | None) -> datetime | None:
@@ -1058,7 +1053,7 @@ async def list_recordings(room_id: int):
     async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT * FROM recordings WHERE room_id = ? AND duration_status = 'valid' AND duration_seconds >= ? ORDER BY start_time DESC LIMIT 500",
+            "SELECT * FROM recordings WHERE room_id = ? AND duration_sec >= ? ORDER BY start_time DESC LIMIT 500",
             (room_id, MIN_RECORDING_DURATION)
         ) as cur:
             rows = await cur.fetchall()
@@ -1096,8 +1091,8 @@ async def list_all_recordings(
 ):
     page = max(1, page)
     offset = (page - 1) * limit
-    duration_filter = "(r.duration_status = 'valid' AND r.duration_seconds >= 28)"
-    where = f"WHERE ({_STATUS_WHERE[status]}) AND {duration_filter}" if status in _STATUS_WHERE else f"WHERE {duration_filter}"
+    status_filter = _STATUS_WHERE[status] if status in _STATUS_WHERE else "1=1"
+    where = f"WHERE ({status_filter}) AND r.duration_sec >= {MIN_RECORDING_DURATION}"
     col = _SORT_COLS.get(sort, "r.start_time")
     direction = "ASC" if order.lower() == "asc" else "DESC"
     async with aio_connect() as db:
@@ -1160,7 +1155,6 @@ async def list_clips():
             JOIN rooms rm ON r.room_id = rm.id
             LEFT JOIN recording_clips rc ON rc.recording_id = r.id AND rc.variant_idx = 0
             WHERE r.clipped = 2 AND r.clip_filename IS NOT NULL
-              AND r.duration_status = 'valid' AND r.duration_seconds >= 28
             ORDER BY r.start_time DESC
         """) as cur:
             rows = await cur.fetchall()
@@ -2043,10 +2037,6 @@ async def retry_transcribe(recording_id: int, regenerate_clip: bool = Query(defa
     filepath = os.path.join(os.path.dirname(__file__), "..", "recordings", rec["filename"])
     if not os.path.exists(filepath):
         raise HTTPException(status_code=404, detail="Recording file missing on disk")
-    duration = await _probe_recording_duration(filepath)
-    decision = classify_duration(duration)
-    if not decision.eligible:
-        raise HTTPException(status_code=409, detail=decision.reason)
     # Preserve the old sidecar before the poll loop replaces it.
     srt_path = os.path.splitext(filepath)[0] + ".srt"
     backup_path = srt_path + ".previous.srt"
@@ -2099,10 +2089,6 @@ async def retranscribe_recording(recording_id: int):
     filepath = os.path.join(recordings_dir, rec["filename"])
     if not os.path.isfile(filepath):
         raise HTTPException(status_code=404, detail="Recording file missing on disk")
-    duration = await _probe_recording_duration(filepath)
-    decision = classify_duration(duration)
-    if not decision.eligible:
-        raise HTTPException(status_code=409, detail=decision.reason)
 
     srt_path = os.path.splitext(filepath)[0] + ".srt"
     backup_path = srt_path + ".previous.srt"
