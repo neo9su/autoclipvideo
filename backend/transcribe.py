@@ -1,4 +1,5 @@
 from gpu_execution import reject_local_media
+from duration_policy import classify_duration, MIN_RECORDING_DURATION
 import asyncio
 import calendar
 import heapq
@@ -24,7 +25,6 @@ logger = logging.getLogger(__name__)
 GPU_SERVICE_URL = os.environ.get("GPU_SERVICE_URL", "http://10.190.0.203:8877")
 
 MIN_RECORDING_HEIGHT = 720  # recordings below this height are skipped from clip jobs
-MIN_RECORDING_DURATION = 28  # recordings shorter than this (seconds) are skipped
 MIN_FINAL_VIDEO_DURATION = 28.0  # director/creative final clips below this are not worth rescuing
 TARGET_PUBLISH_DURATION = 30.5  # pad near-threshold clips above Douyin's 30s boundary
 
@@ -397,6 +397,23 @@ async def poll_transcriptions(broadcast_fn=None):
                 ) as cur:
                     unsynced = await cur.fetchall()
 
+            eligible_unsynced = []
+            for rec in unsynced:
+                filepath = os.path.join(RECORDINGS_DIR, rec["filename"])
+                duration = await _get_video_duration(filepath) if os.path.isfile(filepath) else 0.0
+                decision = classify_duration(duration)
+                async with aio_connect() as update_db:
+                    await update_db.execute(
+                        "UPDATE recordings SET duration_seconds = ?, duration_status = ?, skip_reason = CASE WHEN ? = 'too_short' THEN 'too_short' WHEN ? = 'unavailable' THEN 'duration_unavailable' ELSE NULL END WHERE id = ?",
+                        (duration if duration > 0 else None, decision.status, decision.status, decision.status, rec["id"]),
+                    )
+                    if decision.status == "too_short":
+                        await update_db.execute("UPDATE recordings SET transcribed = -1 WHERE id = ?", (rec["id"],))
+                    await update_db.commit()
+                if decision.eligible:
+                    eligible_unsynced.append(rec)
+            unsynced = eligible_unsynced
+
             has_work = bool(pending or unsynced)
 
             if has_work and not is_online():
@@ -649,20 +666,22 @@ async def _run_editor(recording_id: int, mp4_path: str, srt_path: str, clip_dura
 
     # ── Duration guard ────────────────────────────────────────────────────────
     duration = await _get_video_duration(mp4_path)
-    if 0 < duration < MIN_RECORDING_DURATION:
-        reason = f"录像时长过短（{duration:.0f}秒 < {MIN_RECORDING_DURATION}秒）"
+    decision = classify_duration(duration)
+    if not decision.eligible:
+        reason = "too_short" if decision.status == "too_short" else "duration_unavailable"
+        message = f"录像时长过短（{duration:.2f}秒 < {MIN_RECORDING_DURATION:.0f}秒）" if decision.status == "too_short" else "时长不可用，等待有效媒体探测"
         logger.warning(f"[skip] Recording {recording_id} ({os.path.basename(mp4_path)}): {reason}")
         async with aio_connect() as db:
             await db.execute(
-                "UPDATE recordings SET clipped = -1, skip_reason = ? WHERE id = ?",
-                (reason, recording_id),
+                "UPDATE recordings SET clipped = -1, transcribed = CASE WHEN ? = 'duration_unavailable' THEN transcribed ELSE -1 END, duration_seconds = ?, duration_status = ?, skip_reason = ?, transcribe_error = ? WHERE id = ?",
+                (reason, duration if duration > 0 else None, decision.status, reason, message, recording_id),
             )
             await db.commit()
         return
 
     async with aio_connect() as db:
         await db.execute(
-            "UPDATE recordings SET clipped = 1 WHERE id = ?", (recording_id,)
+            "UPDATE recordings SET clipped = 1, duration_seconds = ?, duration_status = 'valid', skip_reason = NULL WHERE id = ?", (duration, recording_id)
         )
         await db.commit()
 
