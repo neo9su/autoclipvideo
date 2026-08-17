@@ -316,3 +316,25 @@ def test_heartbeat_uses_merged_pr_scan_evidence_without_dispatch(tmp_path):
     assert runner.heartbeat() == {'repaired': 1, 'completed': 1, 'blocked': 0}
     assert runner.run_once(195) is None
     assert store.conn.execute('SELECT state FROM issues WHERE id=194').fetchone()[0] == 'done'
+
+
+def test_heartbeat_keeps_normal_queue_and_active_worker_untouched(tmp_path):
+    store = TaskStore(tmp_path / 'x.db')
+    store.upsert_issue(196, 'normal queued child', 'queued')
+    store.upsert_issue(197, 'active child', 'accepted_idle')
+    store.claim(197, 'worker', 60, 'run-197', 1)
+    store.conn.execute(
+        "INSERT INTO runs(id,issue_id,state,started_at,generation) VALUES(?,?,?,?,?)",
+        ('run-197', 197, 'accepted_idle', time.time(), 1),
+    )
+    runner = Runner(RunnerConfig(db=tmp_path / 'x.db'), store, adapter=type('Adapter', (), {
+        'scan': lambda self: [
+            {'number': 196, 'title': 'normal queued child', 'state': 'OPEN'},
+            {'number': 197, 'title': 'active child', 'state': 'OPEN', 'pullRequests': [{'state': 'MERGED'}]},
+        ]
+    })())
+
+    assert runner.heartbeat() == {'repaired': 0, 'completed': 0, 'blocked': 0}
+    assert store.conn.execute('SELECT state FROM issues WHERE id=196').fetchone()[0] == 'queued'
+    assert store.conn.execute('SELECT state FROM issues WHERE id=197').fetchone()[0] == 'accepted_idle'
+    assert store.conn.execute('SELECT count(*) FROM runs').fetchone()[0] == 1
