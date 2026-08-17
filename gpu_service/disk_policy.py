@@ -19,22 +19,6 @@ def required_free_gb(
     return max(minimum_free_gb, upload_gb + upload_reserve_gb)
 
 
-def upload_rejection_reason(
-    free_gb: float,
-    upload_size_bytes: int | None,
-    minimum_free_gb: float,
-    upload_reserve_gb: float,
-) -> str | None:
-    """Return a safe admission error, or ``None`` when the upload fits."""
-    required_gb = required_free_gb(upload_size_bytes, minimum_free_gb, upload_reserve_gb)
-    if free_gb >= required_gb:
-        return None
-    return (
-        f"free space {free_gb:.1f}GiB is below the {required_gb:.1f}GiB "
-        f"minimum including the {upload_reserve_gb:.1f}GiB upload reserve"
-    )
-
-
 def can_accept_upload(
     free_gb: float,
     upload_size_bytes: int | None,
