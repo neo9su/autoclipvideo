@@ -219,57 +219,15 @@
                 title="上传参考视频进行学习分析">
                 📤 学习素材
               </button>
-              <button
-                v-if="g.qianchuan_status !== 2"
-                class="btn-qianchuan"
-                :disabled="qianchuanBusy[g.id] || g.qianchuan_status === 1"
-                @click="generateQianchuan(g)">
-                {{ qianchuanBusy[g.id] || g.qianchuan_status === 1 ? '生成中…' : (isQianchuanFailure(g.qianchuan_status) ? '↺ 重试千川版' : '生成千川版') }}
-              </button>
               <template v-if="g.qianchuan_status === 2 && g.qianchuan_available">
                 <button class="btn-action cyan" @click="openQianchuanPreview(g)">▶ 预览</button>
                 <a :href="`${apiBase}/api/groups/${g.id}/qianchuan-download`" class="btn-action cyan" download>↓ 下载</a>
-                <button
-                  class="btn-action orange"
-                  :disabled="qianchuanBusy[g.id]"
-                  @click="generateQianchuan(g)">
-                  {{ qianchuanBusy[g.id] ? '生成中…' : '↺ 重新生成' }}
-                </button>
               </template>
             </div>
           </div>
           <div class="qianchuan-hint">{{ qianchuanStatusMeta(g).hint }}</div>
           <div v-if="g.qianchuan_status === 2 && g.qianchuan_file_status !== 'ready'" class="qianchuan-error">⚠ 千川结果文件缺失（stale_path），请重新生成</div>
           <div v-if="g.qianchuan_error" class="qianchuan-error">⚠ {{ summarizeQianchuanError(g.qianchuan_error) }}</div>
-        </div>
-
-        <!-- 直出版 / 保守版操作面板 -->
-        <div class="styles-panel">
-          <div class="styles-header">
-            <div class="styles-title-row">
-              <span class="styles-title">直出版 + 保守版</span>
-              <span class="styles-hint">基于经典版生成两种节奏</span>
-            </div>
-            <div class="styles-actions">
-              <span class="styles-generation-note">请在上方分别触发直出版或保守版</span>
-              <template v-if="g.realistic_status === 2 && g.realistic_available">
-                <button class="btn-action rose" @click="openStylePreview(g, 'realistic')">▶ 直出版</button>
-                <a :href="`${apiBase}/api/groups/${g.id}/realistic-download`" class="btn-action rose" download>↓</a>
-              </template>
-              <template v-if="g.conservative_status === 2 && g.conservative_available">
-                <button class="btn-action orange" @click="openStylePreview(g, 'conservative')">▶ 保守版</button>
-                <a :href="`${apiBase}/api/groups/${g.id}/conservative-download`" class="btn-action orange" download>↓</a>
-              </template>
-            </div>
-          </div>
-          <div class="styles-statuses">
-            <span :class="['style-status', styleStatusClass(g.realistic_status)]">直出版：{{ styleStatusLabel(g.realistic_status) }}</span>
-            <span :class="['style-status', styleStatusClass(g.conservative_status)]">保守版：{{ styleStatusLabel(g.conservative_status) }}</span>
-          </div>
-          <div v-if="g.realistic_status === 2 && g.realistic_file_status !== 'ready'" class="styles-error">⚠ 直出版文件缺失，请重新生成</div>
-          <div v-if="g.conservative_status === 2 && g.conservative_file_status !== 'ready'" class="styles-error">⚠ 保守版文件缺失，请重新生成</div>
-          <div v-if="g.realistic_error" class="styles-error">⚠ 直出版：{{ summarizeStyleError(g.realistic_error) }}</div>
-          <div v-if="g.conservative_error" class="styles-error">⚠ 保守版：{{ summarizeStyleError(g.conservative_error) }}</div>
         </div>
 
         <!-- 封面生成面板 -->
@@ -971,11 +929,26 @@ function versionBusy(group, version) {
 }
 function versionStatusMeta(group, version) {
   const status = versionStatus(group, version)
-  const error = group[`${version}_error`]
+  const error = version === 'classic' ? (group.merge_error || group.classic_error) : group[`${version}_error`]
   if (status === 1 || versionBusy(group, version)) return { label: '生成中', className: 'running', hint: '任务进行中，请勿重复提交。' }
   if (status === 2 && versionIsReady(group, version)) return { label: '已完成', className: 'done', hint: '' }
+  if (version === 'qianchuan' && status === -2) {
+    return {
+      label: '不可用',
+      className: 'blocked',
+      error: summarizeQianchuanError(error),
+      hint: '补充可匹配的录像和 SRT 后再重试。',
+      disabledReason: '缺少可匹配的千川录像或 SRT，请补充素材后重试。',
+    }
+  }
   if (status < 0 || (status === 2 && !versionIsReady(group, version))) {
-    return { label: '失败', className: 'failed', error: summarizeStyleError(error) || '结果文件缺失，可重试。', hint: '', disabledReason: '' }
+    return {
+      label: '失败',
+      className: 'failed',
+      error: summarizeStyleError(error) || '结果文件缺失，可重试。',
+      hint: '',
+      disabledReason: '',
+    }
   }
   return { label: '未生成', className: 'idle', hint: '', disabledReason: versionPrerequisiteReason(group, version) }
 }
@@ -1049,20 +1022,7 @@ function styleStatusClass(status) {
   if (status < 0) return 'failed'
   return 'idle'
 }
-function hasStylesFailure(group) { return Number(group.realistic_status) < 0 || Number(group.conservative_status) < 0 }
 function summarizeStyleError(error) { return String(error).replace(/\s+/g, ' ').slice(0, 160) }
-async function generateStyles(group) {
-  stylesBusy.value[group.id] = true
-  try {
-    await retryStyles(group.id)
-    show('直出版+保守版任务已提交', 'info')
-    await load()
-  } catch (error) {
-    show(error.message || '样式任务提交失败', 'error')
-  } finally {
-    stylesBusy.value[group.id] = false
-  }
-}
 
 // Re-clip (single recording)
 const reclipModal = ref(null)
@@ -2043,6 +2003,7 @@ onUnmounted(() => { wsCleanup?.(); stopProgressPolling(); groupsObserver?.discon
 .btn-version-trigger:disabled { opacity: .45; cursor: not-allowed; }
 .five-version-error, .five-version-disabled-reason { color: #f87171; font-size: 11px; line-height: 1.4; margin-top: 7px; word-break: break-word; }
 .five-version-disabled-reason { color: #fbbf24; }
+.style-status.blocked { color: #fbbf24; border-color: rgba(251,191,36,.35); background: rgba(251,191,36,.08); }
 .styles-generation-note { color: #94a3b8; font-size: 11px; }
 @media (max-width: 900px) { .five-version-grid { grid-template-columns: repeat(2, minmax(140px, 1fr)); } }
 @media (max-width: 480px) { .five-version-grid { grid-template-columns: 1fr; } .five-version-heading { align-items: flex-start; flex-direction: column; } .five-version-hint { margin-left: 0; } }

@@ -6,8 +6,8 @@ test('maps each five-version control to its independent backend action', () => {
   const groupId = 181
   assert.equal(VERSION_ENDPOINTS.classic(groupId), '/api/groups/181/merge')
   assert.equal(VERSION_ENDPOINTS.director(groupId), '/api/groups/181/retry-director')
-  assert.equal(VERSION_ENDPOINTS.realistic(groupId), '/api/groups/181/retry-styles')
-  assert.equal(VERSION_ENDPOINTS.conservative(groupId), '/api/groups/181/retry-styles')
+  assert.equal(VERSION_ENDPOINTS.realistic(groupId), '/api/groups/181/retry-styles/realistic')
+  assert.equal(VERSION_ENDPOINTS.conservative(groupId), '/api/groups/181/retry-styles/conservative')
   assert.equal(VERSION_ENDPOINTS.qianchuan(groupId), '/api/groups/181/retry-qianchuan')
   assert.deepEqual(STYLE_VERSIONS, ['realistic', 'conservative'])
 })
@@ -19,4 +19,16 @@ test('keeps all version controls visible and explains blocked prerequisites', as
   assert.match(view, /five-version-disabled-reason/)
   assert.match(view, /缺少可匹配的千川录像或 SRT/)
   assert.match(view, /:aria-label="`\$\{version\.label\}：/)
+  assert.match(view, /triggerVersion\(g, version\.key\)/)
+  assert.doesNotMatch(view, /generateStyles\(/)
+  assert.doesNotMatch(view, /直出版 \+ 保守版/)
+})
+
+test('distinguishes unavailable qianchuan from retryable failures and stale artifacts', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const view = await readFile(new URL('./views/Groups.vue', import.meta.url), 'utf8')
+  assert.match(view, /status === -2/)
+  assert.match(view, /label: '不可用'/)
+  assert.match(view, /file_status === 'ready'/)
+  assert.match(view, /结果文件缺失，可重试。/)
 })
