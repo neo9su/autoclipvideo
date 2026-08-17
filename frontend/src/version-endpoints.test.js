@@ -20,3 +20,12 @@ test('keeps all version controls visible and explains blocked prerequisites', as
   assert.match(view, /缺少可匹配的千川录像或 SRT/)
   assert.match(view, /:aria-label="`\$\{version\.label\}：/)
 })
+
+test('distinguishes unavailable qianchuan from retryable failures and stale artifacts', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const view = await readFile(new URL('./views/Groups.vue', import.meta.url), 'utf8')
+  assert.match(view, /status === -2/)
+  assert.match(view, /label: '不可用'/)
+  assert.match(view, /file_status === 'ready'/)
+  assert.match(view, /结果文件缺失，可重试。/)
+})

@@ -936,11 +936,12 @@ function classicStatus(group) {
   return Number(group.classic_status ?? 0)
 }
 function classicIsReady(group) {
-  return Number(group.merge_status) === 2 && Boolean(group.merged_filename) && group.classic_available !== false
+  return Number(group.merge_status) === 2 && Boolean(group.merged_filename) &&
+    group.classic_available !== false && group.classic_file_status === 'ready'
 }
 function versionIsReady(group, version) {
   if (version === 'classic') return classicIsReady(group)
-  return versionStatus(group, version) === 2 && group[`${version}_available`] !== false && group[`${version}_file_status`] !== 'missing'
+  return versionStatus(group, version) === 2 && group[`${version}_available`] !== false && group[`${version}_file_status`] === 'ready'
 }
 function versionBusy(group, version) {
   return Boolean(retryBusy.value[`${group.id}:${version}`]) ||
@@ -953,8 +954,23 @@ function versionStatusMeta(group, version) {
   const error = version === 'classic' ? (group.merge_error || group.classic_error) : group[`${version}_error`]
   if (status === 1 || versionBusy(group, version)) return { label: '生成中', className: 'running', hint: '任务进行中，请勿重复提交。' }
   if (status === 2 && versionIsReady(group, version)) return { label: '已完成', className: 'done', hint: '' }
+  if (version === 'qianchuan' && status === -2) {
+    return {
+      label: '不可用',
+      className: 'blocked',
+      error: summarizeQianchuanError(error),
+      hint: '补充可匹配的录像和 SRT 后再重试。',
+      disabledReason: '缺少可匹配的千川录像或 SRT，请补充素材后重试。',
+    }
+  }
   if (status < 0 || (status === 2 && !versionIsReady(group, version))) {
-    return { label: '失败', className: 'failed', error: summarizeStyleError(error) || '结果文件缺失，可重试。', hint: '', disabledReason: '' }
+    return {
+      label: '失败',
+      className: 'failed',
+      error: summarizeStyleError(error) || '结果文件缺失，可重试。',
+      hint: '',
+      disabledReason: '',
+    }
   }
   return { label: '未生成', className: 'idle', hint: '', disabledReason: versionPrerequisiteReason(group, version) }
 }
@@ -2025,6 +2041,7 @@ onUnmounted(() => { wsCleanup?.(); stopProgressPolling(); groupsObserver?.discon
 .btn-version-trigger:disabled { opacity: .45; cursor: not-allowed; }
 .five-version-error, .five-version-disabled-reason { color: #f87171; font-size: 11px; line-height: 1.4; margin-top: 7px; word-break: break-word; }
 .five-version-disabled-reason { color: #fbbf24; }
+.style-status.blocked { color: #fbbf24; border-color: rgba(251,191,36,.35); background: rgba(251,191,36,.08); }
 .styles-generation-note { color: #94a3b8; font-size: 11px; }
 @media (max-width: 900px) { .five-version-grid { grid-template-columns: repeat(2, minmax(140px, 1fr)); } }
 @media (max-width: 480px) { .five-version-grid { grid-template-columns: 1fr; } .five-version-heading { align-items: flex-start; flex-direction: column; } .five-version-hint { margin-left: 0; } }
