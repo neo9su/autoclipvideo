@@ -293,10 +293,12 @@ class QianchuanMatcher(SemanticMatcher):
                 segment.get("scene_id") for segment in script_segments
                 if segment.get("scene_id") not in matched_scene_ids
             ]
-            self.match_error = (
-                f"group {group_id} matched {len(matched)}/{len(script_segments)} scenes; "
-                f"missing scene ids: {missing_scene_ids}"
-            )
+            existing_error = getattr(self, "match_error", None)
+            if matched or not existing_error:
+                self.match_error = (
+                    f"group {group_id} matched {len(matched)}/{len(script_segments)} scenes; "
+                    f"missing scene ids: {missing_scene_ids}"
+                )
         for item in matched:
             seg = item.get("script_segment") or {}
             text = " ".join([seg.get("text") or seg.get("voiceover_text") or "", " ".join(seg.get("visual_keywords") or [])])
