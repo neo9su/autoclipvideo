@@ -30,6 +30,6 @@ assert.match(view, /version === 'realistic' \|\| version === 'conservative'/)
 assert.match(view, /await retryStyles\(group\.id, version\)/)
 assert.doesNotMatch(view, /generateStyles\(/)
 assert.doesNotMatch(view, /直出版 \+ 保守版/)
-assert.match(view, /versionNeedsRetry\(g, version\.key\)/)
+assert.match(view, /versionTriggerDisabled\(g, version\.key\)/)
 
 console.log('five-version endpoint mappings and independent triggers verified')
