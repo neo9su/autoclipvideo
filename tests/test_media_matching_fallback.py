@@ -98,6 +98,26 @@ async def test_matcher_error_reporting_survives_lightweight_matcher_construction
 
 
 @pytest.mark.asyncio
+async def test_matcher_lookup_errors_are_exposed_to_qianchuan_recovery() -> None:
+    """A source lookup failure must become the actionable pipeline reason."""
+    matcher = object.__new__(SemanticMatcher)
+    matcher.model = None
+
+    async def recordings(_group_id: int):
+        raise RuntimeError("recordings schema unavailable")
+
+    matcher._get_group_recordings = recordings
+    matches = await matcher.match_segments_to_recordings(
+        [{"scene_id": 1, "voiceover_text": "脚本", "duration": 2.0}], 4663
+    )
+
+    assert matches == []
+    assert matcher.match_error == (
+        "source matching failed: recordings schema unavailable"
+    )
+
+
+@pytest.mark.asyncio
 async def test_thumbnail_only_failure_remains_visible_to_qianchuan_matching() -> None:
     import sys
 

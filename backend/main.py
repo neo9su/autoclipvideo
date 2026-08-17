@@ -752,7 +752,7 @@ async def health():
         )
         # Probe remote backend liveness (best-effort, non-blocking)
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with httpx.AsyncClient(timeout=1.0) as client:
                 resp = await client.get(f"{REMOTE_BACKEND_URL}/")
                 result["remote_backend_reachable"] = resp.status_code < 500
         except Exception:
@@ -2645,7 +2645,7 @@ async def gpu_status():
         # unreachable.  Keep this probe remote-only; there is no local fallback.
         async def _aio_get(url):
             try:
-                async with httpx.AsyncClient(timeout=5) as _s:
+                async with httpx.AsyncClient(timeout=1.0) as _s:
                     _r = await _s.get(url)
                     try:
                         _body = _r.json()
