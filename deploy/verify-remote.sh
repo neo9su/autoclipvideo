@@ -30,7 +30,11 @@ assert payload.get('media_workers_enabled') is True, payload
 required = {'transcription', 'backfill', 'publish', 'enhance', 'creative', 'director', 'qianchuan', 'room-monitors'}
 assert required <= set(payload.get('worker_services', [])), payload
 assert payload.get('qianchuan_api_loaded') is True, payload
+policy = payload.get('recording_policy', {})
+assert policy.get('min_duration_seconds') == 28.0, policy
+assert policy.get('max_segment_duration_seconds') == 2700.0, policy
 print('PASS /health: gpu-backend media workers enabled')
+print('PASS /health: recording policy is 28s minimum / 2700s maximum segment')
 print('PASS /health: Qianchuan API router loaded')
 PY
 
