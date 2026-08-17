@@ -50,7 +50,7 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 import shutil as _shutil
 from asr_config import ASR_CONFIG, aligned_segment_bounds
-from disk_policy import upload_rejection_reason
+from disk_policy import can_accept_upload, required_free_gb
 
 _DEFAULT_STORAGE = (
     r"F:\douyin_recordings" if os.name == "nt" else "/data/douyin-recordings"
@@ -145,13 +145,13 @@ _cosyvoice = None       # Singleton CosyVoice2 model
 
 # GPU concurrency: one transcription at a time (shares VRAM with ComfyUI)
 _gpu_sem: asyncio.Semaphore = asyncio.Semaphore(1)
-_TRANSCRIBE_TIMEOUT = int(os.environ.get("TRANSCRIBE_TIMEOUT_SECONDS", "900"))
+_TRANSCRIBE_TIMEOUT = int(os.environ.get("TRANSCRIBE_TIMEOUT_SECONDS", "3600"))
+_TTS_TIMEOUT = int(os.environ.get("TTS_TIMEOUT_SECONDS", "900"))
 _STALE_JOB_SECONDS = int(os.environ.get("STALE_JOB_SECONDS", "3600"))
 _TRANSCRIBE_HEARTBEAT_SECONDS = int(os.environ.get("TRANSCRIBE_HEARTBEAT_SECONDS", "60"))
 _WATCHDOG_INTERVAL_SECONDS = int(os.environ.get("JOB_WATCHDOG_INTERVAL_SECONDS", "60"))
 # NVENC concurrency: 2 concurrent — NVENC is a dedicated hardware unit, no VRAM cost
 _clip_sem: asyncio.Semaphore = asyncio.Semaphore(2)
-_TTS_TIMEOUT = int(os.environ.get("TTS_TIMEOUT_SECONDS", "1800"))
 
 # ── Clip pipeline constants ───────────────────────────────────────────────────
 CLIP_W    = 1080
@@ -1110,13 +1110,13 @@ _clip_jobs = _load_clip_jobs()
 _tts_jobs = _load_tts_jobs()
 _voice_refs = _load_voice_refs()
 
-# Disk space management thresholds.  DISK_MIN_FREE_GB is a reserve, not a
-# required upload size: a volume with 86 GB free must not reject a normal
-# recording merely because its total capacity is below an old 100 GB policy.
+# Disk space management thresholds
 DISK_QUOTA_GB = float(os.environ.get("DISK_QUOTA_GB", "100"))
 DISK_GUARD_GB = float(os.environ.get("DISK_GUARD_GB", "10"))
-DISK_MIN_FREE_GB = float(os.environ.get("DISK_MIN_FREE_GB", "10"))
-DISK_UPLOAD_RESERVE_GB = float(os.environ.get("DISK_UPLOAD_RESERVE_GB", "1"))
+# Admission is based on the actual upload size plus a small recovery reserve.
+# The old 80 GiB minimum rejected healthy volumes with tens of GiB available.
+UPLOAD_MIN_FREE_GB = float(os.environ.get("UPLOAD_MIN_FREE_GB", "10"))
+UPLOAD_RESERVE_GB = float(os.environ.get("UPLOAD_RESERVE_GB", "2"))
 
 def _get_disk_free_gb() -> float:
     """Return free space on STORAGE_DIR drive in GB."""
@@ -1456,28 +1456,17 @@ async def create_job(
 
     # Check disk space before accepting upload
     free_gb = _get_disk_free_gb()
-    rejection_reason = upload_rejection_reason(
-        free_gb,
-        file.size,
-        minimum_free_gb=DISK_MIN_FREE_GB,
-        upload_reserve_gb=DISK_UPLOAD_RESERVE_GB,
-    )
-    if rejection_reason:
-        logger.warning(f"Low disk space: {rejection_reason}")
+    upload_required_free_gb = required_free_gb(file.size, UPLOAD_MIN_FREE_GB, UPLOAD_RESERVE_GB)
+    if not can_accept_upload(free_gb, file.size, UPLOAD_MIN_FREE_GB, UPLOAD_RESERVE_GB):
+        logger.warning(f"Low disk space: {free_gb:.1f}GB free, requested {file.size or 'unknown'} bytes")
         # Try to trigger cleanup
         asyncio.create_task(_cleanup_old_jobs())
         await asyncio.sleep(5)  # Wait for cleanup
         free_gb = _get_disk_free_gb()
-        rejection_reason = upload_rejection_reason(
-            free_gb,
-            file.size,
-            minimum_free_gb=DISK_MIN_FREE_GB,
-            upload_reserve_gb=DISK_UPLOAD_RESERVE_GB,
-        )
-        if rejection_reason:
+        if not can_accept_upload(free_gb, file.size, UPLOAD_MIN_FREE_GB, UPLOAD_RESERVE_GB):
             raise HTTPException(
-                status_code=507,
-                detail=f"Insufficient disk space: {rejection_reason}"
+                status_code=507, 
+                detail=f"Insufficient disk space: {free_gb:.1f}GB free, need at least {upload_required_free_gb:.1f}GB for upload"
             )
 
     async with aiofiles.open(mp4_path, "wb") as f:
@@ -1659,7 +1648,7 @@ async def create_clip_job(request: Request, req: ClipJobRequest):
     
     # Check disk space before starting clip job
     free_gb = _get_disk_free_gb()
-    if free_gb < DISK_MIN_FREE_GB:  # Preserve a bounded reserve for generated output
+    if free_gb < UPLOAD_MIN_FREE_GB:
         logger.warning(f"Low disk space: {free_gb:.1f}GB free, cannot start clip job")
         _clip_jobs.pop(job_id, None)
         raise HTTPException(
