@@ -734,6 +734,7 @@ async def _do_clip_job(
     ass_content: str,
     thumb_seek: float,
     preserve_original_audio: bool = False,
+    sound_cues: list | None = None,
 ):
     """Full NVENC clip pipeline: preprocess → xfade merge → subtitle burn → thumbnail."""
     out_dir = os.path.join(STORAGE_DIR, "clips", job_id)
@@ -812,6 +813,32 @@ async def _do_clip_job(
             "aformat=sample_fmts=fltp:channel_layouts=stereo[aout]"
         )
 
+        # Conservative keyword cues are mixed once, after the clip timeline is
+        # assembled.  cue_id deduplication keeps retries idempotent.
+        cue_inputs = []
+        cue_filters = []
+        seen_cue_ids = set()
+        for cue in sound_cues or []:
+            cue_id = str(cue.get("cue_id") or "")
+            sfx_path = str(cue.get("sfx_path") or "")
+            if not sfx_path or not os.path.exists(sfx_path) or cue_id in seen_cue_ids:
+                continue
+            seen_cue_ids.add(cue_id)
+            input_index = 2 + len(cue_inputs)
+            cue_inputs.append(sfx_path)
+            delay = max(0, int(float(cue.get("time") or 0) * 1000))
+            cue_filters.append(f"[{input_index}:a]adelay={delay}:all=1,volume={float(cue.get('gain_db', -15))}dB[cue{input_index}]")
+
+        for sfx_path in cue_inputs:
+            cmd.extend(["-i", sfx_path])
+        if cue_filters:
+            cue_labels = "".join(f"[cue{2 + index}]" for index in range(len(cue_inputs)))
+            cue_filters.append(f"[aout]{cue_labels}amix=inputs={len(cue_inputs) + 1}:duration=first:dropout_transition=0[aout_mix]")
+            audio_filter = audio_filter + ";" + ";".join(cue_filters)
+            audio_map = "[aout_mix]"
+        else:
+            audio_map = "[aout]"
+
         if has_subs:
             # Windows path fix: forward slashes + escape drive colon for ffmpeg filter parser
             fwd = ass_path.replace("\\", "/")
@@ -827,10 +854,10 @@ async def _do_clip_job(
             else:
                 video_filter = f"[0:v]ass=filename='{escaped}',format=yuv420p[vout]"
             filter_complex = f"{audio_filter};{video_filter}"
-            vmap, amap = "[vout]", "[aout]"
+            vmap, amap = "[vout]", audio_map
         else:
             filter_complex = audio_filter
-            vmap, amap = "0:v", "[aout]"
+            vmap, amap = "0:v", audio_map
 
         rc = await _run_ffmpeg(
             FFMPEG_ASS, "-y", "-i", merged,
@@ -876,11 +903,13 @@ async def _run_clip_job(
     ass_content: str,
     thumb_seek: float,
     preserve_original_audio: bool = False,
+    sound_cues: list | None = None,
 ):
     async with _clip_sem:
         await _do_clip_job(
             job_id, mp4_path, segments, ass_content, thumb_seek,
             preserve_original_audio=preserve_original_audio,
+            sound_cues=sound_cues,
         )
 
 
@@ -1656,6 +1685,7 @@ class ClipJobRequest(BaseModel):
     idempotency_key: str = ""
     execution_node: str = "remote-gpu"
     preserve_original_audio: bool = False
+    sound_cues: list = []
 
 
 @app.post("/clip-jobs", status_code=201)
@@ -1706,6 +1736,7 @@ async def create_clip_job(request: Request, req: ClipJobRequest):
         _run_clip_job(
             job_id, mp4_path, req.segments, req.ass_content, req.thumb_seek,
             preserve_original_audio=req.preserve_original_audio,
+            sound_cues=req.sound_cues,
         )
     )
     return {"job_id": job_id, "status": "queued"}

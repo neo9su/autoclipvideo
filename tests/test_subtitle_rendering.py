@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "backend"))
 
-from editor import Seg, build_ass, parse_srt, resolve_subtitle_font_path
+from editor import Seg, build_ass, build_conservative_sound_cues, parse_srt, resolve_subtitle_font_path
 
 
 def test_parse_srt_preserves_multiline_and_bom(tmp_path):
@@ -126,3 +126,29 @@ def test_ass_escapes_source_override_characters_without_dropping_text():
     ass = build_ass(selected, source_cues, realistic=True)
 
     assert "保留\\\\路径 \\{原文\\}" in ass
+
+
+def test_conservative_ass_limits_each_cue_to_two_lines_and_styles_keywords():
+    selected = [Seg(idx=1, start=0, end=3, text="scene", transition="cut:0")]
+    source = [Seg(idx=1, start=0, end=3, text="这是一个很长的字幕内容显白自然用于验证安全区域")]
+
+    ass = build_ass(selected, source, conservative=True)
+    dialogue = next(line for line in ass.splitlines() if line.startswith("Dialogue:"))
+
+    assert dialogue.count(r"\N") == 1
+    assert r"{\c&H0000CCFF&\3c&H00FFFFFF&\bord3\shad0}显白{\r}" in dialogue
+    assert r"{\c&H0000CCFF&\3c&H00FFFFFF&\bord3\shad0}自然{\r}" in dialogue
+
+
+def test_conservative_keyword_sound_cues_are_timed_and_idempotent(tmp_path):
+    sfx = tmp_path / "pop.wav"
+    sfx.write_bytes(b"valid-sfx")
+    selected = [Seg(idx=1, start=10, end=14, text="scene", transition="cut:0")]
+    source = [Seg(idx=1, start=10, end=12, text="显白"), Seg(idx=2, start=12, end=14, text="自然")]
+
+    cues = build_conservative_sound_cues(selected, source, str(sfx))
+
+    assert [cue["time"] for cue in cues] == [0.12, 2.12]
+    assert [cue["keyword"] for cue in cues] == ["显白", "自然"]
+    assert [cue["cue_id"] for cue in cues] == ["conservative:1:0", "conservative:2:0"]
+    assert len({cue["cue_id"] for cue in cues}) == len(cues)
