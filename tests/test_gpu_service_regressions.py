@@ -3,7 +3,7 @@
 import ast
 from pathlib import Path
 
-from gpu_service.disk_policy import required_free_gb
+from gpu_service.disk_policy import configured_positive_int, required_free_gb
 
 GPU_MAIN = Path(__file__).parents[1] / "gpu_service" / "main.py"
 
@@ -18,6 +18,15 @@ def test_timeout_constants_are_initialized():
         if isinstance(target, ast.Name)
     }
     assert {"_TRANSCRIBE_TIMEOUT", "_TTS_TIMEOUT"} <= names
+
+
+def test_timeout_settings_fall_back_for_invalid_values():
+    environment = {
+        "TRANSCRIBE_TIMEOUT_SECONDS": "not-a-number",
+        "TTS_TIMEOUT_SECONDS": "0",
+    }
+    assert configured_positive_int(environment, "TRANSCRIBE_TIMEOUT_SECONDS", 3600) == 3600
+    assert configured_positive_int(environment, "TTS_TIMEOUT_SECONDS", 1800) == 1800
 
 
 def test_small_upload_ignores_historical_batch_floor():
