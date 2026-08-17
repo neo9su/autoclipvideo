@@ -1,34 +1,53 @@
-#!/usr/bin/env python3
-"""Print a non-destructive inventory of recordings shorter than 28 seconds."""
+"""Dry-run inventory of recordings below the processing threshold.
 
-import asyncio
+Usage: python scripts/inventory_short_recordings.py [--db PATH] [--recordings-dir PATH]
+This command never deletes files. The later approved deletion endpoint must consume
+this report and require an explicit confirmation token.
+"""
+import argparse
 import json
 import os
+import sqlite3
+from pathlib import Path
 import sys
+import subprocess
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
-
-import aiosqlite
-
-from db import DB_PATH
-from duration_policy import MIN_RECORDING_DURATION, inventory_row, probe_duration, classify_duration
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
+from duration_policy import MIN_RECORDING_DURATION_SECONDS, classify_duration
 
 
-async def main() -> None:
+def build_inventory(db_path: str, recordings_dir: str) -> dict:
+    root = Path(recordings_dir).resolve()
+    connection = sqlite3.connect(db_path)
+    connection.row_factory = sqlite3.Row
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(recordings)")}
+    duration_column = "duration_seconds" if "duration_seconds" in columns else "NULL AS duration_seconds"
+    rows = connection.execute(f"SELECT id, filename, {duration_column}, size_bytes FROM recordings ORDER BY id").fetchall()
     items = []
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT id, filename, size_bytes FROM recordings ORDER BY id") as cursor:
-            rows = await cursor.fetchall()
-        for row in rows:
-            path = os.path.join(os.path.dirname(__file__), "..", "recordings", row["filename"])
-            duration = await probe_duration(path)
-            status, reason = classify_duration(duration)
-            if status == "too_short":
-                items.append(inventory_row({**dict(row), "duration_seconds": duration, "duration_status": status, "skip_reason": reason}))
-    print(json.dumps({"dry_run": True, "threshold_seconds": MIN_RECORDING_DURATION,
-                      "items": items, "total_reclaimable_bytes": sum(i["size_bytes"] for i in items)}, ensure_ascii=False, indent=2))
+    for row in rows:
+        path = (root / row["filename"]).resolve() if row["filename"] else None
+        duration = row["duration_seconds"]
+        if duration is None and path and path.is_file():
+            try:
+                probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)], capture_output=True, text=True, timeout=10, check=True)
+                duration = float(probe.stdout.strip())
+            except (OSError, ValueError, subprocess.SubprocessError):
+                duration = None
+        status = classify_duration(duration)
+        if status == "accepted" or status == "duration_unavailable":
+            continue
+        size = path.stat().st_size if path and path.is_file() else int(row["size_bytes"] or 0)
+        items.append({"recording_id": row["id"], "path": str(path) if path else None, "duration_seconds": duration, "size_bytes": size})
+    return {"threshold_seconds": MIN_RECORDING_DURATION_SECONDS, "dry_run": True, "count": len(items), "total_reclaimable_bytes": sum(i["size_bytes"] for i in items), "items": items}
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--db", default="douyin.db")
+    parser.add_argument("--recordings-dir", default="recordings")
+    args = parser.parse_args()
+    print(json.dumps(build_inventory(args.db, args.recordings_dir), ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

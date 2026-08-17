@@ -160,7 +160,9 @@ async def init_db():
             "ALTER TABLE products ADD COLUMN room_id INTEGER",
             "ALTER TABLE recordings ADD COLUMN skip_reason TEXT",
             "ALTER TABLE recordings ADD COLUMN duration_seconds REAL",
-            "ALTER TABLE recordings ADD COLUMN duration_status TEXT NOT NULL DEFAULT 'unavailable'",
+            "ALTER TABLE recordings ADD COLUMN duration_status TEXT",
+            "ALTER TABLE recordings ADD COLUMN duration_seconds REAL",
+            "ALTER TABLE recordings ADD COLUMN duration_status TEXT",
             "ALTER TABLE clip_groups ADD COLUMN merge_error TEXT",
             # 双模式支持字段
             "ALTER TABLE clip_groups ADD COLUMN editing_mode TEXT DEFAULT 'director'",
@@ -177,7 +179,6 @@ async def init_db():
             "ALTER TABLE recordings ADD COLUMN upload_bytes INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE recordings ADD COLUMN download_bytes INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE recordings ADD COLUMN temp_file_count INTEGER NOT NULL DEFAULT 0",
-            "ALTER TABLE recordings ADD COLUMN duration_sec REAL",
             # VibeVoice
             "ALTER TABLE clip_groups ADD COLUMN vibe TEXT DEFAULT 'trendy'",
             # Voice cloning: one voice reference per live room

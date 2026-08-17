@@ -2,18 +2,17 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
-
-from duration_policy import classify_duration
-
-
-def test_duration_boundary_is_inclusive():
-    assert classify_duration(27.9) == ("too_short", "too_short")
-    assert classify_duration(27.99) == ("too_short", "too_short")
-    assert classify_duration(28.0) == ("eligible", None)
-    assert classify_duration(28.01) == ("eligible", None)
+from duration_policy import classify_duration, is_processable_duration
 
 
-def test_invalid_duration_is_unavailable_not_too_short():
-    assert classify_duration(None) == ("unavailable", "duration_unavailable")
-    assert classify_duration("not-a-duration") == ("unavailable", "duration_unavailable")
-    assert classify_duration(0) == ("unavailable", "duration_unavailable")
+def test_duration_boundaries():
+    assert classify_duration(27.9) == "too_short"
+    assert classify_duration(27.99) == "too_short"
+    assert classify_duration(28.0) == "accepted"
+    assert classify_duration(28.01) == "accepted"
+
+
+def test_invalid_duration_is_unavailable_and_not_processable():
+    for value in (None, "", "bad", 0, -1, float("nan")):
+        assert classify_duration(value) == "duration_unavailable"
+        assert not is_processable_duration(value)
