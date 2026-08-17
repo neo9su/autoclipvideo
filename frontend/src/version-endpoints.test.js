@@ -11,3 +11,12 @@ test('maps each five-version control to its independent backend action', () => {
   assert.equal(VERSION_ENDPOINTS.qianchuan(groupId), '/api/groups/181/retry-qianchuan')
   assert.deepEqual(STYLE_VERSIONS, ['realistic', 'conservative'])
 })
+
+test('keeps all version controls visible and explains blocked prerequisites', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const view = await readFile(new URL('./views/Groups.vue', import.meta.url), 'utf8')
+  assert.match(view, /v-for="version in fiveVersions"/)
+  assert.match(view, /five-version-disabled-reason/)
+  assert.match(view, /缺少可匹配的千川录像或 SRT/)
+  assert.match(view, /:aria-label="`\$\{version\.label\}：/)
+})

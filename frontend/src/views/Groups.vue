@@ -961,7 +961,7 @@ function classicIsReady(group) {
 }
 function versionIsReady(group, version) {
   if (version === 'classic') return classicIsReady(group)
-  return versionStatus(group, version) === 2 && group[`${version}_available`] !== false && group[`${version}_file_status`] === 'ready'
+  return versionStatus(group, version) === 2 && group[`${version}_available`] !== false && group[`${version}_file_status`] !== 'missing'
 }
 function versionBusy(group, version) {
   return Boolean(retryBusy.value[`${group.id}:${version}`]) ||
@@ -975,7 +975,7 @@ function versionStatusMeta(group, version) {
   if (status === 1 || versionBusy(group, version)) return { label: '生成中', className: 'running', hint: '任务进行中，请勿重复提交。' }
   if (status === 2 && versionIsReady(group, version)) return { label: '已完成', className: 'done', hint: '' }
   if (status < 0 || (status === 2 && !versionIsReady(group, version))) {
-    return { label: '失败', className: 'failed', error: summarizeStyleError(error) || '结果文件缺失，可重试。', hint: '' }
+    return { label: '失败', className: 'failed', error: summarizeStyleError(error) || '结果文件缺失，可重试。', hint: '', disabledReason: '' }
   }
   return { label: '未生成', className: 'idle', hint: '', disabledReason: versionPrerequisiteReason(group, version) }
 }
@@ -983,9 +983,13 @@ function versionTriggerDisabled(group, version) {
   return Boolean(versionPrerequisiteReason(group, version)) || versionBusy(group, version) || versionStatus(group, version) === 1
 }
 function versionPrerequisiteReason(group, version) {
-  if (version === 'qianchuan' && Number(group.qianchuan_status) === -2) return '缺少可匹配的千川录像或 SRT，请补充素材后重试。'
-  if (Number(group.ready_count || 0) > 0) return ''
-  return '暂无可用剪辑，请先完成转录和剪辑。'
+  if (version === 'qianchuan' && Number(group.qianchuan_status) === -2) {
+    return '缺少可匹配的千川录像或 SRT，请补充素材后重试。'
+  }
+  if (Number(group.ready_count || 0) === 0) {
+    return '暂无可用剪辑，请先完成转录和剪辑。'
+  }
+  return ''
 }
 function versionTriggerLabel(group, version) {
   if (versionBusy(group, version) || versionStatus(group, version) === 1) return '生成中…'
