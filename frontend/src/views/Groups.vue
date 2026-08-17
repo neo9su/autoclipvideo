@@ -118,6 +118,8 @@
                   class="btn-version-trigger"
                   :class="version.buttonClass"
                   :disabled="versionTriggerDisabled(g, version.key)"
+                  :aria-label="`${version.label}：${versionTriggerLabel(g, version.key)}`"
+                  :title="versionTriggerDisabled(g, version.key) ? versionStatusMeta(g, version.key).disabledReason : versionTriggerLabel(g, version.key)"
                   @click="triggerVersion(g, version.key)">
                   {{ versionTriggerLabel(g, version.key) }}
                 </button>
@@ -137,6 +139,9 @@
               </div>
               <div v-if="versionStatusMeta(g, version.key).error" class="five-version-error">
                 ⚠ {{ versionStatusMeta(g, version.key).error }}
+              </div>
+              <div v-if="versionStatusMeta(g, version.key).disabledReason" class="five-version-disabled-reason">
+                已暂停：{{ versionStatusMeta(g, version.key).disabledReason }}
               </div>
               <div v-if="versionStatusMeta(g, version.key).hint" class="five-version-note">
                 {{ versionStatusMeta(g, version.key).hint }}
@@ -966,27 +971,29 @@ function versionBusy(group, version) {
 function versionStatusMeta(group, version) {
   const status = versionStatus(group, version)
   const error = group[`${version}_error`] || (version === 'classic' ? group.merge_error : '') || (version === 'director' ? group.director_error : '')
+  const disabledReason = versionUnavailableReason(group, version)
   if (status === 1 || versionBusy(group, version)) return { label: '生成中', className: 'running', hint: '任务进行中，请勿重复提交。' }
   if (status === 2 && versionIsReady(group, version)) return { label: '已完成', className: 'done', hint: '' }
   if (status < 0 || (status === 2 && !versionIsReady(group, version))) {
-    const unavailableReason = versionUnavailableReason(group, version)
     return {
-      label: unavailableReason ? '不可用' : '失败',
-      className: unavailableReason ? 'blocked' : 'failed',
-      error: summarizeStyleError(error) || unavailableReason || '结果文件缺失，可重试。',
-      hint: unavailableReason ? '满足前置条件后可使用重试。' : '',
+      label: disabledReason ? '不可用' : '失败',
+      className: disabledReason ? 'blocked' : 'failed',
+      error: summarizeStyleError(error) || (disabledReason ? '' : '结果文件缺失，可重试。'),
+      disabledReason,
+      hint: disabledReason ? '满足前置条件后可使用重试。' : '可点击“重试”再次提交此版本。',
     }
   }
   return {
     label: '未生成',
     className: 'idle',
-    hint: versionUnavailableReason(group, version) || '尚未生成，可单独生成此版本。',
+    disabledReason,
+    hint: disabledReason || '尚未生成，可单独生成此版本。',
   }
 }
 function versionUnavailableReason(group, version) {
   if (Number(group.ready_count || 0) === 0) return '缺少可用剪辑，请先完成源录像转录和剪辑。'
-  if (version === 'qianchuan' && (group.qianchuan_available === false || Number(group.qianchuan_status) === -2)) {
-    return summarizeQianchuanError(group.qianchuan_error) || '千川镜头匹配不足，暂无可用录音或 SRT 匹配。'
+  if (version === 'qianchuan' && Number(group.qianchuan_status) === -2) {
+    return summarizeQianchuanError(group.qianchuan_error) || '缺少可匹配的千川录像或 SRT，暂无可用镜头。'
   }
   if ((version === 'realistic' || version === 'conservative') && group.merge_status !== 2 && group.classic_status !== 2) {
     return '缺少经典版源文件，请先生成经典版。'
@@ -2050,6 +2057,7 @@ onUnmounted(() => { wsCleanup?.(); stopProgressPolling(); groupsObserver?.discon
 .btn-version-retry { color: #fbbf24; border-color: rgba(251,191,36,.35); background: rgba(251,191,36,.08); }
 .btn-version-retry:hover { background: rgba(251,191,36,.18); }
 .five-version-error { color: #f87171; font-size: 11px; line-height: 1.4; margin-top: 7px; word-break: break-word; }
+.five-version-disabled-reason { color: #fb923c; font-size: 11px; line-height: 1.4; margin-top: 7px; word-break: break-word; }
 @media (max-width: 900px) { .five-version-grid { grid-template-columns: repeat(2, minmax(140px, 1fr)); } }
 @media (max-width: 480px) { .five-version-grid { grid-template-columns: 1fr; } .five-version-heading { align-items: flex-start; flex-direction: column; } .five-version-hint { margin-left: 0; } }
 /* Review modal */
