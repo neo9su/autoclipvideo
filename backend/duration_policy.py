@@ -11,6 +11,25 @@ TOO_SHORT_REASON = "too_short"
 UNAVAILABLE_REASON = "duration_unavailable"
 
 
+def is_within_recording_limit(duration: object) -> bool:
+    """Return whether a finite positive duration fits in one live segment."""
+    try:
+        value = float(duration)
+    except (TypeError, ValueError):
+        return False
+    return (
+        value > 0
+        and value == value
+        and value not in (float("inf"), float("-inf"))
+        and value <= MAX_RECORDING_DURATION_SECONDS
+    )
+
+
+def recording_segment_duration() -> float:
+    """Return the hard limit used by every recorder segment invocation."""
+    return MAX_RECORDING_DURATION_SECONDS
+
+
 def classify_duration(duration: object) -> str:
     """Return an explicit status; invalid or absent values are never eligible."""
     try:

@@ -11,6 +11,7 @@ from duration_policy import (
     MIN_RECORDING_DURATION_SECONDS,
     classify_duration,
     is_processable_duration,
+    is_within_recording_limit,
 )
 from scripts.inventory_short_recordings import build_inventory
 
@@ -27,6 +28,15 @@ def test_recording_policy_boundaries():
     assert MAX_RECORDING_DURATION_SECONDS == 2700.0
     assert classify_duration(2699.99) == "accepted"
     assert classify_duration(2700.0) == "accepted"
+    assert is_within_recording_limit(2699.99)
+    assert is_within_recording_limit(2700.0)
+    assert not is_within_recording_limit(2700.01)
+
+
+def test_recording_policy_rejects_non_finite_segment_durations():
+    assert not is_within_recording_limit(None)
+    assert not is_within_recording_limit(float("nan"))
+    assert not is_within_recording_limit(float("inf"))
 
 
 def test_segment_rotation_configuration_is_bounded_at_45_minutes():
