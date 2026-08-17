@@ -6,7 +6,12 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "backend"))
-from duration_policy import classify_duration, is_processable_duration
+from duration_policy import (
+    MAX_RECORDING_DURATION_SECONDS,
+    MIN_RECORDING_DURATION_SECONDS,
+    classify_duration,
+    is_processable_duration,
+)
 from scripts.inventory_short_recordings import build_inventory
 
 
@@ -15,6 +20,20 @@ def test_duration_boundaries():
     assert classify_duration(27.99) == "too_short"
     assert classify_duration(28.0) == "accepted"
     assert classify_duration(28.01) == "accepted"
+
+
+def test_recording_policy_boundaries():
+    assert MIN_RECORDING_DURATION_SECONDS == 28.0
+    assert MAX_RECORDING_DURATION_SECONDS == 2700.0
+    assert classify_duration(2699.99) == "accepted"
+    assert classify_duration(2700.0) == "accepted"
+
+
+def test_segment_rotation_configuration_is_bounded_at_45_minutes():
+    sys.path.insert(0, str(PROJECT_ROOT / "backend"))
+    from recorder import SEGMENT_DURATION
+
+    assert SEGMENT_DURATION == MAX_RECORDING_DURATION_SECONDS
 
 
 def test_invalid_duration_is_unavailable_and_not_processable():
