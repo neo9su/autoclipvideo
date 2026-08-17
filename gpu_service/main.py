@@ -18,6 +18,7 @@ os.environ.setdefault("MODELSCOPE_OFFLINE", "1")
 os.environ.setdefault("MS_OFFLINE", "1")
 
 import asyncio
+import calendar
 import hashlib
 import hmac
 import logging
@@ -141,6 +142,9 @@ _cosyvoice = None       # Singleton CosyVoice2 model
 
 # GPU concurrency: one transcription at a time (shares VRAM with ComfyUI)
 _gpu_sem: asyncio.Semaphore = asyncio.Semaphore(1)
+_TRANSCRIBE_TIMEOUT = int(os.environ.get("TRANSCRIBE_TIMEOUT_SECONDS", "3600"))
+_STALE_JOB_SECONDS = int(os.environ.get("STALE_JOB_SECONDS", "3600"))
+_TRANSCRIBE_HEARTBEAT_SECONDS = int(os.environ.get("TRANSCRIBE_HEARTBEAT_SECONDS", "60"))
 # NVENC concurrency: 2 concurrent — NVENC is a dedicated hardware unit, no VRAM cost
 _clip_sem: asyncio.Semaphore = asyncio.Semaphore(2)
 
@@ -170,7 +174,8 @@ Create all tables and reset interrupted jobs."""
                 mp4_path TEXT NOT NULL,
                 srt_path TEXT NOT NULL,
                 error TEXT,
-                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                heartbeat_at TEXT
             )
         """)
         conn.execute("""
@@ -188,6 +193,10 @@ Create all tables and reset interrupted jobs."""
         conn.execute(
             "UPDATE jobs SET status = 'error', error = 'service restarted' WHERE status = 'processing'"
         )
+        try:
+            conn.execute("ALTER TABLE jobs ADD COLUMN heartbeat_at TEXT")
+        except sqlite3.OperationalError:
+            pass
         conn.execute(
             "UPDATE clip_jobs SET status = 'error', error = 'service restarted' WHERE status IN ('queued', 'processing')"
         )
@@ -318,16 +327,34 @@ def _db_update_tts_job(job_id: str, **kwargs):
 def _db_insert_job(job_id: str, mp4_path: str, srt_path: str):
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
-            "INSERT OR REPLACE INTO jobs (job_id, mp4_path, srt_path, status) VALUES (?, ?, ?, 'processing')",
+            "INSERT OR REPLACE INTO jobs (job_id, mp4_path, srt_path, status, heartbeat_at) VALUES (?, ?, ?, 'processing', datetime('now'))",
             (job_id, mp4_path, srt_path),
         )
         conn.commit()
 
 
+def _db_touch_job(job_id: str) -> None:
+    """Persist a heartbeat while the ASR iterator is still making progress."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("UPDATE jobs SET heartbeat_at = datetime('now') WHERE job_id = ?", (job_id,))
+        conn.commit()
+
+
+async def _heartbeat_job(job_id: str) -> None:
+    """Keep the durable heartbeat alive while the synchronous ASR runs."""
+    while True:
+        await asyncio.sleep(_TRANSCRIBE_HEARTBEAT_SECONDS)
+        job = _jobs.get(job_id)
+        if not job or job.get("status") != "processing":
+            return
+        _db_touch_job(job_id)
+        job["heartbeat_at"] = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+
+
 def _db_update_job(job_id: str, status: str, error: str = None):
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
-            "UPDATE jobs SET status = ?, error = ? WHERE job_id = ?",
+            "UPDATE jobs SET status = ?, error = ?, heartbeat_at = datetime('now') WHERE job_id = ?",
             (status, error, job_id),
         )
         conn.commit()
@@ -406,6 +433,8 @@ def _do_transcribe(job_id: str):
             segments, info = model.transcribe(mp4_path, **ASR_CONFIG.transcribe_options())
         with open(srt_path, "w", encoding="utf-8") as f:
             for i, seg in enumerate(segments, 1):
+                if i == 1 or i % 10 == 0:
+                    _db_touch_job(job_id)
                 start, end = aligned_segment_bounds(seg)
                 f.write(f"{i}\n")
                 f.write(f"{_fmt_ts(start)} --> {_fmt_ts(end)}\n")
@@ -419,6 +448,7 @@ def _do_transcribe(job_id: str):
 
 
 async def _run_with_lock(job_id: str):
+    heartbeat_task = asyncio.create_task(_heartbeat_job(job_id))
     try:
         async with _gpu_sem:
             await asyncio.wait_for(
@@ -428,6 +458,34 @@ async def _run_with_lock(job_id: str):
     except asyncio.TimeoutError:
         _log.error(f"Transcription job {job_id} TIMED OUT after {_TRANSCRIBE_TIMEOUT}s — releasing semaphore")
         _db_update_job(job_id, "error", f"Timed out after {_TRANSCRIBE_TIMEOUT}s")
+    finally:
+        heartbeat_task.cancel()
+
+
+def _job_age_seconds(job: dict, now: float | None = None) -> float:
+    now = now or time.time()
+    stamp = job.get("heartbeat_at") or job.get("created_at")
+    if not stamp:
+        return 0.0
+
+
+def _recover_stale_jobs() -> list[str]:
+    """Mark stale processing jobs terminal without deleting their artifacts."""
+    recovered = []
+    now = time.time()
+    for job_id, job in list(_jobs.items()):
+        if job.get("status") != "processing" or _job_age_seconds(job, now) < _STALE_JOB_SECONDS:
+            continue
+        error = f"Recovered stale processing job after {int(_job_age_seconds(job, now))}s"
+        job["status"] = "error"
+        job["error"] = error
+        _db_update_job(job_id, "error", error)
+        recovered.append(job_id)
+    return recovered
+    try:
+        return max(0.0, now - calendar.timegm(time.strptime(stamp[:19], "%Y-%m-%d %H:%M:%S")))
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
 
 
 # ── NVENC clip pipeline ───────────────────────────────────────────────────────
@@ -1361,7 +1419,25 @@ async def get_job(request: Request, job_id: str):
     _require_api_auth(request)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    return {"job_id": job_id, "status": job["status"], "error": job.get("error")}
+    return {"job_id": job_id, "status": job["status"], "error": job.get("error"), "heartbeat_at": job.get("heartbeat_at"), "age_seconds": _job_age_seconds(job)}
+
+
+@app.post("/jobs/{job_id}/recover")
+async def recover_stale_job(request: Request, job_id: str):
+    _require_api_auth(request)
+    job = _jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    age = _job_age_seconds(job)
+    if job.get("status") != "processing":
+        return {"job_id": job_id, "status": job.get("status"), "recovered": False}
+    if age < _STALE_JOB_SECONDS:
+        raise HTTPException(status_code=409, detail="Job is not stale enough to recover")
+    error = f"Recovered stale processing job after {int(age)}s"
+    job["status"] = "error"
+    job["error"] = error
+    _db_update_job(job_id, "error", error)
+    return {"job_id": job_id, "status": "error", "recovered": True, "age_seconds": age}
 
 
 @app.get("/jobs/{job_id}/srt")

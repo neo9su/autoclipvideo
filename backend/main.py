@@ -2631,6 +2631,10 @@ async def gpu_status():
         "last_complete_at": _iso(ps["last_complete_at"]),
         "blocked_count": ps["blocked_count"],
         "active_job_id": ps["active_job_id"],
+        "poll_started_at": _iso(ps["poll_started_at"]),
+        "stale_recovery_count": ps["stale_recovery_count"],
+        "last_recovery_at": _iso(ps["last_recovery_at"]),
+        "last_recovery_job_id": ps["last_recovery_job_id"],
         "poll_interval": POLL_INTERVAL,
     }
     # Maintenance mode flag

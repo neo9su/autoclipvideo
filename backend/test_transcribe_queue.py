@@ -145,11 +145,51 @@ async def test_stale_open_cleanup_keeps_recent_active_recording(backend_main) ->
         Path(db_path).unlink(missing_ok=True)
 
 
+async def test_stale_job_recovery_resets_only_matching_recording(backend_main) -> None:
+    import transcribe
+
+    assert transcribe._is_stale_job(
+        {"job_id": "old", "created_at": "2000-01-01 00:00:00"}, now=2_000_000_000
+    )
+    fd, db_path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.unlink(db_path)
+    try:
+        await _create_queue_test_db(backend_main, db_path)
+        await _insert_recording(db_path, id=104, transcribed=1, synced=1, gpu_job_id="old")
+        transcribe.aio_connect = lambda: dbmod.aio_connect(db_path)
+        transcribe.GPU_SERVICE_URL = "http://gpu.invalid"
+
+        class _Response:
+            status = 200
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): return None
+            async def json(self): return {"recovered": True}
+
+        class _Session:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *args): return None
+            def post(self, *args, **kwargs): return _Response()
+
+        original_session = transcribe.aiohttp.ClientSession
+        transcribe.aiohttp.ClientSession = _Session
+        try:
+            assert await transcribe._recover_stale_job({"id": 104, "gpu_job_id": "old"})
+        finally:
+            transcribe.aiohttp.ClientSession = original_session
+        async with aiosqlite.connect(db_path) as con:
+            row = await (await con.execute("SELECT transcribed, synced, gpu_job_id FROM recordings WHERE id=104")).fetchone()
+        assert row == (0, 0, None)
+    finally:
+        Path(db_path).unlink(missing_ok=True)
+
+
 async def main_test() -> None:
     backend_main = _load_backend_main()
     await test_transcribe_queue_excludes_ghost_open_recording(backend_main)
     await test_transcribe_queue_includes_finished_unsynced_recording_with_file(backend_main)
     await test_stale_open_cleanup_keeps_recent_active_recording(backend_main)
+    await test_stale_job_recovery_resets_only_matching_recording(backend_main)
     print("transcribe queue ghost-recording guards ok")
 
 
