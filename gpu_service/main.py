@@ -813,16 +813,32 @@ async def _do_clip_job(
             "aformat=sample_fmts=fltp:channel_layouts=stereo[aout]"
         )
 
+        # Conservative keyword cues are mixed once, after the clip timeline is
+        # assembled.  cue_id deduplication keeps retries idempotent.
         cue_inputs = []
+        cue_filters = []
+        seen_cue_ids = set()
         for cue in sound_cues or []:
-            if not isinstance(cue, dict) or cue.get("reason") != "conservative_keyword_emphasis":
+            cue_id = str(cue.get("cue_id") or "")
+            sfx_path = str(cue.get("sfx_path") or "")
+            if not sfx_path or not os.path.exists(sfx_path) or cue_id in seen_cue_ids:
                 continue
-            cue_path = cue.get("sfx_path")
-            if cue_path and os.path.isfile(str(cue_path)):
-                cue_inputs.append((str(cue_path), max(0, int(float(cue.get("time") or 0) * 1000))))
-        for cue_path, _ in cue_inputs:
-            cmd_input_index = 2 + len(cue_inputs) - 1
-            break
+            seen_cue_ids.add(cue_id)
+            input_index = 2 + len(cue_inputs)
+            cue_inputs.append(sfx_path)
+            delay = max(0, int(float(cue.get("time") or 0) * 1000))
+            cue_filters.append(f"[{input_index}:a]adelay={delay}:all=1,volume={float(cue.get('gain_db', -15))}dB[cue{input_index}]")
+
+        for sfx_path in cue_inputs:
+            cmd.extend(["-i", sfx_path])
+        if cue_filters:
+            cue_labels = "".join(f"[cue{2 + index}]" for index in range(len(cue_inputs)))
+            cue_filters.append(f"[aout]{cue_labels}amix=inputs={len(cue_inputs) + 1}:duration=first:dropout_transition=0[aout_mix]")
+            audio_filter = audio_filter + ";" + ";".join(cue_filters)
+            audio_map = "[aout_mix]"
+        else:
+            audio_map = "[aout]"
+
         if has_subs:
             # Windows path fix: forward slashes + escape drive colon for ffmpeg filter parser
             fwd = ass_path.replace("\\", "/")
@@ -838,24 +854,13 @@ async def _do_clip_job(
             else:
                 video_filter = f"[0:v]ass=filename='{escaped}',format=yuv420p[vout]"
             filter_complex = f"{audio_filter};{video_filter}"
-            vmap, amap = "[vout]", "[aout]"
+            vmap, amap = "[vout]", audio_map
         else:
             filter_complex = audio_filter
-            vmap, amap = "0:v", "[aout]"
+            vmap, amap = "0:v", audio_map
 
-        ffmpeg_args = [FFMPEG_ASS, "-y", "-i", merged]
-        for cue_path, _ in cue_inputs:
-            ffmpeg_args.extend(["-i", cue_path])
-        if cue_inputs:
-            cue_labels = []
-            for cue_index, (_, delay_ms) in enumerate(cue_inputs, start=2):
-                cue_label = f"sfx{cue_index}"
-                cue_filters = f"[{cue_index}:a]adelay={delay_ms}:all=1,volume=-15dB[{cue_label}]"
-                filter_complex = f"{filter_complex};{cue_filters}"
-                cue_labels.append(f"[{cue_label}]")
-            filter_complex = f"{filter_complex};[0:a]{''.join(cue_labels)}amix=inputs={len(cue_labels)+1}:duration=first:dropout_transition=0[aout]"
         rc = await _run_ffmpeg(
-            *ffmpeg_args,
+            FFMPEG_ASS, "-y", "-i", merged,
             "-filter_complex", filter_complex,
             "-map", vmap, "-map", amap,
             "-pix_fmt", "yuv420p",
