@@ -13,14 +13,15 @@ def test_five_version_controls_use_independent_endpoints():
     assert "if (version === 'classic') await mergeGroup(group.id)" in trigger_source
     assert "else if (version === 'director') await retryDirector(group.id)" in trigger_source
     assert "else if (version === 'qianchuan') await retryQianchuan(group.id)" in trigger_source
-    assert "else await retryStyles(group.id, version)" in trigger_source
+    assert "await retryStyles(group.id, version)" in trigger_source
     assert "当前接口会同时提交直出版与保守版" not in trigger_source
 
     assert "/retry-director" in API_SOURCE
     assert "/retry-qianchuan" in API_SOURCE
-    assert "JSON.stringify({ version })" in API_SOURCE
+    assert "encodeURIComponent(version)" in API_SOURCE
 
 
 def test_classic_readiness_uses_merge_artifact_fields():
-    assert "group.merge_status ?? group.classic_status" in GROUPS_SOURCE
+    assert "if (Number(group.merge_status) === 1) return 1" in GROUPS_SOURCE
+    assert "return Number(group.classic_status ?? 0)" in GROUPS_SOURCE
     assert "Boolean(group.merged_filename)" in GROUPS_SOURCE
