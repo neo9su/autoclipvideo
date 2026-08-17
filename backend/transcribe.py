@@ -69,6 +69,9 @@ _poll_state: dict = {
     "last_poll_at": None,       # epoch float
     "last_submit_at": None,     # epoch float: last time a job was sent to GPU
     "last_complete_at": None,   # epoch float: last transcription finished
+    "last_poll_finished_at": None,
+    "poll_count": 0,
+    "last_poll_error": None,
     "blocked_count": 0,         # items blocked by merger on last poll
     "active_job_id": None,      # gpu_job_id currently running on GPU
     "poll_started_at": None,
@@ -455,11 +458,18 @@ async def poll_transcriptions(broadcast_fn=None):
                             )
                             await db.commit()
                 _poll_state["blocked_count"] = blocked
+            _poll_state["poll_count"] += 1
+            _poll_state["last_poll_error"] = None
 
         except asyncio.CancelledError:
             break
         except Exception as e:
+            _poll_state["last_poll_error"] = type(e).__name__
             logger.exception(f"Transcription poll error: {e}")
+        finally:
+            # ``last_poll_at`` is the start heartbeat. This completion
+            # heartbeat distinguishes a slow cycle from a dead poll loop.
+            _poll_state["last_poll_finished_at"] = time.time()
 
         # Sleep until next interval, but wake immediately if flush_poll() is called
         try:
