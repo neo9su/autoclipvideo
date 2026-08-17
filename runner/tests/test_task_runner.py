@@ -338,3 +338,20 @@ def test_heartbeat_keeps_normal_queue_and_active_worker_untouched(tmp_path):
     assert store.conn.execute('SELECT state FROM issues WHERE id=196').fetchone()[0] == 'queued'
     assert store.conn.execute('SELECT state FROM issues WHERE id=197').fetchone()[0] == 'accepted_idle'
     assert store.conn.execute('SELECT count(*) FROM runs').fetchone()[0] == 1
+
+
+def test_heartbeat_skips_when_another_coordinator_holds_the_lock(tmp_path):
+    store = TaskStore(tmp_path / 'x.db')
+    store.upsert_issue(198, 'normal queued issue', 'queued')
+    assert store.acquire_coordinator('other-heartbeat')
+    runner = Runner(RunnerConfig(db=tmp_path / 'x.db'), store, adapter=type('Adapter', (), {
+        'scan': lambda self: [{'number': 198, 'title': 'normal queued issue', 'state': 'OPEN'}]
+    })())
+
+    assert runner.heartbeat() == {
+        'repaired': 0,
+        'completed': 0,
+        'blocked': 0,
+        'skipped': 'coordinator_busy',
+    }
+    assert store.conn.execute('SELECT state FROM issues WHERE id=198').fetchone()[0] == 'queued'
