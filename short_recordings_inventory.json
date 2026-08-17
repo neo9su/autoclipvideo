@@ -1,0 +1,7 @@
+{
+  "dry_run": true,
+  "threshold_seconds": 28.0,
+  "recordings": [],
+  "count": 0,
+  "reclaimable_bytes": 0
+}

@@ -55,6 +55,8 @@ async def _insert_recording(db_path: str, **values) -> None:
         "synced": 0,
         "transcribed": 0,
         "local_deleted": 0,
+        "duration_seconds": 60.0,
+        "duration_status": "accepted",
     }
     defaults.update(values)
     columns = ", ".join(defaults)
