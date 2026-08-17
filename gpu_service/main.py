@@ -49,7 +49,12 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 import shutil as _shutil
-from asr_config import ASR_CONFIG, aligned_segment_bounds
+try:
+    from asr_config import ASR_CONFIG, aligned_segment_bounds
+    from disk_policy import has_upload_capacity
+except ImportError:
+    from .asr_config import ASR_CONFIG, aligned_segment_bounds
+    from .disk_policy import has_upload_capacity
 
 _DEFAULT_STORAGE = (
     r"F:\douyin_recordings" if os.name == "nt" else "/data/douyin-recordings"
@@ -144,7 +149,19 @@ _cosyvoice = None       # Singleton CosyVoice2 model
 
 # GPU concurrency: one transcription at a time (shares VRAM with ComfyUI)
 _gpu_sem: asyncio.Semaphore = asyncio.Semaphore(1)
-_TRANSCRIBE_TIMEOUT = int(os.environ.get("TRANSCRIBE_TIMEOUT_SECONDS", "3600"))
+
+
+def _positive_timeout(name: str, default: int) -> int:
+    """Read a timeout while preventing invalid or disabled worker limits."""
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+_TRANSCRIBE_TIMEOUT = _positive_timeout("TRANSCRIBE_TIMEOUT_SECONDS", 3600)
+_TTS_TIMEOUT = _positive_timeout("TTS_TIMEOUT_SECONDS", 1800)
 _STALE_JOB_SECONDS = int(os.environ.get("STALE_JOB_SECONDS", "3600"))
 _TRANSCRIBE_HEARTBEAT_SECONDS = int(os.environ.get("TRANSCRIBE_HEARTBEAT_SECONDS", "60"))
 _WATCHDOG_INTERVAL_SECONDS = int(os.environ.get("JOB_WATCHDOG_INTERVAL_SECONDS", "60"))
@@ -1108,10 +1125,22 @@ _clip_jobs = _load_clip_jobs()
 _tts_jobs = _load_tts_jobs()
 _voice_refs = _load_voice_refs()
 
-# Disk space management thresholds
-DISK_QUOTA_GB = float(os.environ.get("DISK_QUOTA_GB", "100"))      # max data files (clips, audio_concat, etc.)
-DISK_GUARD_GB = float(os.environ.get("DISK_GUARD_GB", "10"))       # safety margin below quota for incoming uploads
-BATCH_UPLOAD_LIMIT_GB = float(os.environ.get("BATCH_UPLOAD_LIMIT_GB", "80"))  # max upload batch size
+# Disk space management thresholds.  Upload admission is based on the actual
+# request size plus a modest safety margin, not the data quota.  This keeps a
+# healthy volume usable when its free space is below the old 80/100 GB policy.
+DISK_QUOTA_GB = float(os.environ.get("DISK_QUOTA_GB", "100"))
+DISK_GUARD_GB = float(os.environ.get("DISK_GUARD_GB", "10"))
+def _positive_float(name: str, default: float) -> float:
+    """Read a positive storage setting without allowing an unsafe value."""
+    try:
+        value = float(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return value if value >= 0 else default
+
+
+DISK_MIN_FREE_GB = _positive_float("DISK_MIN_FREE_GB", 20.0)
+DISK_UPLOAD_HEADROOM_GB = _positive_float("DISK_UPLOAD_HEADROOM_GB", 5.0)
 
 def _get_disk_free_gb() -> float:
     """Return free space on STORAGE_DIR drive in GB."""
@@ -1449,18 +1478,30 @@ async def create_job(
     mp4_path = os.path.join(room_dir, _raw_filename)
     srt_path = os.path.join(room_dir, job_id + ".srt")
 
-    # Check disk space before accepting upload
+    # Check disk space before accepting upload.  Keep a configurable floor and
+    # account for the current file rather than treating DISK_QUOTA_GB as a
+    # required amount of free space.
     free_gb = _get_disk_free_gb()
-    if free_gb < BATCH_UPLOAD_LIMIT_GB:
+    if not has_upload_capacity(
+        free_gb,
+        file.size,
+        DISK_MIN_FREE_GB,
+        DISK_UPLOAD_HEADROOM_GB,
+    ):
         logger.warning(f"Low disk space: {free_gb:.1f}GB free, requested {file.size or 'unknown'} bytes")
         # Try to trigger cleanup
         asyncio.create_task(_cleanup_old_jobs())
         await asyncio.sleep(5)  # Wait for cleanup
         free_gb = _get_disk_free_gb()
-        if free_gb < BATCH_UPLOAD_LIMIT_GB:
+        if not has_upload_capacity(
+            free_gb,
+            file.size,
+            DISK_MIN_FREE_GB,
+            DISK_UPLOAD_HEADROOM_GB,
+        ):
             raise HTTPException(
                 status_code=507, 
-                detail=f"Insufficient disk space: {free_gb:.1f}GB free, need at least {BATCH_UPLOAD_LIMIT_GB}GB for upload"
+                detail=f"Insufficient disk space: {free_gb:.1f}GB free for requested upload and {DISK_MIN_FREE_GB}GB safety floor"
             )
 
     async with aiofiles.open(mp4_path, "wb") as f:

@@ -24,10 +24,10 @@ out-of-memory scan. Example:
 python scripts/gpu_stability_audit.py --log gpu_service.log --log watchdog.log --whisper-pid 18396 --process-json whisper-process.json
 ```
 
-Export `whisper-process.json` from Task Manager/PowerShell and correlate the PID
-with the job database and recent log timestamps. The audit deliberately reports
-`needs_job_correlation` and `do_not_kill`; it never terminates a process without
-evidence of an orphaned job.
+Export `whisper-process.json` from Task Manager/PowerShell and correlate the
+PID with the job database and recent log timestamps. The audit deliberately
+reports `needs_job_correlation` and `do_not_kill`; it never terminates a
+process without evidence of an orphaned job.
 
 ## Logs and health
 
@@ -35,11 +35,22 @@ GPU and watchdog logs rotate at 50 MiB with five backups by default. Override
 `GPU_LOG_DIR`, `GPU_LOG_MAX_BYTES`, and `GPU_LOG_BACKUP_COUNT` on the GPU host.
 `/health` now reports PID, start time, uptime, CUDA availability and queue data.
 Watchdog `/status` persists restart counts, last exit codes, health and PID data
-in `watchdog_state.json`. The control plane's 8899 status continues to probe the
-remote health endpoint rather than treating stale watchdog cache as truth.
+in `watchdog_state.json`. The control plane's 8899 status continues to probe
+the remote health endpoint rather than treating stale watchdog cache as truth.
 
-A healthy recovery check is five consecutive calls to `http://127.0.0.1:8877/health`
-and `http://127.0.0.1:8878/status`, followed by five calls to control-plane
-`/api/gpu/status`; each should show the current remote PID and a fresh `health`
-probe. The macOS guard in `gpu_service_src/gpu_service.py` and backend remote-GPU
-policy prevent local media fallback.
+A healthy recovery check is five consecutive calls to
+`http://127.0.0.1:8877/health` and `http://127.0.0.1:8878/status`, followed by
+five calls to control-plane `/api/gpu/status`; each should show the current
+remote PID and a fresh `health` probe. The macOS guard in
+`gpu_service_src/gpu_service.py` and backend remote-GPU policy prevent local
+media fallback.
+
+## Disk-space admission
+
+Transcription uploads retain `DISK_MIN_FREE_GB` of free space after the upload,
+plus `DISK_UPLOAD_HEADROOM_GB` of working headroom for processing. Both values
+are configurable GPU-service settings and default to 20 GB and 5 GB. The
+service no longer requires the unrelated 100 GB data quota (or an 80 GB fixed
+upload floor) to remain free before accepting a normal transcription upload.
+Cleanup remains owned by the existing watchdog/service process and admission
+checks do not delete recordings.

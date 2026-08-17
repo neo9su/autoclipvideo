@@ -42,6 +42,7 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 import shutil as _shutil
 from asr_config import aligned_segment_bounds
+from disk_policy import configured_positive_int
 
 _DEFAULT_STORAGE = (
     r"C:\Users\neo\douyin_recordings" if os.name == "nt" else "/data/douyin-recordings"
@@ -106,6 +107,8 @@ _cosyvoice = None       # Singleton CosyVoice2 model
 
 # GPU concurrency: one transcription at a time (shares VRAM with ComfyUI)
 _gpu_sem: asyncio.Semaphore = asyncio.Semaphore(1)
+_TRANSCRIBE_TIMEOUT = configured_positive_int(os.environ, "TRANSCRIBE_TIMEOUT_SECONDS", 3600)
+_TTS_TIMEOUT = configured_positive_int(os.environ, "TTS_TIMEOUT_SECONDS", 1800)
 # NVENC concurrency: 2 concurrent — NVENC is a dedicated hardware unit, no VRAM cost
 _clip_sem: asyncio.Semaphore = asyncio.Semaphore(2)
 
@@ -429,8 +432,19 @@ def _do_transcribe(job_id: str):
 
 
 async def _run_with_lock(job_id: str):
-    async with _gpu_sem:
-        await asyncio.to_thread(_do_transcribe, job_id)
+    try:
+        async with _gpu_sem:
+            await asyncio.wait_for(
+                asyncio.to_thread(_do_transcribe, job_id),
+                timeout=_TRANSCRIBE_TIMEOUT,
+            )
+    except asyncio.TimeoutError:
+        error = f"Timed out after {_TRANSCRIBE_TIMEOUT}s"
+        logger.error("Transcription job %s timed out: %s", job_id, error)
+        job = _jobs.get(job_id)
+        if job is not None:
+            job.update({"status": "error", "error": error})
+        _db_update_job(job_id, "error", error)
 
 
 # ── NVENC clip pipeline ───────────────────────────────────────────────────────
