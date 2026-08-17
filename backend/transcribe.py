@@ -992,7 +992,8 @@ async def _run_variant_pipeline(group_id: int, variant: str, status_claimed: boo
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 "SELECT r.id, r.filename, r.room_id, r.start_time FROM recordings r "
-                "WHERE r.group_id=? AND (r.clipped=2 OR r.clip_filename IS NOT NULL) "
+                "WHERE r.group_id=? AND r.duration_status = 'accepted' "
+                "AND (r.clipped=2 OR r.clip_filename IS NOT NULL) "
                 "ORDER BY r.start_time ASC",
                 (group_id,),
             ) as cur:
@@ -1037,7 +1038,7 @@ async def _extract_srt_for_director(group_id: int) -> Optional[str]:
         async with aio_connect() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                "SELECT filename FROM recordings WHERE group_id = ? AND transcribed = 2 LIMIT 3",
+                "SELECT filename FROM recordings WHERE group_id = ? AND transcribed = 2 AND duration_status = 'accepted' LIMIT 3",
                 (group_id,),
             ) as cur:
                 rows = await cur.fetchall()
@@ -1063,7 +1064,7 @@ async def _get_group_total_duration(group_id: int) -> float:
         async with aio_connect() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                "SELECT id, filename FROM recordings WHERE group_id = ? AND transcribed = 2 AND local_deleted = 0",
+                "SELECT id, filename FROM recordings WHERE group_id = ? AND transcribed = 2 AND local_deleted = 0 AND duration_status = 'accepted'",
                 (group_id,),
             ) as cur:
                 rows = await cur.fetchall()

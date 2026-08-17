@@ -264,7 +264,7 @@ async def _get_srt_excerpt_with_fallback(group_id: int, merged_filename: Optiona
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT filename FROM recordings
-               WHERE group_id = ? AND clipped = 2
+               WHERE group_id = ? AND clipped = 2 AND duration_status = 'accepted'
                ORDER BY start_time ASC""",
             (group_id,),
         ) as cur:
