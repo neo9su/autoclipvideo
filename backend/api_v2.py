@@ -51,6 +51,29 @@ voice_director = VoiceDirector()
 # 同时最多 1 个 compose-video 任务（libx264/videotoolbox 占满 CPU）
 _COMPOSE_SEM = asyncio.Semaphore(1)
 
+
+def _build_qianchuan_script_segments(script: Dict, audio_segments: List[Dict]) -> List[Dict]:
+    """Normalize generated scenes before matching without relying on outer names."""
+    audio_duration_by_scene = {
+        item.get("scene_id"): item.get("duration", 0)
+        for item in audio_segments
+        if item.get("scene_id") is not None
+    }
+    normalized_segments = []
+    for scene in script.get("scenes", []):
+        scene_type = str(scene.get("scene_type") or "")
+        scene_id = scene.get("scene_id")
+        normalized_segments.append({
+            "text": scene.get("voiceover_text", ""),
+            "voiceover_text": scene.get("voiceover_text", ""),
+            "visual_keywords": scene.get("visual_requirements", []),
+            "priority_shots": scene.get("priority_shots", []),
+            "duration": max(2.5, audio_duration_by_scene.get(scene_id, scene.get("duration", 3.0))),
+            "scene_type": scene_type,
+            "scene_id": scene_id,
+        })
+    return normalized_segments
+
 class ScriptGenerationRequest(BaseModel):
     group_id: int
     script_type: str = "balanced"  # story/tutorial/comparison/planting/balanced（保留兼容）
@@ -389,18 +412,7 @@ async def _qianchuan_generate_bg(group_id: int, script: Dict) -> None:
 
             # 2) Strong shot matching with ad-oriented metadata.
             matcher = QianchuanMatcher(DB_PATH)
-            script_segments = [
-                {
-                    "text": s.get("voiceover_text", ""),
-                    "voiceover_text": s.get("voiceover_text", ""),
-                    "visual_keywords": s.get("visual_requirements", []),
-                    "priority_shots": s.get("priority_shots", []),
-                    "duration": max(2.5, next((a.get("duration", 0) for a in audio_segments if a.get("scene_id") == s.get("scene_id")), s.get("duration", 3.0))),
-                    "scene_type": s.get("scene_type", ""),
-                    "scene_id": s.get("scene_id"),
-                }
-                for s in script.get("scenes", [])
-            ]
+            script_segments = _build_qianchuan_script_segments(script, audio_segments)
             matched = await matcher.match_qianchuan_segments(script_segments, group_id)
             audit = audit_qianchuan_segments(matched, audio_segments)
             review_payload = {"matching": matched, "relevance_audit": audit}
@@ -409,7 +421,7 @@ async def _qianchuan_generate_bg(group_id: int, script: Dict) -> None:
                 detail = {
                     "matched_count": len(matched), "required_count": minimum_matches,
                     "matched_scene_ids": [item.get("script_segment", {}).get("scene_id") for item in matched],
-                    "reason": (
+                    "reason": getattr(matcher, "match_error", None) or (
                         "source media/SRT unavailable" if not matched
                         else "source SRT fallback produced too few segments"
                     ),

@@ -633,11 +633,6 @@ async def lifespan(app: FastAPI):
         require_remote_gpu("backend startup")
     await init_db()
     logger.info("Qianchuan fact-source SQLite DB: %s", os.path.abspath(DB_PATH))
-    await _reset_stuck_clip_tasks()
-    await _cleanup_stale_open_recording_placeholders()
-    # Load human-approved keyword score overrides into the scoring table
-    from editor import load_rule_overrides
-    await load_rule_overrides()
 
     from gpu_state import watch_gpu_service, register_online_callback
     gpu_watcher_task = asyncio.create_task(watch_gpu_service(broadcast_fn=broadcast))
@@ -659,6 +654,7 @@ async def lifespan(app: FastAPI):
             "(capture, transcription, backfill, publish, enhance, creative/director, and room monitors)"
         )
         tasks.extend([
+            asyncio.create_task(_run_startup_recovery()),
             asyncio.create_task(poll_transcriptions(broadcast_fn=broadcast)),
             asyncio.create_task(backfill_auto_merge()),
             asyncio.create_task(poll_publish_tasks(broadcast_fn=broadcast)),
@@ -681,6 +677,19 @@ async def lifespan(app: FastAPI):
             pass
     for room_id in list(monitor._tasks.keys()):
         await monitor.remove_room(room_id)
+
+
+async def _run_startup_recovery() -> None:
+    """Run crash recovery after lifespan yields so lightweight APIs can serve."""
+    try:
+        await _reset_stuck_clip_tasks()
+        await _cleanup_stale_open_recording_placeholders()
+        from editor import load_rule_overrides
+        await load_rule_overrides()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("Startup recovery failed; background workers remain available")
 
 
 APP_VERSION = "MVP1.04.2026032501"

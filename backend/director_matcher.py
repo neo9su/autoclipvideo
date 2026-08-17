@@ -29,6 +29,24 @@ except ImportError:
 _matcher_instance: Optional["SemanticMatcher"] = None
 
 
+def _is_thumbnail_only_clip_failure(clip_error: Optional[str]) -> bool:
+    """Return whether the only failed artifact is the optional thumbnail."""
+    return bool(
+        clip_error
+        and "local media execution is disabled: thumbnail generation" in clip_error
+    )
+
+
+def qianchuan_source_eligibility_sql(alias: str = "recordings") -> str:
+    """Build the predicate for synced/transcribed sources usable by Qianchuan."""
+    return (
+        f"{alias}.synced = 1 AND {alias}.transcribed = 2 AND "
+        f"({alias}.clipped = 2 OR "
+        f"({alias}.clipped = -1 AND {alias}.clip_error LIKE "
+        "'%local media execution is disabled: thumbnail generation%'))"
+    )
+
+
 def get_matcher(db_path: str) -> "SemanticMatcher":
     global _matcher_instance
     if _matcher_instance is None:
@@ -79,15 +97,11 @@ class SemanticMatcher:
         self.db_path = db_path
         self.match_error: Optional[str] = None
         self.model = None
+        self._model_load_lock = asyncio.Lock()
         
-        # 初始化sentence-transformers模型
-        if SENTENCE_TRANSFORMERS_AVAILABLE:
-            try:
-                self.model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
-                logger.info("Loaded sentence-transformers model successfully")
-            except Exception as e:
-                logger.warning(f"Failed to load sentence-transformers model: {e}")
-                self.model = None
+        # Loading the transformer synchronously here blocks the event loop during
+        # startup.  Matching lazily keeps /health and queue/status APIs responsive;
+        # keyword/SRT matching remains available while the optional model loads.
         
         # 预定义关键词映射（用于回退匹配）
         self.keyword_patterns = {
@@ -115,6 +129,7 @@ class SemanticMatcher:
         """
         self.match_error = None
         try:
+            await self._ensure_model_loaded()
             recordings = await self._get_group_recordings(group_id)
             if not recordings:
                 self.match_error = (
@@ -199,6 +214,30 @@ class SemanticMatcher:
             self.match_error = f"source matching failed: {e}"
             return await self._get_fallback_matches(script_segments, group_id)
 
+    async def _ensure_model_loaded(self) -> None:
+        """Load the optional semantic model off the event loop on first use."""
+        if self.model is not None or not SENTENCE_TRANSFORMERS_AVAILABLE:
+            return
+        model_load_lock = getattr(self, "_model_load_lock", None)
+        if model_load_lock is None:
+            # Tests and lightweight recovery paths may deliberately construct a
+            # matcher without __init__; preserve their explicit model=None.
+            return
+        async with model_load_lock:
+            if self.model is not None:
+                return
+            loop = asyncio.get_running_loop()
+
+            def load_model():
+                return SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
+
+            try:
+                self.model = await loop.run_in_executor(None, load_model)
+                logger.info("Loaded sentence-transformers model successfully")
+            except Exception as exc:
+                logger.warning("Failed to load sentence-transformers model: %s", exc)
+                self.model = None
+
     async def _find_best_srt_match(
         self,
         segment_text: str,
@@ -220,7 +259,7 @@ class SemanticMatcher:
             used_time_ranges = {}
 
         best_result = None
-        best_score = 0.3  # 最低阈值：score < 0.3 认为匹配不可靠
+        best_score = 0.3000001  # Keep the strict threshold above the weak 0.3 fallback score.
 
         loop = asyncio.get_event_loop()
 
