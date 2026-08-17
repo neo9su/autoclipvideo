@@ -390,7 +390,8 @@ async def poll_transcriptions(broadcast_fn=None):
             async with aio_connect() as db:
                 db.row_factory = aiosqlite.Row
                 async with db.execute(
-                    "SELECT * FROM recordings WHERE transcribed = 1 AND gpu_job_id IS NOT NULL"
+                    "SELECT * FROM recordings WHERE transcribed = 1 AND gpu_job_id IS NOT NULL "
+                    "AND duration_status = 'accepted'"
                 ) as cur:
                     pending = await cur.fetchall()
                 async with db.execute(

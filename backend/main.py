@@ -2047,6 +2047,8 @@ async def retry_transcribe(recording_id: int, regenerate_clip: bool = Query(defa
             rec = await cur.fetchone()
     if not rec:
         raise HTTPException(status_code=404, detail="Recording not found")
+    if rec["duration_status"] != "accepted":
+        raise HTTPException(status_code=409, detail=rec["skip_reason"] or "Recording duration is unavailable")
     filepath = os.path.join(os.path.dirname(__file__), "..", "recordings", rec["filename"])
     if not os.path.exists(filepath):
         raise HTTPException(status_code=404, detail="Recording file missing on disk")
@@ -2097,6 +2099,8 @@ async def retranscribe_recording(recording_id: int):
             rec = await cur.fetchone()
     if not rec:
         raise HTTPException(status_code=404, detail="Recording not found")
+    if rec["duration_status"] != "accepted":
+        raise HTTPException(status_code=409, detail=rec["skip_reason"] or "Recording duration is unavailable")
 
     recordings_dir = os.path.join(os.path.dirname(__file__), "..", "recordings")
     filepath = os.path.join(recordings_dir, rec["filename"])
@@ -2140,7 +2144,8 @@ async def clip_missing():
     async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         rows = await db.execute_fetchall(
-            "SELECT * FROM recordings WHERE transcribed = 2 AND clipped IN (0, -1)"
+            "SELECT * FROM recordings WHERE transcribed = 2 AND clipped IN (0, -1) "
+            "AND duration_status = 'accepted'"
         )
     queued, skipped = [], []
     base = os.path.join(os.path.dirname(__file__), "..", "recordings")
@@ -2164,6 +2169,8 @@ async def retry_clip(recording_id: int):
             rec = await cur.fetchone()
     if not rec:
         raise HTTPException(status_code=404, detail="Recording not found")
+    if rec["duration_status"] != "accepted":
+        raise HTTPException(status_code=409, detail=rec["skip_reason"] or "Recording duration is unavailable")
     if rec["transcribed"] != 2:
         raise HTTPException(status_code=409, detail="Transcription not complete")
     mp4_path = os.path.join(os.path.dirname(__file__), "..", "recordings", rec["filename"])
@@ -2498,7 +2505,8 @@ async def reclip(req: ReclipRequest):
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT r.* FROM recordings r JOIN rooms rm ON r.room_id = rm.id "
-            "WHERE rm.name = ? AND substr(r.start_time,1,10) = ? AND r.transcribed = 2",
+            "WHERE rm.name = ? AND substr(r.start_time,1,10) = ? AND r.transcribed = 2 "
+            "AND r.duration_status = 'accepted'",
             (req.room_name, req.date)
         ) as cur:
             recs = await cur.fetchall()
@@ -2522,7 +2530,7 @@ async def reclip_group_all(group_id: int):
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT id, filename, clip_count FROM recordings "
-            "WHERE group_id = ? AND transcribed = 2",
+            "WHERE group_id = ? AND transcribed = 2 AND duration_status = 'accepted'",
             (group_id,),
         ) as cur:
             recs = await cur.fetchall()
@@ -5001,6 +5009,7 @@ async def _periodic_clip_dispatch():
                         """SELECT id, filename, clip_count, room_id FROM recordings 
                            WHERE transcribed = 2 AND clipped = 0 
                            AND local_deleted = 0 AND synced = 1
+                           AND duration_status = 'accepted'
                            ORDER BY end_time ASC
                            LIMIT ?""",
                         (BATCH_LIMIT,),
