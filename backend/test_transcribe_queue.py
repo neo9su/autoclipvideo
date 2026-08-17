@@ -184,12 +184,31 @@ async def test_stale_job_recovery_resets_only_matching_recording(backend_main) -
         Path(db_path).unlink(missing_ok=True)
 
 
+def test_transcription_watchdog_contract_is_present() -> None:
+    source = Path("gpu_service/main.py").read_text()
+    assert "async def _job_watchdog_loop" in source
+    assert "_recover_stale_jobs()" in source
+    assert "_transcription_tasks[job_id] = asyncio.create_task(_run_with_lock(job_id))" in source
+    assert "_transcription_tasks.pop(job_id, None)" in source
+    assert '"transcription_watchdog"' in source
+
+
+def test_recovery_endpoint_cancels_worker_without_deleting_artifacts() -> None:
+    source = Path("gpu_service/main.py").read_text()
+    recovery_block = source[source.index("async def recover_stale_job"):source.index("async def get_srt")]
+    assert "task.cancel()" in recovery_block
+    assert "_db_update_job(job_id, \"error\", error)" in recovery_block
+    assert "os.remove" not in recovery_block
+
+
 async def main_test() -> None:
     backend_main = _load_backend_main()
     await test_transcribe_queue_excludes_ghost_open_recording(backend_main)
     await test_transcribe_queue_includes_finished_unsynced_recording_with_file(backend_main)
     await test_stale_open_cleanup_keeps_recent_active_recording(backend_main)
     await test_stale_job_recovery_resets_only_matching_recording(backend_main)
+    test_transcription_watchdog_contract_is_present()
+    test_recovery_endpoint_cancels_worker_without_deleting_artifacts()
     print("transcribe queue ghost-recording guards ok")
 
 

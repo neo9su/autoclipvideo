@@ -133,6 +133,8 @@ COSYVOICE_MODEL_DIR = os.environ.get("COSYVOICE_MODEL_DIR", _default_cosy_dir())
 
 # ── In-memory stores ──────────────────────────────────────────────────────────
 _jobs: dict = {}        # transcription jobs
+_transcription_tasks: dict[str, asyncio.Task] = {}
+_watchdog_stats = {"last_run_at": None, "last_recovery_at": None, "recovered_count": 0}
 _clip_jobs: dict = {}   # clip jobs
 _tts_jobs: dict = {}    # TTS synthesis jobs
 _audio_concat_jobs: dict = {}
@@ -145,6 +147,7 @@ _gpu_sem: asyncio.Semaphore = asyncio.Semaphore(1)
 _TRANSCRIBE_TIMEOUT = int(os.environ.get("TRANSCRIBE_TIMEOUT_SECONDS", "3600"))
 _STALE_JOB_SECONDS = int(os.environ.get("STALE_JOB_SECONDS", "3600"))
 _TRANSCRIBE_HEARTBEAT_SECONDS = int(os.environ.get("TRANSCRIBE_HEARTBEAT_SECONDS", "60"))
+_WATCHDOG_INTERVAL_SECONDS = int(os.environ.get("JOB_WATCHDOG_INTERVAL_SECONDS", "60"))
 # NVENC concurrency: 2 concurrent — NVENC is a dedicated hardware unit, no VRAM cost
 _clip_sem: asyncio.Semaphore = asyncio.Semaphore(2)
 
@@ -460,6 +463,7 @@ async def _run_with_lock(job_id: str):
         _db_update_job(job_id, "error", f"Timed out after {_TRANSCRIBE_TIMEOUT}s")
     finally:
         heartbeat_task.cancel()
+        _transcription_tasks.pop(job_id, None)
 
 
 def _job_age_seconds(job: dict, now: float | None = None) -> float:
@@ -467,25 +471,44 @@ def _job_age_seconds(job: dict, now: float | None = None) -> float:
     stamp = job.get("heartbeat_at") or job.get("created_at")
     if not stamp:
         return 0.0
+    try:
+        return max(0.0, now - calendar.timegm(time.strptime(stamp[:19], "%Y-%m-%d %H:%M:%S")))
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
 
 
 def _recover_stale_jobs() -> list[str]:
-    """Mark stale processing jobs terminal without deleting their artifacts."""
+    """Fail stale jobs and release their worker tasks for safe re-submission."""
     recovered = []
     now = time.time()
     for job_id, job in list(_jobs.items()):
         if job.get("status") != "processing" or _job_age_seconds(job, now) < _STALE_JOB_SECONDS:
             continue
-        error = f"Recovered stale processing job after {int(_job_age_seconds(job, now))}s"
+        age = int(_job_age_seconds(job, now))
+        error = f"Recovered stale processing job after {age}s"
         job["status"] = "error"
         job["error"] = error
         _db_update_job(job_id, "error", error)
+        task = _transcription_tasks.get(job_id)
+        if task and not task.done():
+            task.cancel()
         recovered.append(job_id)
     return recovered
-    try:
-        return max(0.0, now - calendar.timegm(time.strptime(stamp[:19], "%Y-%m-%d %H:%M:%S")))
-    except (TypeError, ValueError, OverflowError):
-        return 0.0
+
+
+async def _job_watchdog_loop() -> None:
+    """Continuously expose and recover jobs whose durable heartbeat stops."""
+    while True:
+        await asyncio.sleep(_WATCHDOG_INTERVAL_SECONDS)
+        try:
+            recovered = _recover_stale_jobs()
+            _watchdog_stats["last_run_at"] = time.time()
+            if recovered:
+                _watchdog_stats["last_recovery_at"] = time.time()
+                _watchdog_stats["recovered_count"] += len(recovered)
+                logger.warning("Job watchdog recovered %d stale transcription job(s): %s", len(recovered), recovered)
+        except Exception:
+            logger.exception("Job watchdog failed")
 
 
 # ── NVENC clip pipeline ───────────────────────────────────────────────────────
@@ -1247,6 +1270,10 @@ async def _auto_cleanup_loop():
 async def _lifespan(app: FastAPI):
     asyncio.create_task(_auto_cleanup_loop())
     asyncio.create_task(_disk_guard_loop())  # Start disk space monitoring
+    recovered = _recover_stale_jobs()
+    if recovered:
+        logger.warning("Startup recovered %d stale transcription job(s): %s", len(recovered), recovered)
+    asyncio.create_task(_job_watchdog_loop())
     # CosyVoice2 model is loaded lazily on first TTS job (model takes ~30s to load).
     yield
 
@@ -1349,6 +1376,12 @@ async def health():
         "queue_depth": queued,
         "clip_jobs_running": clip_running,
         "clip_jobs_pending": clip_pending,
+        "transcription_watchdog": {
+            **_watchdog_stats,
+            "interval_seconds": _WATCHDOG_INTERVAL_SECONDS,
+            "stale_threshold_seconds": _STALE_JOB_SECONDS,
+            "active_tasks": len(_transcription_tasks),
+        },
         "concat_jobs_active": concat_running,
         "classic_concat_jobs_active": classic_concat_running,
     }
@@ -1409,7 +1442,7 @@ async def create_job(
     if idempotency_key:
         _jobs[idempotency_key] = _jobs[job_id]
     _db_insert_job(job_id, mp4_path, srt_path)
-    asyncio.create_task(_run_with_lock(job_id))
+    _transcription_tasks[job_id] = asyncio.create_task(_run_with_lock(job_id))
     return {"job_id": job_id, "status": "processing"}
 
 
@@ -1437,6 +1470,10 @@ async def recover_stale_job(request: Request, job_id: str):
     job["status"] = "error"
     job["error"] = error
     _db_update_job(job_id, "error", error)
+    task = _transcription_tasks.get(job_id)
+    if task and not task.done():
+        task.cancel()
+    _transcription_tasks.pop(job_id, None)
     return {"job_id": job_id, "status": "error", "recovered": True, "age_seconds": age}
 
 
