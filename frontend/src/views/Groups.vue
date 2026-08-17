@@ -118,8 +118,6 @@
                   class="btn-version-trigger"
                   :class="version.buttonClass"
                   :disabled="versionTriggerDisabled(g, version.key)"
-                  :title="versionTriggerDisabled(g, version.key) ? versionStatusMeta(g, version.key).disabledReason : `${versionTriggerLabel(g, version.key)}${version.label}`"
-                  :aria-label="`${version.label}：${versionTriggerLabel(g, version.key)}`"
                   @click="triggerVersion(g, version.key)">
                   {{ versionTriggerLabel(g, version.key) }}
                 </button>
@@ -142,9 +140,6 @@
               </div>
               <div v-if="versionStatusMeta(g, version.key).hint" class="five-version-note">
                 {{ versionStatusMeta(g, version.key).hint }}
-              </div>
-              <div v-if="versionStatusMeta(g, version.key).disabledReason" class="five-version-disabled-reason">
-                🔒 {{ versionStatusMeta(g, version.key).disabledReason }}
               </div>
             </div>
           </div>
@@ -251,7 +246,6 @@
               <span class="styles-hint">基于经典版生成两种节奏</span>
             </div>
             <div class="styles-actions">
-              <span class="styles-generation-note">请在上方分别触发直出版或保守版</span>
               <template v-if="g.realistic_status === 2 && g.realistic_available">
                 <button class="btn-action rose" @click="openStylePreview(g, 'realistic')">▶ 直出版</button>
                 <a :href="`${apiBase}/api/groups/${g.id}/realistic-download`" class="btn-action rose" download>↓</a>
@@ -971,25 +965,36 @@ function versionBusy(group, version) {
 }
 function versionStatusMeta(group, version) {
   const status = versionStatus(group, version)
-  const error = group[`${version}_error`]
+  const error = group[`${version}_error`] || (version === 'classic' ? group.merge_error : '') || (version === 'director' ? group.director_error : '')
   if (status === 1 || versionBusy(group, version)) return { label: '生成中', className: 'running', hint: '任务进行中，请勿重复提交。' }
   if (status === 2 && versionIsReady(group, version)) return { label: '已完成', className: 'done', hint: '' }
   if (status < 0 || (status === 2 && !versionIsReady(group, version))) {
-    return { label: '失败', className: 'failed', error: summarizeStyleError(error) || '结果文件缺失，可重试。', hint: '', disabledReason: '' }
+    const unavailableReason = versionUnavailableReason(group, version)
+    return {
+      label: unavailableReason ? '不可用' : '失败',
+      className: unavailableReason ? 'blocked' : 'failed',
+      error: summarizeStyleError(error) || unavailableReason || '结果文件缺失，可重试。',
+      hint: unavailableReason ? '满足前置条件后可使用重试。' : '',
+    }
   }
-  return { label: '未生成', className: 'idle', hint: '', disabledReason: versionPrerequisiteReason(group, version) }
-}
-function versionTriggerDisabled(group, version) {
-  return Boolean(versionPrerequisiteReason(group, version)) || versionBusy(group, version) || versionStatus(group, version) === 1
-}
-function versionPrerequisiteReason(group, version) {
-  if (version === 'qianchuan' && Number(group.qianchuan_status) === -2) {
-    return '缺少可匹配的千川录像或 SRT，请补充素材后重试。'
+  return {
+    label: '未生成',
+    className: 'idle',
+    hint: versionUnavailableReason(group, version) || '尚未生成，可单独生成此版本。',
   }
-  if (Number(group.ready_count || 0) === 0) {
-    return '暂无可用剪辑，请先完成转录和剪辑。'
+}
+function versionUnavailableReason(group, version) {
+  if (Number(group.ready_count || 0) === 0) return '缺少可用剪辑，请先完成源录像转录和剪辑。'
+  if (version === 'qianchuan' && (group.qianchuan_available === false || Number(group.qianchuan_status) === -2)) {
+    return summarizeQianchuanError(group.qianchuan_error) || '千川镜头匹配不足，暂无可用录音或 SRT 匹配。'
+  }
+  if ((version === 'realistic' || version === 'conservative') && group.merge_status !== 2 && group.classic_status !== 2) {
+    return '缺少经典版源文件，请先生成经典版。'
   }
   return ''
+}
+function versionTriggerDisabled(group, version) {
+  return Boolean(versionUnavailableReason(group, version)) || versionBusy(group, version) || versionStatus(group, version) === 1
 }
 function versionTriggerLabel(group, version) {
   if (versionBusy(group, version) || versionStatus(group, version) === 1) return '生成中…'
@@ -2024,6 +2029,7 @@ onUnmounted(() => { wsCleanup?.(); stopProgressPolling(); groupsObserver?.discon
 .style-status.running { background: rgba(251,191,36,0.14); color: #fbbf24; }
 .style-status.done { background: rgba(52,211,153,0.14); color: #6ee7b7; }
 .style-status.failed { background: rgba(254,44,85,0.14); color: #f87171; }
+.style-status.blocked { background: rgba(251,146,60,0.16); color: #fb923c; }
 .styles-statuses { margin-top: 8px; }
 .styles-error { margin-top: 6px; font-size: 11px; color: #f87171; line-height: 1.5; word-break: break-all; }
 .five-version-panel { padding: 14px 16px; background: linear-gradient(90deg, rgba(99,102,241,.09), rgba(20,184,166,.06)); border-top: 1px solid rgba(129,140,248,.3); border-bottom: 1px solid rgba(129,140,248,.22); }
@@ -2037,13 +2043,13 @@ onUnmounted(() => { wsCleanup?.(); stopProgressPolling(); groupsObserver?.discon
 .five-version-topline { justify-content: space-between; margin-bottom: 8px; }
 .five-version-name { color: #e2e8f0; font-size: 12px; font-weight: 600; }
 .five-version-actions { min-height: 28px; }
-.btn-version-trigger, .btn-version-link { border-radius: 5px; padding: 4px 8px; font-size: 11px; cursor: pointer; white-space: nowrap; border: 1px solid rgba(148,163,184,.25); background: rgba(148,163,184,.1); color: #cbd5e1; text-decoration: none; }
+.btn-version-trigger, .btn-version-link, .btn-version-retry { border-radius: 5px; padding: 4px 8px; font-size: 11px; cursor: pointer; white-space: nowrap; border: 1px solid rgba(148,163,184,.25); background: rgba(148,163,184,.1); color: #cbd5e1; text-decoration: none; }
 .btn-version-trigger.teal { color: #5eead4; }.btn-version-trigger.purple { color: #c4b5fd; }.btn-version-trigger.rose { color: #fda4af; }.btn-version-trigger.orange { color: #fdba74; }.btn-version-trigger.cyan { color: #67e8f9; }
 .btn-version-trigger:hover:not(:disabled), .btn-version-link:hover { background: rgba(255,255,255,.1); }
 .btn-version-trigger:disabled { opacity: .45; cursor: not-allowed; }
-.five-version-error, .five-version-disabled-reason { color: #f87171; font-size: 11px; line-height: 1.4; margin-top: 7px; word-break: break-word; }
-.five-version-disabled-reason { color: #fbbf24; }
-.styles-generation-note { color: #94a3b8; font-size: 11px; }
+.btn-version-retry { color: #fbbf24; border-color: rgba(251,191,36,.35); background: rgba(251,191,36,.08); }
+.btn-version-retry:hover { background: rgba(251,191,36,.18); }
+.five-version-error { color: #f87171; font-size: 11px; line-height: 1.4; margin-top: 7px; word-break: break-word; }
 @media (max-width: 900px) { .five-version-grid { grid-template-columns: repeat(2, minmax(140px, 1fr)); } }
 @media (max-width: 480px) { .five-version-grid { grid-template-columns: 1fr; } .five-version-heading { align-items: flex-start; flex-direction: column; } .five-version-hint { margin-left: 0; } }
 /* Review modal */
