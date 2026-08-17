@@ -1002,11 +1002,18 @@ async def upload_recording(room_id: int, file: UploadFile = File(...), srt: Opti
     duration_status = classify_duration(probed_duration)
     skip_reason = duration_reason(probed_duration) or None
 
+    if duration_status == "too_short":
+        try:
+            os.unlink(filepath)
+        except OSError as exc:
+            logger.warning("Could not discard short uploaded recording %s: %s", filename, exc)
+        size_bytes = 0
+
     start_time = now.isoformat()
     async with aio_connect() as db:
         cur = await db.execute(
-            "INSERT INTO recordings (room_id, filename, start_time, end_time, size_bytes, synced, clip_count, duration_seconds, duration_status, skip_reason) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)",
-            (room_id, filename, start_time, start_time, size_bytes, clip_count, probed_duration or None, duration_status, skip_reason),
+            "INSERT INTO recordings (room_id, filename, start_time, end_time, size_bytes, synced, clip_count, duration_seconds, duration_status, skip_reason, local_deleted) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)",
+            (room_id, filename, start_time, start_time, size_bytes, clip_count, probed_duration or None, duration_status, skip_reason, int(duration_status == "too_short")),
         )
         await db.commit()
         recording_id = cur.lastrowid
@@ -2295,12 +2302,19 @@ async def upload_custom_group_video(group_id: int, file: UploadFile = File(...),
     duration_status = classify_duration(duration)
     skip_reason = duration_reason(duration) or None
 
+    if duration_status == "too_short":
+        try:
+            os.unlink(filepath)
+        except OSError as exc:
+            logger.warning("Could not discard short custom upload %s: %s", filename, exc)
+        size_bytes = 0
+
     start_time = now.isoformat()
     async with aio_connect() as db:
         cur = await db.execute(
-            "INSERT INTO recordings (room_id, filename, start_time, end_time, size_bytes, synced, clip_count, group_id, duration_seconds, duration_status, skip_reason) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)",
+            "INSERT INTO recordings (room_id, filename, start_time, end_time, size_bytes, synced, clip_count, group_id, duration_seconds, duration_status, skip_reason, local_deleted) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)",
             (room_id, filename, start_time, start_time, size_bytes, clip_count, group_id,
-             duration or None, duration_status, skip_reason),
+             duration or None, duration_status, skip_reason, int(duration_status == "too_short")),
         )
         await db.commit()
         recording_id = cur.lastrowid

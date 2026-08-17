@@ -4,6 +4,7 @@ import asyncio
 import os
 
 MIN_RECORDING_DURATION_SECONDS = 28.0
+MAX_RECORDING_DURATION_SECONDS = 45 * 60
 # Compatibility alias for pipeline modules that use the shorter name.
 MIN_RECORDING_DURATION = MIN_RECORDING_DURATION_SECONDS
 TOO_SHORT_REASON = "too_short"
@@ -26,7 +27,7 @@ def is_processable_duration(duration: object) -> bool:
 
 
 async def probe_duration(path: str) -> float | None:
-    """Probe a media file without treating probe failure as a short file."""
+    """Probe a media file and return its positive duration, including short files."""
     if not path or not os.path.isfile(path):
         return None
     try:

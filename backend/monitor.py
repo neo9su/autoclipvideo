@@ -199,6 +199,27 @@ class MonitorManager:
         # Check stream resolution in background after file has data
         asyncio.create_task(self._check_stream_resolution(room_id, filename))
 
+    async def _on_segment_rejected(self, room_id: int, filepath: str, segment_index: int, duration):
+        """Close the provisional row for a discarded short recording."""
+        filename = os.path.basename(filepath)
+        from duration_policy import classify_duration, duration_reason
+        status = classify_duration(duration)
+        async with aio_connect() as db:
+            await db.execute(
+                """INSERT OR IGNORE INTO recordings
+                   (room_id, filename, start_time, segment_index, clip_count)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (room_id, filename, datetime.now().isoformat(), segment_index, AUTO_CLIP_COUNT),
+            )
+            await db.execute(
+                """UPDATE recordings SET end_time=?, size_bytes=0, duration_seconds=?,
+                   duration_status=?, skip_reason=?, local_deleted=1
+                   WHERE room_id=? AND filename=?""",
+                (datetime.now().isoformat(), duration, status, duration_reason(duration), room_id, filename),
+            )
+            await db.commit()
+        await self._notify_update(room_id)
+
     async def _on_segment_done(self, room_id: int, filepath: str, segment_index: int):
         """Called when a recording segment completes."""
         import os as _os
@@ -288,6 +309,7 @@ class MonitorManager:
                             room_id, name, url,
                             on_segment_done=self._on_segment_done,
                             on_segment_start=self._on_segment_start,
+                            on_segment_rejected=self._on_segment_rejected,
                         )
                         self._recorders[room_id] = recorder
                         await recorder.start(stream_url)
