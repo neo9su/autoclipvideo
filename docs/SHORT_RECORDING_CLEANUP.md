@@ -1,29 +1,23 @@
 # Short recording cleanup
 
-The processing floor is **28.0 seconds inclusive**. A 27.99-second recording
-is `too_short` / `时长不足`; 28.0 seconds is accepted. Missing, unreadable, or
-invalid duration probes are `duration_unavailable` and are never deletion
-candidates.
+The backend uses one inclusive threshold: recordings with a probed duration `< 28.0` seconds are `too_short`; exactly `28.0` seconds is eligible. Missing or invalid media is `duration_unavailable` and is never deletion-eligible.
 
 ## Dry-run inventory
 
-Run against the active backend's mounted database and recordings directory:
+Run from the repository root:
 
 ```sh
-python scripts/inventory_short_recordings.py --db /path/to/douyin.db --recordings-root /path/to/recordings --output short-recordings.json
+python scripts/inventory_short_recordings.py > short-recording-inventory.json
 ```
 
-The command is read-only and reports recording ID, path, duration, size, and
-total reclaimable bytes. No existing file is deleted by this task.
+This only probes media and prints recording IDs, relative paths, durations, sizes, and total reclaimable bytes. It does not modify the database or delete files.
 
-## Later approved deletion
+## Approved cleanup (later, explicit operator action)
 
-After an operator reviews the JSON report and explicitly approves the listed
-IDs, use a separately reviewed deletion operation (not the dry-run command):
+There is intentionally no automatic deletion endpoint in this change. After reviewing the dry-run report, an operator may delete an explicitly approved set with the existing authenticated endpoint, one ID at a time:
 
 ```sh
-python scripts/delete_short_recordings.py --db /path/to/douyin.db --recordings-root /path/to/recordings --ids <approved-id-1>,<approved-id-2> --confirm
+curl -X DELETE "$BACKEND_URL/api/recordings/<recording_id>/local-file"
 ```
 
-That command/endpoint is intentionally not implemented or invoked here; the
-explicit confirmation gate must remain separate from inventory.
+Do not substitute an inventory query for operator confirmation. Verify the active remote backend first with `deploy/verify-remote.sh <backend-url>` and run the inventory against that backend's database/media mount.

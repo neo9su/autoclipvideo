@@ -159,6 +159,8 @@ async def init_db():
             "ALTER TABLE clip_groups ADD COLUMN quality_issue TEXT",
             "ALTER TABLE products ADD COLUMN room_id INTEGER",
             "ALTER TABLE recordings ADD COLUMN skip_reason TEXT",
+            "ALTER TABLE recordings ADD COLUMN duration_seconds REAL",
+            "ALTER TABLE recordings ADD COLUMN duration_status TEXT NOT NULL DEFAULT 'unavailable'",
             "ALTER TABLE clip_groups ADD COLUMN merge_error TEXT",
             # 双模式支持字段
             "ALTER TABLE clip_groups ADD COLUMN editing_mode TEXT DEFAULT 'director'",

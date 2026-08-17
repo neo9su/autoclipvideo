@@ -23,6 +23,7 @@ from typing import Optional
 import aiosqlite
 
 from db import DB_PATH, aio_connect
+from duration_policy import MIN_RECORDING_DURATION, probe_duration, classify_duration
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,16 @@ async def _get_pending_unsynced(room_id: int) -> list:
     result = []
     for row in rows:
         d = dict(row)
+        duration = await probe_duration(os.path.join(RECORDINGS_DIR, d["filename"]))
+        status, reason = classify_duration(duration)
+        if status != "eligible":
+            async with aio_connect() as db:
+                await db.execute(
+                    "UPDATE recordings SET duration_seconds=?, duration_status=?, skip_reason=? WHERE id=?",
+                    (duration if status == "too_short" else None, status, reason, d["id"]),
+                )
+                await db.commit()
+            continue
         try:
             if d["start_time"] and d["end_time"]:
                 st = d["start_time"].replace(" ", "T")

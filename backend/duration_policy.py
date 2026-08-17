@@ -1,31 +1,67 @@
-"""Single source of truth for recording duration eligibility."""
-from __future__ import annotations
+"""Single source of truth for source-recording duration eligibility."""
 
-import math
-from typing import Any
+import asyncio
+import json
+import logging
+import os
 
 MIN_RECORDING_DURATION = 28.0
+TOO_SHORT_REASON = "too_short"
+UNAVAILABLE_REASON = "duration_unavailable"
+
+logger = logging.getLogger(__name__)
 
 
-def classify_duration(value: Any) -> str:
-    """Return ``accepted``, ``too_short`` or ``unavailable`` conservatively."""
+def classify_duration(duration: object) -> tuple[str, str | None]:
+    """Classify a probed duration; invalid values are never treated as short."""
     try:
-        duration = float(value)
+        value = float(duration)
     except (TypeError, ValueError):
-        return "unavailable"
-    if not math.isfinite(duration) or duration < 0:
-        return "unavailable"
-    return "accepted" if duration >= MIN_RECORDING_DURATION else "too_short"
+        return "unavailable", UNAVAILABLE_REASON
+    if value != value or value <= 0:
+        return "unavailable", UNAVAILABLE_REASON
+    if value < MIN_RECORDING_DURATION:
+        return "too_short", TOO_SHORT_REASON
+    return "eligible", None
 
 
-def duration_reason(value: Any) -> str | None:
-    status = classify_duration(value)
-    if status == "too_short":
-        return "too_short"
-    if status == "unavailable":
-        return "duration_unavailable"
-    return None
+async def probe_duration(path: str) -> float | None:
+    """Probe media duration, returning None on missing/invalid media."""
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", path,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await process.communicate()
+        if process.returncode != 0:
+            return None
+        duration = float(stdout.decode().strip())
+        return duration if duration > 0 else None
+    except (OSError, ValueError):
+        return None
 
 
-def is_processable_duration(value: Any) -> bool:
-    return classify_duration(value) == "accepted"
+async def update_duration(db, recording_id: int, path: str) -> tuple[str, str | None, float | None]:
+    """Probe and persist eligibility metadata for one recording."""
+    duration = await probe_duration(path)
+    status, reason = classify_duration(duration)
+    await db.execute(
+        "UPDATE recordings SET duration_seconds=?, duration_status=?, skip_reason=? WHERE id=?",
+        (duration, status, reason, recording_id),
+    )
+    return status, reason, duration
+
+
+def inventory_row(row: dict) -> dict:
+    """Return a stable, operator-facing inventory representation."""
+    return {
+        "recording_id": row.get("id"),
+        "path": row.get("filename"),
+        "duration_seconds": row.get("duration_seconds"),
+        "size_bytes": row.get("size_bytes") or 0,
+        "status": row.get("duration_status") or "unavailable",
+        "reason": row.get("skip_reason") or UNAVAILABLE_REASON,
+    }
