@@ -843,7 +843,19 @@ async def _do_edit(recording_id: int, mp4_path: str, srt_path: str, clip_duratio
                 for k, clip_path in enumerate(clip_paths):
                     clip_filename = os.path.relpath(clip_path, RECORDINGS_DIR)
                     offset = max(3.0, c_dur * (0.2 + 0.3 * k))
-                    thumb = await generate_thumbnail(clip_path, offset=offset)
+                    # Thumbnail generation is presentation-only.  The control
+                    # plane deliberately rejects local media execution, so a
+                    # policy error here must not discard a valid remote clip
+                    # or make it ineligible for SRT/qianchuan matching.
+                    try:
+                        thumb = await generate_thumbnail(clip_path, offset=offset)
+                    except Exception as exc:
+                        logger.warning(
+                            "Optional thumbnail skipped for recording %s: %s",
+                            recording_id,
+                            str(exc)[:200],
+                        )
+                        thumb = None
                     thumb_basename = os.path.relpath(thumb, RECORDINGS_DIR) if thumb else None
                     gpu_job_id = _clip_job_id_cache.pop(clip_path, None)
 
@@ -1949,7 +1961,10 @@ async def backfill_auto_merge():
                                SELECT 1 FROM recordings
                                WHERE recordings.group_id = clip_groups.id
                                  AND recordings.local_deleted = 0
-                                 AND recordings.clipped = 2
+                                 AND recordings.synced = 1
+                                 AND recordings.transcribed = 2
+                                 AND (recordings.clipped = 2 OR
+                                      (recordings.clipped = -1 AND recordings.clip_error LIKE '%local media execution is disabled: thumbnail generation%'))
                              )
                            ORDER BY id DESC"""
                     ) as cur:

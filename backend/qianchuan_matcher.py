@@ -257,6 +257,8 @@ def score_product_match(context: Dict, product_id: Optional[str] = None, keyword
 class QianchuanMatcher(SemanticMatcher):
     """Semantic matcher with Qianchuan shot-bias metadata."""
 
+    allow_thumbnail_optional_sources = True
+
     def _qianchuan_bias(self, segment: Dict, text: str) -> float:
         text_l = text.lower()
         score = 0.0
