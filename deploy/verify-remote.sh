@@ -36,6 +36,12 @@ assert policy.get('max_segment_duration_seconds') == 2700.0, policy
 print('PASS /health: gpu-backend media workers enabled')
 print('PASS /health: recording policy is 28s minimum / 2700s maximum segment')
 print('PASS /health: Qianchuan API router loaded')
+policy = payload.get('recording_policy')
+assert policy == {
+    'min_duration_seconds': 28.0,
+    'max_segment_duration_seconds': 2700,
+}, policy
+print('PASS /health: recording policy is 28s minimum / 2700s segment maximum')
 PY
 
 curl --silent --show-error --location "$BASE_URL/openapi.json" > "$TMP_DIR/openapi.json"

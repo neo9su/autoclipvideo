@@ -205,6 +205,9 @@ class MonitorManager:
         from duration_policy import classify_duration, duration_reason
         status = classify_duration(duration)
         async with aio_connect() as db:
+            # The start callback is intentionally fire-and-forget. Keep this
+            # fallback so a very short segment rejected before that callback
+            # commits still leaves only an explicitly deleted/non-valid row.
             await db.execute(
                 """INSERT OR IGNORE INTO recordings
                    (room_id, filename, start_time, segment_index, clip_count)
@@ -247,11 +250,15 @@ class MonitorManager:
         
         async with aio_connect() as db:
             db.row_factory = aiosqlite.Row
+            from duration_policy import classify_duration, probe_duration
+            duration = await probe_duration(filepath)
+            duration_status = classify_duration(duration)
             await _update_with_retry(
                 db,
-                """UPDATE recordings SET end_time = ?, size_bytes = ?
+                """UPDATE recordings SET end_time = ?, size_bytes = ?,
+                       duration_seconds = ?, duration_status = ?, skip_reason = NULL
                    WHERE room_id = ? AND filename = ?""",
-                (datetime.now().isoformat(), size, room_id, filename),
+                (datetime.now().isoformat(), size, duration, duration_status, room_id, filename),
             )
             async with db.execute(
                 "SELECT id FROM recordings WHERE room_id=? AND filename=?",
