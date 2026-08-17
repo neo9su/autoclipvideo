@@ -230,6 +230,35 @@ class TaskStore:
         ).fetchone()
         return bool(artifact)
 
+    def _has_active_execution(self, issue_id: int) -> bool:
+        """Avoid fencing a worker that won the queue race before scan evidence arrived."""
+        return bool(self.conn.execute(
+            "SELECT 1 FROM runs WHERE issue_id=? AND state IN ('running','accepted_idle') LIMIT 1",
+            (issue_id,),
+        ).fetchone())
+
+    def reconcile_completed_issues(self, remote_issues=None) -> int:
+        """Mark queued issues done only when durable merged/completion evidence exists."""
+        remote_by_id = {int(item['number']): item for item in (remote_issues or []) if item.get('number') is not None}
+        completed = 0
+        now = time.time()
+        for row in self.conn.execute("SELECT id,state,payload FROM issues WHERE state IN ('queued','retryable','to_do')").fetchall():
+            issue_id, issue_state, payload = row
+            remote = remote_by_id.get(issue_id, {})
+            if self._has_active_execution(issue_id) or not (
+                self._completion_evidence(issue_id, issue_state, payload)
+                or self._completion_evidence(issue_id, remote.get('state', ''), remote)
+            ):
+                continue
+            changed = self.conn.execute(
+                "UPDATE issues SET state='done',updated_at=? WHERE id=? AND state IN ('queued','retryable','to_do')",
+                (now, issue_id),
+            ).rowcount
+            if changed:
+                completed += 1
+                self.event('completion_reconciled', issue_id, payload={'reason': 'merged_or_execution_evidence'})
+        return completed
+
     def reconcile_decompositions(self, remote_issues=None) -> dict:
         """Repair parent rollups from current state; safe to call on every heartbeat.
 
@@ -254,7 +283,8 @@ class TaskStore:
                     remote = remote_by_id.get(int(child_id), {})
                     child_state = child['state'] if child else remote.get('state', '')
                     child_payload = child['payload'] if child else remote
-                    if self._completion_evidence(child_id, child_state, child_payload) or self._completion_evidence(child_id, remote.get('state', ''), remote):
+                    has_completion = self._completion_evidence(child_id, child_state, child_payload) or self._completion_evidence(child_id, remote.get('state', ''), remote)
+                    if has_completion and not self._has_active_execution(child_id):
                         completed_ids.append(child_id)
                         if child and child_state not in {'done', 'closed'} and self._completion_evidence(child_id, remote.get('state', ''), remote):
                             self.conn.execute("UPDATE issues SET state='done',updated_at=? WHERE id=? AND state NOT IN ('done','closed')", (time.time(), child_id))
@@ -367,7 +397,7 @@ class TaskStore:
     def upsert_issue(self, issue_id, title, state="queued", payload=None):
         now = time.time()
         existing = self.conn.execute("SELECT state FROM issues WHERE id=?", (issue_id,)).fetchone()
-        if existing and existing[0] in {"done", "running"}:
+        if existing and existing[0] in {"done", "running", "accepted_idle"}:
             state = existing[0]
         self.conn.execute("INSERT INTO issues(id,title,state,payload,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,payload=excluded.payload,updated_at=excluded.updated_at", (issue_id,title,state,json.dumps(payload or {}),now))
 
@@ -543,7 +573,10 @@ class Runner:
         for issue in issues:
             number = issue.get('number')
             if number is not None:
-                self.store.upsert_issue(number, issue.get('title', f'Issue {number}'), issue.get('state', 'queued'), issue)
+                remote_state = issue.get('state', 'queued')
+                local_state = 'queued' if str(remote_state).lower() == 'open' else remote_state
+                self.store.upsert_issue(number, issue.get('title', f'Issue {number}'), local_state, issue)
+        self.store.reconcile_completed_issues(issues)
         return self.store.reconcile_decompositions(issues)
 
     def status(self):
