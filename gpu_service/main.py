@@ -340,6 +340,17 @@ def _db_touch_job(job_id: str) -> None:
         conn.commit()
 
 
+async def _heartbeat_job(job_id: str) -> None:
+    """Keep the durable heartbeat alive while the synchronous ASR runs."""
+    while True:
+        await asyncio.sleep(_TRANSCRIBE_HEARTBEAT_SECONDS)
+        job = _jobs.get(job_id)
+        if not job or job.get("status") != "processing":
+            return
+        _db_touch_job(job_id)
+        job["heartbeat_at"] = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+
+
 def _db_update_job(job_id: str, status: str, error: str = None):
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
@@ -437,6 +448,7 @@ def _do_transcribe(job_id: str):
 
 
 async def _run_with_lock(job_id: str):
+    heartbeat_task = asyncio.create_task(_heartbeat_job(job_id))
     try:
         async with _gpu_sem:
             await asyncio.wait_for(
@@ -446,6 +458,8 @@ async def _run_with_lock(job_id: str):
     except asyncio.TimeoutError:
         _log.error(f"Transcription job {job_id} TIMED OUT after {_TRANSCRIBE_TIMEOUT}s — releasing semaphore")
         _db_update_job(job_id, "error", f"Timed out after {_TRANSCRIBE_TIMEOUT}s")
+    finally:
+        heartbeat_task.cancel()
 
 
 def _job_age_seconds(job: dict, now: float | None = None) -> float:
@@ -453,6 +467,21 @@ def _job_age_seconds(job: dict, now: float | None = None) -> float:
     stamp = job.get("heartbeat_at") or job.get("created_at")
     if not stamp:
         return 0.0
+
+
+def _recover_stale_jobs() -> list[str]:
+    """Mark stale processing jobs terminal without deleting their artifacts."""
+    recovered = []
+    now = time.time()
+    for job_id, job in list(_jobs.items()):
+        if job.get("status") != "processing" or _job_age_seconds(job, now) < _STALE_JOB_SECONDS:
+            continue
+        error = f"Recovered stale processing job after {int(_job_age_seconds(job, now))}s"
+        job["status"] = "error"
+        job["error"] = error
+        _db_update_job(job_id, "error", error)
+        recovered.append(job_id)
+    return recovered
     try:
         return max(0.0, now - calendar.timegm(time.strptime(stamp[:19], "%Y-%m-%d %H:%M:%S")))
     except (TypeError, ValueError, OverflowError):
