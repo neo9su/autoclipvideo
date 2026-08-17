@@ -616,8 +616,8 @@ class SemanticMatcher:
                     "FROM recordings AS r WHERE group_id = ? AND "
                     f"{qianchuan_source_eligibility_sql('r')} "
                     "AND duration_status = 'accepted' "
-                    "AND (local_deleted = 0 OR local_deleted IS NULL) "
-                    "ORDER BY start_time",
+                    "AND (local_deleted = 0 OR local_deleted IS NULL)"
+                    " ORDER BY start_time",
                     (group_id,),
                 ) as cursor:
                     rows = await cursor.fetchall()
@@ -675,11 +675,11 @@ class SemanticMatcher:
                     "transcript_text": transcript_text,
                     "srt_entries": srt_entries,
                     "duration": duration,
-                    "clip_error": row["clip_error"],
                 })
 
-        except Exception as e:
-            logger.error(f"Failed to get recordings for group {group_id}: {e}")
+        except Exception as exc:
+            self.match_error = f"source media lookup failed for group {group_id}: {exc}"
+            logger.error(self.match_error)
 
         return recordings
 
