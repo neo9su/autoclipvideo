@@ -32,6 +32,8 @@ def test_qianchuan_eligibility_keeps_thumbnail_only_failure_source() -> None:
     predicate = qianchuan_source_eligibility_sql("r")
     assert "r.synced = 1" in predicate
     assert "r.transcribed = 2" in predicate
+    assert "r.duration_status = 'accepted'" in predicate
+    assert "r.local_deleted = 0" in predicate
     assert "thumbnail generation" in predicate
     assert "r.clipped = 2" in predicate
 

@@ -40,7 +40,9 @@ def _is_thumbnail_only_clip_failure(clip_error: Optional[str]) -> bool:
 def qianchuan_source_eligibility_sql(alias: str = "recordings") -> str:
     """Build the predicate for synced/transcribed sources usable by Qianchuan."""
     return (
-        f"{alias}.synced = 1 AND {alias}.transcribed = 2 AND "
+        f"{alias}.synced = 1 AND {alias}.transcribed = 2 "
+        f"AND {alias}.duration_status = 'accepted' "
+        f"AND ({alias}.local_deleted = 0 OR {alias}.local_deleted IS NULL) AND "
         f"({alias}.clipped = 2 OR "
         f"({alias}.clipped = -1 AND {alias}.clip_error LIKE "
         "'%local media execution is disabled: thumbnail generation%'))"
@@ -115,16 +117,6 @@ class SemanticMatcher:
             '场景展示': ['日常', '约会', '工作', '场合']
         }
     
-    def _set_match_error(self, message: Optional[str]) -> None:
-        """Persist a diagnostic even for recovery-created lightweight instances."""
-        self.match_error = message
-
-    def _source_eligibility_sql(self) -> str:
-        """Return the source predicate appropriate for this matcher policy."""
-        if getattr(self, "allow_thumbnail_optional_sources", False):
-            return qianchuan_source_eligibility_sql("recordings")
-        return "recordings.clipped = 2 AND recordings.duration_status = 'accepted'"
-
     async def match_segments_to_recordings(self, script_segments: List[Dict],
                                          group_id: int) -> List[Dict]:
         """
@@ -137,12 +129,12 @@ class SemanticMatcher:
         时间排斥机制：每段匹配后设置冷却区（±15s），后续段落优先选择
         远离已用区间的时间点，确保画面多样性。
         """
-        self._set_match_error(None)
+        self.match_error = None
         try:
             await self._ensure_model_loaded()
             recordings = await self._get_group_recordings(group_id)
             if not recordings:
-                self._set_match_error(
+                self.match_error = (
                     f"group {group_id} has no usable source media/SRT; "
                     "verify the recording row and non-empty source sidecar"
                 )
@@ -221,7 +213,7 @@ class SemanticMatcher:
 
         except Exception as e:
             logger.error(f"Segment matching failed for group {group_id}: {e}")
-            self._set_match_error(f"source matching failed: {e}")
+            self.match_error = f"source matching failed: {e}"
             return await self._get_fallback_matches(script_segments, group_id)
 
     async def _ensure_model_loaded(self) -> None:
@@ -622,9 +614,8 @@ class SemanticMatcher:
             async with aiosqlite.connect(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
                 async with db.execute(
-                    "SELECT id, filename, clip_filename, clip_error, start_time, end_time FROM recordings"
-                    f" WHERE group_id = ? AND {self._source_eligibility_sql()}"
-                    " AND (local_deleted = 0 OR local_deleted IS NULL)"
+                    "SELECT id, filename, clip_filename, start_time, end_time FROM recordings"
+                    f" WHERE group_id = ? AND {qianchuan_source_eligibility_sql()}"
                     " ORDER BY start_time",
                     (group_id,),
                 ) as cursor:

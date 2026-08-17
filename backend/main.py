@@ -655,7 +655,6 @@ async def lifespan(app: FastAPI):
         )
         tasks.extend([
             asyncio.create_task(_run_startup_recovery()),
-            asyncio.create_task(_start_room_monitors()),
             asyncio.create_task(poll_transcriptions(broadcast_fn=broadcast)),
             asyncio.create_task(backfill_auto_merge()),
             asyncio.create_task(poll_publish_tasks(broadcast_fn=broadcast)),
@@ -667,8 +666,11 @@ async def lifespan(app: FastAPI):
             asyncio.create_task(_periodic_qianchuan_dispatch()),
             asyncio.create_task(_periodic_clip_dispatch()),
         ])
-        # Room monitor startup may touch the database and stream services. Keep
-        # it in the worker task set so lifespan yields without waiting for it.
+        # Room discovery and monitor creation can touch the database and spawn
+        # recorder tasks. Do not hold lifespan startup (and therefore health
+        # endpoint readiness) on that recovery work.
+        monitor_start_task = asyncio.create_task(_start_monitors_safely())
+        tasks.append(monitor_start_task)
     yield
     for task in tasks:
         task.cancel()
@@ -679,16 +681,6 @@ async def lifespan(app: FastAPI):
             pass
     for room_id in list(monitor._tasks.keys()):
         await monitor.remove_room(room_id)
-
-
-async def _start_room_monitors() -> None:
-    """Start stream monitors without delaying API readiness."""
-    try:
-        await monitor.start_all()
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        logger.exception("Room monitor startup failed; API workers remain available")
 
 
 async def _run_startup_recovery() -> None:
@@ -702,6 +694,16 @@ async def _run_startup_recovery() -> None:
         raise
     except Exception:
         logger.exception("Startup recovery failed; background workers remain available")
+
+
+async def _start_monitors_safely() -> None:
+    """Start room monitors without delaying the HTTP server readiness path."""
+    try:
+        await monitor.start_all()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("Room monitor startup failed; API remains available")
 
 
 APP_VERSION = "MVP1.04.2026032501"
@@ -745,8 +747,8 @@ async def health():
         )
         # Probe remote backend liveness (best-effort, non-blocking)
         try:
-            async with httpx.AsyncClient(timeout=1.5) as client:
-                resp = await client.get(f"{REMOTE_BACKEND_URL}/")
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(f"{REMOTE_BACKEND_URL}/", timeout=1.0)
                 result["remote_backend_reachable"] = resp.status_code < 500
         except Exception:
             result["remote_backend_reachable"] = False
@@ -2636,7 +2638,7 @@ async def gpu_status():
         # unreachable.  Keep this probe remote-only; there is no local fallback.
         async def _aio_get(url):
             try:
-                async with httpx.AsyncClient(timeout=1.5) as _s:
+                async with httpx.AsyncClient(timeout=1.0) as _s:
                     _r = await _s.get(url)
                     try:
                         _body = _r.json()
@@ -4983,17 +4985,6 @@ async def _periodic_qianchuan_dispatch():
                     """SELECT id FROM clip_groups
                        WHERE classic_status = 2
                          AND qianchuan_status IN (0, -1, -3, -4)
-                         AND EXISTS (
-                           SELECT 1 FROM recordings
-                           WHERE recordings.group_id = clip_groups.id
-                             AND recordings.synced = 1
-                             AND recordings.transcribed = 2
-                             AND recordings.duration_status = 'accepted'
-                             AND (recordings.local_deleted = 0 OR recordings.local_deleted IS NULL)
-                             AND (recordings.clipped = 2 OR
-                                  (recordings.clipped = -1 AND recordings.clip_error LIKE
-                                   '%local media execution is disabled: thumbnail generation%'))
-                         )
                          AND (qianchuan_error IS NULL OR qianchuan_error = '' OR (
                            qianchuan_error NOT LIKE '%no recordings%'
                            AND qianchuan_error NOT LIKE '%recording files missing%'
