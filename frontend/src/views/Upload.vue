@@ -20,6 +20,7 @@
             <span class="file-label">{{ isImage ? '图片' : '视频' }}</span>
             <span class="file-name">{{ videoFile.name }}</span>
             <span class="file-size">{{ formatBytes(videoFile.size) }}</span>
+            <span v-if="duration < MIN_RECORDING_DURATION" class="duration-warning">时长不足：至少 28 秒</span>
           </div>
           <div v-else class="drop-hint">
             <span class="drop-plus">+</span>
@@ -65,7 +66,7 @@
         </div>
         <button
           class="btn-submit"
-          :disabled="!videoFile || !roomId || uploading || isImage"
+          :disabled="!videoFile || !roomId || uploading || isImage || duration < MIN_RECORDING_DURATION"
           :title="isImage ? '图片文件不支持上传剪辑' : ''"
           @click="submit"
         >{{ uploading ? '上传中…' : '上传并剪辑' }}</button>
@@ -290,6 +291,7 @@ const videoInput = ref(null)
 const srtInput   = ref(null)
 let pollTimer = null
 const STORAGE_KEY = 'upload_jobs'
+const MIN_RECORDING_DURATION = 28
 
 const isImage = computed(() => {
   if (!videoFile.value) return false
@@ -355,7 +357,10 @@ function saveJobs() {
 }
 
 async function submit() {
-  if (!videoFile.value || !roomId.value || uploading.value || isImage.value) return
+  if (!videoFile.value || !roomId.value || uploading.value || isImage.value || duration.value < MIN_RECORDING_DURATION) {
+    if (duration.value < MIN_RECORDING_DURATION) show('时长不足（至少 28 秒）', 'error')
+    return
+  }
   uploading.value = true
   try {
     const room   = rooms.value.find(r => r.id === Number(roomId.value))
@@ -366,7 +371,11 @@ async function submit() {
       transcribed: srtFile.value ? 2 : 0, clipped: 0, clips: [],
     })
     saveJobs()
-    show('上传成功，剪辑任务已提交', 'success')
+    if (result.duration_status && result.duration_status !== 'accepted') {
+      show(result.skip_reason || '时长不可用，已保留但未进入处理队列', 'error')
+    } else {
+      show('上传成功，剪辑任务已提交', 'success')
+    }
     clearFiles()
     startPolling()
   } catch (e) {

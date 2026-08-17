@@ -168,7 +168,7 @@ async def load_group_context(db_path: str, group_id: int, product_id: Optional[s
 
         async with db.execute(
             """SELECT filename FROM recordings
-               WHERE group_id = ? AND transcribed = 2
+               WHERE group_id = ? AND transcribed = 2 AND duration_status = 'accepted'
                ORDER BY id DESC LIMIT 5""",
             (group_id,),
         ) as cur:

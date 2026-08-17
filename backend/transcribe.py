@@ -1,4 +1,5 @@
 from gpu_execution import reject_local_media
+from duration_policy import MIN_RECORDING_DURATION_SECONDS, UNAVAILABLE_REASON, classify_duration, duration_reason
 import asyncio
 import calendar
 import heapq
@@ -24,7 +25,7 @@ logger = logging.getLogger(__name__)
 GPU_SERVICE_URL = os.environ.get("GPU_SERVICE_URL", "http://10.190.0.203:8877")
 
 MIN_RECORDING_HEIGHT = 720  # recordings below this height are skipped from clip jobs
-MIN_RECORDING_DURATION = 28  # recordings shorter than this (seconds) are skipped
+MIN_RECORDING_DURATION = MIN_RECORDING_DURATION_SECONDS
 MIN_FINAL_VIDEO_DURATION = 28.0  # director/creative final clips below this are not worth rescuing
 TARGET_PUBLISH_DURATION = 30.5  # pad near-threshold clips above Douyin's 30s boundary
 
@@ -40,7 +41,8 @@ async def _get_video_duration(mp4_path: str) -> float:
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
         )
         stdout, _ = await proc.communicate()
-        return float(stdout.strip())
+        value = float(stdout.strip())
+        return value if value > 0 else 0.0
     except Exception:
         return 0.0
 
@@ -328,14 +330,15 @@ async def poll_transcriptions(broadcast_fn=None):
             # Case 1: normal pending (clipped=0)
             async with db.execute(
                 "SELECT id, filename, clip_count FROM recordings "
-                "WHERE transcribed=2 AND clipped=0 AND local_deleted=0"
+                "WHERE transcribed=2 AND clipped=0 AND local_deleted=0 "
+                "AND duration_status='accepted'"
             ) as cur:
                 pending = await cur.fetchall()
             # Case 2: stuck mid-clipping (clipped=1, no clip_filename)
             async with db.execute(
                 "SELECT id, filename, clip_count FROM recordings "
                 "WHERE transcribed=2 AND clipped=1 AND clip_filename IS NULL "
-                "AND local_deleted=0 AND clip_error IS NULL"
+                "AND local_deleted=0 AND clip_error IS NULL AND duration_status='accepted'"
             ) as cur:
                 stuck = await cur.fetchall()
         # Reset stuck jobs back to pending
@@ -393,7 +396,8 @@ async def poll_transcriptions(broadcast_fn=None):
                 async with db.execute(
                     """SELECT * FROM recordings
                        WHERE synced = 0 AND transcribed = 0 AND local_deleted = 0
-                         AND end_time IS NOT NULL AND end_time != start_time"""
+                         AND end_time IS NOT NULL AND end_time != start_time
+                         AND duration_status = 'accepted'"""
                 ) as cur:
                     unsynced = await cur.fetchall()
 
@@ -649,13 +653,16 @@ async def _run_editor(recording_id: int, mp4_path: str, srt_path: str, clip_dura
 
     # ── Duration guard ────────────────────────────────────────────────────────
     duration = await _get_video_duration(mp4_path)
-    if 0 < duration < MIN_RECORDING_DURATION:
-        reason = f"录像时长过短（{duration:.0f}秒 < {MIN_RECORDING_DURATION}秒）"
+    duration_status = classify_duration(duration)
+    if duration_status != "accepted":
+        reason = duration_reason(duration)
+        if duration_status == UNAVAILABLE_REASON:
+            reason = f"{UNAVAILABLE_REASON}: {reason}"
         logger.warning(f"[skip] Recording {recording_id} ({os.path.basename(mp4_path)}): {reason}")
         async with aio_connect() as db:
             await db.execute(
-                "UPDATE recordings SET clipped = -1, skip_reason = ? WHERE id = ?",
-                (reason, recording_id),
+                "UPDATE recordings SET clipped = -1, duration_seconds = ?, duration_status = ?, skip_reason = ? WHERE id = ?",
+                (duration or None, duration_status, reason, recording_id),
             )
             await db.commit()
         return
@@ -997,7 +1004,8 @@ async def _run_variant_pipeline(group_id: int, variant: str, status_claimed: boo
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 "SELECT r.id, r.filename, r.room_id, r.start_time FROM recordings r "
-                "WHERE r.group_id=? AND (r.clipped=2 OR r.clip_filename IS NOT NULL) "
+                "WHERE r.group_id=? AND r.duration_status = 'accepted' "
+                "AND (r.clipped=2 OR r.clip_filename IS NOT NULL) "
                 "ORDER BY r.start_time ASC",
                 (group_id,),
             ) as cur:
@@ -1042,7 +1050,7 @@ async def _extract_srt_for_director(group_id: int) -> Optional[str]:
         async with aio_connect() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                "SELECT filename FROM recordings WHERE group_id = ? AND transcribed = 2 LIMIT 3",
+                "SELECT filename FROM recordings WHERE group_id = ? AND transcribed = 2 AND duration_status = 'accepted' LIMIT 3",
                 (group_id,),
             ) as cur:
                 rows = await cur.fetchall()
@@ -1068,7 +1076,7 @@ async def _get_group_total_duration(group_id: int) -> float:
         async with aio_connect() as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                "SELECT id, filename FROM recordings WHERE group_id = ? AND transcribed = 2 AND local_deleted = 0",
+                "SELECT id, filename FROM recordings WHERE group_id = ? AND transcribed = 2 AND local_deleted = 0 AND duration_status = 'accepted'",
                 (group_id,),
             ) as cur:
                 rows = await cur.fetchall()
