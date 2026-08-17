@@ -29,6 +29,6 @@ test('distinguishes unavailable qianchuan from retryable failures and stale arti
   const view = await readFile(new URL('./views/Groups.vue', import.meta.url), 'utf8')
   assert.match(view, /status === -2/)
   assert.match(view, /label: '不可用'/)
-  assert.match(view, /file_status === 'ready'/)
+  assert.match(view, /fileStatus === 'ready'/)
   assert.match(view, /结果文件缺失，可重试。/)
 })
