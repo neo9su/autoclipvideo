@@ -612,10 +612,12 @@ class SemanticMatcher:
             async with aiosqlite.connect(self.db_path) as db:
                 db.row_factory = aiosqlite.Row
                 async with db.execute(
-                    "SELECT id, filename, clip_filename, start_time, end_time FROM recordings"
-                    " WHERE group_id = ? AND clipped = 2 AND duration_status = 'accepted'"
-                    " AND (local_deleted = 0 OR local_deleted IS NULL)"
-                    " ORDER BY start_time",
+                    "SELECT id, filename, clip_filename, start_time, end_time, clip_error "
+                    "FROM recordings AS r WHERE group_id = ? AND "
+                    f"{qianchuan_source_eligibility_sql('r')} "
+                    "AND duration_status = 'accepted' "
+                    "AND (local_deleted = 0 OR local_deleted IS NULL) "
+                    "ORDER BY start_time",
                     (group_id,),
                 ) as cursor:
                     rows = await cursor.fetchall()
@@ -673,6 +675,7 @@ class SemanticMatcher:
                     "transcript_text": transcript_text,
                     "srt_entries": srt_entries,
                     "duration": duration,
+                    "clip_error": row["clip_error"],
                 })
 
         except Exception as e:
