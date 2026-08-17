@@ -16,4 +16,14 @@ assert.match(view, /version === 'director'\) await retryDirector\(group\.id\)/)
 assert.match(view, /version === 'qianchuan'\) await retryQianchuan\(group\.id\)/)
 assert.match(view, /await retryStyles\(group\.id, version\)/)
 
-console.log('five-version endpoint mappings verified')
+assert.match(view, /const fiveVersions = \[/)
+for (const label of ['经典版', '导演版', '直出版', '保守版', '千川版']) {
+  assert.ok(view.includes(`label: '${label}'`), `missing independent trigger label: ${label}`)
+}
+assert.match(view, /version === 'realistic' \|\| version === 'conservative'/)
+assert.match(view, /await retryStyles\(group\.id, version\)/)
+assert.doesNotMatch(view, /generateStyles\(/)
+assert.doesNotMatch(view, /直出版 \+ 保守版/)
+assert.match(view, /versionNeedsRetry\(g, version\.key\)/)
+
+console.log('five-version endpoint mappings and independent triggers verified')
