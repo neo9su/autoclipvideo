@@ -7,19 +7,23 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 RECORDINGS_DIR = os.path.join(os.path.dirname(__file__), "..", "recordings")
-SEGMENT_DURATION = 25 * 60  # 25 minutes in seconds
+from duration_policy import MAX_RECORDING_DURATION_SECONDS, classify_duration, probe_duration
+
+SEGMENT_DURATION = MAX_RECORDING_DURATION_SECONDS
 
 
 from douyin_live import get_stream_url, check_live_status  # noqa: F401
 
 
 class RoomRecorder:
-    def __init__(self, room_id: int, room_name: str, room_url: str, on_segment_done=None, on_segment_start=None):
+    def __init__(self, room_id: int, room_name: str, room_url: str, on_segment_done=None,
+                 on_segment_start=None, on_segment_rejected=None):
         self.room_id = room_id
         self.room_name = room_name
         self.room_url = room_url
         self.on_segment_done = on_segment_done    # async callback(room_id, filepath, segment_index)
         self.on_segment_start = on_segment_start  # async callback(room_id, filename, segment_index)
+        self.on_segment_rejected = on_segment_rejected  # async callback(room_id, filepath, segment_index, duration)
         self.recording = False
         self.current_file: Optional[str] = None
         self.session_start: Optional[datetime] = None
@@ -61,14 +65,29 @@ class RoomRecorder:
         self.session_start = None
         self.segment_start = None
 
-        # Finalize the last segment that was interrupted by stop()
-        if last_file and self.on_segment_done:
+        # Finalize the last segment that was interrupted by stop(). Apply the
+        # same duration gate as normal rotation/recovery before dispatching it.
+        if last_file:
             filepath = os.path.join(RECORDINGS_DIR, last_file)
             if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
                 logger.info(f"[{self.room_name}] Finalizing last segment on stop: {last_file}")
-                asyncio.create_task(
-                    self.on_segment_done(self.room_id, filepath, last_seg_index)
-                )
+                await self._finalize_segment(filepath, last_seg_index)
+
+    async def _finalize_segment(self, filepath: str, segment_index: int) -> bool:
+        """Probe, retain, and dispatch a completed segment exactly once."""
+        duration = await probe_duration(filepath)
+        if classify_duration(duration) != "accepted":
+            logger.info(f"[{self.room_name}] Discarding short recording {os.path.basename(filepath)} ({duration!r}s)")
+            try:
+                os.unlink(filepath)
+            except OSError as exc:
+                logger.warning(f"[{self.room_name}] Could not discard short recording {filepath}: {exc}")
+            if self.on_segment_rejected:
+                await self.on_segment_rejected(self.room_id, filepath, segment_index, duration)
+            return False
+        if self.on_segment_done:
+            asyncio.create_task(self.on_segment_done(self.room_id, filepath, segment_index))
+        return True
 
     async def _record_loop(self, stream_url: str):
         while self.recording:
@@ -117,14 +136,12 @@ class RoomRecorder:
 
             # Segment completed normally
             segment_ok = os.path.exists(filepath) and os.path.getsize(filepath) > 0
-            if segment_ok:
+            if segment_ok and await self._finalize_segment(filepath, self.segment_index):
                 size = os.path.getsize(filepath)
                 logger.info(f"[{self.room_name}] Segment done: {filename} ({size // 1024 // 1024}MB)")
                 self.segment_index += 1
-                if self.on_segment_done:
-                    asyncio.create_task(
-                        self.on_segment_done(self.room_id, filepath, self.segment_index - 1)
-                    )
+            elif segment_ok:
+                self.segment_index += 1
 
             if returncode == 0:
                 # Re-fetch stream URL for next segment (URL may expire)
