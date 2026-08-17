@@ -1,5 +1,6 @@
 from gpu_execution import reject_local_media
 import asyncio
+import calendar
 import heapq
 import logging
 import os
@@ -70,6 +71,10 @@ _poll_state: dict = {
     "last_complete_at": None,   # epoch float: last transcription finished
     "blocked_count": 0,         # items blocked by merger on last poll
     "active_job_id": None,      # gpu_job_id currently running on GPU
+    "poll_started_at": None,
+    "stale_recovery_count": 0,
+    "last_recovery_at": None,
+    "last_recovery_job_id": None,
 }
 
 # Event to wake the poll loop immediately (used by the flush endpoint)
@@ -79,6 +84,7 @@ _flush_event: asyncio.Event = asyncio.Event()
 _retranscribe_without_clip: set[int] = set()
 RECORDINGS_DIR = os.path.join(os.path.dirname(__file__), "..", "recordings")
 POLL_INTERVAL = 60  # seconds
+STALE_TRANSCRIBE_SECONDS = int(os.environ.get("STALE_TRANSCRIBE_SECONDS", "3600"))
 
 # Pipeline concurrency: GPU has headroom (RTX 4080S 16GB), LLM semaphore is separate (=3).
 # Director and creative use independent semaphores to maximize throughput.
@@ -373,6 +379,8 @@ async def poll_transcriptions(broadcast_fn=None):
 
     while True:
         try:
+            _poll_state["poll_started_at"] = time.time()
+            _poll_state["last_poll_at"] = _poll_state["poll_started_at"]
             async with aio_connect() as db:
                 db.row_factory = aiosqlite.Row
                 async with db.execute(
@@ -386,7 +394,6 @@ async def poll_transcriptions(broadcast_fn=None):
                 ) as cur:
                     unsynced = await cur.fetchall()
 
-            _poll_state["last_poll_at"] = time.time()
             has_work = bool(pending or unsynced)
 
             if has_work and not is_online():
@@ -489,6 +496,9 @@ async def _check_job(rec, broadcast_fn):
         return
 
     job = _json
+    if job["status"] == "processing" and _is_stale_job(job):
+        if await _recover_stale_job(rec):
+            return
     if job["status"] == "done":
         global _session_done
         if job_id in _job_submit_times:
@@ -519,6 +529,44 @@ async def _check_job(rec, broadcast_fn):
                 (err_msg, rec["id"]),
             )
             await db.commit()
+
+
+def _is_stale_job(job: dict, now: float | None = None) -> bool:
+    now = now or time.time()
+    stamp = job.get("heartbeat_at") or job.get("created_at")
+    if stamp:
+        try:
+            return now - calendar.timegm(time.strptime(stamp[:19], "%Y-%m-%d %H:%M:%S")) >= STALE_TRANSCRIBE_SECONDS
+        except (TypeError, ValueError, OverflowError):
+            pass
+    submitted = _job_submit_times.get(job.get("job_id"))
+    return bool(submitted and now - submitted >= STALE_TRANSCRIBE_SECONDS)
+
+
+async def _recover_stale_job(rec) -> bool:
+    job_id = rec["gpu_job_id"]
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(f"{GPU_SERVICE_URL}/jobs/{job_id}/recover", timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                body = await resp.json() if resp.status in (200, 404) else {}
+                if resp.status == 409 or (resp.status == 200 and not body.get("recovered")):
+                    return False
+                if resp.status not in (200, 404):
+                    return False
+    except Exception as exc:
+        logger.warning("Cannot recover stale GPU job %s: %s", job_id, type(exc).__name__)
+        return False
+    _job_submit_times.pop(job_id, None)
+    if _poll_state["active_job_id"] == job_id:
+        _poll_state["active_job_id"] = None
+    _poll_state["stale_recovery_count"] += 1
+    _poll_state["last_recovery_at"] = time.time()
+    _poll_state["last_recovery_job_id"] = job_id
+    async with aio_connect() as db:
+        await db.execute("UPDATE recordings SET transcribed=0, synced=0, gpu_job_id=NULL, transcribe_error=NULL WHERE id=? AND transcribed=1 AND gpu_job_id=?", (rec["id"], job_id))
+        await db.commit()
+    logger.warning("Recovered stale transcription job %s for recording %s", job_id, rec["id"])
+    return True
 
 
 async def _fetch_srt(recording_id: int, job_id: str, filename: str, clip_count: int = 1, broadcast_fn=None):
