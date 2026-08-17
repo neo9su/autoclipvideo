@@ -919,7 +919,8 @@ function classicIsReady(group) {
 }
 function versionIsReady(group, version) {
   if (version === 'classic') return classicIsReady(group)
-  return versionStatus(group, version) === 2 && group[`${version}_available`] !== false && group[`${version}_file_status`] !== 'missing'
+  const file_status = group[`${version}_file_status`]
+  return versionStatus(group, version) === 2 && file_status === 'ready'
 }
 function versionBusy(group, version) {
   return Boolean(retryBusy.value[`${group.id}:${version}`]) ||
