@@ -3082,7 +3082,8 @@ async def retry_all_clip_queue_jobs():
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT id, filename, clip_count FROM recordings "
-            "WHERE clipped = -1 AND (skip_reason IS NULL OR skip_reason = '')"
+            "WHERE clipped = -1 AND duration_status = 'accepted' "
+            "AND (skip_reason IS NULL OR skip_reason = '')"
         ) as cur:
             records = await cur.fetchall()
 

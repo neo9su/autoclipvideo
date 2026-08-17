@@ -1769,7 +1769,8 @@ async def backfill_auto_merge():
                 gid = g['id']
                 async with db.execute(
                     """SELECT filename FROM recordings 
-                       WHERE group_id = ? AND local_deleted = 0 AND clipped = 2 
+                       WHERE group_id = ? AND local_deleted = 0 AND clipped = 2
+                         AND duration_status = 'accepted'
                        LIMIT 1""", (gid,)
                 ) as rcur:
                     rows = await rcur.fetchall()
@@ -1802,7 +1803,8 @@ async def backfill_auto_merge():
                 gid = g['id']
                 async with db.execute(
                     """SELECT filename FROM recordings 
-                       WHERE group_id = ? AND local_deleted = 0 AND clipped = 2 
+                       WHERE group_id = ? AND local_deleted = 0 AND clipped = 2
+                         AND duration_status = 'accepted'
                        LIMIT 1""", (gid,)
                 ) as rcur:
                     rows = await rcur.fetchall()
