@@ -56,7 +56,8 @@ async def test_missing_media_retry_is_atomic_and_does_not_touch_successful_group
 
 
 @pytest.mark.asyncio
-async def test_exact_chinese_missing_media_error_is_retryable() -> None:
+async def test_deployed_chinese_missing_media_error_is_retryable() -> None:
+    """The deployed Chinese preflight error must match the SQL claim guard."""
     import aiosqlite
 
     async with aiosqlite.connect(":memory:") as db:
@@ -67,14 +68,13 @@ async def test_exact_chinese_missing_media_error_is_retryable() -> None:
             "INSERT INTO clip_groups VALUES (?, ?, ?)",
             (4675, -2, "录像文件缺失，无法自动补齐。请重新上传或修复素材路径。"),
         )
-
         assert await claim_pipeline_start(
             db, "qianchuan_status", 4675, allow_missing_media_retry=True
         )
-        cursor = await db.execute(
+        async with db.execute(
             "SELECT qianchuan_status FROM clip_groups WHERE id = 4675"
-        )
-        row = await cursor.fetchone()
+        ) as cursor:
+            row = await cursor.fetchone()
         assert row == (1,)
 
 
