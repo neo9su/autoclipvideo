@@ -55,6 +55,29 @@ async def test_missing_media_retry_is_atomic_and_does_not_touch_successful_group
         assert rows == [(4675, 1), (4685, 2)]
 
 
+@pytest.mark.asyncio
+async def test_deployed_chinese_missing_media_error_is_retryable() -> None:
+    """The deployed Chinese preflight error must match the SQL claim guard."""
+    import aiosqlite
+
+    async with aiosqlite.connect(":memory:") as db:
+        await db.execute(
+            "CREATE TABLE clip_groups (id INTEGER PRIMARY KEY, qianchuan_status INTEGER, qianchuan_error TEXT)"
+        )
+        await db.execute(
+            "INSERT INTO clip_groups VALUES (?, ?, ?)",
+            (4675, -2, "录像文件缺失，无法自动补齐。请重新上传或修复素材路径。"),
+        )
+        assert await claim_pipeline_start(
+            db, "qianchuan_status", 4675, allow_missing_media_retry=True
+        )
+        async with db.execute(
+            "SELECT qianchuan_status FROM clip_groups WHERE id = 4675"
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row == (1,)
+
+
 @pytest.mark.parametrize("scene_type", ["result_hook", "product_proof", "cta"])
 def test_qianchuan_background_segments_keep_scene_type(scene_type: str) -> None:
     """Background generation must pass each scene type into the matcher/composer."""
