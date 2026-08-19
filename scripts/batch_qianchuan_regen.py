@@ -16,7 +16,7 @@ import urllib.error
 import urllib.request
 import uuid
 from dataclasses import asdict, dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Iterable, Optional
 
 LOGGER = logging.getLogger("qianchuan_batch")
@@ -81,9 +81,36 @@ def safe_integer(value: Any) -> int:
         return 0
 
 
-def recording_asset_paths(root: Path, filename: str) -> tuple[Path, Path]:
-    source = root / filename
-    return source, source.with_suffix(".srt")
+def _recording_candidates(root: Path, filename: str) -> list[Path]:
+    """Return safe local candidates for a DB recording filename.
+
+    Recorder databases contain both POSIX and Windows-style relative paths.
+    Recovery must not accidentally resolve an absolute database value against
+    the current working directory, and existing transcribers have used both
+    ``clip.srt`` and ``clip.mp4.srt`` sidecar names.
+    """
+    raw = str(filename or "").strip()
+    if not raw:
+        return []
+    normalized = Path(raw.replace("\\", "/"))
+    windows = PureWindowsPath(raw)
+    if normalized.is_absolute() or windows.is_absolute() or windows.drive or ".." in normalized.parts:
+        return []
+    candidate = (root / normalized).resolve()
+    try:
+        candidate.relative_to(root.resolve())
+    except ValueError:
+        return []
+    return [candidate]
+
+
+def recording_asset_paths(root: Path, filename: str) -> tuple[Optional[Path], tuple[Path, ...]]:
+    """Resolve one source and all supported non-empty SRT sidecar locations."""
+    candidates = _recording_candidates(root, filename)
+    if not candidates:
+        return None, ()
+    source = candidates[0]
+    return source, (Path(f"{source}.srt"), source.with_suffix(".srt"))
 
 
 def inspect_candidates(db_path: str, recordings_root: str) -> list[GroupCandidate]:
@@ -111,12 +138,12 @@ def inspect_candidates(db_path: str, recordings_root: str) -> list[GroupCandidat
             for recording in recordings:
                 filename = recording["filename"] or ""
                 if filename:
-                    source_path, srt_path = recording_asset_paths(root, filename)
+                    source_path, srt_paths = recording_asset_paths(root, filename)
                     if not recording["local_deleted"] and source_path.is_file():
                         source_count += 1
                     else:
                         path_unavailable = True
-                    if srt_path.is_file():
+                    if any(path.is_file() and path.stat().st_size > 0 for path in srt_paths):
                         srt_count += 1
                     else:
                         path_unavailable = True
