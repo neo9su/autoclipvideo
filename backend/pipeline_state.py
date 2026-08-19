@@ -49,7 +49,8 @@ async def claim_pipeline_start(
             "lower(COALESCE(qianchuan_error, '')) LIKE '%sync_mp4_to_storage%' OR "
             "lower(COALESCE(qianchuan_error, '')) LIKE '%media_unavailable%' OR "
             "lower(COALESCE(qianchuan_error, '')) LIKE '%source media/srt unavailable%' OR "
-            "lower(COALESCE(qianchuan_error, '')) LIKE '%no usable source media/srt%'))"
+            "lower(COALESCE(qianchuan_error, '')) LIKE '%no usable source media/srt%' OR "
+            "lower(COALESCE(qianchuan_error, '')) LIKE '%录像文件缺失，无法自动补齐%'))"
         )
     cursor = await db.execute(
         f"UPDATE clip_groups SET {status_column}=1 WHERE id=? AND ({retry_condition})",
