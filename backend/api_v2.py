@@ -277,7 +277,12 @@ async def generate_qianchuan(request: QianchuanGenerateRequest):
     from pipeline_state import claim_pipeline_start
     async with aiosqlite.connect(DB_PATH) as db:
         if not request.dry_run and request.generate_video:
-            if not await claim_pipeline_start(db, "qianchuan_status", request.group_id):
+            if not await claim_pipeline_start(
+                db,
+                "qianchuan_status",
+                request.group_id,
+                allow_missing_media_retry=True,
+            ):
                 async with db.execute("SELECT qianchuan_status FROM clip_groups WHERE id = ?", (request.group_id,)) as cur:
                     current = await cur.fetchone()
                 return QianchuanGenerateResponse(success=True, started=False, group_id=request.group_id, status=current[0] if current else 0, script=script, score=match.get("score"), review=match)
@@ -372,7 +377,12 @@ async def _run_qianchuan_pipeline(group_id: int) -> None:
     from db import DB_PATH, aio_connect
     from pipeline_state import claim_pipeline_start
     async with aio_connect() as db:
-        if not await claim_pipeline_start(db, "qianchuan_status", group_id):
+        if not await claim_pipeline_start(
+            db,
+            "qianchuan_status",
+            group_id,
+            allow_missing_media_retry=True,
+        ):
             logger.info(f"Qianchuan pipeline group {group_id} already running/completed — skipping")
             return
         await db.commit()
