@@ -12,6 +12,8 @@ _MISSING_MEDIA_MARKERS = (
     "missing-media",
     "sync_mp4_to_storage",
     "media_unavailable",
+    "source media/srt unavailable",
+    "no usable source media/srt",
 )
 
 
@@ -44,7 +46,9 @@ async def claim_pipeline_start(
             " OR (qianchuan_status = -2 AND "
             "(lower(COALESCE(qianchuan_error, '')) LIKE '%missing-media%' OR "
             "lower(COALESCE(qianchuan_error, '')) LIKE '%sync_mp4_to_storage%' OR "
-            "lower(COALESCE(qianchuan_error, '')) LIKE '%media_unavailable%'))"
+            "lower(COALESCE(qianchuan_error, '')) LIKE '%media_unavailable%' OR "
+            "lower(COALESCE(qianchuan_error, '')) LIKE '%source media/srt unavailable%' OR "
+            "lower(COALESCE(qianchuan_error, '')) LIKE '%no usable source media/srt%'))"
         )
     cursor = await db.execute(
         f"UPDATE clip_groups SET {status_column}=1 WHERE id=? AND ({retry_condition})",
