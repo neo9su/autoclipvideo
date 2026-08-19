@@ -14,6 +14,7 @@ _MISSING_MEDIA_MARKERS = (
     "media_unavailable",
     "source media/srt unavailable",
     "no usable source media/srt",
+    "录像文件缺失，无法自动补齐",
 )
 
 

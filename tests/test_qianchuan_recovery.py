@@ -13,6 +13,7 @@ from scripts.batch_qianchuan_regen import recording_asset_paths
     [
         "source media/SRT unavailable",
         "group 4687 has no usable source media/SRT; verify storage",
+        "录像文件缺失，无法自动补齐。请重新上传或修复素材路径。",
     ],
 )
 def test_missing_source_media_errors_are_recoverable(error: str) -> None:
