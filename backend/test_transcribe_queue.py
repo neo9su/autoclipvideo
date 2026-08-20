@@ -180,6 +180,37 @@ async def test_stale_open_cleanup_keeps_recent_active_recording(backend_main) ->
         Path(db_path).unlink(missing_ok=True)
 
 
+async def test_missing_finished_source_is_marked_terminal(backend_main) -> None:
+    fd, db_path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.unlink(db_path)
+    try:
+        await _create_queue_test_db(backend_main, db_path)
+        await _insert_recording(
+            db_path,
+            id=107,
+            filename="never_mounted.mp4",
+            end_time=datetime.now().isoformat(),
+        )
+        import transcribe
+
+        transcribe.aio_connect = lambda: dbmod.aio_connect(db_path)
+        await transcribe._mark_missing_source_media(107, "never_mounted.mp4")
+
+        con = sqlite3.connect(db_path)
+        row = con.execute(
+            "SELECT transcribed, transcribe_error, skip_reason FROM recordings WHERE id=107"
+        ).fetchone()
+        con.close()
+        assert row == (
+            -1,
+            "missing source media: never_mounted.mp4",
+            "missing source media: never_mounted.mp4",
+        )
+    finally:
+        Path(db_path).unlink(missing_ok=True)
+
+
 async def test_stale_job_recovery_resets_only_matching_recording(backend_main) -> None:
     import transcribe
 
@@ -261,6 +292,7 @@ async def main_test() -> None:
     await test_transcribe_queue_includes_finished_unsynced_recording_with_file(backend_main)
     await test_transcribe_queue_excludes_short_and_unavailable_recordings(backend_main)
     await test_stale_open_cleanup_keeps_recent_active_recording(backend_main)
+    await test_missing_finished_source_is_marked_terminal(backend_main)
     await test_stale_job_recovery_resets_only_matching_recording(backend_main)
     test_transcription_watchdog_contract_is_present()
     test_recovery_endpoint_cancels_worker_without_deleting_artifacts()

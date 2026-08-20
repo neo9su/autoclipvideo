@@ -2734,7 +2734,9 @@ async def gpu_status():
         async with db.execute(
             """SELECT COUNT(*) FROM recordings
                WHERE (transcribed = 1 AND gpu_job_id IS NOT NULL)
-                  OR (transcribed = 0 AND synced = 0 AND local_deleted = 0 AND end_time IS NOT NULL)"""
+                  OR (transcribed = 0 AND synced = 0 AND local_deleted = 0
+                      AND end_time IS NOT NULL AND end_time != start_time
+                      AND (duration_status = 'accepted' OR duration_status IS NULL))"""
         ) as cur:
             (pending_transcribe,) = await cur.fetchone()
     result["pending_transcribe"] = pending_transcribe
