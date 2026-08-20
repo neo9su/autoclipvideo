@@ -2602,6 +2602,11 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
                 f.write(_b64.b64decode(tts_audio_b64))
             has_tts = os.path.exists(tts_path) and os.path.getsize(tts_path) > 0
 
+        if not has_subs:
+            raise RuntimeError("Final encode requires non-empty timed subtitles")
+        if not has_tts:
+            raise RuntimeError("Final encode requires non-empty TTS audio")
+
         merged_has_audio = await _has_audio_stream(merged)
         inputs = ["-i", merged]
 
@@ -2621,6 +2626,9 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
         else:
             audio_filter = None
             has_audio_out = False
+
+        if not has_audio_out:
+            raise RuntimeError("Final encode requires an audio stream")
 
         if has_subs:
             fwd = ass_path.replace("\\", "/")

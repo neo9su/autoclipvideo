@@ -1010,36 +1010,20 @@ async def _compose_video_bg(
             # Douyin never rejects near-boundary 29.x clips as under 30s.
             from transcribe import (
                 MIN_FINAL_VIDEO_DURATION,
-                TARGET_PUBLISH_DURATION,
                 _get_video_duration,
-                _pad_video_to_min_duration,
             )
-            from final_video import postprocess_final_video
-
             _dur = await _get_video_duration(output_path)
             if _dur <= 0:
                 raise RuntimeError("导演版视频时长探测失败")
-            if _dur < TARGET_PUBLISH_DURATION:
-                padded_path = await _pad_video_to_min_duration(output_path, _dur)
-                if padded_path:
-                    logger.info(
-                        "Director API compose group %s: padded video from %.1fs to >=%.1fs",
-                        group_id,
-                        _dur,
-                        TARGET_PUBLISH_DURATION,
-                    )
-                    output_path = padded_path
-                else:
-                    try:
-                        os.remove(output_path)
-                    except Exception:
-                        pass
-                    raise RuntimeError(f"导演版视频时长 {_dur:.1f}s < {MIN_FINAL_VIDEO_DURATION:.0f}s 最低要求")
+            if _dur < MIN_FINAL_VIDEO_DURATION:
+                try:
+                    os.remove(output_path)
+                except OSError:
+                    logger.warning("Unable to remove rejected director artifact for group %s", group_id)
+                raise RuntimeError(f"导演版视频时长 {_dur:.1f}s < {MIN_FINAL_VIDEO_DURATION:.0f}s 最低要求")
 
-            processed_path = await postprocess_final_video(output_path)
-            if not processed_path:
-                raise RuntimeError("导演版4K/50fps背景补齐后处理失败")
-            output_path = processed_path
+            # The downloaded artifact is already the GPU-produced final encode.
+            # Never invoke a local post-processing fallback on the control plane.
 
             # 清理配音文件（已嵌入视频）
             try:
