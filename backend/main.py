@@ -31,7 +31,7 @@ from fastapi.staticfiles import StaticFiles
 from db import init_db, DB_PATH, aio_connect
 from models import RoomCreate, Room, Recording, ProductCreate, ProductUpdate, PublishAccountCreate, PublishTaskCreate, BatchScheduleCreate
 from monitor import MonitorManager
-from transcribe import poll_transcriptions, _run_editor, _clip_progress, get_clip_queue, update_job_priority, cancel_clip_job, pause_clip_job, resume_clip_job, _job_submit_times, _job_durations, _poll_state, flush_poll, POLL_INTERVAL, RECORDINGS_DIR, backfill_auto_merge, transcription_queue_diagnostics
+from transcribe import poll_transcriptions, _run_editor, _clip_progress, get_clip_queue, update_job_priority, cancel_clip_job, pause_clip_job, resume_clip_job, _job_submit_times, _job_durations, _poll_state, flush_poll, POLL_INTERVAL, RECORDINGS_DIR, backfill_auto_merge
 from analyzer import merge_group
 from sync import sync_file
 from gpu_execution import require_remote_gpu
@@ -2729,9 +2729,7 @@ async def gpu_status():
     except Exception as e:
         logger.error(f"GPU status check failed: {e}")
 
-    # Pending transcription jobs: in-flight on GPU + waiting to upload (exclude live segments).
-    # The diagnostic classifier is the source of truth for why rows are not
-    # submitted; this avoids reporting a large, unexplained denominator.
+    # Pending transcription jobs: in-flight on GPU + waiting to upload (exclude live segments)
     async with aio_connect() as db:
         async with db.execute(
             """SELECT COUNT(*) FROM recordings
@@ -2748,8 +2746,10 @@ async def gpu_status():
         if row[0] and os.path.isfile(_recording_file_path(row[0]) or "")
     )
     result["pending_transcribe"] = pending_transcribe
-    result["transcription_diagnostics"] = await transcription_queue_diagnostics(
-        gpu_online=gpu_is_online(), sample_limit=5,
+    from transcribe import transcription_queue_diagnosis
+    result["transcription_queue"] = await transcription_queue_diagnosis(
+        gpu_online=result["online"],
+        gpu_error=result.get("health", {}).get("error") if isinstance(result.get("health"), dict) else None,
     )
     # Include cached watchdog state (no extra HTTP call needed)
     from gpu_state import watchdog_status
@@ -2774,8 +2774,12 @@ async def gpu_status():
         "stale_recovery_count": ps["stale_recovery_count"],
         "last_recovery_at": _iso(ps["last_recovery_at"]),
         "last_recovery_job_id": ps["last_recovery_job_id"],
-        "diagnostic_categories": ps["diagnostic_categories"],
-        "diagnostic_samples": ps["diagnostic_samples"],
+        "diagnosis": {
+            "counts": (ps.get("diagnosis") or {}).get("counts", {}),
+            "samples": (ps.get("diagnosis") or {}).get("samples", []),
+            "can_submit_count": (ps.get("diagnosis") or {}).get("can_submit_count", 0),
+            "blocked_reason": (ps.get("diagnosis") or {}).get("blocked_reason"),
+        },
         "poll_interval": POLL_INTERVAL,
     }
     # Maintenance mode flag

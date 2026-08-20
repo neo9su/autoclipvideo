@@ -257,6 +257,57 @@ async def test_missing_finished_source_is_marked_terminal(backend_main) -> None:
         Path(db_path).unlink(missing_ok=True)
 
 
+async def test_queue_diagnosis_classifies_pending_reasons_without_mutation(backend_main) -> None:
+    import transcribe
+
+    fd, db_path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.unlink(db_path)
+    source_path = Path(backend_main.RECORDINGS_DIR) / "diagnosis_ready.mp4"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_bytes(b"placeholder")
+    try:
+        await _create_queue_test_db(backend_main, db_path)
+        await _insert_recording(db_path, id=201, filename=source_path.name)
+        await _insert_recording(
+            db_path, id=202, filename="short.mp4", duration_status="too_short"
+        )
+        await _insert_recording(
+            db_path, id=203, filename="open.mp4", end_time=None
+        )
+        await _insert_recording(
+            db_path, id=204, filename="gone.mp4", transcribed=-1,
+            transcribe_error="source media unavailable: recording file is missing"
+        )
+        await _insert_recording(
+            db_path, id=205, filename="gone.srt.mp4", transcribed=-1,
+            transcribe_error="source media/SRT unavailable: non-empty SRT sidecar is missing"
+        )
+        await _insert_recording(
+            db_path, id=206, filename="running.mp4", transcribed=1,
+            synced=1, gpu_job_id="gpu-job-206"
+        )
+        transcribe.aio_connect = lambda: dbmod.aio_connect(db_path)
+        diagnosis = await transcribe.transcription_queue_diagnosis(gpu_online=False)
+
+        assert diagnosis["counts"]["ready_to_submit"] == 0
+        assert diagnosis["counts"]["duration_not_accepted"] == 1
+        assert diagnosis["counts"]["end_time_invalid"] == 1
+        assert diagnosis["counts"]["media_missing"] == 1
+        assert diagnosis["counts"]["srt_missing"] == 1
+        assert diagnosis["counts"]["gpu_job_running"] == 1
+        assert diagnosis["blocked_reason"] == "gpu_offline"
+
+        async with aiosqlite.connect(db_path) as con:
+            rows = await (await con.execute(
+                "SELECT id, transcribed, synced FROM recordings WHERE id IN (201, 202, 203, 204, 205, 206) ORDER BY id"
+            )).fetchall()
+        assert rows == [(201, 0, 0), (202, 0, 0), (203, 0, 0), (204, -1, 0), (205, -1, 0), (206, 1, 1)]
+    finally:
+        source_path.unlink(missing_ok=True)
+        Path(db_path).unlink(missing_ok=True)
+
+
 def test_transcription_watchdog_contract_is_present() -> None:
     source = Path("gpu_service/main.py").read_text()
     assert "async def _job_watchdog_loop" in source
