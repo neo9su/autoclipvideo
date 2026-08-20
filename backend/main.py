@@ -5035,7 +5035,7 @@ async def _periodic_clip_dispatch():
     Dispatches recordings with transcribed=2 and clipped=0 that have valid files.
     Only dispatches when GPU service is online.
     """
-    from transcribe import _mark_clip_source_unavailable, _run_editor, get_clip_queue, _pending_heap
+    from transcribe import _mark_missing_clip_artifacts_terminal, _run_editor, get_clip_queue, _pending_heap
     BATCH_LIMIT = 10
     while True:
         try:
@@ -5078,11 +5078,15 @@ async def _periodic_clip_dispatch():
                         # Check files exist
                         if not os.path.isfile(mp4_path):
                             logger.warning(f"Clip dispatch: recording {rec_id} has no source MP4; marking unavailable")
-                            await _mark_clip_source_unavailable(rec_id, "source media/SRT unavailable: MP4 file is missing")
+                            await _mark_missing_clip_artifacts_terminal(
+                                rec_id, filename, srt=False,
+                            )
                             continue
                         if not srt_path:
                             logger.warning(f"Clip dispatch: recording {rec_id} has no usable SRT; marking unavailable")
-                            await _mark_clip_source_unavailable(rec_id, "source media/SRT unavailable: SRT is missing or empty")
+                            await _mark_missing_clip_artifacts_terminal(
+                                rec_id, filename, srt=True,
+                            )
                             continue
                         
                         clip_count = rec["clip_count"] if rec["clip_count"] else 1
