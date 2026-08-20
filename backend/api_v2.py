@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from director_script import DirectorScriptGenerator
 from voice_director import VoiceDirector
 from director_matcher import SemanticMatcher, get_matcher
-from director_video import DirectorVideoComposer
+from director_video import DirectorVideoComposer, validate_director_output
 from qianchuan_script import generate_qianchuan_script
 from qianchuan_matcher import (QianchuanMatcher, audit_qianchuan_segments,
                                 load_group_context, score_product_match)
@@ -1005,6 +1005,55 @@ async def _compose_video_bg(
             if not output_path:
                 raise RuntimeError("视频合成失败，请查看后端日志")
 
+            # Keep API/manual director workflow aligned with the automatic
+            # pipeline: <28s is too short to rescue; 28s~30.5s gets padded so
+            # Douyin never rejects near-boundary 29.x clips as under 30s.
+            from transcribe import (
+                MIN_FINAL_VIDEO_DURATION,
+                TARGET_PUBLISH_DURATION,
+                _get_video_duration,
+                _pad_video_to_min_duration,
+            )
+            from final_video import postprocess_final_video
+
+            _dur = await _get_video_duration(output_path)
+            if _dur <= 0:
+                raise RuntimeError("导演版视频时长探测失败")
+            if _dur < TARGET_PUBLISH_DURATION:
+                padded_path = await _pad_video_to_min_duration(output_path, _dur)
+                if padded_path:
+                    logger.info(
+                        "Director API compose group %s: padded video from %.1fs to >=%.1fs",
+                        group_id,
+                        _dur,
+                        TARGET_PUBLISH_DURATION,
+                    )
+                    output_path = padded_path
+                else:
+                    try:
+                        os.remove(output_path)
+                    except Exception:
+                        pass
+                    raise RuntimeError(f"导演版视频时长 {_dur:.1f}s < {MIN_FINAL_VIDEO_DURATION:.0f}s 最低要求")
+
+            processed_path = await postprocess_final_video(output_path)
+            if not processed_path:
+                raise RuntimeError("导演版4K/50fps背景补齐后处理失败")
+            output_path = processed_path
+
+            # The composer must not be able to silently publish a video without
+            # burned subtitles or mixed voiceover. This is read-only ffprobe
+            # validation; all media generation remains on the remote GPU.
+            ass_content = getattr(composer, "last_ass_content", None)
+            if not ass_content:
+                raise RuntimeError("字幕生成失败：未生成 ASS 字幕内容")
+            artifact_evidence = await validate_director_output(
+                output_path, audio_path, ass_content,
+            )
+            logger.info(
+                "Director artifact validation passed for group %s: %s",
+                group_id, artifact_evidence,
+            )
             # 清理配音文件（已嵌入视频）
             try:
                 if os.path.isfile(audio_path):

@@ -22,6 +22,60 @@ import subprocess
 
 logger = logging.getLogger(__name__)
 
+
+async def validate_director_output(output_path: str, audio_path: str,
+                                   ass_content: str) -> dict:
+    """Validate a completed director artifact without performing media work.
+
+    Encoding remains GPU-only.  This function only uses ffprobe to inspect the
+    downloaded artifact, and deliberately requires the subtitle input to have
+    at least one dialogue event so a failed subtitle render cannot be reported
+    as a successful video.
+    """
+    output = Path(output_path)
+    source_audio = Path(audio_path)
+    if not output.is_file() or output.stat().st_size <= 0:
+        raise RuntimeError("director output is missing or empty")
+    if not source_audio.is_file() or source_audio.stat().st_size <= 0:
+        raise RuntimeError("director voiceover is missing or empty")
+    dialogue_count = sum(
+        1 for line in (ass_content or "").splitlines()
+        if line.startswith("Dialogue:") and line.split(",", 9)[-1].strip()
+    )
+    if dialogue_count == 0:
+        raise RuntimeError("director subtitles are empty; refusing completion")
+
+    probe = await asyncio.create_subprocess_exec(
+        "ffprobe", "-v", "error", "-show_streams", "-show_format",
+        "-of", "json", str(output),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await probe.communicate()
+    if probe.returncode != 0:
+        raise RuntimeError(f"director output probe failed: {stderr.decode(errors='replace')[-300:]}")
+    try:
+        metadata = json.loads(stdout.decode())
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("director output probe returned invalid metadata") from exc
+
+    streams = metadata.get("streams") or []
+    video_stream = next((stream for stream in streams if stream.get("codec_type") == "video"), None)
+    audio_stream = next((stream for stream in streams if stream.get("codec_type") == "audio"), None)
+    if not video_stream:
+        raise RuntimeError("director output has no video stream")
+    if not audio_stream:
+        raise RuntimeError("director output has no mixed audio stream")
+    duration = float((metadata.get("format") or {}).get("duration") or 0)
+    if duration <= 0:
+        raise RuntimeError("director output duration is invalid")
+    return {
+        "video_stream": True,
+        "audio_stream": True,
+        "subtitle_dialogues": dialogue_count,
+        "duration": duration,
+        "audio_codec": audio_stream.get("codec_name"),
+    }
+
 # ── 字幕关键词高亮（与 editor.py 同步）─────────────────────────────────────────
 _DIR_HIGHLIGHT_PRODUCT: set = {
     '显白', '自然', '柔顺', '蓬松', '透气', '服帖', '轻盈', '轻薄',
@@ -501,6 +555,7 @@ class DirectorVideoComposer:
             if "Dialogue:" not in ass_content:
                 logger.error("[DIRECTOR] refusing GPU submission without timed subtitles")
                 return None
+            self.last_ass_content = ass_content
 
             config = dict(config)
             config["qianchuan_sound_cues"] = build_edit_sound_cues(
