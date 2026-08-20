@@ -2357,6 +2357,21 @@ _director_jobs: dict = {}
 _director_sem: asyncio.Semaphore = asyncio.Semaphore(1)
 
 
+def validate_director_job_request(ass_content: str, tts_audio_b64: str) -> None:
+    """Enforce the GPU-only director delivery contract at the API boundary."""
+    if not ass_content or "Dialogue:" not in ass_content:
+        raise ValueError("director job requires timed ASS subtitles")
+    if not tts_audio_b64:
+        raise ValueError("director job requires voiceover audio")
+    import base64
+    try:
+        decoded = base64.b64decode(tts_audio_b64, validate=True)
+    except Exception as exc:
+        raise ValueError("director job voiceover is not valid base64") from exc
+    if not decoded:
+        raise ValueError("director job voiceover audio is empty")
+
+
 class DirectorClipItem(BaseModel):
     room_id: int
     filename: str          # filename only; located at STORAGE_DIR/{room_id}/{filename}
@@ -2498,14 +2513,6 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
     has_tts_for_lipsync = bool(tts_audio_b64)  # flag for optional lip sync step
 
     try:
-        # A director job is a publish artifact, not a best-effort preview.  Do
-        # not silently produce a video with the source audio or without burned
-        # subtitles when either required input is missing.
-        if not ass_content or "Dialogue:" not in ass_content:
-            raise ValueError("director job requires non-empty ASS subtitles")
-        if not tts_audio_b64:
-            raise ValueError("director job requires TTS audio")
-
         _update_director_job(job_id, status="processing", phase="preprocess", pct=0)
         _job_start = time.time()
 
@@ -2600,6 +2607,8 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
             with open(ass_path, "w", encoding="utf-8") as f:
                 f.write(ass_content)
             has_subs = True
+        if not has_subs:
+            raise RuntimeError("Final encode refused: subtitles were not provided")
 
         # Write TTS audio
         tts_path = None
@@ -2610,6 +2619,7 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
                 f.write(_b64.b64decode(tts_audio_b64))
             has_tts = os.path.exists(tts_path) and os.path.getsize(tts_path) > 0
 
+        merged_has_audio = await _has_audio_stream(merged)
         inputs = ["-i", merged]
 
         if has_tts:
@@ -2619,11 +2629,17 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
                 "aformat=sample_fmts=fltp:channel_layouts=stereo[aout]"
             )
             has_audio_out = True
+        elif merged_has_audio:
+            audio_filter = (
+                "[0:a]acompressor=threshold=-25dB:ratio=3:attack=5:release=100:makeup=4dB,"
+                "aformat=sample_fmts=fltp:channel_layouts=stereo[aout]"
+            )
+            has_audio_out = True
         else:
-            # This branch is unreachable after the input guard above, but
-            # retaining an explicit failure prevents future changes from
-            # reintroducing a silent/source-audio fallback.
-            raise ValueError("director job produced no playable TTS audio")
+            audio_filter = None
+            has_audio_out = False
+        if not has_audio_out:
+            raise RuntimeError("Final encode refused: no audio stream is available")
 
         if has_subs:
             fwd = ass_path.replace("\\", "/")
@@ -2717,6 +2733,10 @@ async def _run_director_job(job_id: str, clips: list, ass_content: str,
 async def create_director_job(req: DirectorJobRequest):
     if not req.clips:
         raise HTTPException(status_code=422, detail="clips is empty")
+    try:
+        validate_director_job_request(req.ass_content, req.tts_audio_b64)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     job_id = f"dir_{uuid.uuid4().hex[:12]}"
     _update_director_job(job_id, status="queued", phase="", pct=0,
                          created_at=time.time())

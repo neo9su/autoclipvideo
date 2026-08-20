@@ -932,8 +932,8 @@ async def compose_video(group_id: int, video_style: str = "dynamic"):
         raise HTTPException(status_code=400, detail="请先生成导演脚本（步骤1）")
     if not audio_path:
         raise HTTPException(status_code=400, detail="请先生成配音（步骤2）")
-    if not os.path.exists(audio_path):
-        raise HTTPException(status_code=400, detail=f"配音文件不存在: {audio_path}")
+    if not os.path.isfile(audio_path) or os.path.getsize(audio_path) <= 0:
+        raise HTTPException(status_code=400, detail="配音文件不存在或为空")
 
     try:
         script = json.loads(script_raw) if isinstance(script_raw, str) else script_raw
@@ -946,6 +946,7 @@ async def compose_video(group_id: int, video_style: str = "dynamic"):
 
     # 优先使用实际 TTS 音频时长（保证视频和语音同步）
     audio_dur_by_scene: Dict[int, float] = {}
+    segs: List[Dict] = []
     if segments_raw:
         try:
             segs = json.loads(segments_raw) if isinstance(segments_raw, str) else segments_raw
@@ -973,7 +974,10 @@ async def compose_video(group_id: int, video_style: str = "dynamic"):
             "UPDATE clip_groups SET director_status = 1, director_error = NULL WHERE id = ?", (group_id,)
         )
         await db.commit()
-    asyncio.create_task(_compose_video_bg(group_id, script_segments, audio_path, recordings_dir, video_style))
+    asyncio.create_task(_compose_video_bg(
+        group_id, script_segments, audio_path, recordings_dir, video_style,
+        tts_audio_segments=segs,
+    ))
     return {"started": True, "message": "视频合成已启动，完成后自动通知"}
 
 
@@ -983,6 +987,7 @@ async def _compose_video_bg(
     audio_path: str,
     recordings_dir: str,
     video_style: str,
+    tts_audio_segments: Optional[List[Dict]] = None,
 ) -> None:
     """后台合成任务：语义匹配 → 视频编码 → 存库 → 广播。"""
     import aiosqlite
@@ -1001,7 +1006,10 @@ async def _compose_video_bg(
 
             composer = DirectorVideoComposer(recordings_dir)
             config = {"video_style": video_style}
-            output_path = await composer.compose_final_video(matched_segments, audio_path, config)
+            output_path = await composer.compose_final_video(
+                matched_segments, audio_path, config,
+                tts_audio_segments=tts_audio_segments or [],
+            )
             if not output_path:
                 raise RuntimeError("视频合成失败，请查看后端日志")
 

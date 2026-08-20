@@ -151,6 +151,35 @@ def _sec_to_ass(s: float) -> str:
     return f"{h}:{m:02d}:{sec:05.2f}"
 
 
+def validate_director_composition_inputs(
+    matched_segments: List[Dict],
+    audio_path: str,
+    ass_content: str,
+    tts_audio_segments: Optional[List[Dict]] = None,
+) -> None:
+    """Reject incomplete director jobs before they can become deliverables.
+
+    A remote encoder must not turn a missing subtitle or voiceover into a
+    superficially successful video.  This boundary is deliberately strict and
+    remains independent of the GPU implementation so it is easy to test.
+    """
+    if not matched_segments:
+        raise ValueError("director composition requires at least one matched clip")
+    audio_file = Path(audio_path)
+    if not audio_file.is_file() or audio_file.stat().st_size <= 0:
+        raise ValueError("director composition requires a non-empty voiceover file")
+    if not ass_content or "Dialogue:" not in ass_content:
+        raise ValueError("director composition requires non-empty timed subtitles")
+    if not tts_audio_segments:
+        raise ValueError("director composition requires voiceover segment metadata")
+    invalid_segments = [
+        item for item in tts_audio_segments
+        if item.get("scene_id") is None or float(item.get("duration") or 0) <= 0
+    ]
+    if invalid_segments:
+        raise ValueError("director composition requires positive-duration voiceover segments")
+
+
 # Subtitle-to-audio sync offset (seconds). Positive = subtitle appears later.
 # Compensates for AAC encoder delay in the GPU concat pipeline.
 _SUB_OFFSET = 0.30
@@ -595,6 +624,10 @@ class DirectorVideoComposer:
             except ValueError as input_error:
                 logger.error("[DIRECTOR] required media input validation failed: %s", input_error)
                 return None
+
+            validate_director_composition_inputs(
+                video_clips, audio_path, ass_content, tts_audio_segments
+            )
 
             # 5. 提交 GPU director job
             import aiohttp as _aio_dv
