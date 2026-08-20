@@ -2128,6 +2128,85 @@ async def get_director_mp4(job_id: str):
     return FileResponse(path, media_type="video/mp4", filename=f"{job_id}.mp4")
 
 
+async def _probe_director_media(path: str) -> dict:
+    """Collect decode-backed release facts on the GPU worker."""
+    probe_proc = await asyncio.create_subprocess_exec(
+        "ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", path,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await probe_proc.communicate()
+    if probe_proc.returncode != 0:
+        return {"errors": [stderr.decode(errors="replace")[-500:]]}
+
+    import json as _json
+    payload = _json.loads(stdout.decode(errors="replace") or "{}")
+    streams = payload.get("streams") or []
+    videos = [stream for stream in streams if stream.get("codec_type") == "video"]
+    audios = [stream for stream in streams if stream.get("codec_type") == "audio"]
+    media_format = payload.get("format") or {}
+    errors = []
+    if not videos:
+        errors.append("no video stream")
+    if not audios:
+        errors.append("no audio stream")
+
+    report = {
+        "duration": float(media_format.get("duration") or 0),
+        "file_size": int(media_format.get("size") or 0),
+        "video_streams": len(videos),
+        "audio_streams": len(audios),
+        "errors": errors,
+    }
+    if videos:
+        report.update({
+            "width": videos[0].get("width"),
+            "height": videos[0].get("height"),
+            "video_codec": videos[0].get("codec_name"),
+            "fps": videos[0].get("avg_frame_rate"),
+        })
+    if audios:
+        report.update({
+            "audio_codec": audios[0].get("codec_name"),
+            "sample_rate": audios[0].get("sample_rate"),
+        })
+
+    decode_checks = (
+        ("video_decode", ("-map", "0:v:0", "-frames:v", "1", "-f", "null", "-")),
+        ("audio_decode", ("-map", "0:a:0", "-t", "1", "-f", "null", "-")),
+    )
+    for check_name, mapping_args in decode_checks:
+        decode_proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-v", "error", "-i", path, *mapping_args,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, decode_stderr = await decode_proc.communicate()
+        if decode_proc.returncode != 0:
+            errors.append(f"{check_name} failed: {decode_stderr.decode(errors='replace')[-300:]}")
+    return report
+
+
+@app.get("/director-jobs/{job_id}/quality")
+async def get_director_quality(job_id: str):
+    """Expose decode-backed quality evidence for a completed director job."""
+    job = _director_jobs.get(job_id)
+    if not job or job.get("status") != "done":
+        raise HTTPException(status_code=404, detail="Director job not ready")
+    path = job.get("output_path")
+    if not path or not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="Output file missing on server")
+    probe = await _probe_director_media(path)
+    return {
+        **probe,
+        "ok": not probe["errors"],
+        "execution_node": "remote-gpu",
+        "job_id": job_id,
+        "subtitle_burned": job.get("subtitle_burned") is True,
+        "generated_voiceover_mixed": job.get("generated_voiceover_mixed") is True,
+    }
+
+
 # ── Background removal endpoint ───────────────────────────────────────────────
 
 @app.post("/rembg")

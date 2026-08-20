@@ -4,6 +4,7 @@ from pathlib import Path
 
 
 GPU_SERVICE = Path(__file__).parents[1] / "gpu_service" / "main.py"
+GPU_SERVICE_SOURCE = Path(__file__).parents[1] / "gpu_service_src" / "gpu_service.py"
 API = Path(__file__).parents[1] / "backend" / "api_v2.py"
 
 
@@ -40,3 +41,14 @@ def test_gpu_quality_probe_decodes_video_and_audio_payloads():
     assert '"audio_decode"' in source
     assert '"-frames:v", "1"' in source
     assert '"-map", "0:a:0"' in source
+
+
+def test_deployment_source_exposes_the_same_quality_contract():
+    source = GPU_SERVICE_SOURCE.read_text(encoding="utf-8")
+
+    assert '@app.get("/director-jobs/{job_id}/quality")' in source
+    assert '"video_decode"' in source
+    assert '"audio_decode"' in source
+    assert '"execution_node": "remote-gpu"' in source
+    assert '"subtitle_burned"' in source
+    assert '"generated_voiceover_mixed"' in source
