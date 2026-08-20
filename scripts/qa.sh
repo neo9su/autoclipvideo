@@ -23,7 +23,7 @@ run_gate lint python -m py_compile \
   backend/local_media_guard.py backend/test_transcribe_queue.py backend/video_editing_skills.py backend/pipeline_state.py \
   backend/transcribe.py backend/reclip_batch.py \
   scripts/reclip_batch.py scripts/resumable_reclip.py scripts/retranscribe_recording.py scripts/inventory_orphaned_recording_clips.py gpu_service/main.py gpu_service/asr_config.py gpu_service/disk_policy.py \
-  tests/test_inventory_orphaned_recording_clips.py tests/test_gpu_disk_policy.py tests/test_gpu_service_regressions.py tests/test_qianchuan_learning.py tests/test_qianchuan_upload.py tests/test_reclip_batch.py tests/test_resumable_reclip.py
+  tests/test_inventory_orphaned_recording_clips.py tests/test_gpu_disk_policy.py tests/test_gpu_service_regressions.py tests/test_qianchuan_learning.py tests/test_qianchuan_upload.py tests/test_reclip_batch.py tests/test_resumable_reclip.py tests/test_director_acceptance_guards.py
 
 run_gate types python - <<'PY'
 from pathlib import Path

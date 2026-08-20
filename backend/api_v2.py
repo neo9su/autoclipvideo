@@ -932,8 +932,8 @@ async def compose_video(group_id: int, video_style: str = "dynamic"):
         raise HTTPException(status_code=400, detail="请先生成导演脚本（步骤1）")
     if not audio_path:
         raise HTTPException(status_code=400, detail="请先生成配音（步骤2）")
-    if not os.path.isfile(audio_path) or os.path.getsize(audio_path) <= 0:
-        raise HTTPException(status_code=400, detail="配音文件不存在或为空")
+    if not os.path.exists(audio_path):
+        raise HTTPException(status_code=400, detail=f"配音文件不存在: {audio_path}")
 
     try:
         script = json.loads(script_raw) if isinstance(script_raw, str) else script_raw
@@ -946,7 +946,6 @@ async def compose_video(group_id: int, video_style: str = "dynamic"):
 
     # 优先使用实际 TTS 音频时长（保证视频和语音同步）
     audio_dur_by_scene: Dict[int, float] = {}
-    segs: List[Dict] = []
     if segments_raw:
         try:
             segs = json.loads(segments_raw) if isinstance(segments_raw, str) else segments_raw
@@ -974,10 +973,7 @@ async def compose_video(group_id: int, video_style: str = "dynamic"):
             "UPDATE clip_groups SET director_status = 1, director_error = NULL WHERE id = ?", (group_id,)
         )
         await db.commit()
-    asyncio.create_task(_compose_video_bg(
-        group_id, script_segments, audio_path, recordings_dir, video_style,
-        tts_audio_segments=segs,
-    ))
+    asyncio.create_task(_compose_video_bg(group_id, script_segments, audio_path, recordings_dir, video_style))
     return {"started": True, "message": "视频合成已启动，完成后自动通知"}
 
 
@@ -987,7 +983,6 @@ async def _compose_video_bg(
     audio_path: str,
     recordings_dir: str,
     video_style: str,
-    tts_audio_segments: Optional[List[Dict]] = None,
 ) -> None:
     """后台合成任务：语义匹配 → 视频编码 → 存库 → 广播。"""
     import aiosqlite
@@ -1006,18 +1001,46 @@ async def _compose_video_bg(
 
             composer = DirectorVideoComposer(recordings_dir)
             config = {"video_style": video_style}
-            output_path = await composer.compose_final_video(
-                matched_segments, audio_path, config,
-                tts_audio_segments=tts_audio_segments or [],
-            )
+            output_path = await composer.compose_final_video(matched_segments, audio_path, config)
             if not output_path:
                 raise RuntimeError("视频合成失败，请查看后端日志")
 
-            # The remote GPU director job already performs the final encode,
-            # subtitle burn, audio mux, and publish-duration quality gate.
-            # Keep the control plane free of local ffmpeg/ffprobe fallbacks.
+            # Keep API/manual director workflow aligned with the automatic
+            # pipeline: <28s is too short to rescue; 28s~30.5s gets padded so
+            # Douyin never rejects near-boundary 29.x clips as under 30s.
+            from transcribe import (
+                MIN_FINAL_VIDEO_DURATION,
+                TARGET_PUBLISH_DURATION,
+                _get_video_duration,
+                _pad_video_to_min_duration,
+            )
+            _dur = await _get_video_duration(output_path)
+            if _dur <= 0:
+                raise RuntimeError("导演版视频时长探测失败")
+            if _dur < TARGET_PUBLISH_DURATION:
+                padded_path = await _pad_video_to_min_duration(output_path, _dur)
+                if padded_path:
+                    logger.info(
+                        "Director API compose group %s: padded video from %.1fs to >=%.1fs",
+                        group_id,
+                        _dur,
+                        TARGET_PUBLISH_DURATION,
+                    )
+                    output_path = padded_path
+                else:
+                    try:
+                        os.remove(output_path)
+                    except Exception:
+                        pass
+                    raise RuntimeError(f"导演版视频时长 {_dur:.1f}s < {MIN_FINAL_VIDEO_DURATION:.0f}s 最低要求")
 
-            # 清理配音文件（已由 GPU 嵌入视频）
+            # The remote director job is already the final GPU-encoded
+            # artifact.  Do not invoke the control-plane postprocess helper:
+            # it intentionally rejects local media execution under the
+            # GPU-only policy and used to make every successful GPU job fail
+            # after download.
+
+            # 清理配音文件（已嵌入视频）
             try:
                 if os.path.isfile(audio_path):
                     os.remove(audio_path)

@@ -5,7 +5,9 @@
 """
 
 import asyncio
+import base64
 import logging
+import re
 from gpu_execution import media_execution_node, reject_local_media, require_remote_gpu
 from video_editing_skills import (
     build_edit_sound_cues,
@@ -21,60 +23,6 @@ import tempfile
 import subprocess
 
 logger = logging.getLogger(__name__)
-
-
-async def validate_director_output(output_path: str, audio_path: str,
-                                   ass_content: str) -> dict:
-    """Validate a completed director artifact without performing media work.
-
-    Encoding remains GPU-only.  This function only uses ffprobe to inspect the
-    downloaded artifact, and deliberately requires the subtitle input to have
-    at least one dialogue event so a failed subtitle render cannot be reported
-    as a successful video.
-    """
-    output = Path(output_path)
-    source_audio = Path(audio_path)
-    if not output.is_file() or output.stat().st_size <= 0:
-        raise RuntimeError("director output is missing or empty")
-    if not source_audio.is_file() or source_audio.stat().st_size <= 0:
-        raise RuntimeError("director voiceover is missing or empty")
-    dialogue_count = sum(
-        1 for line in (ass_content or "").splitlines()
-        if line.startswith("Dialogue:") and line.split(",", 9)[-1].strip()
-    )
-    if dialogue_count == 0:
-        raise RuntimeError("director subtitles are empty; refusing completion")
-
-    probe = await asyncio.create_subprocess_exec(
-        "ffprobe", "-v", "error", "-show_streams", "-show_format",
-        "-of", "json", str(output),
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await probe.communicate()
-    if probe.returncode != 0:
-        raise RuntimeError(f"director output probe failed: {stderr.decode(errors='replace')[-300:]}")
-    try:
-        metadata = json.loads(stdout.decode())
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise RuntimeError("director output probe returned invalid metadata") from exc
-
-    streams = metadata.get("streams") or []
-    video_stream = next((stream for stream in streams if stream.get("codec_type") == "video"), None)
-    audio_stream = next((stream for stream in streams if stream.get("codec_type") == "audio"), None)
-    if not video_stream:
-        raise RuntimeError("director output has no video stream")
-    if not audio_stream:
-        raise RuntimeError("director output has no mixed audio stream")
-    duration = float((metadata.get("format") or {}).get("duration") or 0)
-    if duration <= 0:
-        raise RuntimeError("director output duration is invalid")
-    return {
-        "video_stream": True,
-        "audio_stream": True,
-        "subtitle_dialogues": dialogue_count,
-        "duration": duration,
-        "audio_codec": audio_stream.get("codec_name"),
-    }
 
 # ── 字幕关键词高亮（与 editor.py 同步）─────────────────────────────────────────
 _DIR_HIGHLIGHT_PRODUCT: set = {
@@ -151,38 +99,29 @@ def _sec_to_ass(s: float) -> str:
     return f"{h}:{m:02d}:{sec:05.2f}"
 
 
-def validate_director_composition_inputs(
-    matched_segments: List[Dict],
-    audio_path: str,
-    ass_content: str,
-    tts_audio_segments: Optional[List[Dict]] = None,
-) -> None:
-    """Reject incomplete director jobs before they can become deliverables.
-
-    A remote encoder must not turn a missing subtitle or voiceover into a
-    superficially successful video.  This boundary is deliberately strict and
-    remains independent of the GPU implementation so it is easy to test.
-    """
-    if not matched_segments:
-        raise ValueError("director composition requires at least one matched clip")
-    audio_file = Path(audio_path)
-    if not audio_file.is_file() or audio_file.stat().st_size <= 0:
-        raise ValueError("director composition requires a non-empty voiceover file")
-    if not ass_content or "Dialogue:" not in ass_content:
-        raise ValueError("director composition requires non-empty timed subtitles")
-    if not tts_audio_segments:
-        raise ValueError("director composition requires voiceover segment metadata")
-    invalid_segments = [
-        item for item in tts_audio_segments
-        if item.get("scene_id") is None or float(item.get("duration") or 0) <= 0
-    ]
-    if invalid_segments:
-        raise ValueError("director composition requires positive-duration voiceover segments")
-
-
 # Subtitle-to-audio sync offset (seconds). Positive = subtitle appears later.
 # Compensates for AAC encoder delay in the GPU concat pipeline.
 _SUB_OFFSET = 0.30
+
+
+def validate_director_acceptance_payload(ass_content: str, tts_audio_b64: str) -> None:
+    """Reject director jobs that cannot produce a publishable artifact."""
+    if not ass_content or "Dialogue:" not in ass_content:
+        raise ValueError("director job requires non-empty timed subtitles")
+    if not re.search(
+        r"^Dialogue:\s*\d+,\d+:\d{2}:\d{2}\.\d{2},\d+:\d{2}:\d{2}\.\d{2},",
+        ass_content,
+        flags=re.MULTILINE,
+    ):
+        raise ValueError("director job subtitles contain no timed cues")
+    if not tts_audio_b64:
+        raise ValueError("director job requires generated TTS audio")
+    try:
+        decoded_audio = base64.b64decode(tts_audio_b64, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise ValueError("director job TTS audio is not valid base64") from exc
+    if not decoded_audio:
+        raise ValueError("director job TTS audio is empty")
 
 
 # Scene-type specific subtitle styles for dynamic text annotation
@@ -273,14 +212,6 @@ _SCENE_SUBTITLE_STYLES = {
         'anim': r"{\fad(120,80)}",
     },
 }
-
-
-def validate_director_media_inputs(ass_content: str, tts_audio_b64: str) -> None:
-    """Reject publish jobs that could silently lose subtitles or voiceover."""
-    if not ass_content or "Dialogue:" not in ass_content:
-        raise ValueError("director composition requires non-empty ASS subtitles")
-    if not tts_audio_b64:
-        raise ValueError("director composition requires TTS audio")
 
 
 def _get_scene_subtitle_style(scene_type: str) -> dict:
@@ -589,10 +520,6 @@ class DirectorVideoComposer:
             # 3. 构建 ASS 字幕（本地生成，含关键词高亮）
             # video clip duration 已对齐 TTS，字幕用同一个 tts_dur_by_scene 保证同步
             ass_content = config.get("qianchuan_ass_content") or _build_director_ass(video_clips, tr_dur, tts_dur_by_scene)
-            if "Dialogue:" not in ass_content:
-                logger.error("[DIRECTOR] refusing GPU submission without timed subtitles")
-                return None
-            self.last_ass_content = ass_content
 
             config = dict(config)
             config["qianchuan_sound_cues"] = build_edit_sound_cues(
@@ -611,23 +538,12 @@ class DirectorVideoComposer:
                 logger.info(f"[DIRECTOR] compose_final_video: audio_source={audio_source} size={Path(audio_source).stat().st_size}")
                 with open(audio_source, "rb") as f:
                     raw = f.read()
-                if not raw:
-                    logger.error("[DIRECTOR] refusing GPU submission with empty TTS audio")
-                    return None
                 tts_b64 = _b64.b64encode(raw).decode()
                 logger.info(f"[DIRECTOR] compose_final_video: tts_b64 encoded, len={len(tts_b64)}")
             except Exception as ae:
                 logger.error(f"[DIRECTOR] compose_final_video: TTS audio encode FAILED: {ae}")
                 return None
-            try:
-                validate_director_media_inputs(ass_content, tts_b64)
-            except ValueError as input_error:
-                logger.error("[DIRECTOR] required media input validation failed: %s", input_error)
-                return None
-
-            validate_director_composition_inputs(
-                video_clips, audio_path, ass_content, tts_audio_segments
-            )
+            validate_director_acceptance_payload(ass_content, tts_b64)
 
             # 5. 提交 GPU director job
             import aiohttp as _aio_dv
@@ -727,23 +643,28 @@ class DirectorVideoComposer:
                         "[DIRECTOR] remote job %s done: response=%s output_path=%s",
                         job_id, {k: data.get(k) for k in ("status", "phase", "pct", "error")}, output_candidate,
                     )
-                    async with _aio_dv.ClientSession() as session:
-                        async with session.get(
-                            f"{self._GPU_SERVICE_URL}/director-jobs/{job_id}/quality",
-                            timeout=_aio_dv.ClientTimeout(total=30),
-                        ) as quality_response:
-                            if quality_response.status != 200:
-                                raise RuntimeError("remote director quality gate unavailable")
-                            quality = await quality_response.json()
-                    if not quality.get("ok"):
-                        raise RuntimeError(f"remote director quality gate failed: {quality.get('errors', [])}")
-                    if quality.get("duration", 0) < 15 or quality.get("duration", 0) > 300:
-                        raise RuntimeError("remote director output duration is outside publish bounds")
                     break
                 if status == "error":
                     raise RuntimeError(f"remote director job failed: {data.get('error', 'unknown error')}")
             else:
                 raise TimeoutError(f"remote director job {job_id} did not finish before the wait deadline")
+
+            # The GPU node is the source of truth for the publish gate.  Do
+            # this before downloading/returning an artifact so a job with a
+            # missing stream can never be marked complete by the control plane.
+            async with _aio_dv.ClientSession() as session:
+                async with session.get(
+                    f"{self._GPU_SERVICE_URL}/director-jobs/{job_id}/quality",
+                    timeout=_aio_dv.ClientTimeout(total=30),
+                ) as quality_response:
+                    quality_payload = await quality_response.json()
+            if quality_response.status != 200 or not quality_payload.get("ok"):
+                raise RuntimeError(
+                    "remote director acceptance failed: "
+                    f"{quality_payload.get('errors') or 'quality endpoint unavailable'}"
+                )
+            if quality_payload.get("video_streams", 0) < 1 or quality_payload.get("audio_streams", 0) < 1:
+                raise RuntimeError("remote director acceptance failed: final video requires video and audio streams")
 
             # 7. 下载结果
             logger.info(f"[DIRECTOR] compose_final_video: downloading job {job_id} mp4")
@@ -762,24 +683,6 @@ class DirectorVideoComposer:
             if not output_path.exists() or output_path.stat().st_size == 0:
                 raise RuntimeError("remote director output was empty")
             logger.info(f"[DIRECTOR] compose_final_video: output file size={output_path.stat().st_size}")
-
-            # Quality probing is performed by the GPU worker.  The control
-            # plane must not use local ffprobe or accept an unplayable result.
-            async with _aio_dv.ClientSession() as session:
-                async with session.get(
-                    f"{self._GPU_SERVICE_URL}/director-jobs/{job_id}/quality",
-                    timeout=_aio_dv.ClientTimeout(total=30),
-                ) as quality_response:
-                    quality = await quality_response.json()
-            if quality_response.status != 200 or not quality.get("ok"):
-                raise RuntimeError(f"remote director quality gate failed: {quality.get('errors', ['unknown error'])}")
-            if quality.get("video_streams", 0) < 1 or quality.get("audio_streams", 0) < 1:
-                raise RuntimeError("remote director quality gate requires video and audio streams")
-            duration = float(quality.get("duration") or 0)
-            if duration < 30.5:
-                raise RuntimeError(
-                    f"remote director quality gate duration {duration:.2f}s is below the 30.5s publish minimum"
-                )
 
             logger.info(f"Director video composition complete (GPU): {output_path}")
 

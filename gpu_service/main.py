@@ -5,6 +5,8 @@ Run on GPU server: uvicorn main:app --host 0.0.0.0 --port 8877
 # Set HuggingFace offline flags BEFORE any imports so huggingface_hub.constants
 # reads them at import time and never attempts network access.
 import os
+import re
+import base64
 import platform
 
 if platform.system() == "Darwin":
@@ -2357,21 +2359,6 @@ _director_jobs: dict = {}
 _director_sem: asyncio.Semaphore = asyncio.Semaphore(1)
 
 
-def validate_director_job_request(ass_content: str, tts_audio_b64: str) -> None:
-    """Enforce the GPU-only director delivery contract at the API boundary."""
-    if not ass_content or "Dialogue:" not in ass_content:
-        raise ValueError("director job requires timed ASS subtitles")
-    if not tts_audio_b64:
-        raise ValueError("director job requires voiceover audio")
-    import base64
-    try:
-        decoded = base64.b64decode(tts_audio_b64, validate=True)
-    except Exception as exc:
-        raise ValueError("director job voiceover is not valid base64") from exc
-    if not decoded:
-        raise ValueError("director job voiceover audio is empty")
-
-
 class DirectorClipItem(BaseModel):
     room_id: int
     filename: str          # filename only; located at STORAGE_DIR/{room_id}/{filename}
@@ -2388,6 +2375,30 @@ class DirectorJobRequest(BaseModel):
     transition_duration: float = 0.4
     thumb_seek: float = 3.0
     total_tts_duration: float = 0.0  # 总 TTS 时长，用于 -t 精确控制输出时长（替代 -shortest）
+
+
+def _validate_director_acceptance_inputs(req: DirectorJobRequest) -> None:
+    """Fail closed when a director job cannot satisfy the release contract.
+
+    Director output is a publishable artifact, so silently falling back to the
+    source audio or to an un-subtitled video is not acceptable.
+    """
+    if not req.ass_content or "Dialogue:" not in req.ass_content:
+        raise HTTPException(status_code=422, detail="director job requires non-empty timed subtitles")
+    if not re.search(
+        r"^Dialogue:\s*\d+,\d+:\d{2}:\d{2}\.\d{2},\d+:\d{2}:\d{2}\.\d{2},",
+        req.ass_content,
+        flags=re.MULTILINE,
+    ):
+        raise HTTPException(status_code=422, detail="director job subtitles contain no timed cues")
+    if not req.tts_audio_b64:
+        raise HTTPException(status_code=422, detail="director job requires generated TTS audio")
+    try:
+        decoded_audio = base64.b64decode(req.tts_audio_b64, validate=True)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=422, detail="director job TTS audio is not valid base64")
+    if not decoded_audio:
+        raise HTTPException(status_code=422, detail="director job TTS audio is empty")
 
 
 def _update_director_job(job_id: str, **kwargs):
@@ -2513,6 +2524,16 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
     has_tts_for_lipsync = bool(tts_audio_b64)  # flag for optional lip sync step
 
     try:
+        if not ass_content or "Dialogue:" not in ass_content:
+            raise ValueError("director acceptance failed: subtitle burn-in input is empty")
+        if not tts_audio_b64:
+            raise ValueError("director acceptance failed: generated TTS audio is missing")
+        try:
+            decoded_tts = _b64.b64decode(tts_audio_b64, validate=True)
+        except (ValueError, TypeError) as exc:
+            raise ValueError("director acceptance failed: generated TTS audio is invalid") from exc
+        if not decoded_tts:
+            raise ValueError("director acceptance failed: generated TTS audio is empty")
         _update_director_job(job_id, status="processing", phase="preprocess", pct=0)
         _job_start = time.time()
 
@@ -2607,8 +2628,6 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
             with open(ass_path, "w", encoding="utf-8") as f:
                 f.write(ass_content)
             has_subs = True
-        if not has_subs:
-            raise RuntimeError("Final encode refused: subtitles were not provided")
 
         # Write TTS audio
         tts_path = None
@@ -2629,17 +2648,12 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
                 "aformat=sample_fmts=fltp:channel_layouts=stereo[aout]"
             )
             has_audio_out = True
-        elif merged_has_audio:
-            audio_filter = (
-                "[0:a]acompressor=threshold=-25dB:ratio=3:attack=5:release=100:makeup=4dB,"
-                "aformat=sample_fmts=fltp:channel_layouts=stereo[aout]"
-            )
-            has_audio_out = True
         else:
             audio_filter = None
             has_audio_out = False
-        if not has_audio_out:
-            raise RuntimeError("Final encode refused: no audio stream is available")
+
+        if not has_tts:
+            raise RuntimeError("director acceptance failed: generated TTS audio could not be decoded")
 
         if has_subs:
             fwd = ass_path.replace("\\", "/")
@@ -2733,10 +2747,7 @@ async def _run_director_job(job_id: str, clips: list, ass_content: str,
 async def create_director_job(req: DirectorJobRequest):
     if not req.clips:
         raise HTTPException(status_code=422, detail="clips is empty")
-    try:
-        validate_director_job_request(req.ass_content, req.tts_audio_b64)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _validate_director_acceptance_inputs(req)
     job_id = f"dir_{uuid.uuid4().hex[:12]}"
     _update_director_job(job_id, status="queued", phase="", pct=0,
                          created_at=time.time())
