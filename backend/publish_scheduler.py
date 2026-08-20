@@ -14,6 +14,10 @@ import aiosqlite
 from db import DB_PATH, aio_connect
 from notifier import notify
 from video_path_resolver import resolve_video_path, describe_missing
+from publish_policy import (
+    MAX_PUBLISH_DURATION_SECONDS,
+    validate_publish_duration,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +29,7 @@ async def check_video_quality(video_path: str) -> tuple[bool, str]:
     """
     Check video quality requirements for publishing:
       - Resolution >= 1080x1920 (portrait 1080P)
-      - Duration >= 15 seconds (max 150 seconds)
+      - Duration >= 15 seconds (max 300 seconds)
     Returns (passed, reason). reason is empty string if passed.
     """
     try:
@@ -59,10 +63,9 @@ async def check_video_quality(video_path: str) -> tuple[bool, str]:
         duration = float(info.get("format", {}).get("duration", 0))
     except Exception:
         duration = 0.0
-    if duration < 15:
-        issues.append(f"时长不足（{duration:.1f}s，需要 ≥ 15 秒）")
-    if duration > 150:
-        issues.append(f"时长超限（{duration:.1f}s，需要 ≤ 150 秒）")
+    duration_issue = validate_publish_duration(duration)
+    if duration_issue:
+        issues.append(duration_issue)
 
     if issues:
         return False, "；".join(issues)

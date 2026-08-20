@@ -160,6 +160,7 @@
     <div v-if="showCreateModal" class="modal-overlay" @click.self="showCreateModal = false">
       <div class="modal">
         <h3>创建发布任务</h3>
+        <p class="muted publish-duration-hint">发布视频时长要求：15–300 秒（含边界）</p>
 
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
           <label style="margin:0">选择分组 *（仅显示已合并的）</label>
