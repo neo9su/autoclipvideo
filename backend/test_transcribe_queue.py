@@ -219,9 +219,7 @@ async def test_stale_job_recovery_resets_only_matching_recording(backend_main) -
         Path(db_path).unlink(missing_ok=True)
 
 
-async def test_missing_source_is_marked_terminal_instead_of_requeued(backend_main) -> None:
-    import transcribe
-
+async def test_transcribe_queue_excludes_missing_finished_source(backend_main) -> None:
     fd, db_path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
     os.unlink(db_path)
@@ -230,21 +228,13 @@ async def test_missing_source_is_marked_terminal_instead_of_requeued(backend_mai
         await _insert_recording(
             db_path,
             id=107,
-            filename="deleted_source.mp4",
-            start_time=(datetime.now() - timedelta(minutes=10)).isoformat(),
+            filename="missing_finished.mp4",
+            start_time=(datetime.now() - timedelta(minutes=5)).isoformat(),
             end_time=datetime.now().isoformat(),
         )
-        transcribe.aio_connect = lambda: dbmod.aio_connect(db_path)
-
-        await transcribe._mark_missing_source_terminal(107, "deleted_source.mp4")
-
-        async with aiosqlite.connect(db_path) as con:
-            row = await (await con.execute(
-                "SELECT transcribed, skip_reason, transcribe_error FROM recordings WHERE id=107"
-            )).fetchone()
-        assert row[0] == -1
-        assert "missing source media" in row[1]
-        assert row[1] == row[2]
+        response = await backend_main.get_transcribe_queue()
+        assert response["jobs"] == []
+        assert response["total"] == response["session_done"]
     finally:
         Path(db_path).unlink(missing_ok=True)
 

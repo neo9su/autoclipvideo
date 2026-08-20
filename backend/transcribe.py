@@ -1,4 +1,5 @@
 from gpu_execution import reject_local_media
+from srt_resolver import resolve_srt_path
 from duration_policy import MIN_RECORDING_DURATION_SECONDS, UNAVAILABLE_REASON, classify_duration, duration_reason
 import asyncio
 import calendar
@@ -19,7 +20,6 @@ from analyzer import analyze_recording
 from thumbnail import generate_thumbnail
 from final_video import postprocess_final_video
 from gpu_execution import reject_local_media
-from srt_resolver import resolve_srt_path
 
 logger = logging.getLogger(__name__)
 
@@ -104,39 +104,41 @@ _job_durations: list[float] = []           # recent completed job durations (las
 _session_done: int = 0                     # jobs completed since backend start
 
 
-async def _mark_missing_source_terminal(recording_id: int, filename: str, *, srt: bool = False) -> None:
-    """Fail closed for finished rows whose source artifact cannot be processed.
+def _source_paths(filename: str) -> tuple[str, str | None]:
+    """Return the source path and its supported, non-empty SRT sidecar.
 
-    A missing source is not a transient GPU condition. Keeping it in the upload
-    queue makes ``pending_transcribe`` grow forever and hides actionable storage
-    failures behind an idle poller.
+    Recording rows can contain either a plain relative filename or a chunked
+    filename.  Keep resolution in one place so the poller and editor agree on
+    ``name.srt`` and ``name.mp4.srt`` conventions.
     """
-    artifact = "SRT" if srt else "source media"
-    reason = f"unprocessable recording: missing {artifact} ({filename})"
+    mp4_path = os.path.join(RECORDINGS_DIR, filename)
+    return mp4_path, resolve_srt_path(mp4_path)
+
+
+async def _mark_unprocessable_source(recording_id: int, filename: str, *, srt_required: bool = False) -> None:
+    """Terminally skip a recording whose required local artifact is absent.
+
+    Missing files cannot be repaired by another GPU poll.  Persisting the
+    reason prevents the same row from inflating ``pending_transcribe`` and
+    being retried forever, while leaving all existing media/database data
+    untouched.
+    """
+    mp4_path, srt_path = _source_paths(filename)
+    missing = []
+    if not os.path.isfile(mp4_path):
+        missing.append("source MP4")
+    if srt_required and not srt_path:
+        missing.append("non-empty SRT")
+    reason = "unprocessable source: missing " + " and ".join(missing)
     async with aio_connect() as db:
         await db.execute(
             """UPDATE recordings
                SET transcribed = -1, transcribe_error = ?, skip_reason = ?
-               WHERE id = ? AND transcribed = 0 AND synced = 0""",
+               WHERE id = ? AND transcribed IN (0, 2)""",
             (reason, reason, recording_id),
         )
         await db.commit()
-    logger.warning("Recording %s marked terminal: %s", recording_id, reason)
-
-
-async def _mark_missing_clip_artifacts_terminal(recording_id: int, filename: str, *, srt: bool) -> None:
-    """Stop startup clip recovery from retrying a permanently missing artifact."""
-    artifact = "SRT" if srt else "source media"
-    reason = f"unprocessable recording: missing {artifact} ({filename})"
-    async with aio_connect() as db:
-        await db.execute(
-            """UPDATE recordings
-               SET clipped = -1, clip_error = ?, skip_reason = ?
-               WHERE id = ? AND transcribed = 2 AND clipped IN (0, 1)""",
-            (reason, reason, recording_id),
-        )
-        await db.commit()
-    logger.warning("Recording %s marked clip terminal: %s", recording_id, reason)
+    logger.warning("Recording %s skipped: %s (%s)", recording_id, reason, filename)
 
 
 def transcribe_timing() -> dict:
@@ -395,18 +397,15 @@ async def poll_transcriptions(broadcast_fn=None):
         recoverable = []
         for rec in orphaned:
             mp4_path = os.path.join(RECORDINGS_DIR, rec["filename"])
-            srt_path = resolve_srt_path(mp4_path)
+            mp4_path, srt_path = _source_paths(rec["filename"])
             if os.path.isfile(mp4_path) and srt_path:
                 recoverable.append((rec, mp4_path, srt_path))
             else:
                 logger.warning(
-                    "Startup recovery: recording %s missing usable files, skipping "
-                    "(mp4=%s, srt=%s)",
-                    rec["id"], os.path.isfile(mp4_path), bool(srt_path),
+                    f"Startup recovery: recording {rec['id']} missing files, skipping "
+                    f"(mp4={os.path.isfile(mp4_path)}, srt={bool(srt_path)})"
                 )
-                await _mark_missing_clip_artifacts_terminal(
-                    rec["id"], rec["filename"], srt=not bool(srt_path),
-                )
+                await _mark_unprocessable_source(rec["id"], rec["filename"], srt_required=True)
         if recoverable:
             logger.info(f"Startup recovery: {len(recoverable)} recordings to re-trigger (batch size {_STARTUP_RECOVERY_BATCH})")
         for i in range(0, len(recoverable), _STARTUP_RECOVERY_BATCH):
@@ -442,18 +441,6 @@ async def poll_transcriptions(broadcast_fn=None):
                 ) as cur:
                     unsynced = await cur.fetchall()
 
-            # Do this before the GPU availability gate. A missing local source
-            # cannot be repaired by waiting for the GPU and otherwise remains in
-            # the pending count forever while ``last_submit_at`` stays empty.
-            processable_unsynced = []
-            for rec in unsynced:
-                filepath = os.path.join(RECORDINGS_DIR, rec["filename"])
-                if os.path.isfile(filepath):
-                    processable_unsynced.append(rec)
-                else:
-                    await _mark_missing_source_terminal(rec["id"], rec["filename"])
-            unsynced = processable_unsynced
-
             has_work = bool(pending or unsynced)
 
             if has_work and not is_online():
@@ -482,8 +469,8 @@ async def poll_transcriptions(broadcast_fn=None):
                         logger.debug("GPU went offline mid-upload loop, stopping")
                         break
                     filepath = os.path.join(RECORDINGS_DIR, rec["filename"])
-                    if not os.path.isfile(filepath):
-                        await _mark_missing_source_terminal(rec["id"], rec["filename"])
+                    if not os.path.exists(filepath):
+                        await _mark_unprocessable_source(rec["id"], rec["filename"])
                         continue
                     result = await maybe_merge_before_upload(rec["room_id"], rec["id"])
                     if result is None:
@@ -691,6 +678,12 @@ async def _fetch_srt(recording_id: int, job_id: str, filename: str, clip_count: 
 async def _run_editor(recording_id: int, mp4_path: str, srt_path: str, clip_duration: Optional[float] = None, clip_count: int = 1, broadcast_fn=None, feedback: Optional[str] = None):
     """Enqueue a clip job into the priority queue and dispatch if a slot is free."""
     global _job_seq
+
+    resolved_srt = resolve_srt_path(mp4_path)
+    if not os.path.isfile(mp4_path) or not resolved_srt:
+        await _mark_unprocessable_source(recording_id, os.path.basename(mp4_path), srt_required=True)
+        return
+    srt_path = resolved_srt
 
     # ── Resolution guard ──────────────────────────────────────────────────────
     height = await _get_video_height(mp4_path)
@@ -1110,8 +1103,7 @@ async def _extract_srt_for_director(group_id: int) -> Optional[str]:
                 rows = await cur.fetchall()
         srt_content = ""
         for r in rows:
-            mp4_path = os.path.join(RECORDINGS_DIR, r["filename"])
-            srt_path = resolve_srt_path(mp4_path)
+            _mp4_path, srt_path = _source_paths(r["filename"])
             if srt_path:
                 with open(srt_path, encoding="utf-8") as f:
                     srt_content += f.read() + "\n\n"
