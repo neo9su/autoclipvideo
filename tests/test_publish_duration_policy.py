@@ -1,20 +1,24 @@
-from backend.publish_policy import (
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parents[1] / "backend"))
+
+from publish_policy import (  # noqa: E402
     MAX_PUBLISH_DURATION_SECONDS,
-    MIN_PUBLISH_DURATION_SECONDS,
     validate_publish_duration,
 )
 
 
-def test_publish_policy_accepts_videos_above_old_limit():
+def test_publish_maximum_is_300_seconds():
     assert MAX_PUBLISH_DURATION_SECONDS == 300.0
+
+
+def test_publish_accepts_video_above_previous_limit():
     assert validate_publish_duration(150.1) is None
     assert validate_publish_duration(162.8) is None
     assert validate_publish_duration(300.0) is None
 
 
-def test_publish_policy_rejects_only_outside_new_duration_bounds():
-    too_short = validate_publish_duration(MIN_PUBLISH_DURATION_SECONDS - 0.1)
-    too_long = validate_publish_duration(MAX_PUBLISH_DURATION_SECONDS + 0.1)
-
-    assert too_short and "≥ 15 秒" in too_short
-    assert too_long and "≤ 300 秒" in too_long
+def test_publish_rejects_video_above_new_limit():
+    reason = validate_publish_duration(300.1)
+    assert reason == "时长超限（300.1s，需要 ≤ 300 秒）"

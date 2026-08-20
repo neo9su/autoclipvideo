@@ -13,6 +13,7 @@ import aiosqlite
 
 from db import DB_PATH, aio_connect
 from notifier import notify
+from publish_policy import validate_publish_duration
 from video_path_resolver import resolve_video_path, describe_missing
 from publish_policy import (
     MAX_PUBLISH_DURATION_SECONDS,

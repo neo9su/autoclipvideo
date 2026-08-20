@@ -239,6 +239,8 @@
           </div>
         </template>
 
+        <p class="muted publish-duration-hint">发布视频时长要求：15–300 秒</p>
+
         <label>平台 *</label>
         <div class="muted" style="margin:-4px 0 8px;font-size:12px">发布视频时长要求：15–300 秒（保留现有分辨率与质量检查）</div>
         <select v-model="newTask.platform" class="input">
@@ -1502,6 +1504,7 @@ onUnmounted(() => wsCleanup?.())
 
 <style scoped>
 .publish-layout { display: flex; gap: 20px; min-height: 600px; flex-direction: column; }
+.publish-duration-hint { margin: -4px 0 8px; font-size: 12px; }
 @media (min-width: 900px) { .publish-layout { flex-direction: row; } }
 
 .task-list-panel { width: 100%; max-width: 320px; flex-shrink: 0; }
