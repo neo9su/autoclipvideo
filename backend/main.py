@@ -97,14 +97,6 @@ def _recording_file_exists(filename: str | None) -> bool:
     return bool(path and os.path.exists(path))
 
 
-def _recording_file_exists_for_row(filename: str | None) -> bool:
-    """Check a DB filename using the same safe path contract as media jobs."""
-    from media_contract import resolve_media_file
-
-    path = resolve_media_file(filename or "")
-    return bool(path and path.is_file())
-
-
 def _parse_recording_time(value: str | None) -> datetime | None:
     """Parse DB timestamps stored with either ISO 'T' or SQLite space separators."""
     if not value:
@@ -128,7 +120,7 @@ def _is_finished_unsynced_upload_candidate(row) -> bool:
         return False
     if row["duration_status"] != "accepted":
         return False
-    return _recording_file_exists_for_row(row["filename"])
+    return _recording_file_exists(row["filename"])
 
 
 async def _cleanup_stale_open_recording_placeholders(max_age_hours: int = STALE_OPEN_RECORDING_HOURS) -> int:
@@ -2737,25 +2729,23 @@ async def gpu_status():
     except Exception as e:
         logger.error(f"GPU status check failed: {e}")
 
-    # Pending transcription jobs: in-flight on GPU + waiting to upload.  A DB
-    # placeholder without a mounted source MP4 is terminal, not pending; count
-    # it here exactly as the poller does so the status endpoint cannot report a
-    # permanently stuck backlog.
+    # Pending transcription jobs: in-flight on GPU + waiting to upload.  A
+    # finished DB row whose source has disappeared is terminally unprocessable,
+    # not pending; counting it here made the status endpoint report a permanent
+    # backlog even though the poller could never submit it.
     async with aio_connect() as db:
-        db.row_factory = aiosqlite.Row
         async with db.execute(
-            """SELECT transcribed, gpu_job_id, filename, synced, local_deleted,
-                      end_time, start_time, duration_status
+            """SELECT filename, transcribed, gpu_job_id, synced, local_deleted
                FROM recordings
                WHERE (transcribed = 1 AND gpu_job_id IS NOT NULL)
                   OR (transcribed = 0 AND synced = 0 AND local_deleted = 0
-                      AND end_time IS NOT NULL)"""
+                      AND end_time IS NOT NULL AND duration_status = 'accepted')"""
         ) as cur:
             pending_rows = await cur.fetchall()
     pending_transcribe = sum(
         1 for row in pending_rows
         if row["transcribed"] == 1
-        or _is_finished_unsynced_upload_candidate(row)
+        or os.path.isfile(os.path.join(RECORDINGS_DIR, row["filename"]))
     )
     result["pending_transcribe"] = pending_transcribe
     # Include cached watchdog state (no extra HTTP call needed)
