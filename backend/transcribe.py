@@ -81,6 +81,8 @@ _poll_state: dict = {
     "stale_recovery_count": 0,
     "last_recovery_at": None,
     "last_recovery_job_id": None,
+    "diagnostic_categories": {},
+    "diagnostic_samples": [],
 }
 
 # Event to wake the poll loop immediately (used by the flush endpoint)
@@ -125,6 +127,96 @@ def transcribe_timing() -> dict:
         "submit_times": dict(_job_submit_times),
         "avg_duration_s": avg,
         "session_done": _session_done,
+    }
+
+
+def classify_transcription_record(
+    record: dict,
+    *,
+    media_exists: bool,
+    gpu_online: bool,
+    merge_blocked: bool = False,
+) -> str:
+    """Classify a queue row without changing database state or touching GPU.
+
+    This is intentionally a pure boundary classifier so the operator endpoint
+    can explain rows which the upload loop deliberately does not select.
+    """
+    if record.get("synced") == 1 or record.get("gpu_job_id"):
+        return "gpu_job_running"
+    if record.get("transcribed") not in (0, None):
+        return "terminal_or_completed"
+    if record.get("local_deleted"):
+        return "media_deleted"
+    if not record.get("end_time") or record.get("end_time") == record.get("start_time"):
+        return "end_time_invalid"
+    if record.get("duration_status") != "accepted":
+        return "duration_invalid"
+    if not media_exists:
+        return "media_missing"
+    if merge_blocked:
+        return "merge_blocked"
+    if not gpu_online:
+        return "gpu_offline_or_error"
+    return "ready_to_submit"
+
+
+async def transcription_queue_diagnostics(
+    *, gpu_online: bool, sample_limit: int = 5,
+) -> dict:
+    """Return read-only, auditable queue classifications and safe samples."""
+    from collections import Counter
+
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT id, filename, room_id, transcribed, synced, gpu_job_id,
+                      local_deleted, start_time, end_time, duration_status,
+                      duration_seconds, transcribe_error, skip_reason
+               FROM recordings
+               WHERE transcribed IN (-1, 0, 1, 2)
+               ORDER BY id ASC"""
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+    categories = Counter()
+    samples: dict[str, list[dict]] = {}
+    for row in rows:
+        record = dict(row)
+        filepath = os.path.join(RECORDINGS_DIR, record["filename"] or "")
+        category = classify_transcription_record(
+            record,
+            media_exists=os.path.isfile(filepath),
+            gpu_online=gpu_online,
+        )
+        categories[category] += 1
+        bucket = samples.setdefault(category, [])
+        if len(bucket) < sample_limit:
+            # Do not expose filenames or room names; IDs and stable reasons are
+            # sufficient to reconcile this report against the database audit.
+            bucket.append({
+                "recording_id": record["id"],
+                "duration_status": record["duration_status"],
+                "duration_seconds": record["duration_seconds"],
+                "has_media": os.path.isfile(filepath),
+                "has_gpu_job": bool(record["gpu_job_id"]),
+                "reason": record["transcribe_error"] or record["skip_reason"],
+            })
+
+    ready = categories["ready_to_submit"]
+    return {
+        "gpu_online": gpu_online,
+        "category_counts": dict(categories),
+        "ready_to_submit": ready,
+        "blocked_total": sum(value for key, value in categories.items()
+                              if key not in {"ready_to_submit", "gpu_job_running", "terminal_or_completed"}),
+        "samples": samples,
+        "no_submit_reason": (
+            None if ready else (
+                "gpu_offline_or_error" if not gpu_online else
+                "no_recording_matches_finished_accepted_media_present"
+            )
+        ),
     }
 
 # ── Clip Job Priority Queue ───────────────────────────────────────────────────
@@ -420,12 +512,22 @@ async def poll_transcriptions(broadcast_fn=None):
                     unsynced = await cur.fetchall()
 
             available_unsynced = []
+            diagnostic_categories = {}
+            diagnostic_samples = {}
             for rec in unsynced:
                 filepath = os.path.join(RECORDINGS_DIR, rec["filename"])
                 if os.path.isfile(filepath):
                     available_unsynced.append(rec)
+                    category = classify_transcription_record(
+                        dict(rec), media_exists=True, gpu_online=is_online(),
+                    )
                 else:
                     await mark_missing_source_media(rec["id"], rec["filename"])
+                    category = "media_missing"
+                diagnostic_categories[category] = diagnostic_categories.get(category, 0) + 1
+                diagnostic_samples.setdefault(category, [])
+                if len(diagnostic_samples[category]) < 5:
+                    diagnostic_samples[category].append({"recording_id": rec["id"]})
             unsynced = available_unsynced
 
             has_work = bool(pending or unsynced)
@@ -480,6 +582,10 @@ async def poll_transcriptions(broadcast_fn=None):
                                 context="transcription upload",
                             )
                         blocked += 1
+                        diagnostic_categories["merge_blocked"] = diagnostic_categories.get("merge_blocked", 0) + 1
+                        diagnostic_samples.setdefault("merge_blocked", [])
+                        if len(diagnostic_samples["merge_blocked"]) < 5:
+                            diagnostic_samples["merge_blocked"].append({"recording_id": rec["id"]})
                         continue
                     upload_path, primary_id = result
                     valid, err_msg = await _validate_mp4(upload_path)
@@ -508,6 +614,8 @@ async def poll_transcriptions(broadcast_fn=None):
                             )
                             await db.commit()
                 _poll_state["blocked_count"] = blocked
+            _poll_state["diagnostic_categories"] = diagnostic_categories
+            _poll_state["diagnostic_samples"] = diagnostic_samples
             _poll_state["poll_count"] += 1
             _poll_state["last_poll_error"] = None
 
