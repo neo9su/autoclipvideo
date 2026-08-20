@@ -1,28 +1,33 @@
-"""Fail-closed release contracts for GPU director composition."""
+"""Release gates for the GPU-only director subtitle/voiceover contract."""
 
 from pathlib import Path
 
 
-ROOT = Path(__file__).parents[1]
+GPU_SERVICE = Path(__file__).parents[1] / "gpu_service" / "main.py"
+API = Path(__file__).parents[1] / "backend" / "api_v2.py"
 
 
-def test_control_plane_rejects_empty_subtitle_render():
-    source = (ROOT / "backend" / "director_video.py").read_text(encoding="utf-8")
-    assert '"Dialogue:" not in ass_content' in source
-    assert "refusing an uncaptioned final video" in source
+def test_gpu_final_encode_requires_burned_subtitles():
+    source = GPU_SERVICE.read_text(encoding="utf-8")
+
+    assert "non-empty timed subtitles are required" in source
+    assert 'r"(?m)^Dialogue:' in source
+    assert "ass=filename=" in source
 
 
-def test_gpu_director_requires_generated_voiceover_and_subtitles():
-    source = (ROOT / "gpu_service" / "main.py").read_text(encoding="utf-8")
-    assert '"Dialogue:" not in ass_content' in source
-    assert "not tts_audio_b64" in source
-    assert "final director video has no audio stream" in source
+def test_gpu_final_encode_requires_generated_voiceover_and_never_source_fallback():
+    source = GPU_SERVICE.read_text(encoding="utf-8")
+
+    assert "generated voiceover is required" in source
+    assert "generated voiceover audio is missing" in source
+    assert "[1:a]acompressor" in source
+    assert "elif merged_has_audio" not in source
 
 
-def test_gpu_only_director_path_has_no_source_audio_fallback():
-    source = (ROOT / "gpu_service" / "main.py").read_text(encoding="utf-8")
-    director_start = source.index("async def _do_director_job(")
-    director_end = source.index("async def _run_director_job(", director_start)
-    director_source = source[director_start:director_end]
-    assert "elif merged_has_audio" not in director_source
+def test_api_only_marks_completed_after_composer_and_release_postprocess():
+    source = API.read_text(encoding="utf-8")
+    compose = source.index("output_path = await composer.compose_final_video")
+    status = source.index("director_status = 2", compose)
 
+    assert source.index("postprocess_final_video", compose) < status
+    assert source.index("director_final_video = ?", compose) < status

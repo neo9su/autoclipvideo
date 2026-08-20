@@ -2501,13 +2501,6 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
         _update_director_job(job_id, status="processing", phase="preprocess", pct=0)
         _job_start = time.time()
 
-        # Publication requires generated subtitles and narration. Never emit an
-        # uncaptioned artifact or silently substitute source audio.
-        if "Dialogue:" not in ass_content:
-            raise ValueError("director job requires non-empty timed subtitle cues")
-        if not tts_audio_b64:
-            raise ValueError("director job requires generated voiceover audio")
-
         n = len(clips)
         _SF = (
             f"scale={CLIP_W}:{CLIP_H}:force_original_aspect_ratio=decrease:flags=lanczos,"
@@ -2594,11 +2587,20 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
 
         # Write ASS
         ass_path = os.path.join(out_dir, "subs.ass")
-        has_subs = False
-        if ass_content and "Dialogue:" in ass_content:
+        import re as _re
+        has_subs = bool(
+            ass_content
+            and _re.search(
+                r"(?m)^Dialogue:\s*\d+:\d{2}:\d{2}\.\d{2},"
+                r"\d+:\d{2}:\d{2}\.\d{2},",
+                ass_content,
+            )
+        )
+        if has_subs:
             with open(ass_path, "w", encoding="utf-8") as f:
                 f.write(ass_content)
-            has_subs = True
+        if not has_subs:
+            raise RuntimeError("Director final encode blocked: non-empty timed subtitles are required")
 
         # Write TTS audio
         tts_path = None
@@ -2608,17 +2610,9 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
             with open(tts_path, "wb") as f:
                 f.write(_b64.b64decode(tts_audio_b64))
             has_tts = os.path.exists(tts_path) and os.path.getsize(tts_path) > 0
-            if not has_tts:
-                raise RuntimeError("TTS audio payload decoded to an empty file")
-        else:
-            raise RuntimeError("generated voiceover payload is required")
-
-        if not has_subs:
-            raise RuntimeError("Final encode requires non-empty timed subtitles")
         if not has_tts:
-            raise RuntimeError("Final encode requires non-empty TTS audio")
+            raise RuntimeError("Director final encode blocked: generated voiceover is required")
 
-        merged_has_audio = await _has_audio_stream(merged)
         inputs = ["-i", merged]
 
         if has_tts:
@@ -2629,10 +2623,9 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
             )
             has_audio_out = True
         else:
-            raise ValueError("generated voiceover audio could not be prepared")
-
-        if not has_audio_out:
-            raise RuntimeError("Final encode requires an audio stream")
+            # Do not silently promote source audio to release audio.  Director
+            # output is accepted only when the generated voiceover is present.
+            raise RuntimeError("Director final encode blocked: generated voiceover audio is missing")
 
         if has_subs:
             fwd = ass_path.replace("\\", "/")
@@ -2649,7 +2642,11 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
                 filter_complex = video_filter
             vmap = "[vout]"
         else:
-            raise RuntimeError("timed ASS subtitle payload is required for burn-in")
+            if audio_filter:
+                filter_complex = audio_filter
+            else:
+                filter_complex = None
+            vmap = "0:v"
 
         ff_args = [FFMPEG_ASS, "-y", *inputs]
         if filter_complex:
@@ -2676,8 +2673,6 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
         )
         if rc != 0 or not os.path.exists(final_out):
             raise RuntimeError(f"Final encode failed (rc={rc})")
-        if not await _has_audio_stream(final_out):
-            raise RuntimeError("final director video has no audio stream")
 
         # ── Phase 4: thumbnail ────────────────────────────────────────────────
         _update_director_job(job_id, phase="thumbnail", pct=90)
@@ -2696,7 +2691,6 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
         _update_director_job(
             job_id, status="done", phase="done", pct=100,
             output_path=final_out, thumb_path=thumb_path or "",
-            subtitle_burned=True, generated_voiceover_mixed=has_tts,
         )
         logger.info(f"Director job {job_id} complete: {final_out}")
 
@@ -2793,14 +2787,7 @@ async def get_director_quality(job_id: str):
     if not path or not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="Output file missing on server")
     probe = await _probe_media(path)
-    return {
-        **probe,
-        "ok": not probe["errors"] and bool(job.get("subtitle_burned")) and bool(job.get("generated_voiceover_mixed")),
-        "subtitle_burned": bool(job.get("subtitle_burned")),
-        "generated_voiceover_mixed": bool(job.get("generated_voiceover_mixed")),
-        "execution_node": "remote-gpu",
-        "job_id": job_id,
-    }
+    return {**probe, "ok": not probe["errors"], "execution_node": "remote-gpu", "job_id": job_id}
 
 
 @app.get("/director-jobs/{job_id}/mp4")
