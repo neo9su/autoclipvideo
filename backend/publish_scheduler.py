@@ -2,6 +2,7 @@
 Background publish scheduler.
 Polls every 60 seconds for pending/scheduled publish tasks and executes them.
 """
+
 import asyncio
 import json
 import logging
@@ -15,6 +16,8 @@ from db import DB_PATH, aio_connect
 from notifier import notify
 from video_path_resolver import resolve_video_path, describe_missing
 
+from duration_policy import PUBLISH_MAX_DURATION_SECONDS, PUBLISH_MIN_DURATION_SECONDS
+
 logger = logging.getLogger(__name__)
 
 RECORDINGS_DIR = os.path.join(os.path.dirname(__file__), "..", "recordings")
@@ -25,7 +28,7 @@ async def check_video_quality(video_path: str) -> tuple[bool, str]:
     """
     Check video quality requirements for publishing:
       - Resolution >= 1080x1920 (portrait 1080P)
-      - Duration >= 15 seconds (max 150 seconds)
+      - Duration >= 15 seconds (max 300 seconds)
     Returns (passed, reason). reason is empty string if passed.
     """
     try:
@@ -59,10 +62,11 @@ async def check_video_quality(video_path: str) -> tuple[bool, str]:
         duration = float(info.get("format", {}).get("duration", 0))
     except Exception:
         duration = 0.0
-    if duration < 15:
-        issues.append(f"时长不足（{duration:.1f}s，需要 ≥ 15 秒）")
-    if duration > 150:
-        issues.append(f"时长超限（{duration:.1f}s，需要 ≤ 150 秒）")
+    if duration < PUBLISH_MIN_DURATION_SECONDS:
+        issues.append(f"时长不足（{duration:.1f}s，需要 ≥ {PUBLISH_MIN_DURATION_SECONDS:.0f} 秒）")
+    if duration > PUBLISH_MAX_DURATION_SECONDS:
+        issues.append(f"时长超限（{duration:.1f}s，需要 ≤ {PUBLISH_MAX_DURATION_SECONDS:.0f} 秒）")
+
 
     if issues:
         return False, "；".join(issues)
