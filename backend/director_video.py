@@ -81,6 +81,27 @@ _ANIM_KW_POP = (r"{\fad(0,200)"
                 r"\t(450,600,\fscx100\fscy100)}")
 
 
+def _require_burn_in_and_voiceover(ass_content: str, audio_path: str) -> None:
+    """Fail closed when a release would omit subtitles or the generated voiceover."""
+    if not isinstance(ass_content, str) or "Dialogue:" not in ass_content:
+        raise RuntimeError("subtitle burn-in contract failed: timed ASS dialogue is missing")
+    audio_file = Path(audio_path)
+    if not audio_file.is_file() or audio_file.stat().st_size <= 0:
+        raise RuntimeError("voiceover contract failed: generated audio is missing or empty")
+
+
+def _validate_remote_media_report(report: Dict) -> None:
+    """Validate GPU-side ffprobe evidence before downloading a release artifact."""
+    if not report.get("ok"):
+        raise RuntimeError(f"remote media quality gate failed: {report.get('errors') or 'unknown error'}")
+    if int(report.get("video_streams") or 0) < 1:
+        raise RuntimeError("remote media quality gate failed: video stream is missing")
+    if int(report.get("audio_streams") or 0) < 1:
+        raise RuntimeError("remote media quality gate failed: audio stream is missing")
+    if float(report.get("duration") or 0) <= 0:
+        raise RuntimeError("remote media quality gate failed: duration is invalid")
+
+
 def _annotate_dir(text: str) -> str:
     """在 text 里标注关键词（暖金色 ASS tag）。"""
     for kw in _DIR_SORTED_KWS:
@@ -451,8 +472,6 @@ class DirectorVideoComposer:
             logger.error(f"[DIRECTOR] compose_final_video: audio_path MISSING: {audio_path}")
             return None
         audio_size = Path(audio_path).stat().st_size
-        if audio_size <= 0:
-            raise RuntimeError("voiceover audio file is empty; refusing final composition")
         logger.info(f"[DIRECTOR] compose_final_video: audio exists, size={audio_size}")
 
         try:
@@ -500,8 +519,7 @@ class DirectorVideoComposer:
             # 3. 构建 ASS 字幕（本地生成，含关键词高亮）
             # video clip duration 已对齐 TTS，字幕用同一个 tts_dur_by_scene 保证同步
             ass_content = config.get("qianchuan_ass_content") or _build_director_ass(video_clips, tr_dur, tts_dur_by_scene)
-            if "Dialogue:" not in ass_content:
-                raise RuntimeError("subtitle render produced no timed cues; refusing an uncaptioned final video")
+            _require_burn_in_and_voiceover(ass_content, audio_path)
 
             config = dict(config)
             config["qianchuan_sound_cues"] = build_edit_sound_cues(
@@ -631,6 +649,16 @@ class DirectorVideoComposer:
                 raise TimeoutError(f"remote director job {job_id} did not finish before the wait deadline")
 
             # 7. 下载结果
+            async with _aio_dv.ClientSession() as session:
+                async with session.get(
+                    f"{self._GPU_SERVICE_URL}/director-jobs/{job_id}/quality",
+                    timeout=_aio_dv.ClientTimeout(total=30),
+                ) as quality_response:
+                    if quality_response.status != 200:
+                        raise RuntimeError(
+                            f"remote director quality gate unavailable: HTTP {quality_response.status}"
+                        )
+                    _validate_remote_media_report(await quality_response.json())
             logger.info(f"[DIRECTOR] compose_final_video: downloading job {job_id} mp4")
             async with _aio_dv.ClientSession() as session:
                 async with session.get(

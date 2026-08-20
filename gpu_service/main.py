@@ -2608,6 +2608,10 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
             with open(tts_path, "wb") as f:
                 f.write(_b64.b64decode(tts_audio_b64))
             has_tts = os.path.exists(tts_path) and os.path.getsize(tts_path) > 0
+            if not has_tts:
+                raise RuntimeError("TTS audio payload decoded to an empty file")
+        else:
+            raise RuntimeError("generated voiceover payload is required")
 
         if not has_subs:
             raise RuntimeError("Final encode requires non-empty timed subtitles")
@@ -2645,11 +2649,7 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
                 filter_complex = video_filter
             vmap = "[vout]"
         else:
-            if audio_filter:
-                filter_complex = audio_filter
-            else:
-                filter_complex = None
-            vmap = "0:v"
+            raise RuntimeError("timed ASS subtitle payload is required for burn-in")
 
         ff_args = [FFMPEG_ASS, "-y", *inputs]
         if filter_complex:
@@ -2696,6 +2696,7 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
         _update_director_job(
             job_id, status="done", phase="done", pct=100,
             output_path=final_out, thumb_path=thumb_path or "",
+            subtitle_burned=True, generated_voiceover_mixed=has_tts,
         )
         logger.info(f"Director job {job_id} complete: {final_out}")
 
@@ -2792,7 +2793,14 @@ async def get_director_quality(job_id: str):
     if not path or not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="Output file missing on server")
     probe = await _probe_media(path)
-    return {**probe, "ok": not probe["errors"], "execution_node": "remote-gpu", "job_id": job_id}
+    return {
+        **probe,
+        "ok": not probe["errors"] and bool(job.get("subtitle_burned")) and bool(job.get("generated_voiceover_mixed")),
+        "subtitle_burned": bool(job.get("subtitle_burned")),
+        "generated_voiceover_mixed": bool(job.get("generated_voiceover_mixed")),
+        "execution_node": "remote-gpu",
+        "job_id": job_id,
+    }
 
 
 @app.get("/director-jobs/{job_id}/mp4")
