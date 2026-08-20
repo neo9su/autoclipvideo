@@ -451,6 +451,8 @@ class DirectorVideoComposer:
             logger.error(f"[DIRECTOR] compose_final_video: audio_path MISSING: {audio_path}")
             return None
         audio_size = Path(audio_path).stat().st_size
+        if audio_size <= 0:
+            raise RuntimeError("voiceover audio file is empty; refusing final composition")
         logger.info(f"[DIRECTOR] compose_final_video: audio exists, size={audio_size}")
 
         try:
@@ -498,8 +500,8 @@ class DirectorVideoComposer:
             # 3. 构建 ASS 字幕（本地生成，含关键词高亮）
             # video clip duration 已对齐 TTS，字幕用同一个 tts_dur_by_scene 保证同步
             ass_content = config.get("qianchuan_ass_content") or _build_director_ass(video_clips, tr_dur, tts_dur_by_scene)
-            if not ass_content or "Dialogue:" not in ass_content:
-                raise RuntimeError("director composition requires non-empty timed subtitles")
+            if "Dialogue:" not in ass_content:
+                raise RuntimeError("subtitle render produced no timed cues; refusing an uncaptioned final video")
 
             config = dict(config)
             config["qianchuan_sound_cues"] = build_edit_sound_cues(
@@ -522,9 +524,7 @@ class DirectorVideoComposer:
                 logger.info(f"[DIRECTOR] compose_final_video: tts_b64 encoded, len={len(tts_b64)}")
             except Exception as ae:
                 logger.error(f"[DIRECTOR] compose_final_video: TTS audio encode FAILED: {ae}")
-                raise RuntimeError("director composition requires readable voiceover audio") from ae
-            if not tts_b64:
-                raise RuntimeError("director composition requires non-empty voiceover audio")
+                return None
 
             # 5. 提交 GPU director job
             import aiohttp as _aio_dv

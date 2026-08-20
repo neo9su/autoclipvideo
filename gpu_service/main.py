@@ -2501,6 +2501,13 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
         _update_director_job(job_id, status="processing", phase="preprocess", pct=0)
         _job_start = time.time()
 
+        # Publication requires generated subtitles and narration. Never emit an
+        # uncaptioned artifact or silently substitute source audio.
+        if "Dialogue:" not in ass_content:
+            raise ValueError("director job requires non-empty timed subtitle cues")
+        if not tts_audio_b64:
+            raise ValueError("director job requires generated voiceover audio")
+
         n = len(clips)
         _SF = (
             f"scale={CLIP_W}:{CLIP_H}:force_original_aspect_ratio=decrease:flags=lanczos,"
@@ -2617,15 +2624,8 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
                 "aformat=sample_fmts=fltp:channel_layouts=stereo[aout]"
             )
             has_audio_out = True
-        elif merged_has_audio:
-            audio_filter = (
-                "[0:a]acompressor=threshold=-25dB:ratio=3:attack=5:release=100:makeup=4dB,"
-                "aformat=sample_fmts=fltp:channel_layouts=stereo[aout]"
-            )
-            has_audio_out = True
         else:
-            audio_filter = None
-            has_audio_out = False
+            raise ValueError("generated voiceover audio could not be prepared")
 
         if not has_audio_out:
             raise RuntimeError("Final encode requires an audio stream")
@@ -2676,6 +2676,8 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
         )
         if rc != 0 or not os.path.exists(final_out):
             raise RuntimeError(f"Final encode failed (rc={rc})")
+        if not await _has_audio_stream(final_out):
+            raise RuntimeError("final director video has no audio stream")
 
         # ── Phase 4: thumbnail ────────────────────────────────────────────────
         _update_director_job(job_id, phase="thumbnail", pct=90)
