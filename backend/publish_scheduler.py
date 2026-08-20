@@ -2,7 +2,6 @@
 Background publish scheduler.
 Polls every 60 seconds for pending/scheduled publish tasks and executes them.
 """
-
 import asyncio
 import json
 import logging
@@ -15,8 +14,10 @@ import aiosqlite
 from db import DB_PATH, aio_connect
 from notifier import notify
 from video_path_resolver import resolve_video_path, describe_missing
-
-from duration_policy import PUBLISH_MAX_DURATION_SECONDS, PUBLISH_MIN_DURATION_SECONDS
+from publish_policy import (
+    MAX_PUBLISH_DURATION_SECONDS,
+    validate_publish_duration,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -62,11 +63,9 @@ async def check_video_quality(video_path: str) -> tuple[bool, str]:
         duration = float(info.get("format", {}).get("duration", 0))
     except Exception:
         duration = 0.0
-    if duration < PUBLISH_MIN_DURATION_SECONDS:
-        issues.append(f"时长不足（{duration:.1f}s，需要 ≥ {PUBLISH_MIN_DURATION_SECONDS:.0f} 秒）")
-    if duration > PUBLISH_MAX_DURATION_SECONDS:
-        issues.append(f"时长超限（{duration:.1f}s，需要 ≤ {PUBLISH_MAX_DURATION_SECONDS:.0f} 秒）")
-
+    duration_issue = validate_publish_duration(duration)
+    if duration_issue:
+        issues.append(duration_issue)
 
     if issues:
         return False, "；".join(issues)
