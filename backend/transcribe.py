@@ -104,6 +104,20 @@ _job_durations: list[float] = []           # recent completed job durations (las
 _session_done: int = 0                     # jobs completed since backend start
 
 
+async def mark_missing_source_media(recording_id: int, filename: str | None) -> None:
+    """Persist a terminal, actionable error for a finished missing source."""
+    basename = os.path.basename(filename or "") or "<unnamed>"
+    reason = f"source media unavailable: {basename}"
+    async with aio_connect() as db:
+        await db.execute(
+            """UPDATE recordings SET transcribed=-1, transcribe_error=?, skip_reason=?
+               WHERE id=? AND transcribed=0 AND synced=0""",
+            (reason, reason, recording_id),
+        )
+        await db.commit()
+    logger.warning("Recording %s marked unavailable: %s", recording_id, reason)
+
+
 def transcribe_timing() -> dict:
     recent = _job_durations[-10:] if _job_durations else []
     avg = sum(recent) / len(recent) if recent else 0.0
@@ -402,8 +416,17 @@ async def poll_transcriptions(broadcast_fn=None):
                        WHERE synced = 0 AND transcribed = 0 AND local_deleted = 0
                          AND end_time IS NOT NULL AND end_time != start_time
                          AND duration_status = 'accepted'"""
-                ) as cur:
+                    ) as cur:
                     unsynced = await cur.fetchall()
+
+            available_unsynced = []
+            for rec in unsynced:
+                filepath = os.path.join(RECORDINGS_DIR, rec["filename"])
+                if os.path.isfile(filepath):
+                    available_unsynced.append(rec)
+                else:
+                    await mark_missing_source_media(rec["id"], rec["filename"])
+            unsynced = available_unsynced
 
             has_work = bool(pending or unsynced)
 
@@ -664,6 +687,13 @@ async def _fetch_srt(recording_id: int, job_id: str, filename: str, clip_count: 
                     f"SRT download truncated for {job_id}: "
                     f"got {len(content)} B, expected {expected_len} B — skipping"
                 )
+                reason = "SRT download incomplete"
+                async with aio_connect() as db:
+                    await db.execute(
+                        "UPDATE recordings SET transcribed=-1, transcribe_error=?, skip_reason=? WHERE id=?",
+                        (reason, reason, recording_id),
+                    )
+                    await db.commit()
                 return
             if not content.strip():
                 # Whisper produced 0 speech segments — no text in the video.
@@ -692,6 +722,13 @@ async def _fetch_srt(recording_id: int, job_id: str, filename: str, clip_count: 
                 _retranscribe_without_clip.discard(recording_id)
         else:
             logger.error(f"SRT download failed for {job_id}: {_srt_status}")
+            reason = f"SRT unavailable after GPU transcription (HTTP {_srt_status})"
+            async with aio_connect() as db:
+                await db.execute(
+                    "UPDATE recordings SET transcribed=-1, transcribe_error=?, skip_reason=? WHERE id=?",
+                    (reason, reason, recording_id),
+                )
+                await db.commit()
     except Exception as e:
         logger.error(f"SRT fetch error for {job_id}: {e}")
 

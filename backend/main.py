@@ -2729,23 +2729,21 @@ async def gpu_status():
     except Exception as e:
         logger.error(f"GPU status check failed: {e}")
 
-    # Pending transcription jobs: in-flight on GPU + waiting to upload.  A
-    # finished DB row whose source has disappeared is terminally unprocessable,
-    # not pending; counting it here made the status endpoint report a permanent
-    # backlog even though the poller could never submit it.
+    # Pending transcription jobs: in-flight on GPU + waiting to upload (exclude live segments)
     async with aio_connect() as db:
         async with db.execute(
-            """SELECT filename, transcribed, gpu_job_id, synced, local_deleted
-               FROM recordings
-               WHERE (transcribed = 1 AND gpu_job_id IS NOT NULL)
-                  OR (transcribed = 0 AND synced = 0 AND local_deleted = 0
-                      AND end_time IS NOT NULL AND duration_status = 'accepted')"""
+            """SELECT COUNT(*) FROM recordings
+               WHERE transcribed = 1 AND gpu_job_id IS NOT NULL"""
         ) as cur:
-            pending_rows = await cur.fetchall()
-    pending_transcribe = sum(
-        1 for row in pending_rows
-        if row["transcribed"] == 1
-        or os.path.isfile(os.path.join(RECORDINGS_DIR, row["filename"]))
+            (running_transcribe,) = await cur.fetchone()
+        async with db.execute(
+            """SELECT filename FROM recordings
+               WHERE transcribed=0 AND synced=0 AND local_deleted=0 AND end_time IS NOT NULL"""
+        ) as cur:
+            pending_upload_rows = await cur.fetchall()
+    pending_transcribe = running_transcribe + sum(
+        1 for row in pending_upload_rows
+        if row[0] and os.path.isfile(_recording_file_path(row[0]) or "")
     )
     result["pending_transcribe"] = pending_transcribe
     # Include cached watchdog state (no extra HTTP call needed)
