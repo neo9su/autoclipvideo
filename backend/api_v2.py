@@ -970,7 +970,12 @@ async def compose_video(group_id: int, video_style: str = "dynamic"):
     # ── 后台执行（匹配 + 编码，可能数分钟）────────────────────────────────────────
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "UPDATE clip_groups SET director_status = 1, director_error = NULL WHERE id = ?", (group_id,)
+            """UPDATE clip_groups SET
+               director_status = 1,
+               director_final_video = NULL,
+               director_error = NULL
+               WHERE id = ?""",
+            (group_id,),
         )
         await db.commit()
     asyncio.create_task(_compose_video_bg(group_id, script_segments, audio_path, recordings_dir, video_style))

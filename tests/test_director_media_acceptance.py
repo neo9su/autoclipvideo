@@ -25,6 +25,7 @@ def test_api_marks_background_failures_instead_of_completing():
     """Only the success path may persist director_status=2."""
     assert 'director_status = 2' in API_V2
     assert 'director_status = -1' in API_V2
+    assert 'director_final_video = NULL' in API_V2
     assert 'director_final_video = ?, director_error = NULL' in API_V2
     assert 'postprocess_final_video' not in API_V2
 

@@ -2775,6 +2775,22 @@ async def _probe_media(path: str) -> dict:
                        "video_codec": videos[0].get("codec_name"), "fps": videos[0].get("avg_frame_rate")})
     if audios:
         report.update({"audio_codec": audios[0].get("codec_name"), "sample_rate": audios[0].get("sample_rate")})
+    # ffprobe metadata alone does not prove that the encoded payload can be
+    # decoded.  Decode one video frame and a short audio window on the GPU
+    # node before exposing the release-quality report.
+    decode_checks = (
+        ("video_decode", ("-map", "0:v:0", "-frames:v", "1", "-f", "null", "-")),
+        ("audio_decode", ("-map", "0:a:0", "-t", "1", "-f", "null", "-")),
+    )
+    for check_name, mapping_args in decode_checks:
+        decode_proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-v", "error", "-i", path, *mapping_args,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, decode_stderr = await decode_proc.communicate()
+        if decode_proc.returncode != 0:
+            errors.append(f"{check_name} failed: {decode_stderr.decode(errors='replace')[-300:]}")
     return report
 
 

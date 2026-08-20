@@ -31,3 +31,12 @@ def test_api_only_marks_completed_after_composer_and_remote_duration_gate():
 
     assert source.index("quality_report", compose) < status
     assert source.index("director_final_video = ?", compose) < status
+
+
+def test_gpu_quality_probe_decodes_video_and_audio_payloads():
+    source = GPU_SERVICE.read_text(encoding="utf-8")
+
+    assert '"video_decode"' in source
+    assert '"audio_decode"' in source
+    assert '"-frames:v", "1"' in source
+    assert '"-map", "0:a:0"' in source
