@@ -219,7 +219,9 @@ async def test_stale_job_recovery_resets_only_matching_recording(backend_main) -
         Path(db_path).unlink(missing_ok=True)
 
 
-async def test_transcribe_queue_excludes_missing_finished_source(backend_main) -> None:
+async def test_missing_finished_source_is_terminally_skipped(backend_main) -> None:
+    import transcribe
+
     fd, db_path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
     os.unlink(db_path)
@@ -228,13 +230,18 @@ async def test_transcribe_queue_excludes_missing_finished_source(backend_main) -
         await _insert_recording(
             db_path,
             id=107,
-            filename="missing_finished.mp4",
-            start_time=(datetime.now() - timedelta(minutes=5)).isoformat(),
-            end_time=datetime.now().isoformat(),
+            filename="deleted_finished_source.mp4",
+            size_bytes=123,
         )
-        response = await backend_main.get_transcribe_queue()
-        assert response["jobs"] == []
-        assert response["total"] == response["session_done"]
+        transcribe.aio_connect = lambda: dbmod.aio_connect(db_path)
+        await transcribe._mark_missing_source({"id": 107, "filename": "deleted_finished_source.mp4"})
+        async with aiosqlite.connect(db_path) as con:
+            row = await (await con.execute(
+                "SELECT transcribed, synced, transcribe_error, skip_reason FROM recordings WHERE id=107"
+            )).fetchone()
+        assert row[0:2] == (-1, 0)
+        assert row[2] == row[3]
+        assert "source media unavailable" in row[2]
     finally:
         Path(db_path).unlink(missing_ok=True)
 
@@ -282,6 +289,7 @@ async def main_test() -> None:
     await test_transcribe_queue_excludes_short_and_unavailable_recordings(backend_main)
     await test_stale_open_cleanup_keeps_recent_active_recording(backend_main)
     await test_stale_job_recovery_resets_only_matching_recording(backend_main)
+    await test_missing_finished_source_is_terminally_skipped(backend_main)
     test_transcription_watchdog_contract_is_present()
     test_recovery_endpoint_cancels_worker_without_deleting_artifacts()
     test_poll_health_reports_cycle_completion_and_errors()
