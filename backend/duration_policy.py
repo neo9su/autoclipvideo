@@ -3,6 +3,11 @@
 import asyncio
 import os
 
+from publish_policy import (
+    MAX_PUBLISH_DURATION_SECONDS as PUBLISH_MAX_DURATION_SECONDS,
+    MIN_PUBLISH_DURATION_SECONDS as PUBLISH_MIN_DURATION_SECONDS,
+)
+
 MIN_RECORDING_DURATION_SECONDS = 28.0
 MAX_RECORDING_DURATION_SECONDS = 45 * 60
 # Compatibility alias for pipeline modules that use the shorter name.

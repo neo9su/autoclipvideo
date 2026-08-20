@@ -9,6 +9,8 @@ sys.path.insert(0, str(PROJECT_ROOT / "backend"))
 from duration_policy import (
     MAX_RECORDING_DURATION_SECONDS,
     MIN_RECORDING_DURATION_SECONDS,
+    PUBLISH_MAX_DURATION_SECONDS,
+    PUBLISH_MIN_DURATION_SECONDS,
     classify_duration,
     is_processable_duration,
     is_within_recording_limit,
@@ -50,6 +52,13 @@ def test_invalid_duration_is_unavailable_and_not_processable():
     for value in (None, "", "bad", 0, -1, float("nan"), float("inf"), float("-inf")):
         assert classify_duration(value) == "duration_unavailable"
         assert not is_processable_duration(value)
+
+
+def test_publish_duration_policy_accepts_legacy_overage_and_rejects_above_new_limit():
+    assert PUBLISH_MIN_DURATION_SECONDS == 15.0
+    assert PUBLISH_MAX_DURATION_SECONDS == 300.0
+    assert PUBLISH_MIN_DURATION_SECONDS <= 162.8 <= PUBLISH_MAX_DURATION_SECONDS
+    assert 150.0 < 162.8 < 300.0
 
 
 def test_inventory_is_dry_run_and_only_lists_verified_short_files(tmp_path, monkeypatch):

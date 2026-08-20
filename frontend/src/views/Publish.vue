@@ -160,6 +160,7 @@
     <div v-if="showCreateModal" class="modal-overlay" @click.self="showCreateModal = false">
       <div class="modal">
         <h3>创建发布任务</h3>
+        <p class="muted publish-duration-hint">发布视频时长要求：15–300 秒（含边界）</p>
 
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
           <label style="margin:0">选择分组 *（仅显示已合并的）</label>
@@ -238,7 +239,10 @@
           </div>
         </template>
 
+        <p class="muted publish-duration-hint">发布视频时长要求：15–300 秒</p>
+
         <label>平台 *</label>
+        <div class="muted" style="margin:-4px 0 8px;font-size:12px">发布视频时长要求：15–300 秒（保留现有分辨率与质量检查）</div>
         <select v-model="newTask.platform" class="input">
           <option value="douyin">抖音</option>
           <option value="kuaishou">快手</option>
@@ -1500,6 +1504,7 @@ onUnmounted(() => wsCleanup?.())
 
 <style scoped>
 .publish-layout { display: flex; gap: 20px; min-height: 600px; flex-direction: column; }
+.publish-duration-hint { margin: -4px 0 8px; font-size: 12px; }
 @media (min-width: 900px) { .publish-layout { flex-direction: row; } }
 
 .task-list-panel { width: 100%; max-width: 320px; flex-shrink: 0; }
