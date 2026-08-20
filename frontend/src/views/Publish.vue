@@ -240,6 +240,7 @@
         </template>
 
         <label>平台 *</label>
+        <div class="muted" style="margin:-4px 0 8px;font-size:12px">发布视频时长要求：15–300 秒（保留现有分辨率与质量检查）</div>
         <select v-model="newTask.platform" class="input">
           <option value="douyin">抖音</option>
           <option value="kuaishou">快手</option>
