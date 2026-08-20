@@ -81,6 +81,7 @@ _poll_state: dict = {
     "stale_recovery_count": 0,
     "last_recovery_at": None,
     "last_recovery_job_id": None,
+    "diagnosis": {"counts": {}, "samples": [], "can_submit_count": 0, "blocked_reason": None},
 }
 
 # Event to wake the poll loop immediately (used by the flush endpoint)
@@ -102,6 +103,129 @@ _CREATIVE_SEM = asyncio.Semaphore(4)
 _job_submit_times: dict[str, float] = {}   # gpu_job_id → time.time() when submitted
 _job_durations: list[float] = []           # recent completed job durations (last 20)
 _session_done: int = 0                     # jobs completed since backend start
+
+
+def classify_transcription_record(
+    row,
+    *,
+    media_exists: bool,
+    gpu_online: bool,
+    merge_blocked: bool = False,
+    gpu_error: str | None = None,
+) -> str:
+    """Return a stable read-only reason for a transcription queue record."""
+    if row.get("transcribed") == 1 and row.get("synced") == 1 and row.get("gpu_job_id"):
+        return "gpu_job_running"
+    if row.get("transcribed") == 2:
+        return "transcription_complete"
+    if row.get("local_deleted"):
+        return "media_deleted"
+    if row.get("transcribed") == -1:
+        error = (row.get("transcribe_error") or row.get("skip_reason") or "").lower()
+        return "srt_missing" if "srt" in error else "media_missing"
+    if row.get("duration_status") != "accepted":
+        return "duration_invalid"
+    if not row.get("end_time") or row.get("end_time") == row.get("start_time"):
+        return "end_time_invalid"
+    if not media_exists:
+        return "media_missing"
+    if merge_blocked:
+        return "merge_blocked"
+    if not gpu_online or gpu_error:
+        return "gpu_offline_or_error"
+    return "ready_to_submit"
+
+QUEUE_DIAGNOSIS_SAMPLE_LIMIT = 10
+
+
+def _queue_sample(row, reason: str, *, status: str = "pending") -> dict:
+    """Return a redacted, stable operator-facing queue sample."""
+    return {
+        "recording_id": row["id"],
+        "filename": os.path.basename(row["filename"] or ""),
+        "reason": reason,
+        "status": status,
+        "duration_status": row["duration_status"],
+        "end_time_present": bool(row["end_time"]),
+        "synced": row["synced"],
+        "transcribed": row["transcribed"],
+        "gpu_job_id": row["gpu_job_id"],
+    }
+
+
+async def transcription_queue_diagnosis(*, gpu_online: bool, gpu_error: str | None = None) -> dict:
+    """Classify every unsynced transcription row without changing the database.
+
+    This is intentionally a read-only audit helper.  Terminal source failures are
+    recorded by the poller, while this endpoint only reports their current state.
+    """
+    counts: dict[str, int] = {}
+    samples: list[dict] = []
+    can_submit = 0
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT id, filename, start_time, end_time, synced, transcribed,
+                      local_deleted, duration_status, gpu_job_id, transcribe_error,
+                      skip_reason
+               FROM recordings
+               WHERE (synced=0 AND transcribed IN (0, -1, 2))
+                  OR (transcribed=1 AND gpu_job_id IS NOT NULL)
+               ORDER BY id ASC"""
+        ) as cur:
+            rows = await cur.fetchall()
+
+    merge_blocked_ids = {
+        sample.get("recording_id")
+        for sample in ((_poll_state.get("diagnosis") or {}).get("merge_samples") or [])
+        if sample.get("recording_id") is not None
+    }
+    for row in rows:
+        media_exists = os.path.isfile(os.path.join(RECORDINGS_DIR, row["filename"] or ""))
+        reason = classify_transcription_record(
+            row,
+            media_exists=media_exists,
+            gpu_online=gpu_online,
+            merge_blocked=row["id"] in merge_blocked_ids,
+            gpu_error=gpu_error,
+        )
+        if reason == "duration_invalid":
+            reason = "duration_not_accepted"
+        elif reason == "gpu_offline_or_error":
+            reason = "gpu_error" if gpu_error else "gpu_offline"
+        # A cached merge result is authoritative for the last poll cycle. Do
+        # not report the same row as ready merely because the media still
+        # exists while the merger is waiting for another chunk.
+        if reason == "ready_to_submit" and row["id"] in merge_blocked_ids:
+            reason = "merge_blocked"
+        if reason == "ready_to_submit":
+            can_submit += 1
+        if reason == "gpu_job_running":
+            sample_status = "running"
+        else:
+            sample_status = "pending"
+        counts[reason] = counts.get(reason, 0) + 1
+        if len(samples) < QUEUE_DIAGNOSIS_SAMPLE_LIMIT:
+            samples.append(_queue_sample(row, reason, status=sample_status))
+
+    poll_diagnosis = _poll_state.get("diagnosis") or {}
+    merge_samples = poll_diagnosis.get("merge_samples", [])
+    if merge_samples:
+        counts["merge_blocked"] = poll_diagnosis.get("merge_blocked", len(merge_samples))
+        samples.extend(merge_samples[:QUEUE_DIAGNOSIS_SAMPLE_LIMIT])
+    blocked_reason = None
+    if can_submit == 0:
+        priority = ("gpu_error", "gpu_offline", "merge_blocked", "media_missing",
+                    "srt_missing", "duration_invalid", "end_time_invalid")
+        blocked_reason = next((item for item in priority if counts.get(item)), "queue_empty")
+    return {
+        "counts": counts,
+        "samples": samples[:QUEUE_DIAGNOSIS_SAMPLE_LIMIT],
+        "can_submit_count": can_submit,
+        "blocked_reason": blocked_reason,
+        "last_submit_at": _poll_state["last_submit_at"],
+        "last_complete_at": _poll_state["last_complete_at"],
+    }
 
 
 async def mark_missing_source_media(recording_id: int, filename: str | None) -> None:
@@ -419,6 +543,12 @@ async def poll_transcriptions(broadcast_fn=None):
                     ) as cur:
                     unsynced = await cur.fetchall()
 
+            diagnosis = await transcription_queue_diagnosis(
+                gpu_online=is_online(),
+                gpu_error=_poll_state.get("last_poll_error"),
+            )
+            _poll_state["diagnosis"] = diagnosis
+
             available_unsynced = []
             for rec in unsynced:
                 filepath = os.path.join(RECORDINGS_DIR, rec["filename"])
@@ -450,6 +580,7 @@ async def poll_transcriptions(broadcast_fn=None):
                 from sync import sync_file
                 from comfyui_client import free_vram
                 blocked = 0
+                merge_samples = []
                 vram_freed = False  # freed at most once per poll cycle
                 for rec in unsynced:
                     if not is_online():
@@ -480,6 +611,12 @@ async def poll_transcriptions(broadcast_fn=None):
                                 context="transcription upload",
                             )
                         blocked += 1
+                        merge_samples.append({
+                            "recording_id": rec["id"],
+                            "filename": os.path.basename(rec["filename"] or ""),
+                            "reason": "merge_blocked",
+                            "status": "pending",
+                        })
                         continue
                     upload_path, primary_id = result
                     valid, err_msg = await _validate_mp4(upload_path)
@@ -508,6 +645,10 @@ async def poll_transcriptions(broadcast_fn=None):
                             )
                             await db.commit()
                 _poll_state["blocked_count"] = blocked
+                _poll_state["diagnosis"]["merge_blocked"] = blocked
+                _poll_state["diagnosis"]["merge_samples"] = merge_samples[:QUEUE_DIAGNOSIS_SAMPLE_LIMIT]
+                if blocked and _poll_state["diagnosis"].get("can_submit_count", 0) == 0:
+                    _poll_state["diagnosis"]["blocked_reason"] = "merge_blocked"
             _poll_state["poll_count"] += 1
             _poll_state["last_poll_error"] = None
 

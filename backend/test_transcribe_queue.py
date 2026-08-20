@@ -15,6 +15,7 @@ sys.path.insert(0, "backend")
 
 import db as dbmod
 from db import init_db
+from transcribe import classify_transcription_record
 
 
 def test_asr_profile_is_explicit_and_remote_friendly() -> None:
@@ -28,6 +29,25 @@ def test_asr_profile_is_explicit_and_remote_friendly() -> None:
     assert options["word_timestamps"] is True
     assert "假发" in options["initial_prompt"]
     assert options["condition_on_previous_text"] is False
+
+
+def test_transcription_queue_classifier_covers_submission_blockers() -> None:
+    base = {
+        "transcribed": 0,
+        "synced": 0,
+        "local_deleted": 0,
+        "start_time": "2026-08-21T00:00:00",
+        "end_time": "2026-08-21T00:01:00",
+        "duration_status": "accepted",
+    }
+    assert classify_transcription_record(base, media_exists=True, gpu_online=True) == "ready_to_submit"
+    assert classify_transcription_record({**base, "duration_status": "too_short"}, media_exists=True, gpu_online=True) == "duration_invalid"
+    assert classify_transcription_record({**base, "end_time": None}, media_exists=True, gpu_online=True) == "end_time_invalid"
+    assert classify_transcription_record(base, media_exists=False, gpu_online=True) == "media_missing"
+    assert classify_transcription_record(base, media_exists=True, gpu_online=True, merge_blocked=True) == "merge_blocked"
+    assert classify_transcription_record(base, media_exists=True, gpu_online=False) == "gpu_offline_or_error"
+    assert classify_transcription_record({**base, "gpu_job_id": "job-1", "synced": 1, "transcribed": 1}, media_exists=True, gpu_online=True) == "gpu_job_running"
+    assert classify_transcription_record({**base, "transcribed": 2}, media_exists=True, gpu_online=True) == "transcription_complete"
 
 
 def _load_backend_main():
@@ -235,6 +255,57 @@ async def test_missing_finished_source_is_marked_terminal(backend_main) -> None:
             )).fetchone()
         assert row == (-1, "source media unavailable: not-mounted.mp4", "source media unavailable: not-mounted.mp4")
     finally:
+        Path(db_path).unlink(missing_ok=True)
+
+
+async def test_queue_diagnosis_classifies_pending_reasons_without_mutation(backend_main) -> None:
+    import transcribe
+
+    fd, db_path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.unlink(db_path)
+    source_path = Path(backend_main.RECORDINGS_DIR) / "diagnosis_ready.mp4"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_bytes(b"placeholder")
+    try:
+        await _create_queue_test_db(backend_main, db_path)
+        await _insert_recording(db_path, id=201, filename=source_path.name)
+        await _insert_recording(
+            db_path, id=202, filename="short.mp4", duration_status="too_short"
+        )
+        await _insert_recording(
+            db_path, id=203, filename="open.mp4", end_time=None
+        )
+        await _insert_recording(
+            db_path, id=204, filename="gone.mp4", transcribed=-1,
+            transcribe_error="source media unavailable: recording file is missing"
+        )
+        await _insert_recording(
+            db_path, id=205, filename="gone.srt.mp4", transcribed=-1,
+            transcribe_error="source media/SRT unavailable: non-empty SRT sidecar is missing"
+        )
+        await _insert_recording(
+            db_path, id=206, filename="running.mp4", transcribed=1,
+            synced=1, gpu_job_id="gpu-job-206"
+        )
+        transcribe.aio_connect = lambda: dbmod.aio_connect(db_path)
+        diagnosis = await transcribe.transcription_queue_diagnosis(gpu_online=False)
+
+        assert diagnosis["counts"]["ready_to_submit"] == 0
+        assert diagnosis["counts"]["duration_not_accepted"] == 1
+        assert diagnosis["counts"]["end_time_invalid"] == 1
+        assert diagnosis["counts"]["media_missing"] == 1
+        assert diagnosis["counts"]["srt_missing"] == 1
+        assert diagnosis["counts"]["gpu_job_running"] == 1
+        assert diagnosis["blocked_reason"] == "gpu_offline"
+
+        async with aiosqlite.connect(db_path) as con:
+            rows = await (await con.execute(
+                "SELECT id, transcribed, synced FROM recordings WHERE id IN (201, 202, 203, 204, 205, 206) ORDER BY id"
+            )).fetchall()
+        assert rows == [(201, 0, 0), (202, 0, 0), (203, 0, 0), (204, -1, 0), (205, -1, 0), (206, 1, 1)]
+    finally:
+        source_path.unlink(missing_ok=True)
         Path(db_path).unlink(missing_ok=True)
 
 

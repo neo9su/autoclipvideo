@@ -2746,6 +2746,11 @@ async def gpu_status():
         if row[0] and os.path.isfile(_recording_file_path(row[0]) or "")
     )
     result["pending_transcribe"] = pending_transcribe
+    from transcribe import transcription_queue_diagnosis
+    result["transcription_queue"] = await transcription_queue_diagnosis(
+        gpu_online=result["online"],
+        gpu_error=result.get("health", {}).get("error") if isinstance(result.get("health"), dict) else None,
+    )
     # Include cached watchdog state (no extra HTTP call needed)
     from gpu_state import watchdog_status
     result["watchdog"] = watchdog_status()
@@ -2769,6 +2774,12 @@ async def gpu_status():
         "stale_recovery_count": ps["stale_recovery_count"],
         "last_recovery_at": _iso(ps["last_recovery_at"]),
         "last_recovery_job_id": ps["last_recovery_job_id"],
+        "diagnosis": {
+            "counts": (ps.get("diagnosis") or {}).get("counts", {}),
+            "samples": (ps.get("diagnosis") or {}).get("samples", []),
+            "can_submit_count": (ps.get("diagnosis") or {}).get("can_submit_count", 0),
+            "blocked_reason": (ps.get("diagnosis") or {}).get("blocked_reason"),
+        },
         "poll_interval": POLL_INTERVAL,
     }
     # Maintenance mode flag
