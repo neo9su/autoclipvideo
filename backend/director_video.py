@@ -246,6 +246,14 @@ _SCENE_SUBTITLE_STYLES = {
 }
 
 
+def validate_director_media_inputs(ass_content: str, tts_audio_b64: str) -> None:
+    """Reject publish jobs that could silently lose subtitles or voiceover."""
+    if not ass_content or "Dialogue:" not in ass_content:
+        raise ValueError("director composition requires non-empty ASS subtitles")
+    if not tts_audio_b64:
+        raise ValueError("director composition requires TTS audio")
+
+
 def _get_scene_subtitle_style(scene_type: str) -> dict:
     """获取场景类型的字幕样式配置。"""
     return _SCENE_SUBTITLE_STYLES.get(scene_type, _SCENE_SUBTITLE_STYLES['neutral'])
@@ -582,6 +590,11 @@ class DirectorVideoComposer:
             except Exception as ae:
                 logger.error(f"[DIRECTOR] compose_final_video: TTS audio encode FAILED: {ae}")
                 return None
+            try:
+                validate_director_media_inputs(ass_content, tts_b64)
+            except ValueError as input_error:
+                logger.error("[DIRECTOR] required media input validation failed: %s", input_error)
+                return None
 
             # 5. 提交 GPU director job
             import aiohttp as _aio_dv
@@ -716,6 +729,24 @@ class DirectorVideoComposer:
             if not output_path.exists() or output_path.stat().st_size == 0:
                 raise RuntimeError("remote director output was empty")
             logger.info(f"[DIRECTOR] compose_final_video: output file size={output_path.stat().st_size}")
+
+            # Quality probing is performed by the GPU worker.  The control
+            # plane must not use local ffprobe or accept an unplayable result.
+            async with _aio_dv.ClientSession() as session:
+                async with session.get(
+                    f"{self._GPU_SERVICE_URL}/director-jobs/{job_id}/quality",
+                    timeout=_aio_dv.ClientTimeout(total=30),
+                ) as quality_response:
+                    quality = await quality_response.json()
+            if quality_response.status != 200 or not quality.get("ok"):
+                raise RuntimeError(f"remote director quality gate failed: {quality.get('errors', ['unknown error'])}")
+            if quality.get("video_streams", 0) < 1 or quality.get("audio_streams", 0) < 1:
+                raise RuntimeError("remote director quality gate requires video and audio streams")
+            duration = float(quality.get("duration") or 0)
+            if duration < 30.5:
+                raise RuntimeError(
+                    f"remote director quality gate duration {duration:.2f}s is below the 30.5s publish minimum"
+                )
 
             logger.info(f"Director video composition complete (GPU): {output_path}")
 
