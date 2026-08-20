@@ -97,6 +97,14 @@ def _recording_file_exists(filename: str | None) -> bool:
     return bool(path and os.path.exists(path))
 
 
+def _recording_file_exists_for_row(filename: str | None) -> bool:
+    """Check a DB filename using the same safe path contract as media jobs."""
+    from media_contract import resolve_media_file
+
+    path = resolve_media_file(filename or "")
+    return bool(path and path.is_file())
+
+
 def _parse_recording_time(value: str | None) -> datetime | None:
     """Parse DB timestamps stored with either ISO 'T' or SQLite space separators."""
     if not value:
@@ -120,7 +128,7 @@ def _is_finished_unsynced_upload_candidate(row) -> bool:
         return False
     if row["duration_status"] != "accepted":
         return False
-    return _recording_file_exists(row["filename"])
+    return _recording_file_exists_for_row(row["filename"])
 
 
 async def _cleanup_stale_open_recording_placeholders(max_age_hours: int = STALE_OPEN_RECORDING_HOURS) -> int:
@@ -2729,16 +2737,26 @@ async def gpu_status():
     except Exception as e:
         logger.error(f"GPU status check failed: {e}")
 
-    # Pending transcription jobs: in-flight on GPU + waiting to upload (exclude live segments)
+    # Pending transcription jobs: in-flight on GPU + waiting to upload.  A DB
+    # placeholder without a mounted source MP4 is terminal, not pending; count
+    # it here exactly as the poller does so the status endpoint cannot report a
+    # permanently stuck backlog.
     async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
         async with db.execute(
-            """SELECT COUNT(*) FROM recordings
+            """SELECT transcribed, gpu_job_id, filename, synced, local_deleted,
+                      end_time, start_time, duration_status
+               FROM recordings
                WHERE (transcribed = 1 AND gpu_job_id IS NOT NULL)
                   OR (transcribed = 0 AND synced = 0 AND local_deleted = 0
-                      AND end_time IS NOT NULL AND end_time != start_time
-                      AND duration_status = 'accepted')"""
+                      AND end_time IS NOT NULL)"""
         ) as cur:
-            (pending_transcribe,) = await cur.fetchone()
+            pending_rows = await cur.fetchall()
+    pending_transcribe = sum(
+        1 for row in pending_rows
+        if row["transcribed"] == 1
+        or _is_finished_unsynced_upload_candidate(row)
+    )
     result["pending_transcribe"] = pending_transcribe
     # Include cached watchdog state (no extra HTTP call needed)
     from gpu_state import watchdog_status
@@ -3137,8 +3155,8 @@ async def retry_all_clip_queue_jobs():
     failed = 0
     for rec in records:
         mp4_path = os.path.join(RECORDINGS_DIR, rec["filename"])
-        srt_path = resolve_srt_path(mp4_path)
-        if not os.path.isfile(mp4_path) or not srt_path:
+        srt_path = os.path.join(RECORDINGS_DIR, os.path.splitext(rec["filename"])[0] + ".srt")
+        if not os.path.exists(mp4_path) or not os.path.exists(srt_path):
             failed += 1
             continue
         async with aio_connect() as db:
@@ -5035,7 +5053,7 @@ async def _periodic_clip_dispatch():
     Dispatches recordings with transcribed=2 and clipped=0 that have valid files.
     Only dispatches when GPU service is online.
     """
-    from transcribe import _mark_missing_clip_artifacts_terminal, _run_editor, get_clip_queue, _pending_heap
+    from transcribe import _run_editor, get_clip_queue, _pending_heap
     BATCH_LIMIT = 10
     while True:
         try:
@@ -5073,20 +5091,15 @@ async def _periodic_clip_dispatch():
                         
                         # Build paths
                         mp4_path = os.path.join(RECORDINGS_DIR, filename)
-                        srt_path = resolve_srt_path(mp4_path)
+                        srt_path = os.path.join(RECORDINGS_DIR, 
+                            os.path.splitext(filename)[0] + ".srt")
                         
                         # Check files exist
-                        if not os.path.isfile(mp4_path):
-                            logger.warning(f"Clip dispatch: recording {rec_id} has no source MP4; marking unavailable")
-                            await _mark_missing_clip_artifacts_terminal(
-                                rec_id, filename, srt=False,
-                            )
+                        if not os.path.exists(mp4_path):
+                            logger.debug(f"Clip dispatch: skipping {rec_id}, MP4 missing")
                             continue
-                        if not srt_path:
-                            logger.warning(f"Clip dispatch: recording {rec_id} has no usable SRT; marking unavailable")
-                            await _mark_missing_clip_artifacts_terminal(
-                                rec_id, filename, srt=True,
-                            )
+                        if not os.path.exists(srt_path):
+                            logger.debug(f"Clip dispatch: skipping {rec_id}, SRT missing")
                             continue
                         
                         clip_count = rec["clip_count"] if rec["clip_count"] else 1
