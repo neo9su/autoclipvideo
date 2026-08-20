@@ -135,6 +135,15 @@ async def _mark_missing_source(recording_id: int, filename: str, reason: str) ->
         await db.commit()
 
 
+async def _mark_missing_source_media(recording_id: int, filename: str) -> None:
+    """Keep the legacy helper contract while using the terminal skip path."""
+    await _mark_missing_source(
+        recording_id,
+        filename,
+        f"missing source media: {filename}",
+    )
+
+
 async def _mark_missing_clip_source(recording_id: int, filename: str, reason: str) -> None:
     """Terminally classify a completed transcript whose clip inputs disappeared."""
     logger.warning("Recording %s (%s) cannot enter clipping: %s", recording_id, filename, reason)
@@ -427,12 +436,12 @@ async def poll_transcriptions(broadcast_fn=None):
                     "AND duration_status = 'accepted'"
                 ) as cur:
                     pending = await cur.fetchall()
-                async with db.execute(
-                    """SELECT * FROM recordings
+            async with db.execute(
+                """SELECT * FROM recordings
                        WHERE synced = 0 AND transcribed = 0 AND local_deleted = 0
                          AND end_time IS NOT NULL AND end_time != start_time
-                         AND duration_status = 'accepted'"""
-                ) as cur:
+                         AND (duration_status = 'accepted' OR duration_status IS NULL)"""
+            ) as cur:
                     unsynced = await cur.fetchall()
 
             has_work = bool(pending or unsynced)
