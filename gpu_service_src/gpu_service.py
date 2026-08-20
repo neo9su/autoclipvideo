@@ -1972,7 +1972,10 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
         # Write ASS
         ass_path = os.path.join(out_dir, "subs.ass")
         has_subs = False
-        if ass_content and "Dialogue:" in ass_content:
+        if ass_content and __import__("re").search(
+            r"(?m)^Dialogue:\s*(?:\d+,)?\d+:\d{2}:\d{2}\.\d{2},\d+:\d{2}:\d{2}\.\d{2},",
+            ass_content,
+        ):
             with open(ass_path, "w", encoding="utf-8") as f:
                 f.write(ass_content)
             has_subs = True
@@ -1991,7 +1994,6 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
         if not has_tts:
             raise RuntimeError("Final encode requires non-empty TTS audio")
 
-        merged_has_audio = await _has_audio_stream(merged)
         inputs = ["-i", merged]
 
         if has_tts:
@@ -2001,15 +2003,8 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
                 "aformat=sample_fmts=fltp:channel_layouts=stereo[aout]"
             )
             has_audio_out = True
-        elif merged_has_audio:
-            audio_filter = (
-                "[0:a]acompressor=threshold=-25dB:ratio=3:attack=5:release=100:makeup=4dB,"
-                "aformat=sample_fmts=fltp:channel_layouts=stereo[aout]"
-            )
-            has_audio_out = True
         else:
-            audio_filter = None
-            has_audio_out = False
+            raise RuntimeError("Final encode requires generated voiceover audio")
 
         if not has_audio_out:
             raise RuntimeError("Final encode requires an audio stream")
@@ -2072,6 +2067,7 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
         _update_director_job(
             job_id, status="done", phase="done", pct=100,
             output_path=final_out, thumb_path=thumb_path or "",
+            subtitle_burned=True, generated_voiceover_mixed=True,
         )
         logger.info(f"Director job {job_id} complete: {final_out}")
 

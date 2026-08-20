@@ -2591,7 +2591,7 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
         has_subs = bool(
             ass_content
             and _re.search(
-                r"(?m)^Dialogue:\s*\d+:\d{2}:\d{2}\.\d{2},"
+                r"(?m)^Dialogue:\s*(?:\d+,)?\d+:\d{2}:\d{2}\.\d{2},"
                 r"\d+:\d{2}:\d{2}\.\d{2},",
                 ass_content,
             )
@@ -2691,6 +2691,7 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
         _update_director_job(
             job_id, status="done", phase="done", pct=100,
             output_path=final_out, thumb_path=thumb_path or "",
+            subtitle_burned=True, generated_voiceover_mixed=True,
         )
         logger.info(f"Director job {job_id} complete: {final_out}")
 
@@ -2787,7 +2788,14 @@ async def get_director_quality(job_id: str):
     if not path or not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="Output file missing on server")
     probe = await _probe_media(path)
-    return {**probe, "ok": not probe["errors"], "execution_node": "remote-gpu", "job_id": job_id}
+    return {
+        **probe,
+        "ok": not probe["errors"],
+        "execution_node": "remote-gpu",
+        "job_id": job_id,
+        "subtitle_burned": job.get("subtitle_burned") is True,
+        "generated_voiceover_mixed": job.get("generated_voiceover_mixed") is True,
+    }
 
 
 @app.get("/director-jobs/{job_id}/mp4")

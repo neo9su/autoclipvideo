@@ -1008,11 +1008,8 @@ async def _compose_video_bg(
             # Keep API/manual director workflow aligned with the automatic
             # pipeline: <28s is too short to rescue; 28s~30.5s gets padded so
             # Douyin never rejects near-boundary 29.x clips as under 30s.
-            from transcribe import (
-                MIN_FINAL_VIDEO_DURATION,
-                _get_video_duration,
-            )
-            _dur = await _get_video_duration(output_path)
+            from transcribe import MIN_FINAL_VIDEO_DURATION
+            _dur = float(getattr(composer, "last_quality_report", {}).get("duration") or 0)
             if _dur <= 0:
                 raise RuntimeError("导演版视频时长探测失败")
             if _dur < MIN_FINAL_VIDEO_DURATION:

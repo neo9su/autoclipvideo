@@ -24,10 +24,10 @@ def test_gpu_final_encode_requires_generated_voiceover_and_never_source_fallback
     assert "elif merged_has_audio" not in source
 
 
-def test_api_only_marks_completed_after_composer_and_release_postprocess():
+def test_api_only_marks_completed_after_composer_and_remote_duration_gate():
     source = API.read_text(encoding="utf-8")
     compose = source.index("output_path = await composer.compose_final_video")
     status = source.index("director_status = 2", compose)
 
-    assert source.index("postprocess_final_video", compose) < status
+    assert source.index("quality_report", compose) < status
     assert source.index("director_final_video = ?", compose) < status

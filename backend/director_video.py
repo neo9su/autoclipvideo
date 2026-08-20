@@ -83,8 +83,11 @@ _ANIM_KW_POP = (r"{\fad(0,200)"
 
 def _require_burn_in_and_voiceover(ass_content: str, audio_path: str) -> None:
     """Fail closed when a release would omit subtitles or the generated voiceover."""
-    if not isinstance(ass_content, str) or "Dialogue:" not in ass_content:
-        raise RuntimeError("subtitle burn-in contract failed: timed ASS dialogue is missing")
+    if not isinstance(ass_content, str) or not __import__("re").search(
+        r"(?m)^Dialogue:\s*(?:\d+,)?\d+:\d{2}:\d{2}\.\d{2},\d+:\d{2}:\d{2}\.\d{2},",
+        ass_content,
+    ):
+        raise RuntimeError("subtitle burn-in contract failed: requires non-empty timed subtitles")
     audio_file = Path(audio_path)
     if not audio_file.is_file() or audio_file.stat().st_size <= 0:
         raise RuntimeError("voiceover contract failed: generated audio is missing or empty")
@@ -100,6 +103,10 @@ def _validate_remote_media_report(report: Dict) -> None:
         raise RuntimeError("remote media quality gate failed: audio stream is missing")
     if float(report.get("duration") or 0) <= 0:
         raise RuntimeError("remote media quality gate failed: duration is invalid")
+    if report.get("subtitle_burned") is not True:
+        raise RuntimeError("remote media quality gate failed: subtitles were not burned in")
+    if report.get("generated_voiceover_mixed") is not True:
+        raise RuntimeError("remote media quality gate failed: generated voiceover was not mixed")
 
 
 def _annotate_dir(text: str) -> str:
@@ -658,7 +665,9 @@ class DirectorVideoComposer:
                         raise RuntimeError(
                             f"remote director quality gate unavailable: HTTP {quality_response.status}"
                         )
-                    _validate_remote_media_report(await quality_response.json())
+                    quality_report = await quality_response.json()
+                    _validate_remote_media_report(quality_report)
+                    self.last_quality_report = quality_report
             logger.info(f"[DIRECTOR] compose_final_video: downloading job {job_id} mp4")
             async with _aio_dv.ClientSession() as session:
                 async with session.get(
