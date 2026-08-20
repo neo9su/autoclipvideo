@@ -21,6 +21,7 @@ def test_publish_policy_accepts_duration_above_old_limit():
 def test_publish_policy_rejects_only_outside_new_bounds():
     assert "≥ 15" in validate_publish_duration(14.9)
     assert "≤ 300" in validate_publish_duration(300.1)
+    assert "不可用" in validate_publish_duration(float("nan"))
 
 
 @pytest.mark.asyncio
