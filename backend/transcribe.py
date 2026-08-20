@@ -116,6 +116,8 @@ def classify_transcription_record(
     """Return a stable read-only reason for a transcription queue record."""
     if row.get("transcribed") == 1 and row.get("synced") == 1 and row.get("gpu_job_id"):
         return "gpu_job_running"
+    if row.get("transcribed") == 2:
+        return "transcription_complete"
     if row.get("local_deleted"):
         return "media_deleted"
     if row.get("transcribed") == -1:
@@ -173,32 +175,38 @@ async def transcription_queue_diagnosis(*, gpu_online: bool, gpu_error: str | No
         ) as cur:
             rows = await cur.fetchall()
 
+    merge_blocked_ids = {
+        sample.get("recording_id")
+        for sample in ((_poll_state.get("diagnosis") or {}).get("merge_samples") or [])
+        if sample.get("recording_id") is not None
+    }
     for row in rows:
-        if row["transcribed"] == 1 and row["gpu_job_id"]:
-            reason = "gpu_job_running"
-            counts[reason] = counts.get(reason, 0) + 1
-            if len(samples) < QUEUE_DIAGNOSIS_SAMPLE_LIMIT:
-                samples.append(_queue_sample(row, reason, status="running"))
-            continue
-        if row["local_deleted"]:
-            reason = "media_deleted"
-        elif row["transcribed"] == -1:
-            error = (row["transcribe_error"] or row["skip_reason"] or "").lower()
-            reason = "srt_missing" if "srt" in error else "media_missing"
-        elif row["duration_status"] != "accepted":
+        media_exists = os.path.isfile(os.path.join(RECORDINGS_DIR, row["filename"] or ""))
+        reason = classify_transcription_record(
+            row,
+            media_exists=media_exists,
+            gpu_online=gpu_online,
+            merge_blocked=row["id"] in merge_blocked_ids,
+            gpu_error=gpu_error,
+        )
+        if reason == "duration_invalid":
             reason = "duration_not_accepted"
-        elif not row["end_time"] or row["end_time"] == row["start_time"]:
-            reason = "end_time_invalid"
-        elif not os.path.isfile(os.path.join(RECORDINGS_DIR, row["filename"] or "")):
-            reason = "media_missing"
-        elif not gpu_online:
+        elif reason == "gpu_offline_or_error":
             reason = "gpu_error" if gpu_error else "gpu_offline"
-        else:
+        # A cached merge result is authoritative for the last poll cycle. Do
+        # not report the same row as ready merely because the media still
+        # exists while the merger is waiting for another chunk.
+        if reason == "ready_to_submit" and row["id"] in merge_blocked_ids:
+            reason = "merge_blocked"
+        if reason == "ready_to_submit":
             can_submit += 1
-            reason = "ready_to_submit"
+        if reason == "gpu_job_running":
+            sample_status = "running"
+        else:
+            sample_status = "pending"
         counts[reason] = counts.get(reason, 0) + 1
         if len(samples) < QUEUE_DIAGNOSIS_SAMPLE_LIMIT:
-            samples.append(_queue_sample(row, reason))
+            samples.append(_queue_sample(row, reason, status=sample_status))
 
     poll_diagnosis = _poll_state.get("diagnosis") or {}
     merge_samples = poll_diagnosis.get("merge_samples", [])
@@ -208,7 +216,7 @@ async def transcription_queue_diagnosis(*, gpu_online: bool, gpu_error: str | No
     blocked_reason = None
     if can_submit == 0:
         priority = ("gpu_error", "gpu_offline", "merge_blocked", "media_missing",
-                    "srt_missing", "duration_not_accepted", "end_time_invalid")
+                    "srt_missing", "duration_invalid", "end_time_invalid")
         blocked_reason = next((item for item in priority if counts.get(item)), "queue_empty")
     return {
         "counts": counts,

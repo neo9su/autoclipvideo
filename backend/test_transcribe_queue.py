@@ -47,6 +47,7 @@ def test_transcription_queue_classifier_covers_submission_blockers() -> None:
     assert classify_transcription_record(base, media_exists=True, gpu_online=True, merge_blocked=True) == "merge_blocked"
     assert classify_transcription_record(base, media_exists=True, gpu_online=False) == "gpu_offline_or_error"
     assert classify_transcription_record({**base, "gpu_job_id": "job-1", "synced": 1, "transcribed": 1}, media_exists=True, gpu_online=True) == "gpu_job_running"
+    assert classify_transcription_record({**base, "transcribed": 2}, media_exists=True, gpu_online=True) == "transcription_complete"
 
 
 def _load_backend_main():
