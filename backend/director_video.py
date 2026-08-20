@@ -5,7 +5,9 @@
 """
 
 import asyncio
+import base64
 import logging
+import re
 from gpu_execution import media_execution_node, reject_local_media, require_remote_gpu
 from video_editing_skills import (
     build_edit_sound_cues,
@@ -100,6 +102,26 @@ def _sec_to_ass(s: float) -> str:
 # Subtitle-to-audio sync offset (seconds). Positive = subtitle appears later.
 # Compensates for AAC encoder delay in the GPU concat pipeline.
 _SUB_OFFSET = 0.30
+
+
+def validate_director_acceptance_payload(ass_content: str, tts_audio_b64: str) -> None:
+    """Reject director jobs that cannot produce a publishable artifact."""
+    if not ass_content or "Dialogue:" not in ass_content:
+        raise ValueError("director job requires non-empty timed subtitles")
+    if not re.search(
+        r"^Dialogue:\s*\d+,\d+:\d{2}:\d{2}\.\d{2},\d+:\d{2}:\d{2}\.\d{2},",
+        ass_content,
+        flags=re.MULTILINE,
+    ):
+        raise ValueError("director job subtitles contain no timed cues")
+    if not tts_audio_b64:
+        raise ValueError("director job requires generated TTS audio")
+    try:
+        decoded_audio = base64.b64decode(tts_audio_b64, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise ValueError("director job TTS audio is not valid base64") from exc
+    if not decoded_audio:
+        raise ValueError("director job TTS audio is empty")
 
 
 # Scene-type specific subtitle styles for dynamic text annotation
@@ -521,6 +543,7 @@ class DirectorVideoComposer:
             except Exception as ae:
                 logger.error(f"[DIRECTOR] compose_final_video: TTS audio encode FAILED: {ae}")
                 return None
+            validate_director_acceptance_payload(ass_content, tts_b64)
 
             # 5. 提交 GPU director job
             import aiohttp as _aio_dv
@@ -625,6 +648,23 @@ class DirectorVideoComposer:
                     raise RuntimeError(f"remote director job failed: {data.get('error', 'unknown error')}")
             else:
                 raise TimeoutError(f"remote director job {job_id} did not finish before the wait deadline")
+
+            # The GPU node is the source of truth for the publish gate.  Do
+            # this before downloading/returning an artifact so a job with a
+            # missing stream can never be marked complete by the control plane.
+            async with _aio_dv.ClientSession() as session:
+                async with session.get(
+                    f"{self._GPU_SERVICE_URL}/director-jobs/{job_id}/quality",
+                    timeout=_aio_dv.ClientTimeout(total=30),
+                ) as quality_response:
+                    quality_payload = await quality_response.json()
+            if quality_response.status != 200 or not quality_payload.get("ok"):
+                raise RuntimeError(
+                    "remote director acceptance failed: "
+                    f"{quality_payload.get('errors') or 'quality endpoint unavailable'}"
+                )
+            if quality_payload.get("video_streams", 0) < 1 or quality_payload.get("audio_streams", 0) < 1:
+                raise RuntimeError("remote director acceptance failed: final video requires video and audio streams")
 
             # 7. 下载结果
             logger.info(f"[DIRECTOR] compose_final_video: downloading job {job_id} mp4")
