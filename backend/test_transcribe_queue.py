@@ -219,6 +219,25 @@ async def test_stale_job_recovery_resets_only_matching_recording(backend_main) -
         Path(db_path).unlink(missing_ok=True)
 
 
+async def test_missing_finished_source_is_marked_terminal(backend_main) -> None:
+    import transcribe
+    fd, db_path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.unlink(db_path)
+    try:
+        await _create_queue_test_db(backend_main, db_path)
+        await _insert_recording(db_path, id=107, filename="not-mounted.mp4")
+        transcribe.aio_connect = lambda: dbmod.aio_connect(db_path)
+        await transcribe.mark_missing_source_media(107, "not-mounted.mp4")
+        async with aiosqlite.connect(db_path) as con:
+            row = await (await con.execute(
+                "SELECT transcribed, transcribe_error, skip_reason FROM recordings WHERE id=107"
+            )).fetchone()
+        assert row == (-1, "source media unavailable: not-mounted.mp4", "source media unavailable: not-mounted.mp4")
+    finally:
+        Path(db_path).unlink(missing_ok=True)
+
+
 def test_transcription_watchdog_contract_is_present() -> None:
     source = Path("gpu_service/main.py").read_text()
     assert "async def _job_watchdog_loop" in source

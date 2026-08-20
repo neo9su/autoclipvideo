@@ -2733,10 +2733,18 @@ async def gpu_status():
     async with aio_connect() as db:
         async with db.execute(
             """SELECT COUNT(*) FROM recordings
-               WHERE (transcribed = 1 AND gpu_job_id IS NOT NULL)
-                  OR (transcribed = 0 AND synced = 0 AND local_deleted = 0 AND end_time IS NOT NULL)"""
+               WHERE transcribed = 1 AND gpu_job_id IS NOT NULL"""
         ) as cur:
-            (pending_transcribe,) = await cur.fetchone()
+            (running_transcribe,) = await cur.fetchone()
+        async with db.execute(
+            """SELECT filename FROM recordings
+               WHERE transcribed=0 AND synced=0 AND local_deleted=0 AND end_time IS NOT NULL"""
+        ) as cur:
+            pending_upload_rows = await cur.fetchall()
+    pending_transcribe = running_transcribe + sum(
+        1 for row in pending_upload_rows
+        if row[0] and os.path.isfile(_recording_file_path(row[0]) or "")
+    )
     result["pending_transcribe"] = pending_transcribe
     # Include cached watchdog state (no extra HTTP call needed)
     from gpu_state import watchdog_status

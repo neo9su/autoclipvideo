@@ -19,6 +19,7 @@ from analyzer import analyze_recording
 from thumbnail import generate_thumbnail
 from final_video import postprocess_final_video
 from gpu_execution import reject_local_media
+from srt_resolver import resolve_srt_path
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +102,20 @@ _CREATIVE_SEM = asyncio.Semaphore(4)
 _job_submit_times: dict[str, float] = {}   # gpu_job_id → time.time() when submitted
 _job_durations: list[float] = []           # recent completed job durations (last 20)
 _session_done: int = 0                     # jobs completed since backend start
+
+
+async def mark_missing_source_media(recording_id: int, filename: str | None) -> None:
+    """Persist a terminal, actionable error for a finished missing source."""
+    basename = os.path.basename(filename or "") or "<unnamed>"
+    reason = f"source media unavailable: {basename}"
+    async with aio_connect() as db:
+        await db.execute(
+            """UPDATE recordings SET transcribed=-1, transcribe_error=?, skip_reason=?
+               WHERE id=? AND transcribed=0 AND synced=0""",
+            (reason, reason, recording_id),
+        )
+        await db.commit()
+    logger.warning("Recording %s marked unavailable: %s", recording_id, reason)
 
 
 def transcribe_timing() -> dict:
@@ -359,13 +374,15 @@ async def poll_transcriptions(broadcast_fn=None):
         recoverable = []
         for rec in orphaned:
             mp4_path = os.path.join(RECORDINGS_DIR, rec["filename"])
-            srt_path = os.path.splitext(mp4_path)[0] + ".srt"
-            if os.path.exists(mp4_path) and os.path.exists(srt_path):
+            srt_path = resolve_srt_path(mp4_path)
+            if os.path.isfile(mp4_path) and srt_path:
                 recoverable.append((rec, mp4_path, srt_path))
             else:
-                logger.warning(
-                    f"Startup recovery: recording {rec['id']} missing files, skipping "
-                    f"(mp4={os.path.exists(mp4_path)}, srt={os.path.exists(srt_path)})"
+                await _mark_unprocessable_source(
+                    rec["id"],
+                    mp4_exists=os.path.isfile(mp4_path),
+                    srt_exists=bool(srt_path),
+                    context="startup recovery",
                 )
         if recoverable:
             logger.info(f"Startup recovery: {len(recoverable)} recordings to re-trigger (batch size {_STARTUP_RECOVERY_BATCH})")
@@ -399,8 +416,17 @@ async def poll_transcriptions(broadcast_fn=None):
                        WHERE synced = 0 AND transcribed = 0 AND local_deleted = 0
                          AND end_time IS NOT NULL AND end_time != start_time
                          AND duration_status = 'accepted'"""
-                ) as cur:
+                    ) as cur:
                     unsynced = await cur.fetchall()
+
+            available_unsynced = []
+            for rec in unsynced:
+                filepath = os.path.join(RECORDINGS_DIR, rec["filename"])
+                if os.path.isfile(filepath):
+                    available_unsynced.append(rec)
+                else:
+                    await mark_missing_source_media(rec["id"], rec["filename"])
+            unsynced = available_unsynced
 
             has_work = bool(pending or unsynced)
 
@@ -431,9 +457,28 @@ async def poll_transcriptions(broadcast_fn=None):
                         break
                     filepath = os.path.join(RECORDINGS_DIR, rec["filename"])
                     if not os.path.exists(filepath):
+                        await _mark_unprocessable_source(
+                            rec["id"], mp4_exists=False, srt_exists=None,
+                            context="transcription upload",
+                        )
+                        continue
+                    if not os.access(filepath, os.R_OK):
+                        await _mark_unprocessable_source(
+                            rec["id"], mp4_exists=True, srt_exists=None,
+                            context="transcription upload",
+                        )
                         continue
                     result = await maybe_merge_before_upload(rec["room_id"], rec["id"])
                     if result is None:
+                        # The merger returns None both while a chunk is being
+                        # assembled and when its source file is gone.  Re-read
+                        # the row so permanent missing media is terminal rather
+                        # than silently counted and retried forever.
+                        if not os.path.isfile(filepath):
+                            await _mark_unprocessable_source(
+                                rec["id"], mp4_exists=False, srt_exists=None,
+                                context="transcription upload",
+                            )
                         blocked += 1
                         continue
                     upload_path, primary_id = result
@@ -482,6 +527,45 @@ async def poll_transcriptions(broadcast_fn=None):
             _flush_event.clear()
         except asyncio.TimeoutError:
             pass
+
+
+async def _mark_unprocessable_source(
+    recording_id: int,
+    *,
+    mp4_exists: bool,
+    srt_exists: bool | None,
+    context: str,
+) -> None:
+    """Terminally classify a source that cannot enter the media pipeline.
+
+    This is deliberately limited to rows still waiting for upload/editing. It
+    never changes completed recordings and makes the reason visible to both the
+    queue API and group matching instead of allowing a silent retry loop.
+    """
+    reason = _source_unavailable_reason(mp4_exists, srt_exists)
+    logger.warning("%s: recording %s marked unprocessable (%s)", context, recording_id, reason)
+    async with aio_connect() as db:
+        await db.execute(
+            """UPDATE recordings
+               SET transcribed = CASE WHEN transcribed = 0 THEN -1 ELSE transcribed END,
+                   clipped = CASE WHEN transcribed = 2 AND clipped IN (0, 1) THEN -1 ELSE clipped END,
+                   synced = 0, gpu_job_id = NULL,
+                   transcribe_error = ?, clip_error = CASE
+                       WHEN transcribed = 2 AND clipped IN (0, 1) THEN ? ELSE clip_error END,
+                   skip_reason = ?
+               WHERE id = ? AND synced = 0 AND transcribed IN (0, 2)""",
+            (reason, reason, reason, recording_id),
+        )
+        await db.commit()
+
+
+def _source_unavailable_reason(mp4_exists: bool, srt_exists: bool | None) -> str:
+    """Return a stable operator-facing reason for a failed source preflight."""
+    if not mp4_exists:
+        return "source media unavailable: recording file is missing"
+    if srt_exists is False:
+        return "source media/SRT unavailable: non-empty SRT sidecar is missing"
+    return "source media unavailable: recording file is not readable"
 
 
 async def _check_job(rec, broadcast_fn):
@@ -603,6 +687,13 @@ async def _fetch_srt(recording_id: int, job_id: str, filename: str, clip_count: 
                     f"SRT download truncated for {job_id}: "
                     f"got {len(content)} B, expected {expected_len} B — skipping"
                 )
+                reason = "SRT download incomplete"
+                async with aio_connect() as db:
+                    await db.execute(
+                        "UPDATE recordings SET transcribed=-1, transcribe_error=?, skip_reason=? WHERE id=?",
+                        (reason, reason, recording_id),
+                    )
+                    await db.commit()
                 return
             if not content.strip():
                 # Whisper produced 0 speech segments — no text in the video.
@@ -631,6 +722,13 @@ async def _fetch_srt(recording_id: int, job_id: str, filename: str, clip_count: 
                 _retranscribe_without_clip.discard(recording_id)
         else:
             logger.error(f"SRT download failed for {job_id}: {_srt_status}")
+            reason = f"SRT unavailable after GPU transcription (HTTP {_srt_status})"
+            async with aio_connect() as db:
+                await db.execute(
+                    "UPDATE recordings SET transcribed=-1, transcribe_error=?, skip_reason=? WHERE id=?",
+                    (reason, reason, recording_id),
+                )
+                await db.commit()
     except Exception as e:
         logger.error(f"SRT fetch error for {job_id}: {e}")
 
