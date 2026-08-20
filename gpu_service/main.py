@@ -2498,11 +2498,7 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
     has_tts_for_lipsync = bool(tts_audio_b64)  # flag for optional lip sync step
 
     try:
-        if "Dialogue:" not in (ass_content or ""):
-            raise ValueError("director job requires non-empty timed subtitles")
-        if not tts_audio_b64:
-            raise ValueError("director job requires TTS audio")
-
+        _validate_director_delivery_inputs(ass_content, tts_audio_b64)
         _update_director_job(job_id, status="processing", phase="preprocess", pct=0)
         _job_start = time.time()
 
@@ -2612,6 +2608,8 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
 
         if not has_tts:
             raise ValueError("director job TTS audio payload is missing or empty")
+        if not has_subs:
+            raise ValueError("director job subtitle payload is missing or empty")
 
         if has_tts:
             inputs += ["-i", tts_path]
@@ -2689,12 +2687,21 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
         _update_director_job(
             job_id, status="done", phase="done", pct=100,
             output_path=final_out, thumb_path=thumb_path or "",
+            subtitle_burned=has_subs, voiceover_mixed=has_tts,
         )
         logger.info(f"Director job {job_id} complete: {final_out}")
 
     except Exception as e:
         _update_director_job(job_id, status="error", error=str(e))
         logger.error(f"Director job {job_id} failed: {e}")
+
+
+def _validate_director_delivery_inputs(ass_content: str, tts_audio_b64: str) -> None:
+    """Reject incomplete director jobs before any media is marked complete."""
+    if not ass_content or "Dialogue:" not in ass_content:
+        raise ValueError("subtitle input is empty or has no timed Dialogue cues")
+    if not tts_audio_b64:
+        raise ValueError("voiceover input is missing")
 
 
 async def _run_director_job(job_id: str, clips: list, ass_content: str,
@@ -2785,12 +2792,19 @@ async def get_director_quality(job_id: str):
     if not path or not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="Output file missing on server")
     probe = await _probe_media(path)
-    return {
-        **probe,
-        "ok": not probe["errors"] and probe.get("video_streams", 0) == 1 and probe.get("audio_streams", 0) >= 1,
-        "execution_node": "remote-gpu",
-        "job_id": job_id,
-    }
+    errors = list(probe["errors"])
+    if probe.get("video_streams", 0) != 1:
+        errors.append("expected exactly one video stream")
+    if probe.get("audio_streams", 0) < 1:
+        errors.append("expected at least one audio stream")
+    if not job.get("subtitle_burned"):
+        errors.append("subtitle burn was not recorded")
+    if not job.get("voiceover_mixed"):
+        errors.append("voiceover mix was not recorded")
+    return {**probe, "ok": not errors, "errors": errors,
+            "subtitle_burned": bool(job.get("subtitle_burned")),
+            "voiceover_mixed": bool(job.get("voiceover_mixed")),
+            "execution_node": "remote-gpu", "job_id": job_id}
 
 
 @app.get("/director-jobs/{job_id}/mp4")
