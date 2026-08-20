@@ -56,6 +56,7 @@ SPLIT_THRESHOLD  = 8 * 1024 * 1024   # files larger than this get split before u
 SPLIT_CHUNK_SIZE = 6 * 1024 * 1024   # target chunk size when splitting large files (below GPU limit)
 
 RECORDINGS_DIR = os.path.join(os.path.dirname(__file__), "..", "recordings")
+MISSING_MEDIA_REASON = "source media unavailable: local recording file is missing"
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +94,23 @@ async def _get_pending_unsynced(room_id: int) -> list:
     result = []
     for row in rows:
         d = dict(row)
-        duration = await probe_duration(os.path.join(RECORDINGS_DIR, d["filename"]))
+        filepath = os.path.join(RECORDINGS_DIR, d["filename"])
+        if not os.path.isfile(filepath):
+            async with aio_connect() as db:
+                await db.execute(
+                    """UPDATE recordings
+                       SET transcribed=-1, transcribe_error=?, skip_reason=?
+                       WHERE id=? AND synced=0 AND transcribed=0""",
+                    (MISSING_MEDIA_REASON, MISSING_MEDIA_REASON, d["id"]),
+                )
+                await db.commit()
+            logger.warning(
+                "Skipping pending recording %s: source media is missing (%s)",
+                d["id"],
+                d["filename"],
+            )
+            continue
+        duration = await probe_duration(filepath)
         status = classify_duration(duration)
         if status != "accepted":
             async with aio_connect() as db:
@@ -350,6 +367,22 @@ async def maybe_merge_before_upload(
         return None
     filepath = os.path.join(RECORDINGS_DIR, rec["filename"])
     if not os.path.isfile(filepath):
+        # Do not leave a permanently missing historical file in the pending
+        # queue.  This is a terminal preflight failure, not a transient GPU
+        # condition; operators can restore the file and explicitly retry it.
+        async with aio_connect() as db:
+            await db.execute(
+                """UPDATE recordings
+                   SET transcribed=-1, transcribe_error=?, skip_reason=?
+                   WHERE id=? AND synced=0 AND transcribed=0""",
+                (MISSING_MEDIA_REASON, MISSING_MEDIA_REASON, recording_id),
+            )
+            await db.commit()
+        logger.warning(
+            "Skipping recording %s: source media is missing (%s)",
+            recording_id,
+            rec["filename"],
+        )
         return None
     
     file_size = os.path.getsize(filepath)
