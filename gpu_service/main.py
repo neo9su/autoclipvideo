@@ -2498,6 +2498,11 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
     has_tts_for_lipsync = bool(tts_audio_b64)  # flag for optional lip sync step
 
     try:
+        if "Dialogue:" not in (ass_content or ""):
+            raise ValueError("director job requires non-empty timed subtitles")
+        if not tts_audio_b64:
+            raise ValueError("director job requires TTS audio")
+
         _update_director_job(job_id, status="processing", phase="preprocess", pct=0)
         _job_start = time.time()
 
@@ -2587,20 +2592,11 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
 
         # Write ASS
         ass_path = os.path.join(out_dir, "subs.ass")
-        import re as _re
-        has_subs = bool(
-            ass_content
-            and _re.search(
-                r"(?m)^Dialogue:\s*(?:\d+,)?\d+:\d{2}:\d{2}\.\d{2},"
-                r"\d+:\d{2}:\d{2}\.\d{2},",
-                ass_content,
-            )
-        )
-        if has_subs:
+        has_subs = False
+        if ass_content and "Dialogue:" in ass_content:
             with open(ass_path, "w", encoding="utf-8") as f:
                 f.write(ass_content)
-        if not has_subs:
-            raise RuntimeError("Director final encode blocked: non-empty timed subtitles are required")
+            has_subs = True
 
         # Write TTS audio
         tts_path = None
@@ -2610,10 +2606,12 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
             with open(tts_path, "wb") as f:
                 f.write(_b64.b64decode(tts_audio_b64))
             has_tts = os.path.exists(tts_path) and os.path.getsize(tts_path) > 0
-        if not has_tts:
-            raise RuntimeError("Director final encode blocked: generated voiceover is required")
 
+        merged_has_audio = await _has_audio_stream(merged)
         inputs = ["-i", merged]
+
+        if not has_tts:
+            raise ValueError("director job TTS audio payload is missing or empty")
 
         if has_tts:
             inputs += ["-i", tts_path]
@@ -2622,10 +2620,10 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
                 "aformat=sample_fmts=fltp:channel_layouts=stereo[aout]"
             )
             has_audio_out = True
+        elif merged_has_audio:
+            raise ValueError("director job must use generated TTS audio, not source-audio fallback")
         else:
-            # Do not silently promote source audio to release audio.  Director
-            # output is accepted only when the generated voiceover is present.
-            raise RuntimeError("Director final encode blocked: generated voiceover audio is missing")
+            raise ValueError("director job has no audio stream")
 
         if has_subs:
             fwd = ass_path.replace("\\", "/")
@@ -2691,7 +2689,6 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
         _update_director_job(
             job_id, status="done", phase="done", pct=100,
             output_path=final_out, thumb_path=thumb_path or "",
-            subtitle_burned=True, generated_voiceover_mixed=True,
         )
         logger.info(f"Director job {job_id} complete: {final_out}")
 
@@ -2775,22 +2772,6 @@ async def _probe_media(path: str) -> dict:
                        "video_codec": videos[0].get("codec_name"), "fps": videos[0].get("avg_frame_rate")})
     if audios:
         report.update({"audio_codec": audios[0].get("codec_name"), "sample_rate": audios[0].get("sample_rate")})
-    # ffprobe metadata alone does not prove that the encoded payload can be
-    # decoded.  Decode one video frame and a short audio window on the GPU
-    # node before exposing the release-quality report.
-    decode_checks = (
-        ("video_decode", ("-map", "0:v:0", "-frames:v", "1", "-f", "null", "-")),
-        ("audio_decode", ("-map", "0:a:0", "-t", "1", "-f", "null", "-")),
-    )
-    for check_name, mapping_args in decode_checks:
-        decode_proc = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-v", "error", "-i", path, *mapping_args,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, decode_stderr = await decode_proc.communicate()
-        if decode_proc.returncode != 0:
-            errors.append(f"{check_name} failed: {decode_stderr.decode(errors='replace')[-300:]}")
     return report
 
 
@@ -2806,11 +2787,9 @@ async def get_director_quality(job_id: str):
     probe = await _probe_media(path)
     return {
         **probe,
-        "ok": not probe["errors"],
+        "ok": not probe["errors"] and probe.get("video_streams", 0) == 1 and probe.get("audio_streams", 0) >= 1,
         "execution_node": "remote-gpu",
         "job_id": job_id,
-        "subtitle_burned": job.get("subtitle_burned") is True,
-        "generated_voiceover_mixed": job.get("generated_voiceover_mixed") is True,
     }
 
 

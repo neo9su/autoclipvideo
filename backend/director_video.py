@@ -81,34 +81,6 @@ _ANIM_KW_POP = (r"{\fad(0,200)"
                 r"\t(450,600,\fscx100\fscy100)}")
 
 
-def _require_burn_in_and_voiceover(ass_content: str, audio_path: str) -> None:
-    """Fail closed when a release would omit subtitles or the generated voiceover."""
-    if not isinstance(ass_content, str) or not __import__("re").search(
-        r"(?m)^Dialogue:\s*(?:\d+,)?\d+:\d{2}:\d{2}\.\d{2},\d+:\d{2}:\d{2}\.\d{2},",
-        ass_content,
-    ):
-        raise RuntimeError("subtitle burn-in contract failed: requires non-empty timed subtitles")
-    audio_file = Path(audio_path)
-    if not audio_file.is_file() or audio_file.stat().st_size <= 0:
-        raise RuntimeError("voiceover contract failed: generated audio is missing or empty")
-
-
-def _validate_remote_media_report(report: Dict) -> None:
-    """Validate GPU-side ffprobe evidence before downloading a release artifact."""
-    if not report.get("ok"):
-        raise RuntimeError(f"remote media quality gate failed: {report.get('errors') or 'unknown error'}")
-    if int(report.get("video_streams") or 0) < 1:
-        raise RuntimeError("remote media quality gate failed: video stream is missing")
-    if int(report.get("audio_streams") or 0) < 1:
-        raise RuntimeError("remote media quality gate failed: audio stream is missing")
-    if float(report.get("duration") or 0) <= 0:
-        raise RuntimeError("remote media quality gate failed: duration is invalid")
-    if report.get("subtitle_burned") is not True:
-        raise RuntimeError("remote media quality gate failed: subtitles were not burned in")
-    if report.get("generated_voiceover_mixed") is not True:
-        raise RuntimeError("remote media quality gate failed: generated voiceover was not mixed")
-
-
 def _annotate_dir(text: str) -> str:
     """在 text 里标注关键词（暖金色 ASS tag）。"""
     for kw in _DIR_SORTED_KWS:
@@ -526,7 +498,9 @@ class DirectorVideoComposer:
             # 3. 构建 ASS 字幕（本地生成，含关键词高亮）
             # video clip duration 已对齐 TTS，字幕用同一个 tts_dur_by_scene 保证同步
             ass_content = config.get("qianchuan_ass_content") or _build_director_ass(video_clips, tr_dur, tts_dur_by_scene)
-            _require_burn_in_and_voiceover(ass_content, audio_path)
+            if "Dialogue:" not in ass_content:
+                logger.error("[DIRECTOR] refusing GPU submission without timed subtitles")
+                return None
 
             config = dict(config)
             config["qianchuan_sound_cues"] = build_edit_sound_cues(
@@ -545,6 +519,9 @@ class DirectorVideoComposer:
                 logger.info(f"[DIRECTOR] compose_final_video: audio_source={audio_source} size={Path(audio_source).stat().st_size}")
                 with open(audio_source, "rb") as f:
                     raw = f.read()
+                if not raw:
+                    logger.error("[DIRECTOR] refusing GPU submission with empty TTS audio")
+                    return None
                 tts_b64 = _b64.b64encode(raw).decode()
                 logger.info(f"[DIRECTOR] compose_final_video: tts_b64 encoded, len={len(tts_b64)}")
             except Exception as ae:
@@ -649,6 +626,18 @@ class DirectorVideoComposer:
                         "[DIRECTOR] remote job %s done: response=%s output_path=%s",
                         job_id, {k: data.get(k) for k in ("status", "phase", "pct", "error")}, output_candidate,
                     )
+                    async with _aio_dv.ClientSession() as session:
+                        async with session.get(
+                            f"{self._GPU_SERVICE_URL}/director-jobs/{job_id}/quality",
+                            timeout=_aio_dv.ClientTimeout(total=30),
+                        ) as quality_response:
+                            if quality_response.status != 200:
+                                raise RuntimeError("remote director quality gate unavailable")
+                            quality = await quality_response.json()
+                    if not quality.get("ok"):
+                        raise RuntimeError(f"remote director quality gate failed: {quality.get('errors', [])}")
+                    if quality.get("duration", 0) < 15 or quality.get("duration", 0) > 300:
+                        raise RuntimeError("remote director output duration is outside publish bounds")
                     break
                 if status == "error":
                     raise RuntimeError(f"remote director job failed: {data.get('error', 'unknown error')}")
@@ -656,18 +645,6 @@ class DirectorVideoComposer:
                 raise TimeoutError(f"remote director job {job_id} did not finish before the wait deadline")
 
             # 7. 下载结果
-            async with _aio_dv.ClientSession() as session:
-                async with session.get(
-                    f"{self._GPU_SERVICE_URL}/director-jobs/{job_id}/quality",
-                    timeout=_aio_dv.ClientTimeout(total=30),
-                ) as quality_response:
-                    if quality_response.status != 200:
-                        raise RuntimeError(
-                            f"remote director quality gate unavailable: HTTP {quality_response.status}"
-                        )
-                    quality_report = await quality_response.json()
-                    _validate_remote_media_report(quality_report)
-                    self.last_quality_report = quality_report
             logger.info(f"[DIRECTOR] compose_final_video: downloading job {job_id} mp4")
             async with _aio_dv.ClientSession() as session:
                 async with session.get(

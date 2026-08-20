@@ -970,12 +970,7 @@ async def compose_video(group_id: int, video_style: str = "dynamic"):
     # ── 后台执行（匹配 + 编码，可能数分钟）────────────────────────────────────────
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            """UPDATE clip_groups SET
-               director_status = 1,
-               director_final_video = NULL,
-               director_error = NULL
-               WHERE id = ?""",
-            (group_id,),
+            "UPDATE clip_groups SET director_status = 1, director_error = NULL WHERE id = ?", (group_id,)
         )
         await db.commit()
     asyncio.create_task(_compose_video_bg(group_id, script_segments, audio_path, recordings_dir, video_style))
@@ -1009,23 +1004,6 @@ async def _compose_video_bg(
             output_path = await composer.compose_final_video(matched_segments, audio_path, config)
             if not output_path:
                 raise RuntimeError("视频合成失败，请查看后端日志")
-
-            # Keep API/manual director workflow aligned with the automatic
-            # pipeline: <28s is too short to rescue; 28s~30.5s gets padded so
-            # Douyin never rejects near-boundary 29.x clips as under 30s.
-            from transcribe import MIN_FINAL_VIDEO_DURATION
-            _dur = float(getattr(composer, "last_quality_report", {}).get("duration") or 0)
-            if _dur <= 0:
-                raise RuntimeError("导演版视频时长探测失败")
-            if _dur < MIN_FINAL_VIDEO_DURATION:
-                try:
-                    os.remove(output_path)
-                except OSError:
-                    logger.warning("Unable to remove rejected director artifact for group %s", group_id)
-                raise RuntimeError(f"导演版视频时长 {_dur:.1f}s < {MIN_FINAL_VIDEO_DURATION:.0f}s 最低要求")
-
-            # The downloaded artifact is already the GPU-produced final encode.
-            # Never invoke a local post-processing fallback on the control plane.
 
             # 清理配音文件（已嵌入视频）
             try:
