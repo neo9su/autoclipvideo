@@ -76,6 +76,15 @@ async def test_absent_source_media_and_srt_is_explicitly_reported() -> None:
     assert "no usable source media/SRT" in matcher.match_error
 
 
+def test_source_unavailable_markers_are_recoverable_pipeline_failures() -> None:
+    from backend.pipeline_state import is_qianchuan_missing_media_error
+
+    assert is_qianchuan_missing_media_error("source media unavailable: clip.mp4")
+    assert is_qianchuan_missing_media_error(
+        "SRT unavailable after GPU transcription (HTTP 404)"
+    )
+
+
 @pytest.mark.asyncio
 async def test_matcher_error_reporting_survives_lightweight_matcher_construction() -> None:
     """Error reporting must work for recovery-created matcher instances too."""
