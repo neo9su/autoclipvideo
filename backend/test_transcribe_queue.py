@@ -15,6 +15,7 @@ sys.path.insert(0, "backend")
 
 import db as dbmod
 from db import init_db
+from transcribe import classify_transcription_record
 
 
 def test_asr_profile_is_explicit_and_remote_friendly() -> None:
@@ -28,6 +29,24 @@ def test_asr_profile_is_explicit_and_remote_friendly() -> None:
     assert options["word_timestamps"] is True
     assert "假发" in options["initial_prompt"]
     assert options["condition_on_previous_text"] is False
+
+
+def test_transcription_queue_classifier_covers_submission_blockers() -> None:
+    base = {
+        "transcribed": 0,
+        "synced": 0,
+        "local_deleted": 0,
+        "start_time": "2026-08-21T00:00:00",
+        "end_time": "2026-08-21T00:01:00",
+        "duration_status": "accepted",
+    }
+    assert classify_transcription_record(base, media_exists=True, gpu_online=True) == "ready_to_submit"
+    assert classify_transcription_record({**base, "duration_status": "too_short"}, media_exists=True, gpu_online=True) == "duration_invalid"
+    assert classify_transcription_record({**base, "end_time": None}, media_exists=True, gpu_online=True) == "end_time_invalid"
+    assert classify_transcription_record(base, media_exists=False, gpu_online=True) == "media_missing"
+    assert classify_transcription_record(base, media_exists=True, gpu_online=True, merge_blocked=True) == "merge_blocked"
+    assert classify_transcription_record(base, media_exists=True, gpu_online=False) == "gpu_offline_or_error"
+    assert classify_transcription_record({**base, "gpu_job_id": "job-1", "synced": 1, "transcribed": 1}, media_exists=True, gpu_online=True) == "gpu_job_running"
 
 
 def _load_backend_main():
