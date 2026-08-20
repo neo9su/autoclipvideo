@@ -250,6 +250,37 @@ async def test_stale_job_recovery_resets_only_matching_recording(backend_main) -
         Path(db_path).unlink(missing_ok=True)
 
 
+async def test_missing_finished_source_is_terminally_skipped() -> None:
+    """A finished DB placeholder must not remain in pending_transcribe forever."""
+    import transcribe
+
+    fd, db_path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.unlink(db_path)
+    try:
+        dbmod.DB_PATH = db_path
+        await init_db()
+        async with aiosqlite.connect(db_path) as con:
+            await con.execute("INSERT INTO rooms(id, name, url) VALUES(1, 'room', 'https://example.invalid')")
+            await con.commit()
+        await _insert_recording(
+            db_path,
+            id=107,
+            filename="gone.mp4",
+            start_time=(datetime.now() - timedelta(minutes=10)).isoformat(),
+            end_time=datetime.now().isoformat(),
+        )
+        transcribe.aio_connect = lambda: dbmod.aio_connect(db_path)
+        await transcribe._mark_missing_source(107, "gone.mp4", "missing source MP4; upload skipped permanently")
+        async with aiosqlite.connect(db_path) as con:
+            row = await (await con.execute(
+                "SELECT transcribed, synced, transcribe_error, skip_reason FROM recordings WHERE id=107"
+            )).fetchone()
+        assert row == (-1, 0, "missing source MP4; upload skipped permanently", "missing source MP4; upload skipped permanently")
+    finally:
+        Path(db_path).unlink(missing_ok=True)
+
+
 def test_transcription_watchdog_contract_is_present() -> None:
     source = Path("gpu_service/main.py").read_text()
     assert "async def _job_watchdog_loop" in source
