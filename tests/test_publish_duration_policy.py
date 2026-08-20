@@ -22,3 +22,8 @@ def test_publish_accepts_video_above_previous_limit():
 def test_publish_rejects_video_above_new_limit():
     reason = validate_publish_duration(300.1)
     assert reason == "时长超限（300.1s，需要 ≤ 300 秒）"
+
+
+def test_publish_rejects_non_finite_duration():
+    assert validate_publish_duration(float("nan")) == "视频时长不可用（媒体探测失败或缺失）"
+    assert validate_publish_duration(float("inf")) == "视频时长不可用（媒体探测失败或缺失）"

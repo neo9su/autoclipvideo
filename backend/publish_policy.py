@@ -1,5 +1,7 @@
 """Shared policy for videos submitted through the publish queue."""
 
+import math
+
 MIN_PUBLISH_DURATION_SECONDS = 15.0
 MAX_PUBLISH_DURATION_SECONDS = 300.0
 
@@ -11,6 +13,8 @@ def validate_publish_duration(duration: object) -> str | None:
     except (TypeError, ValueError):
         return "视频时长无法读取"
 
+    if not math.isfinite(value):
+        return "视频时长不可用（媒体探测失败或缺失）"
     if value < MIN_PUBLISH_DURATION_SECONDS:
         return f"时长不足（{value:.1f}s，需要 ≥ {MIN_PUBLISH_DURATION_SECONDS:.0f} 秒）"
     if value > MAX_PUBLISH_DURATION_SECONDS:
