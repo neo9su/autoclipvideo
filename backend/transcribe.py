@@ -113,6 +113,19 @@ async def _mark_transcription_unavailable(recording_id: int, reason: str) -> Non
     logger.warning("Recording %s marked unavailable: %s", recording_id, reason)
 
 
+async def _mark_missing_source(recording: dict) -> None:
+    """Terminally classify a finished recording whose source file is absent."""
+    reason = f"{SOURCE_MEDIA_UNAVAILABLE}: {recording.get('filename', 'unknown')}"
+    async with aio_connect() as db:
+        await db.execute(
+            "UPDATE recordings SET transcribed=-1, transcribe_error=?, skip_reason=? "
+            "WHERE id=? AND transcribed=0 AND synced=0",
+            (reason, reason, recording["id"]),
+        )
+        await db.commit()
+    logger.warning("Recording %s marked unavailable: %s", recording["id"], reason)
+
+
 async def _mark_clip_source_unavailable(recording_id: int, reason: str) -> None:
     """Terminally classify a clip whose source media or SRT sidecar is absent."""
     async with aio_connect() as db:
@@ -463,9 +476,7 @@ async def poll_transcriptions(broadcast_fn=None):
                         break
                     filepath = os.path.join(RECORDINGS_DIR, rec["filename"])
                     if not os.path.exists(filepath):
-                        await _mark_transcription_unavailable(
-                            rec["id"], f"{SOURCE_MEDIA_UNAVAILABLE}: {rec['filename']}"
-                        )
+                        await _mark_missing_source(rec)
                         continue
                     result = await maybe_merge_before_upload(rec["room_id"], rec["id"])
                     if result is None:
