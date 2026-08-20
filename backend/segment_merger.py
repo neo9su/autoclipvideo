@@ -278,8 +278,8 @@ async def _split_and_register(
             await db.execute(
                 """INSERT INTO recordings
                    (room_id, filename, size_bytes, synced, transcribed, local_deleted,
-                    segment_index, start_time, end_time)
-                   VALUES (?, ?, ?, 0, 0, 0, ?, ?, ?)""",
+                    segment_index, start_time, end_time, duration_status)
+                   VALUES (?, ?, ?, 0, 0, 0, ?, ?, ?, 'accepted')""",
                 (room_id, os.path.basename(cp), csz, base_index + i, start_time, end_time),
             )
 
