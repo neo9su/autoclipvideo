@@ -1,6 +1,6 @@
 from gpu_execution import reject_local_media
-from srt_resolver import resolve_srt_path
 from duration_policy import MIN_RECORDING_DURATION_SECONDS, UNAVAILABLE_REASON, classify_duration, duration_reason
+from srt_resolver import resolve_srt_path
 import asyncio
 import calendar
 import heapq
@@ -112,49 +112,6 @@ def transcribe_timing() -> dict:
         "avg_duration_s": avg,
         "session_done": _session_done,
     }
-
-
-def _source_path(filename: str | None) -> str | None:
-    """Resolve a recording filename below the backend recording directory."""
-    if not filename:
-        return None
-    return os.path.join(RECORDINGS_DIR, filename)
-
-
-async def _mark_missing_source(recording_id: int, filename: str, reason: str) -> None:
-    """Terminally classify an unavailable artifact instead of retrying forever."""
-    logger.warning("Recording %s (%s) is not processable: %s", recording_id, filename, reason)
-    async with aio_connect() as db:
-        await db.execute(
-            """UPDATE recordings
-               SET transcribed = -1, synced = 0, gpu_job_id = NULL,
-                   transcribe_error = ?, skip_reason = ?
-               WHERE id = ? AND transcribed = 0 AND synced = 0""",
-            (reason, reason, recording_id),
-        )
-        await db.commit()
-
-
-async def _mark_missing_source_media(recording_id: int, filename: str) -> None:
-    """Keep the legacy helper contract while using the terminal skip path."""
-    await _mark_missing_source(
-        recording_id,
-        filename,
-        f"missing source media: {filename}",
-    )
-
-
-async def _mark_missing_clip_source(recording_id: int, filename: str, reason: str) -> None:
-    """Terminally classify a completed transcript whose clip inputs disappeared."""
-    logger.warning("Recording %s (%s) cannot enter clipping: %s", recording_id, filename, reason)
-    async with aio_connect() as db:
-        await db.execute(
-            """UPDATE recordings
-               SET clipped = -1, clip_error = ?, skip_reason = ?
-               WHERE id = ? AND transcribed = 2 AND clipped IN (0, 1)""",
-            (reason, reason, recording_id),
-        )
-        await db.commit()
 
 # ── Clip Job Priority Queue ───────────────────────────────────────────────────
 # Jobs are dispatched up to MAX_CONCURRENT_CLIPS at a time, ordered by priority.
@@ -407,8 +364,14 @@ async def poll_transcriptions(broadcast_fn=None):
             if os.path.isfile(mp4_path) and srt_path:
                 recoverable.append((rec, mp4_path, srt_path))
             else:
-                reason = "missing source MP4" if not os.path.isfile(mp4_path) else "missing or empty SRT sidecar"
-                await _mark_missing_clip_source(rec["id"], rec["filename"], reason)
+                logger.warning(
+                    f"Startup recovery: recording {rec['id']} missing files, skipping "
+                    f"(mp4={os.path.isfile(mp4_path)}, srt={bool(srt_path)})"
+                )
+                await _mark_clip_source_unavailable(
+                    rec["id"],
+                    "source media/SRT unavailable: startup recovery could not find a usable MP4 and SRT",
+                )
         if recoverable:
             logger.info(f"Startup recovery: {len(recoverable)} recordings to re-trigger (batch size {_STARTUP_RECOVERY_BATCH})")
         for i in range(0, len(recoverable), _STARTUP_RECOVERY_BATCH):
@@ -436,12 +399,12 @@ async def poll_transcriptions(broadcast_fn=None):
                     "AND duration_status = 'accepted'"
                 ) as cur:
                     pending = await cur.fetchall()
-            async with db.execute(
-                """SELECT * FROM recordings
+                async with db.execute(
+                    """SELECT * FROM recordings
                        WHERE synced = 0 AND transcribed = 0 AND local_deleted = 0
                          AND end_time IS NOT NULL AND end_time != start_time
-                         AND (duration_status = 'accepted' OR duration_status IS NULL)"""
-            ) as cur:
+                         AND duration_status = 'accepted'"""
+                ) as cur:
                     unsynced = await cur.fetchall()
 
             has_work = bool(pending or unsynced)
@@ -473,10 +436,7 @@ async def poll_transcriptions(broadcast_fn=None):
                         break
                     filepath = os.path.join(RECORDINGS_DIR, rec["filename"])
                     if not os.path.exists(filepath):
-                        await _mark_missing_source(
-                            rec["id"], rec["filename"],
-                            "missing source MP4; upload skipped permanently",
-                        )
+                        await _mark_source_unavailable(rec["id"], "source media unavailable: MP4 file is missing")
                         continue
                     result = await maybe_merge_before_upload(rec["room_id"], rec["id"])
                     if result is None:
@@ -592,6 +552,34 @@ async def _check_job(rec, broadcast_fn):
             await db.commit()
 
 
+async def _mark_source_unavailable(recording_id: int, reason: str) -> None:
+    """Terminally classify a finished recording with no local source media.
+
+    The row is not reset or deleted.  Keeping ``transcribed=-1`` and a stable
+    reason prevents every poll cycle from treating an orphaned row as new work.
+    """
+    async with aio_connect() as db:
+        await db.execute(
+            "UPDATE recordings SET transcribed=-1, transcribe_error=?, skip_reason=? "
+            "WHERE id=? AND transcribed=0 AND synced=0",
+            (reason, reason, recording_id),
+        )
+        await db.commit()
+    logger.warning("Recording %s marked unavailable: %s", recording_id, reason)
+
+
+async def _mark_clip_source_unavailable(recording_id: int, reason: str) -> None:
+    """Stop retrying a completed transcription whose clip inputs disappeared."""
+    async with aio_connect() as db:
+        await db.execute(
+            "UPDATE recordings SET clipped=-1, clip_error=?, skip_reason=? "
+            "WHERE id=? AND transcribed=2 AND clipped IN (0,1)",
+            (reason, reason, recording_id),
+        )
+        await db.commit()
+    logger.warning("Recording %s marked unprocessable: %s", recording_id, reason)
+
+
 def _is_stale_job(job: dict, now: float | None = None) -> bool:
     now = now or time.time()
     stamp = job.get("heartbeat_at") or job.get("created_at")
@@ -631,9 +619,7 @@ async def _recover_stale_job(rec) -> bool:
 
 
 async def _fetch_srt(recording_id: int, job_id: str, filename: str, clip_count: int = 1, broadcast_fn=None):
-    mp4_path = _source_path(filename)
-    srt_filename = os.path.splitext(filename)[0] + ".srt"
-    local_srt = os.path.join(RECORDINGS_DIR, srt_filename)
+    local_srt = os.path.join(RECORDINGS_DIR, os.path.splitext(filename)[0] + ".srt")
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(
@@ -672,6 +658,7 @@ async def _fetch_srt(recording_id: int, job_id: str, filename: str, clip_count: 
                 await db.commit()
             # Validation/retranscription requests may explicitly defer clipping.
             if recording_id not in _retranscribe_without_clip:
+                mp4_path = os.path.join(RECORDINGS_DIR, filename)
                 asyncio.create_task(_run_editor(recording_id, mp4_path, local_srt, clip_count=clip_count, broadcast_fn=broadcast_fn))
             else:
                 _retranscribe_without_clip.discard(recording_id)

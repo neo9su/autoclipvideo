@@ -309,6 +309,15 @@ def test_poll_health_reports_cycle_completion_and_errors() -> None:
     assert '"last_poll_error": ps["last_poll_error"]' in status_source
 
 
+def test_transcription_and_clip_dispatch_use_non_empty_srt_resolution() -> None:
+    transcribe_source = Path("backend/transcribe.py").read_text()
+    main_source = Path("backend/main.py").read_text()
+    assert "srt_path = resolve_srt_path(mp4_path)" in transcribe_source
+    assert "srt_path = resolve_srt_path(mp4_path)" in main_source
+    assert "source media/SRT unavailable" in transcribe_source
+    assert "duration_status = 'accepted'" in main_source[main_source.index("async def gpu_status"):main_source.index("@app.post(\"/api/gpu/maintenance\")")]
+
+
 def test_recovered_worker_cannot_publish_or_reuse_stale_upload_alias() -> None:
     source = Path("gpu_service/main.py").read_text()
     assert "temporary_srt_path = f\"{srt_path}.{job_id}.{id(job)}.tmp\"" in source

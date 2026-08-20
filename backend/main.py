@@ -2736,7 +2736,7 @@ async def gpu_status():
                WHERE (transcribed = 1 AND gpu_job_id IS NOT NULL)
                   OR (transcribed = 0 AND synced = 0 AND local_deleted = 0
                       AND end_time IS NOT NULL AND end_time != start_time
-                      AND (duration_status = 'accepted' OR duration_status IS NULL))"""
+                      AND duration_status = 'accepted')"""
         ) as cur:
             (pending_transcribe,) = await cur.fetchone()
     result["pending_transcribe"] = pending_transcribe
@@ -3137,8 +3137,8 @@ async def retry_all_clip_queue_jobs():
     failed = 0
     for rec in records:
         mp4_path = os.path.join(RECORDINGS_DIR, rec["filename"])
-        srt_path = os.path.join(RECORDINGS_DIR, os.path.splitext(rec["filename"])[0] + ".srt")
-        if not os.path.exists(mp4_path) or not os.path.exists(srt_path):
+        srt_path = resolve_srt_path(mp4_path)
+        if not os.path.isfile(mp4_path) or not srt_path:
             failed += 1
             continue
         async with aio_connect() as db:
@@ -5035,7 +5035,7 @@ async def _periodic_clip_dispatch():
     Dispatches recordings with transcribed=2 and clipped=0 that have valid files.
     Only dispatches when GPU service is online.
     """
-    from transcribe import _run_editor, get_clip_queue, _pending_heap
+    from transcribe import _mark_clip_source_unavailable, _run_editor, get_clip_queue, _pending_heap
     BATCH_LIMIT = 10
     while True:
         try:
@@ -5073,15 +5073,16 @@ async def _periodic_clip_dispatch():
                         
                         # Build paths
                         mp4_path = os.path.join(RECORDINGS_DIR, filename)
-                        srt_path = os.path.join(RECORDINGS_DIR, 
-                            os.path.splitext(filename)[0] + ".srt")
+                        srt_path = resolve_srt_path(mp4_path)
                         
                         # Check files exist
-                        if not os.path.exists(mp4_path):
-                            logger.debug(f"Clip dispatch: skipping {rec_id}, MP4 missing")
+                        if not os.path.isfile(mp4_path):
+                            logger.warning(f"Clip dispatch: recording {rec_id} has no source MP4; marking unavailable")
+                            await _mark_clip_source_unavailable(rec_id, "source media/SRT unavailable: MP4 file is missing")
                             continue
-                        if not os.path.exists(srt_path):
-                            logger.debug(f"Clip dispatch: skipping {rec_id}, SRT missing")
+                        if not srt_path:
+                            logger.warning(f"Clip dispatch: recording {rec_id} has no usable SRT; marking unavailable")
+                            await _mark_clip_source_unavailable(rec_id, "source media/SRT unavailable: SRT is missing or empty")
                             continue
                         
                         clip_count = rec["clip_count"] if rec["clip_count"] else 1
