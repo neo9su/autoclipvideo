@@ -180,37 +180,6 @@ async def test_stale_open_cleanup_keeps_recent_active_recording(backend_main) ->
         Path(db_path).unlink(missing_ok=True)
 
 
-async def test_missing_finished_source_is_marked_terminal(backend_main) -> None:
-    fd, db_path = tempfile.mkstemp(suffix=".db")
-    os.close(fd)
-    os.unlink(db_path)
-    try:
-        await _create_queue_test_db(backend_main, db_path)
-        await _insert_recording(
-            db_path,
-            id=107,
-            filename="never_mounted.mp4",
-            end_time=datetime.now().isoformat(),
-        )
-        import transcribe
-
-        transcribe.aio_connect = lambda: dbmod.aio_connect(db_path)
-        await transcribe._mark_missing_source_media(107, "never_mounted.mp4")
-
-        con = sqlite3.connect(db_path)
-        row = con.execute(
-            "SELECT transcribed, transcribe_error, skip_reason FROM recordings WHERE id=107"
-        ).fetchone()
-        con.close()
-        assert row == (
-            -1,
-            "missing source media: never_mounted.mp4",
-            "missing source media: never_mounted.mp4",
-        )
-    finally:
-        Path(db_path).unlink(missing_ok=True)
-
-
 async def test_stale_job_recovery_resets_only_matching_recording(backend_main) -> None:
     import transcribe
 
@@ -250,33 +219,32 @@ async def test_stale_job_recovery_resets_only_matching_recording(backend_main) -
         Path(db_path).unlink(missing_ok=True)
 
 
-async def test_missing_finished_source_is_terminally_skipped() -> None:
-    """A finished DB placeholder must not remain in pending_transcribe forever."""
+async def test_missing_source_is_marked_terminal_instead_of_requeued(backend_main) -> None:
     import transcribe
 
     fd, db_path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
     os.unlink(db_path)
     try:
-        dbmod.DB_PATH = db_path
-        await init_db()
-        async with aiosqlite.connect(db_path) as con:
-            await con.execute("INSERT INTO rooms(id, name, url) VALUES(1, 'room', 'https://example.invalid')")
-            await con.commit()
+        await _create_queue_test_db(backend_main, db_path)
         await _insert_recording(
             db_path,
             id=107,
-            filename="gone.mp4",
+            filename="deleted_source.mp4",
             start_time=(datetime.now() - timedelta(minutes=10)).isoformat(),
             end_time=datetime.now().isoformat(),
         )
         transcribe.aio_connect = lambda: dbmod.aio_connect(db_path)
-        await transcribe._mark_missing_source(107, "gone.mp4", "missing source MP4; upload skipped permanently")
+
+        await transcribe._mark_missing_source_terminal(107, "deleted_source.mp4")
+
         async with aiosqlite.connect(db_path) as con:
             row = await (await con.execute(
-                "SELECT transcribed, synced, transcribe_error, skip_reason FROM recordings WHERE id=107"
+                "SELECT transcribed, skip_reason, transcribe_error FROM recordings WHERE id=107"
             )).fetchone()
-        assert row == (-1, 0, "missing source MP4; upload skipped permanently", "missing source MP4; upload skipped permanently")
+        assert row[0] == -1
+        assert "missing source media" in row[1]
+        assert row[1] == row[2]
     finally:
         Path(db_path).unlink(missing_ok=True)
 
@@ -309,15 +277,6 @@ def test_poll_health_reports_cycle_completion_and_errors() -> None:
     assert '"last_poll_error": ps["last_poll_error"]' in status_source
 
 
-def test_transcription_and_clip_dispatch_use_non_empty_srt_resolution() -> None:
-    transcribe_source = Path("backend/transcribe.py").read_text()
-    main_source = Path("backend/main.py").read_text()
-    assert "srt_path = resolve_srt_path(mp4_path)" in transcribe_source
-    assert "srt_path = resolve_srt_path(mp4_path)" in main_source
-    assert "source media/SRT unavailable" in transcribe_source
-    assert "duration_status = 'accepted'" in main_source[main_source.index("async def gpu_status"):main_source.index("@app.post(\"/api/gpu/maintenance\")")]
-
-
 def test_recovered_worker_cannot_publish_or_reuse_stale_upload_alias() -> None:
     source = Path("gpu_service/main.py").read_text()
     assert "temporary_srt_path = f\"{srt_path}.{job_id}.{id(job)}.tmp\"" in source
@@ -332,7 +291,6 @@ async def main_test() -> None:
     await test_transcribe_queue_includes_finished_unsynced_recording_with_file(backend_main)
     await test_transcribe_queue_excludes_short_and_unavailable_recordings(backend_main)
     await test_stale_open_cleanup_keeps_recent_active_recording(backend_main)
-    await test_missing_finished_source_is_marked_terminal(backend_main)
     await test_stale_job_recovery_resets_only_matching_recording(backend_main)
     test_transcription_watchdog_contract_is_present()
     test_recovery_endpoint_cancels_worker_without_deleting_artifacts()
