@@ -258,12 +258,13 @@ async def _split_and_register(
     async with aio_connect() as db:
         # Find original recording to get its segment_index, start_time, and end_time
         async with db.execute(
-            "SELECT segment_index, start_time, end_time FROM recordings WHERE id=?", (recording_id,)
+            "SELECT group_id, segment_index, start_time, end_time FROM recordings WHERE id=?", (recording_id,)
         ) as cur:
             row = await cur.fetchone()
-        base_index = row[0] if row else 0
-        start_time = row[1] if row else ""
-        end_time   = row[2] if row else ""
+        group_id = row[0] if row else None
+        base_index = row[1] if row else 0
+        start_time = row[2] if row else ""
+        end_time   = row[3] if row else ""
 
         # Update original row → chunk 0
         chunk0_filename = os.path.basename(chunk0_path)
@@ -277,10 +278,10 @@ async def _split_and_register(
         for i, (cp, csz) in enumerate(chunks[1:], start=1):
             await db.execute(
                 """INSERT INTO recordings
-                   (room_id, filename, size_bytes, synced, transcribed, local_deleted,
-                    segment_index, start_time, end_time)
-                   VALUES (?, ?, ?, 0, 0, 0, ?, ?, ?)""",
-                (room_id, os.path.basename(cp), csz, base_index + i, start_time, end_time),
+                   (room_id, group_id, filename, size_bytes, synced, transcribed,
+                    local_deleted, segment_index, start_time, end_time)
+                   VALUES (?, ?, ?, ?, 0, 0, 0, ?, ?, ?)""",
+                (room_id, group_id, os.path.basename(cp), csz, base_index + i, start_time, end_time),
             )
 
         await db.commit()
