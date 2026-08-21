@@ -40,6 +40,7 @@ from meta_generator import generate_meta, match_product
 from publish_scheduler import poll_publish_tasks
 from video_path_resolver import build_content_disposition, resolve_artifact_path
 from srt_resolver import resolve_srt_path
+from service_manager import probe_backend
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -779,6 +780,23 @@ async def health():
         except Exception:
             pass
     return result
+
+
+@app.get("/api/diagnostics/backend")
+async def backend_diagnostics():
+    """Read-only listener diagnostic; never retries, restarts, or mutates queues."""
+    diagnostic = await asyncio.to_thread(probe_backend, "http://127.0.0.1:8899/health")
+    return {
+        "ok": diagnostic.classification == "healthy",
+        "diagnostic": diagnostic.as_dict(),
+        "recovery": {
+            "automatic_restart": False,
+            "retry": False,
+            "queue_flush": False,
+            "video_rerun": False,
+            "active_task_safety_gate": "required before any operator-approved recovery",
+        },
+    }
 
 
 @app.get("/", include_in_schema=False)
