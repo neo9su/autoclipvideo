@@ -501,6 +501,26 @@ async def poll_transcriptions(broadcast_fn=None):
             srt_path = resolve_srt_path(mp4_path)
             if os.path.isfile(mp4_path) and srt_path:
                 recoverable.append((rec, mp4_path, srt_path))
+            elif os.path.isfile(mp4_path) and not srt_path:
+                # A completed row can lose its downloaded sidecar when the
+                # backend is restarted between GPU completion and SRT write.
+                # Re-queue the source instead of marking it as missing media;
+                # the GPU endpoint's content idempotency key prevents a
+                # duplicate remote job when the original is still retained.
+                logger.warning(
+                    "Startup recovery: recording %s has MP4 but no SRT; re-queuing transcription",
+                    rec["id"],
+                )
+                async with aio_connect() as db:
+                    await db.execute(
+                        """UPDATE recordings
+                           SET synced=0, transcribed=0, gpu_job_id=NULL,
+                               transcribe_error=NULL, skip_reason=NULL,
+                               clipped=0, clip_error=NULL
+                           WHERE id=? AND transcribed=2""",
+                        (rec["id"],),
+                    )
+                    await db.commit()
             else:
                 await _mark_unprocessable_source(
                     rec["id"],
@@ -628,6 +648,19 @@ async def poll_transcriptions(broadcast_fn=None):
                             })
                         continue
                     upload_path, primary_id = result
+                    # The queue snapshot is intentionally taken before the
+                    # upload loop.  Re-check the row so a concurrent poll
+                    # cycle (or a manual retry) cannot submit a row that was
+                    # already claimed and associated with a GPU job.
+                    async with aio_connect() as db:
+                        async with db.execute(
+                            "SELECT synced, transcribed, gpu_job_id FROM recordings WHERE id=?",
+                            (primary_id,),
+                        ) as cur:
+                            current = await cur.fetchone()
+                    if not current or current[0] or current[2] or current[1] != 0:
+                        logger.info("Skipping recording %s: upload already claimed", primary_id)
+                        continue
                     valid, err_msg = await _validate_mp4(upload_path)
                     if not valid:
                         logger.warning(f"Skipping corrupt file {os.path.basename(upload_path)}: {err_msg}")
