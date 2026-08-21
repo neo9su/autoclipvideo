@@ -2563,6 +2563,7 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
             seg_out = os.path.join(out_dir, f"seg{i:03d}.mp4")
             start    = float(clip["start"])
             duration = float(clip["duration"])
+            scene_type = clip.get("scene_type", "")
 
             rc = await _run_ffmpeg(
                 "ffmpeg", "-y",
