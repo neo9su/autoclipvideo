@@ -279,9 +279,8 @@ async def _split_and_register(
             await db.execute(
                 """INSERT INTO recordings
                    (room_id, group_id, filename, size_bytes, synced, transcribed,
-                    local_deleted, segment_index, start_time, end_time,
-                    duration_status)
-                   VALUES (?, ?, ?, ?, 0, 0, 0, ?, ?, ?, 'accepted')""",
+                    local_deleted, segment_index, start_time, end_time)
+                   VALUES (?, ?, ?, ?, 0, 0, 0, ?, ?, ?)""",
                 (room_id, group_id, os.path.basename(cp), csz, base_index + i, start_time, end_time),
             )
 
@@ -340,7 +339,13 @@ async def _ffmpeg_concat(file_paths: list[str], output_path: str) -> bool:
 async def maybe_merge_before_upload(
     room_id: int, recording_id: int
 ) -> Optional[tuple[str, int]]:
-    """Return an uploadable MP4; SRT is produced by the GPU job, not preflight."""
+    """Select a validated MP4 source for upload.
+
+    SRT is intentionally absent from this preflight: it is produced by the
+    remote transcription job and must never gate its own upload.  Chunk
+    splitting still returns the original row as the primary record; generated
+    child rows remain pending and are submitted independently.
+    """
     async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -365,7 +370,7 @@ async def maybe_merge_before_upload(
     
     file_size = os.path.getsize(filepath)
     if file_size <= 0:
-        reason = f"source media invalid: empty file: {rec['filename']}"
+        reason = f"invalid mp4: source file is empty ({rec['filename']})"
         logger.warning("Recording %s cannot be uploaded: %s", recording_id, reason)
         async with aio_connect() as db:
             await db.execute(

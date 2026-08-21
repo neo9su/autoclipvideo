@@ -612,13 +612,20 @@ async def poll_transcriptions(broadcast_fn=None):
                                 rec["id"], mp4_exists=False, srt_exists=None,
                                 context="transcription upload",
                             )
-                        blocked += 1
-                        merge_samples.append({
-                            "recording_id": rec["id"],
-                            "filename": os.path.basename(rec["filename"] or ""),
-                            "reason": "merge_blocked",
-                            "status": "pending",
-                        })
+                        async with aio_connect() as db:
+                            async with db.execute(
+                                "SELECT transcribed, synced FROM recordings WHERE id=?",
+                                (rec["id"],),
+                            ) as cur:
+                                current = await cur.fetchone()
+                        if current and current[0] == 0 and current[1] == 0:
+                            blocked += 1
+                            merge_samples.append({
+                                "recording_id": rec["id"],
+                                "filename": os.path.basename(rec["filename"] or ""),
+                                "reason": "merge_blocked",
+                                "status": "pending",
+                            })
                         continue
                     upload_path, primary_id = result
                     valid, err_msg = await _validate_mp4(upload_path)
@@ -735,6 +742,8 @@ async def _check_job(rec, broadcast_fn):
                 (rec["id"],),
             )
             await db.commit()
+        from sync import forget_upload_job
+        forget_upload_job(job_id)
         return
 
     if _status_code != 200:

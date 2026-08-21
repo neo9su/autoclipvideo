@@ -50,6 +50,22 @@ def test_transcription_queue_classifier_covers_submission_blockers() -> None:
     assert classify_transcription_record({**base, "transcribed": 2}, media_exists=True, gpu_online=True) == "transcription_complete"
 
 
+def test_missing_srt_does_not_block_upload_preflight() -> None:
+    source = Path("backend/segment_merger.py").read_text()
+    preflight = source[source.index("async def maybe_merge_before_upload"):]
+    assert "resolve_srt_path" not in preflight
+    assert "SRT is intentionally absent" in preflight
+
+
+def test_upload_cache_can_be_invalidated_after_gpu_restart() -> None:
+    import sync
+
+    stats = sync.TransferStats("lost-job", "remote-gpu", 12, 1)
+    sync._completed_uploads["room:digest"] = stats
+    sync.forget_upload_job("lost-job")
+    assert "room:digest" not in sync._completed_uploads
+
+
 def _load_backend_main():
     """Import backend.main while hiding optional integration startup warnings."""
     stderr = io.StringIO()

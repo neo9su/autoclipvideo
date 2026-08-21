@@ -36,6 +36,18 @@ def last_transfer_stats() -> Optional[TransferStats]:
     return _last_transfer_stats
 
 
+def forget_upload_job(job_id: str) -> None:
+    """Drop a cached alias after the remote worker has lost a job.
+
+    The cache is deliberately process-local, but a GPU restart can invalidate
+    a job while the backend is still alive.  Keeping the alias would make the
+    next poll submit the same dead job id forever instead of uploading again.
+    """
+    stale_keys = [key for key, stats in _completed_uploads.items() if stats.job_id == job_id]
+    for key in stale_keys:
+        _completed_uploads.pop(key, None)
+
+
 def _file_fingerprint(path: str) -> tuple[str, int]:
     digest = hashlib.sha256()
     size = 0
@@ -58,6 +70,13 @@ async def sync_file(local_path: str, room_id: int) -> Optional[str]:
     require_remote_gpu("source upload")
     if not os.path.isfile(local_path):
         logger.warning("Upload source does not exist: %s", os.path.basename(local_path))
+        return None
+    try:
+        if os.path.getsize(local_path) <= 0:
+            logger.warning("Upload source is empty: %s", os.path.basename(local_path))
+            return None
+    except OSError:
+        logger.warning("Upload source cannot be inspected: %s", os.path.basename(local_path))
         return None
 
     # A missing sidecar SRT is intentionally not an upload prerequisite: the
