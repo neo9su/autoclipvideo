@@ -74,6 +74,13 @@ def test_remote_upload_rejects_empty_sources_and_exposes_cache_invalidation() ->
     assert "X-Idempotency-Key" in source
 
 
+def test_split_children_remain_in_the_transcription_queue() -> None:
+    source = Path("backend/segment_merger.py").read_text()
+    split_block = source[source.index("INSERT INTO recordings", source.index("async def _split_and_register")):]
+    assert "duration_status" in split_block
+    assert "VALUES (?, ?, ?, ?, 0, 0, 0, ?, ?, ?, 'accepted')" in split_block
+
+
 def _load_backend_main():
     """Import backend.main while hiding optional integration startup warnings."""
     stderr = io.StringIO()
