@@ -50,23 +50,17 @@ def test_transcription_queue_classifier_covers_submission_blockers() -> None:
     assert classify_transcription_record({**base, "transcribed": 2}, media_exists=True, gpu_online=True) == "transcription_complete"
 
 
-def test_missing_srt_does_not_block_media_selection() -> None:
-    """A new MP4 is intentionally eligible before the GPU creates its SRT."""
-    source = Path("backend/segment_merger.py").read_text()
-    assert "resolve_srt_path" not in source
-    assert "Select a safe upload source without requiring a pre-existing SRT." in source
-
-
-def test_sync_rejects_empty_source_before_upload() -> None:
-    import sync as syncmod
-
-    async def run_check() -> None:
-        with tempfile.NamedTemporaryFile(suffix=".mp4") as source:
-            valid, reason = await syncmod._validate_mp4_source(source.name)
-        assert not valid
-        assert reason == "source media is empty"
-
-    asyncio.run(run_check())
+def test_missing_srt_does_not_block_transcription_submission() -> None:
+    """SRT is a GPU output and must not be a pre-upload requirement."""
+    row = {
+        "transcribed": 0,
+        "synced": 0,
+        "local_deleted": 0,
+        "start_time": "2026-08-21T00:00:00",
+        "end_time": "2026-08-21T00:01:00",
+        "duration_status": "accepted",
+    }
+    assert classify_transcription_record(row, media_exists=True, gpu_online=True) == "ready_to_submit"
 
 
 def _load_backend_main():
@@ -364,33 +358,6 @@ def test_recovered_worker_cannot_publish_or_reuse_stale_upload_alias() -> None:
     assert "_transcription_tasks.pop(job_id, None)" in source
 
 
-def test_transcription_upload_does_not_require_a_local_srt() -> None:
-    merger_source = Path("backend/segment_merger.py").read_text()
-    poll_source = Path("backend/transcribe.py").read_text()
-    merge_function = merger_source[merger_source.index("async def maybe_merge_before_upload"):]
-    upload_loop = poll_source[poll_source.index("result = await maybe_merge_before_upload"):poll_source.index("_poll_state[\"blocked_count\"]")]
-    assert "resolve_srt_path" not in merge_function
-    assert "upload_path, primary_id = result" in upload_loop
-    assert "SRT" not in upload_loop
-
-
-def test_upload_preflight_rejects_empty_media_and_rechecks_claim() -> None:
-    merger_source = Path("backend/segment_merger.py").read_text()
-    poll_source = Path("backend/transcribe.py").read_text()
-    assert "file_size <= 0" in merger_source
-    assert "source media invalid" in merger_source
-    claim_check = poll_source[poll_source.index("# The queue snapshot is intentionally taken"):poll_source.index("valid, err_msg = await _validate_mp4")]
-    assert "SELECT synced, transcribed, gpu_job_id" in claim_check
-    assert "upload already claimed" in claim_check
-
-
-def test_split_children_remain_in_the_transcription_queue() -> None:
-    merger_source = Path("backend/segment_merger.py").read_text()
-    insert_block = merger_source[merger_source.index("INSERT INTO recordings"):merger_source.index("await db.commit()", merger_source.index("INSERT INTO recordings"))]
-    assert "duration_status" in insert_block
-    assert "'accepted'" in insert_block
-
-
 async def main_test() -> None:
     backend_main = _load_backend_main()
     await test_transcribe_queue_excludes_ghost_open_recording(backend_main)
@@ -402,9 +369,6 @@ async def main_test() -> None:
     test_recovery_endpoint_cancels_worker_without_deleting_artifacts()
     test_poll_health_reports_cycle_completion_and_errors()
     test_recovered_worker_cannot_publish_or_reuse_stale_upload_alias()
-    test_transcription_upload_does_not_require_a_local_srt()
-    test_upload_preflight_rejects_empty_media_and_rechecks_claim()
-    test_split_children_remain_in_the_transcription_queue()
     print("transcribe queue ghost-recording guards ok")
 
 

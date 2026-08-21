@@ -623,10 +623,10 @@ async def poll_transcriptions(broadcast_fn=None):
                     # The merger only selects/splits the MP4 source.
                     result = await maybe_merge_before_upload(rec["room_id"], rec["id"])
                     if result is None:
-                        # The merger returns None both while a chunk is being
-                        # assembled and when its source file is gone.  Re-read
-                        # the row so permanent missing media is terminal rather
-                        # than silently counted and retried forever.
+                        # The merger returns None for terminal source errors or
+                        # when a split/merge operation cannot produce a source.
+                        # Missing SRT is intentionally not checked here: the GPU
+                        # transcription result creates it after upload.
                         if not os.path.isfile(filepath):
                             await _mark_unprocessable_source(
                                 rec["id"], mp4_exists=False, srt_exists=None,

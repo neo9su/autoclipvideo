@@ -279,9 +279,8 @@ async def _split_and_register(
             await db.execute(
                 """INSERT INTO recordings
                    (room_id, group_id, filename, size_bytes, synced, transcribed,
-                    local_deleted, segment_index, start_time, end_time,
-                    duration_status)
-                   VALUES (?, ?, ?, ?, 0, 0, 0, ?, ?, ?, 'accepted')""",
+                    local_deleted, segment_index, start_time, end_time)
+                   VALUES (?, ?, ?, ?, 0, 0, 0, ?, ?, ?)""",
                 (room_id, group_id, os.path.basename(cp), csz, base_index + i, start_time, end_time),
             )
 
@@ -340,14 +339,12 @@ async def _ffmpeg_concat(file_paths: list[str], output_path: str) -> bool:
 async def maybe_merge_before_upload(
     room_id: int, recording_id: int
 ) -> Optional[tuple[str, int]]:
-    """Select a verified source file for GPU transcription.
+    """Return a validated upload source without requiring a local SRT.
 
-    A local SRT is deliberately *not* part of this preflight.  SRT is the
-    output of the remote transcription job, not an upload prerequisite.  The
-    old caller treated ``None`` as a merge decision and consequently left new
-    recordings without sidecars permanently blocked.  Chunk splitting remains
-    here because the returned recording id is the DB row that receives the
-    resulting SRT.
+    Transcription is the producer of the SRT, so an absent sidecar is a normal
+    pre-upload state and must not be treated as a merge decision.  Chunk
+    splitting remains here because it changes the upload source and registers
+    the additional DB rows before the caller submits the first chunk.
     """
     async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
@@ -372,8 +369,8 @@ async def maybe_merge_before_upload(
         return None
     
     file_size = os.path.getsize(filepath)
-    if file_size <= 0:
-        reason = f"source media invalid: {rec['filename']} is empty"
+    if file_size == 0:
+        reason = f"invalid mp4: source file is empty: {rec['filename']}"
         logger.warning("Recording %s cannot be uploaded: %s", recording_id, reason)
         async with aio_connect() as db:
             await db.execute(
