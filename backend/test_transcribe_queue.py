@@ -345,6 +345,30 @@ def test_recovered_worker_cannot_publish_or_reuse_stale_upload_alias() -> None:
     assert "_transcription_tasks.pop(job_id, None)" in source
 
 
+def test_missing_srt_does_not_block_upload_and_chunk_rows_stay_queued() -> None:
+    transcribe_source = Path("backend/transcribe.py").read_text()
+    merger_source = Path("backend/segment_merger.py").read_text()
+    sync_source = Path("backend/sync.py").read_text()
+    upload_section = transcribe_source[
+        transcribe_source.index("result = await maybe_merge_before_upload"):
+        transcribe_source.index('_poll_state["blocked_count"]')
+    ]
+
+    assert "resolve_srt_path(filepath)" not in upload_section
+    assert "WHERE id = ? AND synced = 0 AND transcribed = 0" in transcribe_source
+    assert "duration_status)" in merger_source
+    assert "VALUES (?, ?, ?, ?, 0, 0, 0, ?, ?, ?, 'accepted')" in merger_source
+    assert "os.path.getsize(local_path) <= 0" in sync_source
+
+
+def test_gpu_result_is_the_only_source_of_srt_and_empty_result_is_terminal() -> None:
+    source = Path("backend/transcribe.py").read_text()
+    fetch_section = source[source.index("async def _fetch_srt"):source.index("async def _run_editor")]
+    assert "/jobs/{job_id}/srt" in fetch_section
+    assert "Whisper detected no speech segments" in fetch_section
+    assert "UPDATE recordings SET transcribed = 2" in fetch_section
+
+
 async def main_test() -> None:
     backend_main = _load_backend_main()
     await test_transcribe_queue_excludes_ghost_open_recording(backend_main)
@@ -356,6 +380,8 @@ async def main_test() -> None:
     test_recovery_endpoint_cancels_worker_without_deleting_artifacts()
     test_poll_health_reports_cycle_completion_and_errors()
     test_recovered_worker_cannot_publish_or_reuse_stale_upload_alias()
+    test_missing_srt_does_not_block_upload_and_chunk_rows_stay_queued()
+    test_gpu_result_is_the_only_source_of_srt_and_empty_result_is_terminal()
     print("transcribe queue ghost-recording guards ok")
 
 

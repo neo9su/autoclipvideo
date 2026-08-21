@@ -60,6 +60,17 @@ async def sync_file(local_path: str, room_id: int) -> Optional[str]:
         logger.warning("Upload source does not exist: %s", os.path.basename(local_path))
         return None
 
+    # A missing sidecar SRT is intentionally not an upload prerequisite: the
+    # remote worker creates it.  A zero-byte MP4, however, can never produce a
+    # transcription and must not consume a GPU job or poison the idempotency
+    # cache.
+    try:
+        if os.path.getsize(local_path) <= 0:
+            logger.warning("Upload source is empty: %s", os.path.basename(local_path))
+            return None
+    except OSError as exc:
+        logger.warning("Cannot stat upload source %s: %s", os.path.basename(local_path), type(exc).__name__)
+        return None
     fingerprint, input_bytes = await asyncio.to_thread(_file_fingerprint, local_path)
     cache_key = f"{room_id}:{fingerprint}"
     cached = _completed_uploads.get(cache_key)
@@ -78,6 +89,9 @@ async def sync_file(local_path: str, room_id: int) -> Optional[str]:
                 with open(local_path, "rb") as source:
                     return source.read()
             file_data = await asyncio.to_thread(_read_source)
+            if not file_data:
+                logger.warning("Upload source became empty: %s", filename)
+                return None
             form = aiohttp.FormData()
             form.add_field("room_id", str(room_id))
             form.add_field("file", file_data, filename=filename, content_type="video/mp4")

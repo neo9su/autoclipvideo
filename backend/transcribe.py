@@ -599,6 +599,8 @@ async def poll_transcriptions(broadcast_fn=None):
                             context="transcription upload",
                         )
                         continue
+                    # SRT is produced by the GPU job and fetched after completion.
+                    # The merger only selects/splits the MP4 source.
                     result = await maybe_merge_before_upload(rec["room_id"], rec["id"])
                     if result is None:
                         # The merger returns None both while a chunk is being
@@ -639,11 +641,14 @@ async def poll_transcriptions(broadcast_fn=None):
                         _poll_state["last_submit_at"] = time.time()
                         _poll_state["active_job_id"] = job_id
                         async with aio_connect() as db:
-                            await db.execute(
-                                "UPDATE recordings SET synced = 1, transcribed = 1, gpu_job_id = ?, upload_bytes = ? WHERE id = ?",
+                            cursor = await db.execute(
+                                "UPDATE recordings SET synced = 1, transcribed = 1, gpu_job_id = ?, upload_bytes = ? "
+                                "WHERE id = ? AND synced = 0 AND transcribed = 0",
                                 (job_id, os.path.getsize(upload_path), primary_id),
                             )
                             await db.commit()
+                        if cursor.rowcount != 1:
+                            logger.info("Recording %s was claimed before job %s could be persisted", primary_id, job_id)
                 _poll_state["blocked_count"] = blocked
                 _poll_state["diagnosis"]["merge_blocked"] = blocked
                 _poll_state["diagnosis"]["merge_samples"] = merge_samples[:QUEUE_DIAGNOSIS_SAMPLE_LIMIT]
