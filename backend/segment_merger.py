@@ -279,8 +279,9 @@ async def _split_and_register(
             await db.execute(
                 """INSERT INTO recordings
                    (room_id, group_id, filename, size_bytes, synced, transcribed,
-                    local_deleted, segment_index, start_time, end_time)
-                   VALUES (?, ?, ?, ?, 0, 0, 0, ?, ?, ?)""",
+                    local_deleted, segment_index, start_time, end_time,
+                    duration_status)
+                   VALUES (?, ?, ?, ?, 0, 0, 0, ?, ?, ?, 'accepted')""",
                 (room_id, group_id, os.path.basename(cp), csz, base_index + i, start_time, end_time),
             )
 
@@ -339,12 +340,13 @@ async def _ffmpeg_concat(file_paths: list[str], output_path: str) -> bool:
 async def maybe_merge_before_upload(
     room_id: int, recording_id: int
 ) -> Optional[tuple[str, int]]:
-    """Select a source file for GPU transcription.
+    """Return a validated source candidate for transcription upload.
 
-    An SRT sidecar is deliberately not part of this preflight.  SRT is the
-    *output* of the GPU job, so requiring it here permanently blocks fresh
-    recordings.  Media integrity is still checked by the poller with
-    ``ffprobe`` immediately before upload.
+    An SRT is deliberately not part of this preflight.  SRT is an output of
+    the GPU job, not an input artifact, so requiring one here deadlocks fresh
+    recordings.  Chunk splitting remains part of this function: the returned
+    id is the DB row that owns the returned file and each generated child is
+    registered as an independent pending recording.
     """
     async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
@@ -368,30 +370,7 @@ async def maybe_merge_before_upload(
             await db.commit()
         return None
     
-    try:
-        file_size = os.path.getsize(filepath)
-    except OSError as exc:
-        reason = f"source media unavailable: cannot stat {rec['filename']} ({type(exc).__name__})"
-        logger.warning("Recording %s cannot be uploaded: %s", recording_id, reason)
-        async with aio_connect() as db:
-            await db.execute(
-                "UPDATE recordings SET transcribed=-1, transcribe_error=? "
-                "WHERE id=? AND transcribed=0 AND synced=0",
-                (reason, recording_id),
-            )
-            await db.commit()
-        return None
-    if file_size <= 0:
-        reason = "invalid mp4: source file is empty"
-        logger.warning("Recording %s cannot be uploaded: %s", recording_id, reason)
-        async with aio_connect() as db:
-            await db.execute(
-                "UPDATE recordings SET transcribed=-1, transcribe_error=? "
-                "WHERE id=? AND transcribed=0 AND synced=0",
-                (reason, recording_id),
-            )
-            await db.commit()
-        return None
+    file_size = os.path.getsize(filepath)
     
     # Split files larger than SPLIT_THRESHOLD before upload
     if file_size > SPLIT_THRESHOLD:
