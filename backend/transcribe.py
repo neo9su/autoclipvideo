@@ -769,6 +769,10 @@ async def _check_job(rec, broadcast_fn):
     if _status_code == 404:
         # GPU service restarted and lost this job — re-queue for upload
         logger.warning(f"Job {job_id} not found on GPU service (restarted?), re-queuing")
+        from sync import invalidate_upload
+        await invalidate_upload(
+            os.path.join(RECORDINGS_DIR, rec["filename"]), rec["room_id"]
+        )
         async with aio_connect() as db:
             await db.execute(
                 "UPDATE recordings SET transcribed=0, synced=0, gpu_job_id=NULL WHERE id=?",

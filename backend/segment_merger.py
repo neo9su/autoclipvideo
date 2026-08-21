@@ -275,13 +275,18 @@ async def _split_and_register(
 
         # Insert new rows for chunks 1..N (must include end_time so they aren't
         # treated as in-progress recordings by the poll loop's end_time IS NOT NULL check)
+        # Split children are independent GPU transcription inputs.  They must
+        # be visible to the normal queue immediately; leaving duration_status
+        # NULL makes the poller's accepted-duration predicate skip them.
         for i, (cp, csz) in enumerate(chunks[1:], start=1):
             await db.execute(
                 """INSERT INTO recordings
                    (room_id, group_id, filename, size_bytes, synced, transcribed,
-                    local_deleted, segment_index, start_time, end_time)
-                   VALUES (?, ?, ?, ?, 0, 0, 0, ?, ?, ?)""",
-                (room_id, group_id, os.path.basename(cp), csz, base_index + i, start_time, end_time),
+                    local_deleted, segment_index, start_time, end_time,
+                    duration_seconds, duration_status)
+                   VALUES (?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?, 'accepted')""",
+                (room_id, group_id, os.path.basename(cp), csz, base_index + i,
+                 start_time, end_time, None),
             )
 
         await db.commit()

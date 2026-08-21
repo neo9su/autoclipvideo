@@ -16,6 +16,8 @@ sys.path.insert(0, "backend")
 import db as dbmod
 from db import init_db
 from transcribe import classify_transcription_record
+from transcribe import _source_unavailable_reason
+from sync import sync_file
 
 
 def test_asr_profile_is_explicit_and_remote_friendly() -> None:
@@ -50,17 +52,15 @@ def test_transcription_queue_classifier_covers_submission_blockers() -> None:
     assert classify_transcription_record({**base, "transcribed": 2}, media_exists=True, gpu_online=True) == "transcription_complete"
 
 
-def test_missing_srt_does_not_block_transcription_submission() -> None:
-    """SRT is a GPU output and must not be a pre-upload requirement."""
-    row = {
-        "transcribed": 0,
-        "synced": 0,
-        "local_deleted": 0,
-        "start_time": "2026-08-21T00:00:00",
-        "end_time": "2026-08-21T00:01:00",
-        "duration_status": "accepted",
-    }
-    assert classify_transcription_record(row, media_exists=True, gpu_online=True) == "ready_to_submit"
+def test_missing_srt_does_not_block_new_media_upload() -> None:
+    """SRT is a GPU output, not a prerequisite for the first upload."""
+    assert _source_unavailable_reason(True, None) == "source media unavailable: recording file is not readable"
+
+
+def test_sync_file_rejects_empty_media(tmp_path) -> None:
+    empty_path = tmp_path / "empty.mp4"
+    empty_path.touch()
+    assert asyncio.run(sync_file(str(empty_path), 1)) is None
 
 
 def _load_backend_main():

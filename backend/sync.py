@@ -38,6 +38,15 @@ def last_transfer_stats() -> Optional[TransferStats]:
     return _last_transfer_stats
 
 
+async def invalidate_upload(local_path: str, room_id: int) -> None:
+    """Forget a cached job after the remote service lost it during restart."""
+    try:
+        fingerprint, _ = await asyncio.to_thread(_file_fingerprint, local_path)
+    except (OSError, ValueError):
+        return
+    _completed_uploads.pop(f"{room_id}:{fingerprint}", None)
+
+
 def _file_fingerprint(path: str) -> tuple[str, int]:
     digest = hashlib.sha256()
     size = 0
@@ -88,10 +97,10 @@ async def sync_file(local_path: str, room_id: int) -> Optional[str]:
     callers keep the job queued and must not invoke a local fallback.
     """
     global _last_transfer_stats
-    require_remote_gpu("source upload")
-    if not os.path.isfile(local_path):
+    if not os.path.isfile(local_path) or os.path.getsize(local_path) <= 0:
         logger.warning("Upload source does not exist: %s", os.path.basename(local_path))
         return None
+    require_remote_gpu("source upload")
 
     valid, reason = await _validate_mp4_source(local_path)
     if not valid:
