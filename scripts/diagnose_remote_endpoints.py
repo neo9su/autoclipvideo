@@ -1,142 +1,197 @@
 #!/usr/bin/env python3
-"""Read-only reachability diagnosis for the remote Douyin services.
+"""Read-only reachability diagnosis for the remote backend and GPU services.
 
-The probe performs only network observations: ICMP (when available), TCP
-connect checks, and HTTP GET requests. It never starts, stops, kills, queues,
-retries, or mutates a remote service.
+The command only opens TCP connections and performs HTTP GET requests.  It does
+not restart services, mutate queues, submit work, or retry application jobs.
 """
 
 from __future__ import annotations
 
 import argparse
+import datetime as dt
+import errno
 import json
 import socket
-import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
+
 DEFAULT_HOST = "10.190.0.203"
-DEFAULT_PORTS = (8899, 8877)
-DEFAULT_TIMEOUT_SECONDS = 3.0
+DEFAULT_ENDPOINTS = (("backend", 8899, "/api/monitor/status"), ("gpu", 8877, "/health"))
+
+
+def utc_now() -> str:
+    """Return a timezone-aware UTC timestamp suitable for evidence logs."""
+
+    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+
+
+def classify_socket_error(error: OSError) -> str:
+    """Map common socket failures to stable, operator-friendly categories."""
+
+    if error.errno in {errno.EHOSTDOWN, errno.ENETDOWN, errno.ENETUNREACH, errno.EHOSTUNREACH}:
+        return "host_or_network_down"
+    if error.errno in {errno.ECONNREFUSED, errno.ECONNRESET}:
+        return "connection_refused_or_reset"
+    if isinstance(error, socket.timeout) or error.errno in {errno.ETIMEDOUT, errno.EAGAIN}:
+        return "timeout"
+    if error.errno in {socket.EAI_AGAIN, socket.EAI_FAIL, socket.EAI_NONAME}:
+        return "name_resolution_failure"
+    return "socket_error"
 
 
 @dataclass(frozen=True)
 class ProbeResult:
-    target: str
-    kind: str
-    observed_at: str
-    ok: bool
-    detail: str
-    error_type: str | None = None
-    http_status: int | None = None
+    """Evidence for one endpoint at one point in time."""
+
+    name: str
+    host: str
+    port: int
+    path: str
+    checked_at: str
+    tcp_reachable: bool
+    tcp_failure: str | None
+    tcp_detail: str | None
+    http_reachable: bool
+    http_status: int | None
+    http_failure: str | None
+    http_detail: str | None
 
 
-def timestamp() -> str:
-    """Return a timezone-aware UTC timestamp for evidence correlation."""
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+def probe_endpoint(name: str, host: str, port: int, path: str, timeout: float) -> ProbeResult:
+    """Probe TCP and then a GET health endpoint without changing remote state."""
 
-
-def classify_socket_error(error: OSError) -> str:
-    """Map platform socket failures to stable operator-facing categories."""
-    message = str(error).lower()
-    if "host is down" in message:
-        return "host_down"
-    if "connection refused" in message:
-        return "connection_refused"
-    if "timed out" in message or "timeout" in message:
-        return "timeout"
-    return error.__class__.__name__.lower()
-
-
-def probe_tcp(host: str, port: int, timeout: float) -> ProbeResult:
-    """Check one TCP endpoint without sending application data."""
-    target = f"{host}:{port}"
+    checked_at = utc_now()
+    tcp_reachable = False
+    tcp_failure = None
+    tcp_detail = None
     try:
         with socket.create_connection((host, port), timeout=timeout):
-            return ProbeResult(target, "tcp", timestamp(), True, "connect_succeeded")
+            tcp_reachable = True
     except OSError as error:
-        error_type = classify_socket_error(error)
-        return ProbeResult(target, "tcp", timestamp(), False, str(error), error_type)
+        tcp_failure = classify_socket_error(error)
+        tcp_detail = str(error)
 
-
-def probe_http_get(url: str, timeout: float) -> ProbeResult:
-    """Issue a GET request and retain only status/error metadata."""
-    request = urllib.request.Request(url, method="GET", headers={"User-Agent": "douyin-readonly-diagnosis/1"})
+    http_reachable = False
+    http_status = None
+    http_failure = None
+    http_detail = None
+    request = urllib.request.Request(f"http://{host}:{port}{path}", method="GET")
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return ProbeResult(url, "http_get", timestamp(), True, "response_received", http_status=response.status)
+            http_status = response.status
+            http_reachable = 200 <= response.status < 500
+            if not http_reachable:
+                http_failure = "unexpected_http_status"
     except urllib.error.HTTPError as error:
-        return ProbeResult(url, "http_get", timestamp(), True, "http_error_response", http_status=error.code)
-    except urllib.error.URLError as error:
-        reason = error.reason if isinstance(error.reason, OSError) else OSError(str(error.reason))
-        return ProbeResult(url, "http_get", timestamp(), False, str(error.reason), classify_socket_error(reason))
-    except OSError as error:
-        return ProbeResult(url, "http_get", timestamp(), False, str(error), classify_socket_error(error))
+        http_status = error.code
+        http_reachable = error.code < 500
+        if not http_reachable:
+            http_failure = "http_server_error"
+        http_detail = str(error)
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        reason = error.reason if isinstance(error, urllib.error.URLError) else error
+        http_failure = classify_socket_error(reason) if isinstance(reason, OSError) else "http_error"
+        http_detail = str(error)
 
-
-def probe_ping(host: str, timeout: float) -> ProbeResult:
-    """Run a bounded, non-mutating ICMP probe when the local ping supports it."""
-    command = ["ping", "-c", "1", "-W", str(max(1, int(timeout * 1000))), host]
-    started = timestamp()
-    try:
-        completed = subprocess.run(command, capture_output=True, text=True, timeout=timeout + 1)
-    except (FileNotFoundError, subprocess.TimeoutExpired) as error:
-        return ProbeResult(host, "icmp", started, False, str(error), "probe_unavailable")
-    detail = "echo_reply" if completed.returncode == 0 else "no_echo_reply"
-    return ProbeResult(host, "icmp", started, completed.returncode == 0, detail)
-
-
-def collect_report(host: str, ports: tuple[int, ...], timeout: float) -> dict[str, Any]:
-    """Collect a timestamped report using read-only probes only."""
-    results: list[ProbeResult] = [probe_ping(host, timeout)]
-    for port in ports:
-        results.append(probe_tcp(host, port, timeout))
-        results.append(probe_http_get(f"http://{host}:{port}/health", timeout))
-    tcp_failures = [item.error_type for item in results if item.kind == "tcp" and not item.ok]
-    host_or_network_failure = bool(tcp_failures) and all(
-        failure in {"host_down", "timeout"} for failure in tcp_failures
+    return ProbeResult(
+        name=name,
+        host=host,
+        port=port,
+        path=path,
+        checked_at=checked_at,
+        tcp_reachable=tcp_reachable,
+        tcp_failure=tcp_failure,
+        tcp_detail=tcp_detail,
+        http_reachable=http_reachable,
+        http_status=http_status,
+        http_failure=http_failure,
+        http_detail=http_detail,
     )
+
+
+def diagnose_host(results: list[ProbeResult]) -> dict[str, Any]:
+    """Summarize whether evidence points to host/network or service failure."""
+
+    if not results:
+        return {"classification": "no_observations", "confidence": "none"}
+    tcp_failures = [item.tcp_failure for item in results if not item.tcp_reachable]
+    if len(tcp_failures) == len(results) and any(
+        failure == "host_or_network_down" for failure in tcp_failures
+    ):
+        return {
+            "classification": "likely_host_or_network_failure",
+            "confidence": "high",
+            "reason": "both service ports failed before an application response",
+        }
+    if len(tcp_failures) == len(results) and all(
+        failure == "connection_refused_or_reset" for failure in tcp_failures
+    ):
+        return {
+            "classification": "host_reachable_but_services_not_accepting",
+            "confidence": "medium",
+            "reason": "both TCP connections were actively refused/reset",
+        }
+    if tcp_failures:
+        return {
+            "classification": "mixed_endpoint_failure",
+            "confidence": "medium",
+            "reason": "endpoint failures do not share one TCP failure mode",
+        }
     return {
-        "generated_at": timestamp(),
-        "host": host,
-        "ports": list(ports),
-        "read_only": True,
-        "classification": (
-            "host_or_network_path_unreachable"
-            if host_or_network_failure
-            else "service_or_port_failure"
-        ),
-        "results": [asdict(item) for item in results],
-        "limitations": [
-            "A failed remote probe cannot prove whether Qianchuan or GPU work is still running.",
-            "Do not infer an empty queue or inactive GPU from endpoint unreachability.",
-        ],
+        "classification": "host_and_ports_reachable",
+        "confidence": "high",
+        "reason": "both TCP connections succeeded",
     }
 
 
-def parse_args() -> argparse.Namespace:
-    """Parse safe, observation-only command-line options."""
+def run_cycles(host: str, cycles: int, interval: float, timeout: float) -> list[dict[str, Any]]:
+    """Collect independent read-only snapshots over the requested cycles."""
+
+    snapshots = []
+    for cycle in range(1, cycles + 1):
+        results = [asdict(probe_endpoint(name, host, port, path, timeout)) for name, port, path in DEFAULT_ENDPOINTS]
+        snapshots.append({"cycle": cycle, "checked_at": utc_now(), "results": results, "diagnosis": diagnose_host([ProbeResult(**item) for item in results])})
+        if cycle < cycles:
+            time.sleep(interval)
+    return snapshots
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    """Parse and validate the intentionally read-only CLI options."""
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default=DEFAULT_HOST)
-    parser.add_argument("--ports", nargs="+", type=int, default=list(DEFAULT_PORTS))
-    parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
-    parser.add_argument("--pretty", action="store_true")
-    return parser.parse_args()
+    parser.add_argument("--cycles", type=int, default=1)
+    parser.add_argument("--interval", type=float, default=300.0, help="seconds between cycles")
+    parser.add_argument("--timeout", type=float, default=5.0, help="per-connection timeout in seconds")
+    parser.add_argument("--output", type=Path, help="write JSON evidence to this path")
+    args = parser.parse_args(argv)
+    if args.cycles < 1 or args.interval < 0 or args.timeout <= 0:
+        parser.error("--cycles must be >= 1, --interval must be >= 0, and --timeout must be > 0")
+    return args
 
 
-def main() -> int:
-    """Run the read-only probe and emit JSON evidence."""
-    args = parse_args()
-    if not args.host or not args.ports or any(port < 1 or port > 65535 for port in args.ports):
-        raise SystemExit("host and valid TCP ports are required")
-    if args.timeout <= 0:
-        raise SystemExit("timeout must be positive")
-    report = collect_report(args.host, tuple(args.ports), args.timeout)
-    print(json.dumps(report, ensure_ascii=False, indent=2 if args.pretty else None))
+def main(argv: list[str] | None = None) -> int:
+    """Collect evidence and emit one JSON document to stdout or --output."""
+
+    args = parse_args(argv or sys.argv[1:])
+    evidence = {
+        "tool": "diagnose_remote_endpoints",
+        "mode": "read_only",
+        "host": args.host,
+        "cycles": run_cycles(args.host, args.cycles, args.interval, args.timeout),
+    }
+    payload = json.dumps(evidence, ensure_ascii=False, indent=2) + "\n"
+    if args.output:
+        args.output.write_text(payload, encoding="utf-8")
+    else:
+        sys.stdout.write(payload)
     return 0
 
 
