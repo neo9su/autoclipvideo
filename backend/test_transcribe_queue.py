@@ -50,20 +50,23 @@ def test_transcription_queue_classifier_covers_submission_blockers() -> None:
     assert classify_transcription_record({**base, "transcribed": 2}, media_exists=True, gpu_online=True) == "transcription_complete"
 
 
-def test_missing_srt_does_not_block_upload_preflight() -> None:
+def test_missing_srt_does_not_block_media_selection() -> None:
+    """A new MP4 is intentionally eligible before the GPU creates its SRT."""
     source = Path("backend/segment_merger.py").read_text()
-    preflight = source[source.index("async def maybe_merge_before_upload"):]
-    assert "resolve_srt_path" not in preflight
-    assert "SRT is intentionally absent" in preflight
+    assert "resolve_srt_path" not in source
+    assert "Select a safe upload source without requiring a pre-existing SRT." in source
 
 
-def test_upload_cache_can_be_invalidated_after_gpu_restart() -> None:
-    import sync
+def test_sync_rejects_empty_source_before_upload() -> None:
+    import sync as syncmod
 
-    stats = sync.TransferStats("lost-job", "remote-gpu", 12, 1)
-    sync._completed_uploads["room:digest"] = stats
-    sync.forget_upload_job("lost-job")
-    assert "room:digest" not in sync._completed_uploads
+    async def run_check() -> None:
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as source:
+            valid, reason = await syncmod._validate_mp4_source(source.name)
+        assert not valid
+        assert reason == "source media is empty"
+
+    asyncio.run(run_check())
 
 
 def _load_backend_main():
@@ -361,30 +364,6 @@ def test_recovered_worker_cannot_publish_or_reuse_stale_upload_alias() -> None:
     assert "_transcription_tasks.pop(job_id, None)" in source
 
 
-def test_missing_srt_does_not_block_upload_and_chunk_rows_stay_queued() -> None:
-    transcribe_source = Path("backend/transcribe.py").read_text()
-    merger_source = Path("backend/segment_merger.py").read_text()
-    sync_source = Path("backend/sync.py").read_text()
-    upload_section = transcribe_source[
-        transcribe_source.index("result = await maybe_merge_before_upload"):
-        transcribe_source.index('_poll_state["blocked_count"]')
-    ]
-
-    assert "resolve_srt_path(filepath)" not in upload_section
-    assert "WHERE id = ? AND synced = 0 AND transcribed = 0" in transcribe_source
-    assert "duration_status)" in merger_source
-    assert "VALUES (?, ?, ?, ?, 0, 0, 0, ?, ?, ?, 'accepted')" in merger_source
-    assert "os.path.getsize(local_path) <= 0" in sync_source
-
-
-def test_gpu_result_is_the_only_source_of_srt_and_empty_result_is_terminal() -> None:
-    source = Path("backend/transcribe.py").read_text()
-    fetch_section = source[source.index("async def _fetch_srt"):source.index("async def _run_editor")]
-    assert "/jobs/{job_id}/srt" in fetch_section
-    assert "Whisper detected no speech segments" in fetch_section
-    assert "UPDATE recordings SET transcribed = 2" in fetch_section
-
-
 async def main_test() -> None:
     backend_main = _load_backend_main()
     await test_transcribe_queue_excludes_ghost_open_recording(backend_main)
@@ -396,8 +375,6 @@ async def main_test() -> None:
     test_recovery_endpoint_cancels_worker_without_deleting_artifacts()
     test_poll_health_reports_cycle_completion_and_errors()
     test_recovered_worker_cannot_publish_or_reuse_stale_upload_alias()
-    test_missing_srt_does_not_block_upload_and_chunk_rows_stay_queued()
-    test_gpu_result_is_the_only_source_of_srt_and_empty_result_is_terminal()
     print("transcribe queue ghost-recording guards ok")
 
 

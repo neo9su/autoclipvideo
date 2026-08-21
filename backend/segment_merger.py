@@ -339,12 +339,12 @@ async def _ffmpeg_concat(file_paths: list[str], output_path: str) -> bool:
 async def maybe_merge_before_upload(
     room_id: int, recording_id: int
 ) -> Optional[tuple[str, int]]:
-    """Select a validated MP4 source for upload.
+    """Select a safe upload source without requiring a pre-existing SRT.
 
-    SRT is intentionally absent from this preflight: it is produced by the
-    remote transcription job and must never gate its own upload.  Chunk
-    splitting still returns the original row as the primary record; generated
-    child rows remain pending and are submitted independently.
+    Transcription is the producer of the SRT for newly recorded media.  An
+    absent sidecar therefore must not be interpreted as a reason to defer the
+    MP4.  Existing sidecars are still resolved for callers that need them, but
+    this function only selects/validates media and never fabricates subtitles.
     """
     async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
@@ -369,18 +369,7 @@ async def maybe_merge_before_upload(
         return None
     
     file_size = os.path.getsize(filepath)
-    if file_size <= 0:
-        reason = f"invalid mp4: source file is empty ({rec['filename']})"
-        logger.warning("Recording %s cannot be uploaded: %s", recording_id, reason)
-        async with aio_connect() as db:
-            await db.execute(
-                "UPDATE recordings SET transcribed=-1, transcribe_error=?, skip_reason=? "
-                "WHERE id=? AND transcribed=0 AND synced=0",
-                (reason, reason, recording_id),
-            )
-            await db.commit()
-        return None
-    
+
     # Split files larger than SPLIT_THRESHOLD before upload
     if file_size > SPLIT_THRESHOLD:
         logger.info(f"Splitting large file {rec['filename']} ({file_size // 1024 // 1024}MB)")

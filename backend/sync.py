@@ -36,18 +36,6 @@ def last_transfer_stats() -> Optional[TransferStats]:
     return _last_transfer_stats
 
 
-def forget_upload_job(job_id: str) -> None:
-    """Drop a cached alias after the remote worker has lost a job.
-
-    The cache is deliberately process-local, but a GPU restart can invalidate
-    a job while the backend is still alive.  Keeping the alias would make the
-    next poll submit the same dead job id forever instead of uploading again.
-    """
-    stale_keys = [key for key, stats in _completed_uploads.items() if stats.job_id == job_id]
-    for key in stale_keys:
-        _completed_uploads.pop(key, None)
-
-
 def _file_fingerprint(path: str) -> tuple[str, int]:
     digest = hashlib.sha256()
     size = 0
@@ -56,6 +44,37 @@ def _file_fingerprint(path: str) -> tuple[str, int]:
             digest.update(chunk)
             size += len(chunk)
     return digest.hexdigest(), size
+
+
+async def _validate_mp4_source(local_path: str) -> tuple[bool, str]:
+    """Reject empty or unreadable MP4s before they reach the GPU queue."""
+    try:
+        if os.path.getsize(local_path) <= 0:
+            return False, "source media is empty"
+        process = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", local_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
+        if process.returncode != 0:
+            detail = stderr.decode(errors="replace").strip()[-160:]
+            return False, f"invalid mp4: {detail or 'ffprobe failed'}"
+        try:
+            if float(stdout.decode().strip()) <= 0:
+                return False, "invalid mp4: duration is 0"
+        except ValueError:
+            return False, "invalid mp4: duration is unavailable"
+    except asyncio.TimeoutError:
+        try:
+            process.kill()
+        except Exception:
+            pass
+        return False, "invalid mp4: ffprobe timeout"
+    except (OSError, ValueError) as exc:
+        return False, f"invalid mp4: {type(exc).__name__}"
+    return True, ""
 
 
 async def sync_file(local_path: str, room_id: int) -> Optional[str]:
@@ -71,25 +90,12 @@ async def sync_file(local_path: str, room_id: int) -> Optional[str]:
     if not os.path.isfile(local_path):
         logger.warning("Upload source does not exist: %s", os.path.basename(local_path))
         return None
-    try:
-        if os.path.getsize(local_path) <= 0:
-            logger.warning("Upload source is empty: %s", os.path.basename(local_path))
-            return None
-    except OSError:
-        logger.warning("Upload source cannot be inspected: %s", os.path.basename(local_path))
+
+    valid, reason = await _validate_mp4_source(local_path)
+    if not valid:
+        logger.warning("Upload source rejected for %s: %s", os.path.basename(local_path), reason)
         return None
 
-    # A missing sidecar SRT is intentionally not an upload prerequisite: the
-    # remote worker creates it.  A zero-byte MP4, however, can never produce a
-    # transcription and must not consume a GPU job or poison the idempotency
-    # cache.
-    try:
-        if os.path.getsize(local_path) <= 0:
-            logger.warning("Upload source is empty: %s", os.path.basename(local_path))
-            return None
-    except OSError as exc:
-        logger.warning("Cannot stat upload source %s: %s", os.path.basename(local_path), type(exc).__name__)
-        return None
     fingerprint, input_bytes = await asyncio.to_thread(_file_fingerprint, local_path)
     cache_key = f"{room_id}:{fingerprint}"
     cached = _completed_uploads.get(cache_key)
@@ -108,9 +114,6 @@ async def sync_file(local_path: str, room_id: int) -> Optional[str]:
                 with open(local_path, "rb") as source:
                     return source.read()
             file_data = await asyncio.to_thread(_read_source)
-            if not file_data:
-                logger.warning("Upload source became empty: %s", filename)
-                return None
             form = aiohttp.FormData()
             form.add_field("room_id", str(room_id))
             form.add_field("file", file_data, filename=filename, content_type="video/mp4")
