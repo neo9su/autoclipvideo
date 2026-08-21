@@ -279,9 +279,8 @@ async def _split_and_register(
             await db.execute(
                 """INSERT INTO recordings
                    (room_id, group_id, filename, size_bytes, synced, transcribed,
-                    local_deleted, segment_index, start_time, end_time,
-                    duration_status)
-                   VALUES (?, ?, ?, ?, 0, 0, 0, ?, ?, ?, 'accepted')""",
+                    local_deleted, segment_index, start_time, end_time)
+                   VALUES (?, ?, ?, ?, 0, 0, 0, ?, ?, ?)""",
                 (room_id, group_id, os.path.basename(cp), csz, base_index + i, start_time, end_time),
             )
 
@@ -340,13 +339,12 @@ async def _ffmpeg_concat(file_paths: list[str], output_path: str) -> bool:
 async def maybe_merge_before_upload(
     room_id: int, recording_id: int
 ) -> Optional[tuple[str, int]]:
-    """Return a validated source candidate for transcription upload.
+    """Select a validated source file; SRT is not required before upload.
 
-    An SRT is deliberately not part of this preflight.  SRT is an output of
-    the GPU job, not an input artifact, so requiring one here deadlocks fresh
-    recordings.  Chunk splitting remains part of this function: the returned
-    id is the DB row that owns the returned file and each generated child is
-    registered as an independent pending recording.
+    Transcription is the producer of the SRT sidecar, so checking for one here
+    would deadlock every newly-finished recording.  Chunk splitting remains
+    unchanged: the original row is the primary row for chunk 0 and additional
+    chunks are registered as independent pending rows.
     """
     async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
@@ -371,6 +369,17 @@ async def maybe_merge_before_upload(
         return None
     
     file_size = os.path.getsize(filepath)
+    if file_size <= 0:
+        reason = f"source media invalid: empty file: {rec['filename']}"
+        logger.warning("Recording %s cannot be uploaded: %s", recording_id, reason)
+        async with aio_connect() as db:
+            await db.execute(
+                "UPDATE recordings SET transcribed=-1, transcribe_error=?, skip_reason=? "
+                "WHERE id=? AND transcribed=0 AND synced=0",
+                (reason, reason, recording_id),
+            )
+            await db.commit()
+        return None
     
     # Split files larger than SPLIT_THRESHOLD before upload
     if file_size > SPLIT_THRESHOLD:

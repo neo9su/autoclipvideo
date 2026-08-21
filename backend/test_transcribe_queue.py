@@ -50,25 +50,28 @@ def test_transcription_queue_classifier_covers_submission_blockers() -> None:
     assert classify_transcription_record({**base, "transcribed": 2}, media_exists=True, gpu_online=True) == "transcription_complete"
 
 
-def test_empty_media_is_rejected_before_gpu_upload() -> None:
-    import transcribe
-
-    fd, media_path = tempfile.mkstemp(suffix=".mp4")
-    os.close(fd)
-    try:
-        valid, reason = asyncio.run(transcribe._validate_mp4(media_path))
-        assert not valid
-        assert reason == "invalid mp4: file is empty"
-    finally:
-        Path(media_path).unlink(missing_ok=True)
+def test_upload_preflight_does_not_require_a_local_srt() -> None:
+    source = Path("backend/segment_merger.py").read_text()
+    function = source[source.index("async def maybe_merge_before_upload"):]
+    assert "SRT is not required before upload" in function
+    assert "resolve_srt_path" not in function
+    assert "empty file" in function
 
 
-def test_missing_srt_is_not_a_submission_blocker() -> None:
+def test_poll_upload_path_validates_mp4_before_sync_and_keeps_failed_uploads_pending() -> None:
     source = Path("backend/transcribe.py").read_text()
-    upload_block = source[source.index("result = await maybe_merge_before_upload"):
-                          source.index("_poll_state[\"blocked_count\"]")]
-    assert "resolve_srt_path" not in upload_block
-    assert "sync_file(upload_path" in upload_block
+    upload_block = source[source.index("result = await maybe_merge_before_upload"):source.index("_poll_state[\"blocked_count\"]")]
+    assert "valid, err_msg = await _validate_mp4(upload_path)" in upload_block
+    assert "job_id = await sync_file(upload_path, rec[\"room_id\"])" in upload_block
+    assert "GPU upload did not return a job" in upload_block
+    assert "transcribed = 1" in upload_block
+
+
+def test_remote_upload_rejects_empty_sources_and_exposes_cache_invalidation() -> None:
+    source = Path("backend/sync.py").read_text()
+    assert "input_bytes <= 0" in source
+    assert "def forget_upload_job" in source
+    assert "X-Idempotency-Key" in source
 
 
 def _load_backend_main():

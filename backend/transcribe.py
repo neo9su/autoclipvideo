@@ -611,6 +611,9 @@ async def poll_transcriptions(broadcast_fn=None):
                             context="transcription upload",
                         )
                         continue
+                    # SRT is a GPU output, never an upload precondition.  The
+                    # preflight below validates the MP4 itself and the result
+                    # endpoint writes the sidecar after transcription.
                     result = await maybe_merge_before_upload(rec["room_id"], rec["id"])
                     if result is None:
                         # The merger returns None both while a chunk is being
@@ -656,6 +659,8 @@ async def poll_transcriptions(broadcast_fn=None):
                                 (job_id, os.path.getsize(upload_path), primary_id),
                             )
                             await db.commit()
+                    else:
+                        logger.warning("GPU upload did not return a job for recording %s; keeping it queued", rec["id"])
                 _poll_state["blocked_count"] = blocked
                 _poll_state["diagnosis"]["merge_blocked"] = blocked
                 _poll_state["diagnosis"]["merge_samples"] = merge_samples[:QUEUE_DIAGNOSIS_SAMPLE_LIMIT]
@@ -736,6 +741,8 @@ async def _check_job(rec, broadcast_fn):
     if _status_code == 404:
         # GPU service restarted and lost this job — re-queue for upload
         logger.warning(f"Job {job_id} not found on GPU service (restarted?), re-queuing")
+        from sync import forget_upload_job
+        forget_upload_job(job_id)
         async with aio_connect() as db:
             await db.execute(
                 "UPDATE recordings SET transcribed=0, synced=0, gpu_job_id=NULL WHERE id=?",

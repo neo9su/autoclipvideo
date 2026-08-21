@@ -28,9 +28,9 @@ class TransferStats:
 
 
 _completed_uploads: dict[str, TransferStats] = {}
+_last_transfer_stats: Optional[TransferStats] = None
 _upload_locks: dict[str, asyncio.Lock] = {}
 _upload_locks_guard = asyncio.Lock()
-_last_transfer_stats: Optional[TransferStats] = None
 
 
 def last_transfer_stats() -> Optional[TransferStats]:
@@ -38,13 +38,11 @@ def last_transfer_stats() -> Optional[TransferStats]:
     return _last_transfer_stats
 
 
-async def invalidate_upload(local_path: str, room_id: int) -> None:
-    """Forget a cached job after the remote service lost it during restart."""
-    try:
-        fingerprint, _ = await asyncio.to_thread(_file_fingerprint, local_path)
-    except (OSError, ValueError):
-        return
-    _completed_uploads.pop(f"{room_id}:{fingerprint}", None)
+def forget_upload_job(job_id: str) -> None:
+    """Drop a cached alias after the remote worker has lost its job."""
+    stale_keys = [key for key, stats in _completed_uploads.items() if stats.job_id == job_id]
+    for key in stale_keys:
+        _completed_uploads.pop(key, None)
 
 
 def _file_fingerprint(path: str) -> tuple[str, int]:
@@ -57,37 +55,6 @@ def _file_fingerprint(path: str) -> tuple[str, int]:
     return digest.hexdigest(), size
 
 
-async def _validate_mp4_source(local_path: str) -> tuple[bool, str]:
-    """Reject empty or unreadable MP4s before they reach the GPU queue."""
-    try:
-        if os.path.getsize(local_path) <= 0:
-            return False, "source media is empty"
-        process = await asyncio.create_subprocess_exec(
-            "ffprobe", "-v", "error", "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1", local_path,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
-        if process.returncode != 0:
-            detail = stderr.decode(errors="replace").strip()[-160:]
-            return False, f"invalid mp4: {detail or 'ffprobe failed'}"
-        try:
-            if float(stdout.decode().strip()) <= 0:
-                return False, "invalid mp4: duration is 0"
-        except ValueError:
-            return False, "invalid mp4: duration is unavailable"
-    except asyncio.TimeoutError:
-        try:
-            process.kill()
-        except Exception:
-            pass
-        return False, "invalid mp4: ffprobe timeout"
-    except (OSError, ValueError) as exc:
-        return False, f"invalid mp4: {type(exc).__name__}"
-    return True, ""
-
-
 async def sync_file(local_path: str, room_id: int) -> Optional[str]:
     """Upload one source file once and return its remote transcription job id.
 
@@ -97,18 +64,13 @@ async def sync_file(local_path: str, room_id: int) -> Optional[str]:
     callers keep the job queued and must not invoke a local fallback.
     """
     global _last_transfer_stats
-    if not os.path.isfile(local_path) or os.path.getsize(local_path) <= 0:
-        logger.warning("Upload source does not exist: %s", os.path.basename(local_path))
-        return None
     require_remote_gpu("source upload")
-
-    valid, reason = await _validate_mp4_source(local_path)
-    if not valid:
-        logger.warning("Upload source rejected for %s: %s", os.path.basename(local_path), reason)
+    if not os.path.isfile(local_path):
+        logger.warning("Upload source does not exist: %s", os.path.basename(local_path))
         return None
 
     fingerprint, input_bytes = await asyncio.to_thread(_file_fingerprint, local_path)
-    if input_bytes == 0:
+    if input_bytes <= 0:
         logger.warning("Upload source is empty: %s", os.path.basename(local_path))
         return None
     cache_key = f"{room_id}:{fingerprint}"
@@ -129,6 +91,7 @@ async def sync_file(local_path: str, room_id: int) -> Optional[str]:
                 def _read_source() -> bytes:
                     with open(local_path, "rb") as source:
                         return source.read()
+
                 file_data = await asyncio.to_thread(_read_source)
                 form = aiohttp.FormData()
                 form.add_field("room_id", str(room_id))
