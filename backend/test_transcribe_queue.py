@@ -50,6 +50,37 @@ def test_transcription_queue_classifier_covers_submission_blockers() -> None:
     assert classify_transcription_record({**base, "transcribed": 2}, media_exists=True, gpu_online=True) == "transcription_complete"
 
 
+def test_upload_preflight_does_not_require_a_local_srt() -> None:
+    source = Path("backend/segment_merger.py").read_text()
+    function = source[source.index("async def maybe_merge_before_upload"):]
+    assert "SRT is not required before upload" in function
+    assert "resolve_srt_path" not in function
+    assert "empty file" in function
+
+
+def test_poll_upload_path_validates_mp4_before_sync_and_keeps_failed_uploads_pending() -> None:
+    source = Path("backend/transcribe.py").read_text()
+    upload_block = source[source.index("result = await maybe_merge_before_upload"):source.index("_poll_state[\"blocked_count\"]")]
+    assert "valid, err_msg = await _validate_mp4(upload_path)" in upload_block
+    assert "job_id = await sync_file(upload_path, rec[\"room_id\"])" in upload_block
+    assert "GPU upload did not return a job" in upload_block
+    assert "transcribed = 1" in upload_block
+
+
+def test_remote_upload_rejects_empty_sources_and_exposes_cache_invalidation() -> None:
+    source = Path("backend/sync.py").read_text()
+    assert "input_bytes <= 0" in source
+    assert "def forget_upload_job" in source
+    assert "X-Idempotency-Key" in source
+
+
+def test_split_children_remain_in_the_transcription_queue() -> None:
+    source = Path("backend/segment_merger.py").read_text()
+    split_block = source[source.index("INSERT INTO recordings", source.index("async def _split_and_register")):]
+    assert "duration_status" in split_block
+    assert "VALUES (?, ?, ?, ?, 0, 0, 0, ?, ?, ?, 'accepted')" in split_block
+
+
 def _load_backend_main():
     """Import backend.main while hiding optional integration startup warnings."""
     stderr = io.StringIO()
