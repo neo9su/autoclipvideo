@@ -18,7 +18,19 @@
 
 初始路由采样时间 11:58:04：目标经 `en1`，路由条目存在。初始 ping 为 3/3 超时；随后对 8899、8877、8878 的连接均失败。HTTP GET 未返回状态码。
 
-可复现的诊断工具：`scripts/diagnose_remote_endpoints.py`。该工具只执行 ICMP、TCP connect 和 HTTP GET，不读取或修改远端任务状态，不包含重启/停止/kill/队列操作。
+## 当前复核（2026-08-21 12:08 GMT+8）
+
+使用 `scripts/diagnose_remote_endpoints.py --host 10.190.0.203 --cycles 3 --interval 1 --timeout 1` 做了 3 个连续只读周期：
+
+| 周期 | 时间（GMT+8） | 8899 TCP / HTTP | 8877 TCP / HTTP | 主机诊断 |
+|---|---|---|---|---|
+| 1 | 12:08:09 | `Host is down` / 无 HTTP 状态码 | `Host is down` / 无 HTTP 状态码 | `likely_host_or_network_failure`（high） |
+| 2 | 12:08:10 | `Host is down` / 无 HTTP 状态码 | `Host is down` / 无 HTTP 状态码 | `likely_host_or_network_failure`（high） |
+| 3 | 12:08:11 | `Host is down` / 无 HTTP 状态码 | `Host is down` / 无 HTTP 状态码 | `likely_host_or_network_failure`（high） |
+
+本次 JSON 证据已写入本地临时文件供复核；未执行任何改变远端状态的动作。
+
+可复现的诊断工具：`scripts/diagnose_remote_endpoints.py`。该工具只执行 TCP connect 和 HTTP GET，不读取或修改远端任务状态，不包含 ICMP、SSH、重启/停止/kill/队列操作。
 
 ## Qianchuan / GPU 运行状态判定
 
