@@ -271,6 +271,61 @@ async def test_missing_finished_source_is_marked_terminal(backend_main) -> None:
         Path(db_path).unlink(missing_ok=True)
 
 
+async def test_new_recording_without_srt_is_selected_for_gpu_upload(backend_main) -> None:
+    """A missing SRT must not block the GPU job that creates that SRT."""
+    import segment_merger
+    fd, db_path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.unlink(db_path)
+    source_path = Path(backend_main.RECORDINGS_DIR) / "new_without_srt.mp4"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_bytes(b"not-a-valid-mp4-but-nonempty")
+    try:
+        await _create_queue_test_db(backend_main, db_path)
+        await _insert_recording(db_path, id=108, filename=source_path.name, size_bytes=source_path.stat().st_size)
+        segment_merger.aio_connect = lambda: dbmod.aio_connect(db_path)
+        segment_merger.RECORDINGS_DIR = str(source_path.parent)
+
+        selected = await segment_merger.maybe_merge_before_upload(1, 108)
+
+        assert selected == (str(source_path), 108)
+        assert not (source_path.with_suffix(".srt")).exists()
+        async with aiosqlite.connect(db_path) as con:
+            row = await (await con.execute(
+                "SELECT synced, transcribed, transcribe_error FROM recordings WHERE id=108"
+            )).fetchone()
+        assert row == (0, 0, None)
+    finally:
+        source_path.unlink(missing_ok=True)
+        source_path.with_suffix(".srt").unlink(missing_ok=True)
+        Path(db_path).unlink(missing_ok=True)
+
+
+async def test_empty_recording_is_terminal_before_upload(backend_main) -> None:
+    import segment_merger
+    fd, db_path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.unlink(db_path)
+    source_path = Path(backend_main.RECORDINGS_DIR) / "empty_source.mp4"
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.touch()
+    try:
+        await _create_queue_test_db(backend_main, db_path)
+        await _insert_recording(db_path, id=109, filename=source_path.name, size_bytes=0)
+        segment_merger.aio_connect = lambda: dbmod.aio_connect(db_path)
+        segment_merger.RECORDINGS_DIR = str(source_path.parent)
+
+        assert await segment_merger.maybe_merge_before_upload(1, 109) is None
+        async with aiosqlite.connect(db_path) as con:
+            row = await (await con.execute(
+                "SELECT transcribed, transcribe_error FROM recordings WHERE id=109"
+            )).fetchone()
+        assert row == (-1, "invalid mp4: source file is empty")
+    finally:
+        source_path.unlink(missing_ok=True)
+        Path(db_path).unlink(missing_ok=True)
+
+
 async def test_queue_diagnosis_classifies_pending_reasons_without_mutation(backend_main) -> None:
     import transcribe
 
@@ -365,6 +420,8 @@ async def main_test() -> None:
     await test_transcribe_queue_excludes_short_and_unavailable_recordings(backend_main)
     await test_stale_open_cleanup_keeps_recent_active_recording(backend_main)
     await test_stale_job_recovery_resets_only_matching_recording(backend_main)
+    await test_new_recording_without_srt_is_selected_for_gpu_upload(backend_main)
+    await test_empty_recording_is_terminal_before_upload(backend_main)
     test_transcription_watchdog_contract_is_present()
     test_recovery_endpoint_cancels_worker_without_deleting_artifacts()
     test_poll_health_reports_cycle_completion_and_errors()
