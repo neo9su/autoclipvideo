@@ -25,15 +25,12 @@ function Get-ActiveSession {
     return $null
 }
 
-function Stop-BackendFromOtherSession {
+function Get-BackendFromOtherSession {
     param([int]$SessionId)
     $processes = Get-CimInstance Win32_Process -Filter "Name = 'python.exe' OR Name = 'pythonw.exe'"
-    foreach ($process in $processes) {
-        if ($process.CommandLine -and $process.CommandLine -match $backendProcessPattern -and
-            $process.SessionId -ne $SessionId) {
-            Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
-        }
-    }
+    return @($processes | Where-Object {
+        $_.CommandLine -and $_.CommandLine -match $backendProcessPattern -and $_.SessionId -ne $SessionId
+    })
 }
 
 while ($true) {
@@ -44,7 +41,12 @@ while ($true) {
         continue
     }
 
-    Stop-BackendFromOtherSession -SessionId $sessionId
+    $conflictingProcesses = Get-BackendFromOtherSession -SessionId $sessionId
+    if ($conflictingProcesses.Count -gt 0) {
+        Write-Warning "Backend listener conflict detected on port $Port; an existing backend process is active. No process was stopped."
+        Start-Sleep -Seconds 15
+        continue
+    }
     Push-Location $scriptRoot
     try {
         Write-Host "Starting backend in interactive Windows session $sessionId"
@@ -60,6 +62,10 @@ while ($true) {
                 break
             }
             $backend.Refresh()
+        }
+        if ($backend.ExitCode -ne 0) {
+            Write-Warning "Backend exited with code $($backend.ExitCode). Check the startup log for a listener conflict or configuration error; no automatic retry is performed."
+            break
         }
     } finally {
         Pop-Location
