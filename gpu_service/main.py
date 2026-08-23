@@ -1719,15 +1719,6 @@ async def create_clip_job(request: Request, req: ClipJobRequest):
         else:
             raise HTTPException(status_code=404, detail=f"MP4 not found on server: {mp4_path}")
     
-    # Check disk space before starting clip job
-    free_gb = _get_disk_free_gb()
-    if free_gb < BATCH_UPLOAD_LIMIT_GB * 0.5:  # Need at least half batch limit for output
-        logger.warning(f"Low disk space: {free_gb:.1f}GB free, cannot start clip job")
-        _clip_jobs.pop(job_id, None)
-        raise HTTPException(
-            status_code=507,
-            detail=f"Insufficient disk space: {free_gb:.1f}GB free"
-        )
     if not req.segments:
         raise HTTPException(status_code=422, detail="segments list is empty")
 
