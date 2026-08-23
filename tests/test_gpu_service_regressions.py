@@ -25,3 +25,14 @@ def test_low_disk_upload_is_rejected_with_reserve():
 
 def test_unknown_upload_size_uses_minimum_free_reserve():
     assert has_upload_capacity(10.1, None, 10.0, 1.0)
+
+
+def test_clip_admission_does_not_use_legacy_batch_quota():
+    source = Path("gpu_service/main.py").read_text(encoding="utf-8")
+    assert "BATCH_UPLOAD_LIMIT_GB" not in source
+
+
+def test_tts_failure_logging_does_not_reference_caller_only_scene_type():
+    source = Path("backend/voice_director.py").read_text(encoding="utf-8")
+    assert "GPU TTS exception for scene_type={scene_type}" not in source
+    assert "GPU TTS exception for room_id=%s emotion=%s" in source

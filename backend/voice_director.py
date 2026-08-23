@@ -523,7 +523,16 @@ class VoiceDirector:
             return actual_dur
 
         except Exception as e:
-            logger.warning(f"GPU TTS exception for scene_type={scene_type}: {type(e).__name__}: {e}")
+            # ``scene_type`` belongs to the caller's scene payload and is not
+            # available in this lower-level method.  Do not let error logging
+            # raise a secondary NameError and hide the actual TTS failure.
+            logger.warning(
+                "GPU TTS exception for room_id=%s emotion=%s: %s: %s",
+                room_id,
+                emotion,
+                type(e).__name__,
+                e,
+            )
             return 0.0
 
     # ── MiniMax 云端 TTS ───────────────────────────────────────────────────────
