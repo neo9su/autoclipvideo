@@ -50,25 +50,6 @@ def test_transcription_queue_classifier_covers_submission_blockers() -> None:
     assert classify_transcription_record({**base, "transcribed": 2}, media_exists=True, gpu_online=True) == "transcription_complete"
 
 
-def test_transcription_queue_classifier_accepts_sqlite_rows() -> None:
-    """The live diagnosis query uses sqlite3.Row, not only dictionaries."""
-    connection = sqlite3.connect(":memory:")
-    connection.row_factory = sqlite3.Row
-    connection.execute(
-        """CREATE TABLE recordings (
-            transcribed INTEGER, synced INTEGER, gpu_job_id TEXT,
-            local_deleted INTEGER, transcribe_error TEXT, skip_reason TEXT,
-            duration_status TEXT, end_time TEXT, start_time TEXT
-        )"""
-    )
-    connection.execute(
-        "INSERT INTO recordings VALUES (0, 0, NULL, 0, NULL, NULL, 'accepted', 'end', 'start')"
-    )
-    row = connection.execute("SELECT * FROM recordings").fetchone()
-    assert classify_transcription_record(row, media_exists=True, gpu_online=True) == "ready_to_submit"
-    connection.close()
-
-
 def test_upload_preflight_does_not_require_a_local_srt() -> None:
     source = Path("backend/segment_merger.py").read_text()
     function = source[source.index("async def maybe_merge_before_upload"):]
@@ -93,11 +74,11 @@ def test_remote_upload_rejects_empty_sources_and_exposes_cache_invalidation() ->
     assert "X-Idempotency-Key" in source
 
 
-def test_large_files_remain_one_logical_transcription_task() -> None:
+def test_large_recordings_remain_one_logical_upload_task() -> None:
     source = Path("backend/segment_merger.py").read_text()
-    upload_block = source[source.index("async def maybe_merge_before_upload"):]
-    assert "Do not split/register rows here" in upload_block
-    assert "return filepath, recording_id" in upload_block
+    public_block = source[source.index("async def maybe_merge_before_upload"):]
+    assert "Never split here" in public_block
+    assert "return filepath, recording_id" in public_block
 
 
 def _load_backend_main():

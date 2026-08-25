@@ -123,9 +123,7 @@ def classify_transcription_record(
     if row.get("transcribed") == -1:
         error = (row.get("transcribe_error") or row.get("skip_reason") or "").lower()
         return "srt_missing" if "srt" in error else "media_missing"
-    # NULL is the legacy value used before duration metadata was introduced;
-    # finished rows are re-probed by the dispatcher before submission.
-    if row.get("duration_status") not in (None, "accepted"):
+    if row.get("duration_status") != "accepted":
         return "duration_invalid"
     if not row.get("end_time") or row.get("end_time") == row.get("start_time"):
         return "end_time_invalid"
@@ -553,30 +551,9 @@ async def poll_transcriptions(broadcast_fn=None):
                     """SELECT * FROM recordings
                        WHERE synced = 0 AND transcribed = 0 AND local_deleted = 0
                          AND end_time IS NOT NULL AND end_time != start_time
-                         AND (duration_status IS NULL OR duration_status != 'too_short')"""
-                ) as cur:
+                         AND (duration_status = 'accepted' OR duration_status IS NULL)"""
+                    ) as cur:
                     unsynced = await cur.fetchall()
-
-            # Older rows were created before duration_status was persisted.  A
-            # status-only query made those finished recordings invisible even
-            # though their media was present (the observed "pending != queue"
-            # incident). Re-probe them once per poll and persist the result.
-            for rec in unsynced:
-                if rec["duration_status"] == "accepted":
-                    continue
-                source = os.path.join(RECORDINGS_DIR, rec["filename"] or "")
-                duration = await _get_video_duration(source) if os.path.isfile(source) else 0.0
-                status = classify_duration(duration)
-                async with aio_connect() as db:
-                    await db.execute(
-                        "UPDATE recordings SET duration_seconds=?, duration_status=?, skip_reason=? WHERE id=? AND transcribed=0 AND synced=0",
-                        (duration or None, status, None if status == "accepted" else duration_reason(duration), rec["id"]),
-                    )
-                    await db.commit()
-                rec["duration_seconds"] = duration or None
-                rec["duration_status"] = status
-                rec["skip_reason"] = None if status == "accepted" else duration_reason(duration)
-            unsynced = [rec for rec in unsynced if rec["duration_status"] == "accepted"]
 
             diagnosis = await transcription_queue_diagnosis(
                 gpu_online=is_online(),
@@ -588,6 +565,20 @@ async def poll_transcriptions(broadcast_fn=None):
             for rec in unsynced:
                 filepath = os.path.join(RECORDINGS_DIR, rec["filename"])
                 if os.path.isfile(filepath):
+                    # Backfill legacy rows from the complete source file. A
+                    # transport read/chunk is never classified as a task.
+                    if rec["duration_status"] is None:
+                        duration = await probe_duration(filepath)
+                        status = classify_duration(duration)
+                        async with aio_connect() as db:
+                            await db.execute(
+                                "UPDATE recordings SET duration_seconds=?, duration_status=?, skip_reason=? WHERE id=?",
+                                (duration, status, None if status == "accepted" else status, rec["id"]),
+                            )
+                            await db.commit()
+                        if status != "accepted":
+                            continue
+                        rec["duration_status"] = status
                     available_unsynced.append(rec)
                 else:
                     await mark_missing_source_media(rec["id"], rec["filename"])

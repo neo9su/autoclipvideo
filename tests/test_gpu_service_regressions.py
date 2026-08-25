@@ -36,3 +36,10 @@ def test_tts_failure_logging_does_not_reference_caller_only_scene_type():
     source = Path("backend/voice_director.py").read_text(encoding="utf-8")
     assert "GPU TTS exception for scene_type={scene_type}" not in source
     assert "GPU TTS exception for room_id=%s emotion=%s" in source
+
+
+def test_upload_streaming_keeps_transport_chunks_out_of_logical_job_model():
+    source = Path("backend/sync.py").read_text()
+    assert "AsyncIterablePayload" in source
+    assert "read_source_chunks" in source
+    assert "sync_file" in source
