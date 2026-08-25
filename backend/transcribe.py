@@ -8,6 +8,7 @@ import os
 import time
 from pathlib import Path
 from typing import Optional
+from collections.abc import Mapping
 
 import aiohttp
 import aiosqlite
@@ -114,18 +115,30 @@ def classify_transcription_record(
     gpu_error: str | None = None,
 ) -> str:
     """Return a stable read-only reason for a transcription queue record."""
-    if row.get("transcribed") == 1 and row.get("synced") == 1 and row.get("gpu_job_id"):
+    def value(name: str, default=None):
+        # sqlite3.Row deliberately does not implement Mapping.get().  The
+        # diagnosis endpoint runs with sqlite rows, while unit tests and
+        # callers commonly provide dictionaries.  Keep this boundary helper
+        # read-only and compatible with both representations.
+        if isinstance(row, Mapping):
+            return row.get(name, default)
+        try:
+            return row[name]
+        except (IndexError, KeyError):
+            return default
+
+    if value("transcribed") == 1 and value("synced") == 1 and value("gpu_job_id"):
         return "gpu_job_running"
-    if row.get("transcribed") == 2:
+    if value("transcribed") == 2:
         return "transcription_complete"
-    if row.get("local_deleted"):
+    if value("local_deleted"):
         return "media_deleted"
-    if row.get("transcribed") == -1:
-        error = (row.get("transcribe_error") or row.get("skip_reason") or "").lower()
+    if value("transcribed") == -1:
+        error = (value("transcribe_error") or value("skip_reason") or "").lower()
         return "srt_missing" if "srt" in error else "media_missing"
-    if row.get("duration_status") not in (None, "accepted"):
+    if value("duration_status") not in (None, "accepted"):
         return "duration_invalid"
-    if not row.get("end_time") or row.get("end_time") == row.get("start_time"):
+    if not value("end_time") or value("end_time") == value("start_time"):
         return "end_time_invalid"
     if not media_exists:
         return "media_missing"
