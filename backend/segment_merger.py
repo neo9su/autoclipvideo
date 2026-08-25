@@ -382,16 +382,17 @@ async def maybe_merge_before_upload(
             await db.commit()
         return None
     
-    # Split files larger than SPLIT_THRESHOLD before upload
+    # Do not split a logical recording into database rows.  A database row is
+    # a transcription/editing task, whereas upload framing is a transport
+    # concern.  Splitting here used to create independent jobs with local
+    # timestamps starting at zero and could silently discard all but chunk 0.
+    # The GPU endpoint accepts streamed multipart bodies, so keep the complete
+    # source intact and let the transport retry the request as a whole.
     if file_size > SPLIT_THRESHOLD:
-        logger.info(f"Splitting large file {rec['filename']} ({file_size // 1024 // 1024}MB)")
-        split_result = await _split_and_register(filepath, file_size, room_id, recording_id)
-        if split_result:
-            # Return the first chunk path and its recording ID
-            chunk_path, chunk_id = split_result
-            return chunk_path, chunk_id
-        # If split failed, fall through to normal upload
-    
+        logger.info(
+            "Keeping large recording %s as one logical task (%d MB)",
+            rec["filename"], file_size // 1024 // 1024,
+        )
     return filepath, recording_id
 
 

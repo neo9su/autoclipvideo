@@ -177,6 +177,10 @@ async def init_db():
             "ALTER TABLE recordings ADD COLUMN upload_bytes INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE recordings ADD COLUMN download_bytes INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE recordings ADD COLUMN temp_file_count INTEGER NOT NULL DEFAULT 0",
+            # One logical recording owns one transcription/editing timeline.
+            # Transport retries/framing must never create child recording rows.
+            "ALTER TABLE recordings ADD COLUMN logical_task_id TEXT",
+            "ALTER TABLE recordings ADD COLUMN source_offset_seconds REAL NOT NULL DEFAULT 0",
             # VibeVoice
             "ALTER TABLE clip_groups ADD COLUMN vibe TEXT DEFAULT 'trendy'",
             # Voice cloning: one voice reference per live room

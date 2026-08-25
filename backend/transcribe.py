@@ -123,7 +123,7 @@ def classify_transcription_record(
     if row.get("transcribed") == -1:
         error = (row.get("transcribe_error") or row.get("skip_reason") or "").lower()
         return "srt_missing" if "srt" in error else "media_missing"
-    if row.get("duration_status") != "accepted":
+    if row.get("duration_status") not in (None, "accepted"):
         return "duration_invalid"
     if not row.get("end_time") or row.get("end_time") == row.get("start_time"):
         return "end_time_invalid"
@@ -551,7 +551,7 @@ async def poll_transcriptions(broadcast_fn=None):
                     """SELECT * FROM recordings
                        WHERE synced = 0 AND transcribed = 0 AND local_deleted = 0
                          AND end_time IS NOT NULL AND end_time != start_time
-                         AND duration_status = 'accepted'"""
+                         AND (duration_status IS NULL OR duration_status = 'accepted')"""
                     ) as cur:
                     unsynced = await cur.fetchall()
 
@@ -565,6 +565,16 @@ async def poll_transcriptions(broadcast_fn=None):
             for rec in unsynced:
                 filepath = os.path.join(RECORDINGS_DIR, rec["filename"])
                 if os.path.isfile(filepath):
+                    # Older rows predate duration_status.  They are finished
+                    # upload candidates; do not let a missing backfill value
+                    # make the queue look empty while /gpu/status says pending.
+                    if rec["duration_status"] is None:
+                        async with aio_connect() as db:
+                            await db.execute(
+                                "UPDATE recordings SET duration_status='accepted' WHERE id=? AND duration_status IS NULL",
+                                (rec["id"],),
+                            )
+                            await db.commit()
                     available_unsynced.append(rec)
                 else:
                     await mark_missing_source_media(rec["id"], rec["filename"])
