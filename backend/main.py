@@ -119,9 +119,7 @@ def _is_finished_unsynced_upload_candidate(row) -> bool:
         return False
     if not row["end_time"] or row["end_time"] == row["start_time"]:
         return False
-    # Legacy recordings may not have been backfilled with duration_status yet;
-    # the poller probes the complete source before submission.
-    if row["duration_status"] not in ("accepted", None):
+    if row["duration_status"] != "accepted":
         return False
     return _recording_file_exists(row["filename"])
 
@@ -2758,7 +2756,9 @@ async def gpu_status():
             (running_transcribe,) = await cur.fetchone()
         async with db.execute(
             """SELECT filename FROM recordings
-               WHERE transcribed=0 AND synced=0 AND local_deleted=0 AND end_time IS NOT NULL"""
+               WHERE transcribed=0 AND synced=0 AND local_deleted=0
+                 AND end_time IS NOT NULL AND end_time != start_time
+                 AND duration_status = 'accepted'"""
         ) as cur:
             pending_upload_rows = await cur.fetchall()
     pending_transcribe = running_transcribe + sum(
@@ -3023,7 +3023,7 @@ async def get_transcribe_queue(limit: int = Query(default=100, ge=1, le=500)):
                       r.duration_seconds, r.duration_status, r.skip_reason,
                       rm.name as room_name
                FROM recordings r LEFT JOIN rooms rm ON r.room_id = rm.id
-               WHERE (r.duration_status = 'accepted' OR r.duration_status IS NULL)
+               WHERE r.duration_status = 'accepted'
                  AND ((r.transcribed IN (0, 1) AND (r.synced = 1 OR r.gpu_job_id IS NOT NULL))
                   OR (r.transcribed = 0
                       AND r.synced = 0
@@ -3554,7 +3554,7 @@ async def get_stats():
         db.row_factory = aiosqlite.Row
         rows = await db.execute_fetchall("""
             SELECT
-                SUM(CASE WHEN transcribed = 0 AND local_deleted = 0 AND end_time IS NOT NULL AND (duration_status = 'accepted' OR duration_status IS NULL) THEN 1 ELSE 0 END) AS transcribe_pending,
+                SUM(CASE WHEN transcribed = 0 AND synced = 0 AND local_deleted = 0 AND end_time IS NOT NULL AND end_time != start_time AND duration_status = 'accepted' THEN 1 ELSE 0 END) AS transcribe_pending,
                 SUM(CASE WHEN transcribed = 1 AND duration_status = 'accepted' THEN 1 ELSE 0 END) AS transcribe_running,
                 SUM(CASE WHEN transcribed = -1 AND duration_status = 'accepted' THEN 1 ELSE 0 END) AS transcribe_failed,
                 SUM(CASE WHEN transcribed = 2 AND clipped = 0 AND duration_status = 'accepted' THEN 1 ELSE 0 END) AS clip_pending,

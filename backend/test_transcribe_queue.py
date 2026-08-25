@@ -74,11 +74,18 @@ def test_remote_upload_rejects_empty_sources_and_exposes_cache_invalidation() ->
     assert "X-Idempotency-Key" in source
 
 
-def test_large_recordings_remain_one_logical_upload_task() -> None:
+def test_legacy_rows_are_backfilled_before_queue_filtering() -> None:
+    source = Path("backend/transcribe.py").read_text()
+    assert "async def _backfill_duration_statuses" in source
+    assert "duration_status IS NULL OR duration_status=''" in source
+    assert "await _backfill_duration_statuses()" in source
+
+
+def test_large_recordings_remain_one_logical_transcription_job() -> None:
     source = Path("backend/segment_merger.py").read_text()
-    public_block = source[source.index("async def maybe_merge_before_upload"):]
-    assert "Never split here" in public_block
-    assert "return filepath, recording_id" in public_block
+    function = source[source.index("async def maybe_merge_before_upload"):]
+    assert "Never split into recordings" in function
+    assert "_split_and_register" not in function
 
 
 def _load_backend_main():

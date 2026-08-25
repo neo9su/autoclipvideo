@@ -1,5 +1,5 @@
 from gpu_execution import reject_local_media
-from duration_policy import MIN_RECORDING_DURATION_SECONDS, UNAVAILABLE_REASON, classify_duration, duration_reason
+from duration_policy import MIN_RECORDING_DURATION_SECONDS, UNAVAILABLE_REASON, classify_duration, duration_reason, probe_duration
 import asyncio
 import calendar
 import heapq
@@ -136,6 +136,45 @@ def classify_transcription_record(
     return "ready_to_submit"
 
 QUEUE_DIAGNOSIS_SAMPLE_LIMIT = 10
+
+
+async def _backfill_duration_statuses() -> int:
+    """Make legacy finished rows eligible without changing their media state.
+
+    Older recordings were inserted before ``duration_status`` was introduced.
+    Filtering those rows as ``accepted`` makes the poller appear healthy while
+    silently excluding them from dispatch.  Probe only finished, pending rows
+    and persist the classification idempotently; short recordings are still
+    filtered, while a failed probe remains explicitly unavailable.
+    """
+    async with aio_connect() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT id, filename FROM recordings
+               WHERE synced=0 AND transcribed=0 AND local_deleted=0
+                 AND end_time IS NOT NULL AND end_time != start_time
+                 AND (duration_status IS NULL OR duration_status='')"""
+        ) as cur:
+            rows = await cur.fetchall()
+    updated = 0
+    for row in rows:
+        duration = await probe_duration(
+            os.path.join(RECORDINGS_DIR, row["filename"])
+        )
+        status = classify_duration(duration)
+        reason = duration_reason(duration) if status != "accepted" else None
+        async with aio_connect() as db:
+            await db.execute(
+                """UPDATE recordings
+                   SET duration_seconds=?, duration_status=?, skip_reason=?
+                   WHERE id=? AND (duration_status IS NULL OR duration_status='')""",
+                (duration, status, reason, row["id"]),
+            )
+            await db.commit()
+        updated += 1
+    if updated:
+        logger.info("Duration backfill classified %d legacy transcription row(s)", updated)
+    return updated
 
 
 def _queue_sample(row, reason: str, *, status: str = "pending") -> dict:
@@ -469,6 +508,7 @@ async def poll_transcriptions(broadcast_fn=None):
     # flooding the queue with hundreds of tasks at startup and pegging local CPU.
     _STARTUP_RECOVERY_BATCH = 5
     try:
+        await _backfill_duration_statuses()
         async with aio_connect() as db:
             db.row_factory = aiosqlite.Row
             # Case 1: normal pending (clipped=0)

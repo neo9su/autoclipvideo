@@ -52,12 +52,12 @@ SMALL_THRESHOLD  = 50  * 1024 * 1024  # files smaller than this get merged
 STALE_WAIT_SECS  = 600                # force-upload small files after waiting this long
 MERGE_TARGET_DUR = 900                # target duration for merged file: 15 minutes (seconds)
 MERGE_MAX_DUR    = 1200               # hard cap: never merge beyond 20 minutes total duration
-# A recording is a logical transcription/editing task.  Do not split it into
-# database rows: that loses the global subtitle clock and makes short transport
-# pieces look like independent recordings.  The remote service accepts streamed
-# multipart uploads, so the transfer layer may read the file in chunks without
-# changing this logical unit.
-SPLIT_THRESHOLD = None
+# Upload limits belong to the transport, never to the recordings data model.
+# The GPU endpoint streams multipart bodies, so a recording remains one logical
+# job regardless of its size.  Keep the old names as compatibility constants;
+# they are deliberately not used to create database rows.
+SPLIT_THRESHOLD  = 8 * 1024 * 1024
+SPLIT_CHUNK_SIZE = 6 * 1024 * 1024
 
 RECORDINGS_DIR = os.path.join(os.path.dirname(__file__), "..", "recordings")
 
@@ -386,8 +386,14 @@ async def maybe_merge_before_upload(
             await db.commit()
         return None
     
-    # Never split here.  ``sync_file`` streams the complete logical recording
-    # and the GPU creates exactly one transcription job for it.
+    # Never split into recordings.  In particular, do not turn a transport
+    # limitation into independent ASR/editor jobs with reset timestamps.
+    if file_size > SPLIT_THRESHOLD:
+        logger.info(
+            "Keeping large recording %s as one logical upload (%d bytes)",
+            rec["filename"], file_size,
+        )
+    
     return filepath, recording_id
 
 
