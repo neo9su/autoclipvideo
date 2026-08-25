@@ -2756,7 +2756,10 @@ async def gpu_status():
             (running_transcribe,) = await cur.fetchone()
         async with db.execute(
             """SELECT filename FROM recordings
-               WHERE transcribed=0 AND synced=0 AND local_deleted=0 AND end_time IS NOT NULL"""
+               WHERE transcribed=0 AND synced=0 AND local_deleted=0
+                 AND COALESCE(transport_only, 0) = 0
+                 AND end_time IS NOT NULL AND end_time != start_time
+                 AND COALESCE(duration_status, 'accepted') = 'accepted'"""
         ) as cur:
             pending_upload_rows = await cur.fetchall()
     pending_transcribe = running_transcribe + sum(
@@ -3021,7 +3024,8 @@ async def get_transcribe_queue(limit: int = Query(default=100, ge=1, le=500)):
                       r.duration_seconds, r.duration_status, r.skip_reason,
                       rm.name as room_name
                FROM recordings r LEFT JOIN rooms rm ON r.room_id = rm.id
-               WHERE r.duration_status = 'accepted'
+               WHERE COALESCE(r.duration_status, 'accepted') = 'accepted'
+                 AND COALESCE(r.transport_only, 0) = 0
                  AND ((r.transcribed IN (0, 1) AND (r.synced = 1 OR r.gpu_job_id IS NOT NULL))
                   OR (r.transcribed = 0
                       AND r.synced = 0

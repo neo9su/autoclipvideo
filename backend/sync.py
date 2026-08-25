@@ -88,16 +88,24 @@ async def sync_file(local_path: str, room_id: int) -> Optional[str]:
         url = f"{GPU_SERVICE_URL}/jobs"
         for attempt in range(1, _UPLOAD_RETRIES + 1):
             try:
-                def _read_source() -> bytes:
-                    with open(local_path, "rb") as source:
-                        return source.read()
-
-                file_data = await asyncio.to_thread(_read_source)
                 form = aiohttp.FormData()
                 form.add_field("room_id", str(room_id))
-                form.add_field("file", file_data, filename=filename, content_type="video/mp4")
+                # AsyncIterablePayload bounds memory while keeping the complete
+                # recording as one multipart request.  These read chunks are
+                # transport-only: the GPU endpoint creates exactly one job.
+                async def read_source_chunks():
+                    with open(local_path, "rb") as source:
+                        while chunk := await asyncio.to_thread(source.read, 1024 * 1024):
+                            yield chunk
+
                 headers = {"X-Idempotency-Key": cache_key}
                 async with aiohttp.ClientSession(timeout=_UPLOAD_TIMEOUT) as session:
+                    form.add_field(
+                        "file",
+                        aiohttp.AsyncIterablePayload(read_source_chunks(), content_type="video/mp4"),
+                        filename=filename,
+                        content_type="video/mp4",
+                    )
                     async with session.post(url, data=form, headers=headers) as response:
                         body = await response.json() if response.status in (200, 201) else None
                         text = "" if body is not None else await response.text()

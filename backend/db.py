@@ -177,6 +177,13 @@ async def init_db():
             "ALTER TABLE recordings ADD COLUMN upload_bytes INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE recordings ADD COLUMN download_bytes INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE recordings ADD COLUMN temp_file_count INTEGER NOT NULL DEFAULT 0",
+            # Transport metadata is intentionally separate from logical
+            # recording identity.  No transport piece may become a clip job.
+            "ALTER TABLE recordings ADD COLUMN logical_recording_id INTEGER",
+            "ALTER TABLE recordings ADD COLUMN transport_chunk_index INTEGER",
+            "ALTER TABLE recordings ADD COLUMN transport_offset_bytes INTEGER",
+            "ALTER TABLE recordings ADD COLUMN transport_only INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE recordings ADD COLUMN transport_chunk_count INTEGER",
             # VibeVoice
             "ALTER TABLE clip_groups ADD COLUMN vibe TEXT DEFAULT 'trendy'",
             # Voice cloning: one voice reference per live room

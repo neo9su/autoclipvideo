@@ -52,8 +52,10 @@ SMALL_THRESHOLD  = 50  * 1024 * 1024  # files smaller than this get merged
 STALE_WAIT_SECS  = 600                # force-upload small files after waiting this long
 MERGE_TARGET_DUR = 900                # target duration for merged file: 15 minutes (seconds)
 MERGE_MAX_DUR    = 1200               # hard cap: never merge beyond 20 minutes total duration
-SPLIT_THRESHOLD  = 8 * 1024 * 1024   # files larger than this get split before upload (GPU service limit ~10MB)
-SPLIT_CHUNK_SIZE = 6 * 1024 * 1024   # target chunk size when splitting large files (below GPU limit)
+# Uploads are deliberately not split here.  A split file is a *transport*
+# concern, never a recording/clip concern: making rows for transport pieces
+# loses the global media timeline and causes short pieces to be discarded.
+# The sync client streams the complete logical file to the remote service.
 
 RECORDINGS_DIR = os.path.join(os.path.dirname(__file__), "..", "recordings")
 
@@ -80,11 +82,18 @@ async def _get_pending_unsynced(room_id: int) -> list:
     async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            """SELECT id, filename, segment_index, size_bytes, start_time, end_time
+            """SELECT id, filename, segment_index, size_bytes, start_time, end_time,
+                      transport_chunk_index, transport_offset_bytes
                FROM recordings
                WHERE room_id=? AND synced=0 AND transcribed=0
                  AND local_deleted=0 AND end_time IS NOT NULL AND size_bytes IS NOT NULL
-               ORDER BY segment_index, start_time""",
+                 AND COALESCE(transport_only, 0) = 0
+               ORDER BY
+                 CASE WHEN transport_offset_bytes IS NULL THEN 1 ELSE 0 END,
+                 transport_offset_bytes,
+                 CASE WHEN transport_chunk_index IS NULL THEN 1 ELSE 0 END,
+                 transport_chunk_index,
+                 segment_index, start_time, id""",
             (room_id,),
         ) as cur:
             rows = await cur.fetchall()
@@ -382,16 +391,9 @@ async def maybe_merge_before_upload(
             await db.commit()
         return None
     
-    # Split files larger than SPLIT_THRESHOLD before upload
-    if file_size > SPLIT_THRESHOLD:
-        logger.info(f"Splitting large file {rec['filename']} ({file_size // 1024 // 1024}MB)")
-        split_result = await _split_and_register(filepath, file_size, room_id, recording_id)
-        if split_result:
-            # Return the first chunk path and its recording ID
-            chunk_path, chunk_id = split_result
-            return chunk_path, chunk_id
-        # If split failed, fall through to normal upload
-    
+    # Keeping large logical recording intact for upload: transport pieces
+    # never become database rows. The GPU receives one upload and therefore
+    # creates one transcription job.
     return filepath, recording_id
 
 
