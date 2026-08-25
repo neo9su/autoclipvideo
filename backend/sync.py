@@ -90,25 +90,17 @@ async def sync_file(local_path: str, room_id: int) -> Optional[str]:
             try:
                 form = aiohttp.FormData()
                 form.add_field("room_id", str(room_id))
-                # AsyncIterablePayload keeps the complete recording as one
-                # logical upload while bounding transfer memory.  A read
-                # chunk is transport-only and never becomes a GPU task.
-                async def read_source_chunks():
-                    with open(local_path, "rb") as source:
-                        while chunk := await asyncio.to_thread(source.read, 1024 * 1024):
-                            yield chunk
-
-                form.add_field(
-                    "file",
-                    aiohttp.AsyncIterablePayload(read_source_chunks(), content_type="video/mp4"),
-                    filename=filename,
-                    content_type="video/mp4",
-                )
+                # Pass the file handle to aiohttp instead of reading the
+                # complete logical recording into RAM.  This is a streaming
+                # transport optimization; the remote endpoint still creates
+                # exactly one job for the complete file.
                 headers = {"X-Idempotency-Key": cache_key}
                 async with aiohttp.ClientSession(timeout=_UPLOAD_TIMEOUT) as session:
-                    async with session.post(url, data=form, headers=headers) as response:
-                        body = await response.json() if response.status in (200, 201) else None
-                        text = "" if body is not None else await response.text()
+                    with open(local_path, "rb") as source:
+                        form.add_field("file", source, filename=filename, content_type="video/mp4")
+                        async with session.post(url, data=form, headers=headers) as response:
+                            body = await response.json() if response.status in (200, 201) else None
+                            text = "" if body is not None else await response.text()
                 if response.status == 201 and body and body.get("job_id"):
                     stats = TransferStats(body["job_id"], os.environ.get("GPU_EXECUTION_NODE", "remote-gpu"), input_bytes, attempt)
                     _completed_uploads[cache_key] = stats

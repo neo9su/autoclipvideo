@@ -123,7 +123,7 @@ def classify_transcription_record(
     if row.get("transcribed") == -1:
         error = (row.get("transcribe_error") or row.get("skip_reason") or "").lower()
         return "srt_missing" if "srt" in error else "media_missing"
-    if row.get("duration_status") not in ("accepted", None):
+    if row.get("duration_status") not in (None, "accepted"):
         return "duration_invalid"
     if not row.get("end_time") or row.get("end_time") == row.get("start_time"):
         return "end_time_invalid"
@@ -550,13 +550,9 @@ async def poll_transcriptions(broadcast_fn=None):
                 async with db.execute(
                     """SELECT * FROM recordings
                        WHERE synced = 0 AND transcribed = 0 AND local_deleted = 0
+                         AND COALESCE(transport_only, 0) = 0
                          AND end_time IS NOT NULL AND end_time != start_time
-                         -- Older rows predate duration_status.  Treat a
-                         -- missing value as pending and normalize it below;
-                         -- otherwise healthy finished recordings disappear
-                         -- from dispatch while the status endpoint counts
-                         -- them as pending.
-                         AND (duration_status = 'accepted' OR duration_status IS NULL)"""
+                         AND COALESCE(duration_status, 'accepted') = 'accepted'"""
                     ) as cur:
                     unsynced = await cur.fetchall()
 
@@ -570,27 +566,6 @@ async def poll_transcriptions(broadcast_fn=None):
             for rec in unsynced:
                 filepath = os.path.join(RECORDINGS_DIR, rec["filename"])
                 if os.path.isfile(filepath):
-                    if rec["duration_status"] is None:
-                        # Backfill legacy rows conservatively from the
-                        # recorder's measured duration.  Do not classify a
-                        # transport chunk here: the row is one logical
-                        # recording and its complete duration is authoritative.
-                        duration = rec["duration_seconds"]
-                        if duration is not None and duration >= MIN_RECORDING_DURATION:
-                            async with aio_connect() as db:
-                                await db.execute(
-                                    "UPDATE recordings SET duration_status='accepted', skip_reason=NULL WHERE id=? AND duration_status IS NULL",
-                                    (rec["id"],),
-                                )
-                                await db.commit()
-                            rec = dict(rec)
-                            rec["duration_status"] = "accepted"
-                        else:
-                            logger.info(
-                                "Deferring legacy recording %s: duration status unavailable",
-                                rec["id"],
-                            )
-                            continue
                     available_unsynced.append(rec)
                 else:
                     await mark_missing_source_media(rec["id"], rec["filename"])
