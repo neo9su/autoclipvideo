@@ -93,11 +93,11 @@ def test_remote_upload_rejects_empty_sources_and_exposes_cache_invalidation() ->
     assert "X-Idempotency-Key" in source
 
 
-def test_split_children_remain_in_the_transcription_queue() -> None:
+def test_large_files_remain_one_logical_transcription_task() -> None:
     source = Path("backend/segment_merger.py").read_text()
-    split_block = source[source.index("INSERT INTO recordings", source.index("async def _split_and_register")):]
-    assert "duration_status" in split_block
-    assert "VALUES (?, ?, ?, ?, 0, 0, 0, ?, ?, ?, 'accepted')" in split_block
+    upload_block = source[source.index("async def maybe_merge_before_upload"):]
+    assert "Do not split/register rows here" in upload_block
+    assert "return filepath, recording_id" in upload_block
 
 
 def _load_backend_main():

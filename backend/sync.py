@@ -88,19 +88,22 @@ async def sync_file(local_path: str, room_id: int) -> Optional[str]:
         url = f"{GPU_SERVICE_URL}/jobs"
         for attempt in range(1, _UPLOAD_RETRIES + 1):
             try:
-                def _read_source() -> bytes:
-                    with open(local_path, "rb") as source:
-                        return source.read()
-
-                file_data = await asyncio.to_thread(_read_source)
                 form = aiohttp.FormData()
                 form.add_field("room_id", str(room_id))
-                form.add_field("file", file_data, filename=filename, content_type="video/mp4")
+                # Pass a file object rather than reading the whole recording
+                # into RAM. aiohttp emits the multipart body incrementally;
+                # the GPU service receives one complete logical MP4 and can
+                # preserve its global timeline.
+                source = open(local_path, "rb")
+                form.add_field("file", source, filename=filename, content_type="video/mp4")
                 headers = {"X-Idempotency-Key": cache_key}
-                async with aiohttp.ClientSession(timeout=_UPLOAD_TIMEOUT) as session:
-                    async with session.post(url, data=form, headers=headers) as response:
-                        body = await response.json() if response.status in (200, 201) else None
-                        text = "" if body is not None else await response.text()
+                try:
+                    async with aiohttp.ClientSession(timeout=_UPLOAD_TIMEOUT) as session:
+                        async with session.post(url, data=form, headers=headers) as response:
+                            body = await response.json() if response.status in (200, 201) else None
+                            text = "" if body is not None else await response.text()
+                finally:
+                    source.close()
                 if response.status == 201 and body and body.get("job_id"):
                     stats = TransferStats(body["job_id"], os.environ.get("GPU_EXECUTION_NODE", "remote-gpu"), input_bytes, attempt)
                     _completed_uploads[cache_key] = stats

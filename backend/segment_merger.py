@@ -52,8 +52,10 @@ SMALL_THRESHOLD  = 50  * 1024 * 1024  # files smaller than this get merged
 STALE_WAIT_SECS  = 600                # force-upload small files after waiting this long
 MERGE_TARGET_DUR = 900                # target duration for merged file: 15 minutes (seconds)
 MERGE_MAX_DUR    = 1200               # hard cap: never merge beyond 20 minutes total duration
-SPLIT_THRESHOLD  = 8 * 1024 * 1024   # files larger than this get split before upload (GPU service limit ~10MB)
-SPLIT_CHUNK_SIZE = 6 * 1024 * 1024   # target chunk size when splitting large files (below GPU limit)
+# Kept as compatibility names only. Upload-size chunks must never become
+# recordings: a split MP4 has a zero-based timeline and is not a logical task.
+SPLIT_THRESHOLD  = 0
+SPLIT_CHUNK_SIZE = 0
 
 RECORDINGS_DIR = os.path.join(os.path.dirname(__file__), "..", "recordings")
 
@@ -382,17 +384,8 @@ async def maybe_merge_before_upload(
             await db.commit()
         return None
     
-    # Do not split a logical recording into database rows.  A database row is
-    # a transcription/editing task, whereas upload framing is a transport
-    # concern.  Splitting here used to create independent jobs with local
-    # timestamps starting at zero and could silently discard all but chunk 0.
-    # The GPU endpoint accepts streamed multipart bodies, so keep the complete
-    # source intact and let the transport retry the request as a whole.
-    if file_size > SPLIT_THRESHOLD:
-        logger.info(
-            "Keeping large recording %s as one logical task (%d MB)",
-            rec["filename"], file_size // 1024 // 1024,
-        )
+    # Do not split/register rows here. Transport resumability belongs in sync.py
+    # and the GPU endpoint; this row remains the sole logical task.
     return filepath, recording_id
 
 
