@@ -2756,7 +2756,10 @@ async def gpu_status():
             (running_transcribe,) = await cur.fetchone()
         async with db.execute(
             """SELECT filename FROM recordings
-               WHERE transcribed=0 AND synced=0 AND local_deleted=0 AND end_time IS NOT NULL"""
+               WHERE transcribed=0 AND synced=0 AND local_deleted=0
+                 AND COALESCE(transport_only, 0) = 0
+                 AND end_time IS NOT NULL AND end_time != start_time
+                 AND COALESCE(duration_status, 'accepted') = 'accepted'"""
         ) as cur:
             pending_upload_rows = await cur.fetchall()
     pending_transcribe = running_transcribe + sum(

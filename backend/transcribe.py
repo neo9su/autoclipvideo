@@ -167,10 +167,11 @@ async def transcription_queue_diagnosis(*, gpu_online: bool, gpu_error: str | No
         async with db.execute(
             """SELECT id, filename, start_time, end_time, synced, transcribed,
                       local_deleted, duration_status, gpu_job_id, transcribe_error,
-                      skip_reason
+                      skip_reason, transport_only
                FROM recordings
-               WHERE (synced=0 AND transcribed IN (0, -1, 2))
-                  OR (transcribed=1 AND gpu_job_id IS NOT NULL)
+            WHERE COALESCE(transport_only, 0) = 0
+              AND ((synced=0 AND transcribed IN (0, -1, 2))
+                   OR (transcribed=1 AND gpu_job_id IS NOT NULL))
                ORDER BY id ASC"""
         ) as cur:
             rows = await cur.fetchall()
@@ -570,6 +571,32 @@ async def poll_transcriptions(broadcast_fn=None):
                 else:
                     await mark_missing_source_media(rec["id"], rec["filename"])
             unsynced = available_unsynced
+
+            # Legacy rows may predate duration_status.  Normalize only from
+            # their recorded complete logical duration; transport-only rows
+            # are excluded before this point and are never classified here.
+            # The equivalent legacy predicate was: duration_status =
+            # 'accepted' OR duration_status IS NULL.
+            legacy_duration_ids = [
+                rec["id"] for rec in unsynced
+                if rec["duration_status"] is None
+                and rec["duration_seconds"] is not None
+                and float(rec["duration_seconds"]) >= MIN_RECORDING_DURATION
+            ]
+            if legacy_duration_ids:
+                placeholders = ",".join("?" for _ in legacy_duration_ids)
+                async with aio_connect() as db:
+                    await db.execute(
+                        f"UPDATE recordings SET duration_status='accepted', skip_reason=NULL "
+                        f"WHERE duration_status IS NULL AND id IN ({placeholders})",
+                        legacy_duration_ids,
+                    )
+                    await db.commit()
+                unsynced = [
+                    {**dict(rec), "duration_status": "accepted"}
+                    if rec["id"] in legacy_duration_ids else rec
+                    for rec in unsynced
+                ]
 
             has_work = bool(pending or unsynced)
 

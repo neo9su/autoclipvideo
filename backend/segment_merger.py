@@ -82,12 +82,18 @@ async def _get_pending_unsynced(room_id: int) -> list:
     async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            """SELECT id, filename, segment_index, size_bytes, start_time, end_time
+            """SELECT id, filename, segment_index, size_bytes, start_time, end_time,
+                      transport_chunk_index, transport_offset_bytes
                FROM recordings
                WHERE room_id=? AND synced=0 AND transcribed=0
                  AND local_deleted=0 AND end_time IS NOT NULL AND size_bytes IS NOT NULL
                  AND COALESCE(transport_only, 0) = 0
-               ORDER BY segment_index, start_time""",
+               ORDER BY
+                 CASE WHEN transport_offset_bytes IS NULL THEN 1 ELSE 0 END,
+                 transport_offset_bytes,
+                 CASE WHEN transport_chunk_index IS NULL THEN 1 ELSE 0 END,
+                 transport_chunk_index,
+                 segment_index, start_time, id""",
             (room_id,),
         ) as cur:
             rows = await cur.fetchall()
@@ -385,8 +391,9 @@ async def maybe_merge_before_upload(
             await db.commit()
         return None
     
-    # Do not create database rows for large-file transport pieces.  The GPU
-    # receives one upload and therefore creates one transcription job.
+    # Keeping large logical recording intact for upload: transport pieces
+    # never become database rows. The GPU receives one upload and therefore
+    # creates one transcription job.
     return filepath, recording_id
 
 

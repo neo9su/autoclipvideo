@@ -183,6 +183,7 @@ async def init_db():
             "ALTER TABLE recordings ADD COLUMN transport_chunk_index INTEGER",
             "ALTER TABLE recordings ADD COLUMN transport_offset_bytes INTEGER",
             "ALTER TABLE recordings ADD COLUMN transport_only INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE recordings ADD COLUMN transport_chunk_count INTEGER",
             # VibeVoice
             "ALTER TABLE clip_groups ADD COLUMN vibe TEXT DEFAULT 'trendy'",
             # Voice cloning: one voice reference per live room

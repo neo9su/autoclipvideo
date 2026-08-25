@@ -74,6 +74,35 @@ def test_remote_upload_rejects_empty_sources_and_exposes_cache_invalidation() ->
     assert "X-Idempotency-Key" in source
 
 
+def test_queue_diagnosis_excludes_transport_only_rows() -> None:
+    source = Path("backend/transcribe.py").read_text()
+    diagnosis = source[source.index("async def transcription_queue_diagnosis"):source.index("async def mark_missing_source_media")]
+    assert "COALESCE(transport_only, 0) = 0" in diagnosis
+
+
+def test_large_upload_uses_transport_chunks_without_logical_split() -> None:
+    source = Path("backend/sync.py").read_text()
+    assert "AsyncIterablePayload" in source
+    assert "read_source_chunks" in source
+    merger = Path("backend/segment_merger.py").read_text()
+    assert "_split_and_register(filepath" not in merger[merger.index("async def maybe_merge_before_upload"):]
+
+
+def test_legacy_chunk_recovery_is_a_dry_run_audit() -> None:
+    from logical_recording_recovery import audit_legacy_chunks, transport_order
+
+    rows = [
+        {"id": 2, "filename": "capture_chunk001.mp4", "transcribed": 0, "synced": 0, "segment_index": 99},
+        {"id": 1, "filename": "capture_chunk000.mp4", "transcribed": 2, "synced": 1, "segment_index": 1},
+        {"id": 3, "filename": "capture_chunk002.mp4", "transcribed": 0, "synced": 0, "segment_index": 0},
+    ]
+    report = audit_legacy_chunks(rows)
+    assert report["candidate_count"] == 3
+    assert report["groups"][0]["chunk_count"] == 3
+    assert report["groups"][0]["chunks"][0]["chunk_index"] == 0
+    assert transport_order([{"id": 2, "transport_chunk_index": 1}, {"id": 1, "transport_chunk_index": 0}])[0]["id"] == 1
+
+
 def test_large_recordings_remain_single_logical_transcription_tasks() -> None:
     source = Path("backend/segment_merger.py").read_text()
     upload_block = source[source.index("async def maybe_merge_before_upload"):]
