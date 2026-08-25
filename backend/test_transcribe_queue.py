@@ -74,18 +74,18 @@ def test_remote_upload_rejects_empty_sources_and_exposes_cache_invalidation() ->
     assert "X-Idempotency-Key" in source
 
 
-def test_legacy_rows_are_backfilled_before_queue_filtering() -> None:
-    source = Path("backend/transcribe.py").read_text()
-    assert "async def _backfill_duration_statuses" in source
-    assert "duration_status IS NULL OR duration_status=''" in source
-    assert "await _backfill_duration_statuses()" in source
-
-
-def test_large_recordings_remain_one_logical_transcription_job() -> None:
+def test_large_recordings_remain_single_logical_transcription_tasks() -> None:
     source = Path("backend/segment_merger.py").read_text()
-    function = source[source.index("async def maybe_merge_before_upload"):]
-    assert "Never split into recordings" in function
-    assert "_split_and_register" not in function
+    upload_block = source[source.index("async def maybe_merge_before_upload"):]
+    assert "Keeping large logical recording intact for upload" in upload_block
+    assert "_split_and_register(filepath" not in upload_block
+
+
+def test_queue_accepts_legacy_finished_rows_without_duration_status() -> None:
+    source = Path("backend/transcribe.py").read_text()
+    poll_block = source[source.index("async def poll_transcriptions"):]
+    assert "duration_status = 'accepted' OR duration_status IS NULL" in poll_block
+    assert "UPDATE recordings SET duration_status='accepted'" in poll_block
 
 
 def _load_backend_main():

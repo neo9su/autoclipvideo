@@ -52,12 +52,11 @@ SMALL_THRESHOLD  = 50  * 1024 * 1024  # files smaller than this get merged
 STALE_WAIT_SECS  = 600                # force-upload small files after waiting this long
 MERGE_TARGET_DUR = 900                # target duration for merged file: 15 minutes (seconds)
 MERGE_MAX_DUR    = 1200               # hard cap: never merge beyond 20 minutes total duration
-# Upload limits belong to the transport, never to the recordings data model.
-# The GPU endpoint streams multipart bodies, so a recording remains one logical
-# job regardless of its size.  Keep the old names as compatibility constants;
-# they are deliberately not used to create database rows.
-SPLIT_THRESHOLD  = 8 * 1024 * 1024
-SPLIT_CHUNK_SIZE = 6 * 1024 * 1024
+# Upload limits belong to the transport, not to the recording model.  In
+# particular, never create recordings rows for byte/transport chunks: every
+# row is a logical timeline and is eligible for exactly one ASR job.
+SPLIT_THRESHOLD  = 8 * 1024 * 1024   # retained for migration tooling only
+SPLIT_CHUNK_SIZE = 6 * 1024 * 1024   # retained for migration tooling only
 
 RECORDINGS_DIR = os.path.join(os.path.dirname(__file__), "..", "recordings")
 
@@ -386,14 +385,16 @@ async def maybe_merge_before_upload(
             await db.commit()
         return None
     
-    # Never split into recordings.  In particular, do not turn a transport
-    # limitation into independent ASR/editor jobs with reset timestamps.
+    # Deliberately upload the complete logical recording.  The old code split
+    # files here and registered each piece as a new recording, which reset the
+    # media clock and made short pieces look like independent clip jobs.  A
+    # future resumable transport may split bytes while sending, but it must
+    # reconstruct them before this function returns.
     if file_size > SPLIT_THRESHOLD:
         logger.info(
-            "Keeping large recording %s as one logical upload (%d bytes)",
-            rec["filename"], file_size,
+            "Keeping large logical recording intact for upload: %s (%dMB)",
+            rec["filename"], file_size // 1024 // 1024,
         )
-    
     return filepath, recording_id
 
 

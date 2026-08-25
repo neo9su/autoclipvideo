@@ -119,7 +119,7 @@ def _is_finished_unsynced_upload_candidate(row) -> bool:
         return False
     if not row["end_time"] or row["end_time"] == row["start_time"]:
         return False
-    if row["duration_status"] != "accepted":
+    if row["duration_status"] not in ("accepted", None):
         return False
     return _recording_file_exists(row["filename"])
 
@@ -3023,7 +3023,7 @@ async def get_transcribe_queue(limit: int = Query(default=100, ge=1, le=500)):
                       r.duration_seconds, r.duration_status, r.skip_reason,
                       rm.name as room_name
                FROM recordings r LEFT JOIN rooms rm ON r.room_id = rm.id
-               WHERE r.duration_status = 'accepted'
+               WHERE (r.duration_status = 'accepted' OR r.duration_status IS NULL)
                  AND ((r.transcribed IN (0, 1) AND (r.synced = 1 OR r.gpu_job_id IS NOT NULL))
                   OR (r.transcribed = 0
                       AND r.synced = 0
