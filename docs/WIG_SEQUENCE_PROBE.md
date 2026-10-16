@@ -97,3 +97,26 @@ screen-occluded example, a valid bounded timeline, and preserved identity gaps.
 Any model errors must remain visible alongside parser failures. Even passing
 these few diagnostic examples is not sufficient for production deployment;
 new held-out clips and independent annotations are still required.
+
+## Separate feature diagnostic after contradictory video judgments
+
+The 4B trial can correctly describe straight hair before and curled hair after,
+yet label the relation matching. A syntactically valid timeline can still be
+false. Consequently the video summary is never an approval signal.
+
+`scripts/audit_wig_keyframes.py` is a different, limited diagnostic: it samples
+start/middle/end from each continuous clip, asks only for enumerated visible
+head/color/fringe/texture observations, then compares the start/end features in
+ordinary code. The middle frame's black close-fitting head/net never becomes a
+new product-color label. A changed fringe or texture is a review conflict even
+if the color matches. Unknown/occluded observations remain unknown.
+
+This does NOT prove continuous removal/rewear from three images. Matching
+features plus a close-fitting middle state is only a rewear candidate; source
+motion and object continuity still need review. Matching all three frames cannot
+exclude a switch between them. Different color can be lighting rather than a
+new variant. Every policy result requires review, has render eligibility false,
+and has physical-identity/SKU verification false. Keep this result separate from
+the native-video trial, rather than crediting sampled-image observations as a
+successful continuous-video action detector. Raw observations and independent
+policy output are both retained.
