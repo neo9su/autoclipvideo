@@ -20,6 +20,7 @@ from qianchuan_matcher import (QianchuanMatcher, audit_qianchuan_segments,
                                 load_group_context, score_product_match)
 from qianchuan_video import QianchuanVideoComposer
 from qianchuan_quality import check_qianchuan_video_quality
+from wig_identity_review import REVIEW_REQUIRED, hold_for_review, release_after_recheck, review_message
 from qianchuan_policy import (
     build_qianchuan_metadata, validate_qianchuan_metadata, DEFAULT_POLICY,
 )
@@ -29,6 +30,8 @@ logger = logging.getLogger(__name__)
 # 创建导演模式路由
 director_router = APIRouter(prefix="/api/v2/director", tags=["director"])
 qianchuan_router = APIRouter(prefix="/api/v2/qianchuan", tags=["qianchuan"])
+from wig_identity_routes import identity_router
+qianchuan_router.include_router(identity_router)
 
 # WebSocket broadcast function — injected by main.py at startup
 _broadcast_fn = None
@@ -202,6 +205,12 @@ async def generate_qianchuan(request: QianchuanGenerateRequest):
     if not match.get("ok"):
         err = match.get("reason") or "商品强匹配不足"
         async with aiosqlite.connect(DB_PATH) as db:
+            if await hold_for_review(db, request.group_id, match.get("identity")):
+                return QianchuanGenerateResponse(
+                    success=False, group_id=request.group_id, status=REVIEW_REQUIRED,
+                    score=match.get("score"), review=match,
+                    error=review_message(match.get("identity")),
+                )
             await db.execute(
                 """UPDATE clip_groups SET qianchuan_status = -2, qianchuan_error = ?,
                    qianchuan_score = ?, qianchuan_review = ? WHERE id = ?""",
@@ -392,6 +401,9 @@ async def _run_qianchuan_pipeline(group_id: int) -> None:
             raise RuntimeError("group not found")
         group = context["group"]
         match = score_product_match(context, keywords=[group.get("label"), group.get("wig_model"), group.get("wig_color")], threshold=0.0)
+        async with aiosqlite.connect(DB_PATH) as db:
+            if await hold_for_review(db, group_id, match.get("identity")):
+                return
         # Production recordings may have no matching product catalog row. The
         # recording's own SRT is still the authoritative source for a
         # validation render, so retain group metadata as product context.
@@ -423,6 +435,10 @@ async def _qianchuan_generate_bg(group_id: int, script: Dict) -> None:
 
     async with _COMPOSE_SEM:
         try:
+            context = await load_group_context(DB_PATH, group_id)
+            async with aiosqlite.connect(DB_PATH) as db:
+                if await hold_for_review(db, group_id, context.get("identity")):
+                    return
             # 1) Voiceover: reuse existing voice clone/TTS controller but keep qianchuan DB fields isolated.
             voice_result = await voice_director.generate_voiceover(script=script, group_id=group_id, reference_audio_path=None)
             if not voice_result.get("success"):

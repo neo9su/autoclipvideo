@@ -4,6 +4,12 @@ const inFlightRequests = new Map()
 const MAX_RETRIES = 2
 const RETRYABLE_STATUS_MIN = 500
 
+export async function recheckQianchuanIdentity(id) {
+  const res = await fetchWithTimeout(`${BASE}/api/v2/qianchuan/group/${id}/identity-recheck`, { method: 'POST' })
+  if (!res.ok) throw new Error(await readErrorMessage(res, '重新检查失败'))
+  return res.json()
+}
+
 function notifyLoading(delta) {
   window.dispatchEvent(new CustomEvent('app:loading', { detail: delta }))
 }

@@ -771,7 +771,7 @@ async def health():
         try:
             async with aio_connect() as db:
                 db.row_factory = aiosqlite.Row
-                for status_code, label in [(0, "pending"), (1, "running"), (2, "done"), (-1, "failed"), (-2, "permanent_fail"), (-3, "quality_fail"), (-4, "probe_fail")]:
+                for status_code, label in [(0, "pending"), (1, "running"), (2, "done"), (-1, "failed"), (-2, "permanent_fail"), (-3, "quality_fail"), (-4, "probe_fail"), (-5, "review_required")]:
                     async with db.execute(
                         "SELECT COUNT(*) as cnt FROM clip_groups WHERE qianchuan_status = ?", (status_code,)
                     ) as cur:
