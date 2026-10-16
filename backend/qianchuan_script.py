@@ -10,6 +10,8 @@ import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
+from wig_preprocess import retention_hook_plan
+
 
 DEFAULT_DURATION = 22.0
 MIN_DURATION = 18.0
@@ -114,6 +116,7 @@ def generate_qianchuan_script(
         "structure": "0-3s结果钩子 / 3-7s痛点 / 7-13s产品证据 / 13-19s上脸效果 / 19-23s CTA",
         "product_context": product_context or {},
         "selling_points": merged_points,
+        "retention_hooks": retention_hook_plan(duration),
         "generated_at": time.time(),
         "scenes": scenes,
     }
