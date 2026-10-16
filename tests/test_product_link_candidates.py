@@ -16,7 +16,8 @@ class LinkCandidatesTest(unittest.TestCase):
 
     def test_scoped_candidate_preserves_original_identity(self):
         result = audit_module.audit([self.product], [self.row])["candidates"][0]
-        self.assertEqual(result["status"], "review_required")
+        self.assertEqual(result["status"], "single_link_candidate")
+        self.assertEqual(result["link_option_count"], 1)
         self.assertEqual(result["expected_before"]["product_id"], "dom_placeholder")
         self.assertFalse(result["cart_acceptance_validated"])
 
@@ -29,10 +30,12 @@ class LinkCandidatesTest(unittest.TestCase):
         self.assertFalse(audit_module.valid_record(dict(self.row, product_id="2")))
         self.assertFalse(audit_module.valid_record(dict(self.row, detail_url=self.row["detail_url"].replace("haohuo.jinritemai.com", "example.org"))))
 
-    def test_conflicting_identity_is_held(self):
+    def test_same_name_multiple_links_are_preserved_as_options(self):
         other = dict(self.row, product_id="2", detail_url=self.row["detail_url"].replace("1234567890123456789", "2"))
         result = audit_module.audit([self.product], [self.row, other])["candidates"][0]
-        self.assertEqual(result["status"], "conflict")
+        self.assertEqual(result["status"], "multiple_link_candidates")
+        self.assertEqual(result["link_option_count"], 2)
+        self.assertEqual(result["records"], [self.row, other])
 
     def test_existing_link_and_missing_shop_metadata_untouched(self):
         self.assertEqual(audit_module.audit([dict(self.product, product_url="existing")], [self.row])["candidates"], [])

@@ -48,7 +48,8 @@ def audit(products, records):
         if matches:
             identities = {(str(r["product_id"]), r["detail_url"]) for r in matches}
             candidates.append({"catalogue_id": product["id"],
-                               "status": "review_required" if len(identities) == 1 else "conflict",
+                               "status": "single_link_candidate" if len(identities) == 1 else "multiple_link_candidates",
+                               "link_option_count": len(identities),
                                "expected_before": product,
                                "records": matches,
                                "live_link_validated": False,

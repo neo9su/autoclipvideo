@@ -1,3 +1,5 @@
+> Current policy (user confirmed): identical product names across different URLs are normal. Preserve each real product ID and URL as an option; do not label multiplicity as a conflict. The current manifest has 38 single-link candidates and 16 multiple-link candidates. Earlier conflict/held terminology below is historical and superseded. No option is automatically selected or written to production; source, URL identity, SKU and cart checks remain separate.
+
 # Product link recovery audit — 2026-10-16
 
 Read-only investigation; no production changes, publish retries, browser navigation, or service restarts.
