@@ -31,6 +31,12 @@ and occlusion. Responses are raw model observations, not trusted labels or
 calibrated probabilities. Every result remains `review_required`,
 `eligible_for_render=false`, `visual_verified=false`, `sku_verified=false`.
 
+For restricted-network hosts, use `--model-dir` pointing to an offline snapshot.
+Its `source_manifest.json` must match the pinned model/revision and all listed
+file hashes are checked before inference; local-only loading prevents network
+fallback. The weight file SHA-256 is
+`d05b567eeaf534e83d375551f068ed57b5f52d37c657197f644af5ef9db091a2`.
+
 CPU smoke tests must precede GPU measurements. Run CUDA only when it cannot
 interrupt production work; record allocated and reserved peaks separately from
 whole-device usage. Failures do not switch devices automatically. A failed run

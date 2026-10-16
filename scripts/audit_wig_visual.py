@@ -20,11 +20,26 @@ def main():
     p.add_argument('--image', action='append', required=True)
     p.add_argument('--output', required=True)
     p.add_argument('--cache-dir', required=True)
+    p.add_argument('--model-dir', help='offline snapshot with source_manifest.json')
     p.add_argument('--device', choices=['cpu', 'cuda'], default='cpu')
     a = p.parse_args()
     paths = [Path(x).resolve(strict=True) for x in a.image]
     if len(paths) > 12:
         p.error('at most 12 explicit images')
+    model_source = MODEL
+    if a.model_dir:
+        model_source = str(Path(a.model_dir).resolve(strict=True))
+        manifest = json.loads((Path(model_source) / 'source_manifest.json').read_text())
+        if manifest['model'] != MODEL or manifest['revision'] != REVISION:
+            p.error('offline snapshot model/revision mismatch')
+        for item in manifest['files']:
+            file = (Path(model_source) / item['path']).resolve(strict=True)
+            if not file.is_relative_to(Path(model_source)):
+                p.error('snapshot path escapes model directory')
+            with file.open('rb') as stream:
+                digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+            if digest != item['sha256']:
+                p.error('offline snapshot checksum mismatch: ' + item['path'])
     out = Path(a.output)
     # Reserve a fresh output before expensive work; never overwrite prior evidence.
     with out.open('x', encoding='utf-8') as report:
@@ -37,9 +52,9 @@ def main():
                 raise RuntimeError('CUDA unavailable; no silent fallback')
             torch.cuda.reset_peak_memory_stats()
         started = time.monotonic()
-        processor = AutoProcessor.from_pretrained(MODEL, revision=REVISION, cache_dir=a.cache_dir, trust_remote_code=False)
+        processor = AutoProcessor.from_pretrained(model_source, revision=REVISION, cache_dir=a.cache_dir, trust_remote_code=False, local_files_only=bool(a.model_dir))
         model = AutoModelForImageTextToText.from_pretrained(
-            MODEL, revision=REVISION, cache_dir=a.cache_dir,
+            model_source, revision=REVISION, cache_dir=a.cache_dir, local_files_only=bool(a.model_dir),
             torch_dtype=torch.float16 if a.device == 'cuda' else torch.float32,
             trust_remote_code=False, attn_implementation='eager',
         ).to(a.device).eval()
