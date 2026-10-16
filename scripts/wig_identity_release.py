@@ -4,6 +4,7 @@ Use a release directory OUTSIDE the backend. Prepare preserves exact old bytes;
 apply refuses drift; rollback refuses to overwrite later edits.
 """
 import argparse
+import ast
 import hashlib
 import json
 from pathlib import Path
@@ -11,6 +12,76 @@ from pathlib import Path
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
+
+
+def _encode_like(text, original):
+    newline = "\r\n" if b"\r\n" in original else "\n"
+    return (b"\xef\xbb\xbf" if original.startswith(b"\xef\xbb\xbf") else b"") + text.replace("\n", newline).encode()
+
+
+def _insert_before(text, function, marker, addition, optional=False):
+    # AST is only a structural locator; compile() validates the resulting source.
+    nodes = [n for n in ast.parse(text).body if isinstance(n, ast.AsyncFunctionDef) and n.name == function]
+    if not nodes and optional:
+        return text
+    if len(nodes) != 1:
+        raise ValueError(f"Unknown function layout: {function}")
+    lines = text.splitlines(keepends=True)
+    node = nodes[0]
+    body = "".join(lines[node.lineno - 1:node.end_lineno])
+    if body.count(marker) != 1:
+        raise ValueError(f"Ambiguous insertion anchor in {function}")
+    body = body.replace(marker, addition + marker, 1)
+    return "".join(lines[:node.lineno - 1]) + body + "".join(lines[node.end_lineno:])
+
+
+def patch_review_api(data):
+    text = data.decode("utf-8-sig").replace("\r\n", "\n")
+    if "wig_identity_review" in text:
+        raise ValueError("Review patch already present")
+    marker = 'qianchuan_router = APIRouter(prefix="/api/v2/qianchuan", tags=["qianchuan"])\n'
+    if text.count(marker) != 1:
+        raise ValueError("Unknown Qianchuan router layout")
+    text = text.replace(marker, marker + 'from wig_identity_routes import identity_router\n'
+                        'from wig_identity_review import REVIEW_REQUIRED, hold_for_review, review_message\n'
+                        'qianchuan_router.include_router(identity_router)\n', 1)
+    manual = '''    from db import aio_connect
+    async with aio_connect() as identity_db:
+        if await hold_for_review(identity_db, request.group_id, context.get("identity")):
+            return QianchuanGenerateResponse(
+                success=False, group_id=request.group_id, status=REVIEW_REQUIRED,
+                score=0.0, review={"identity": context.get("identity")},
+                error=review_message(context.get("identity")),
+            )
+'''
+    text = _insert_before(text, 'generate_qianchuan', '    match = score_product_match(', manual)
+    for name, version in [('_run_qianchuan_pipeline', 'qianchuan'), ('_run_qianchuan_v2', 'qianchuan_v2')]:
+        guard = f'''        from db import aio_connect
+        async with aio_connect() as identity_db:
+            if await hold_for_review(identity_db, group_id, context.get("identity"), {version!r}):
+                return
+'''
+        text = _insert_before(text, name, '        group = context["group"]', guard, optional=name.endswith('_v2'))
+    for name, version in [('_qianchuan_generate_bg', 'qianchuan'), ('_qianchuan_v2_bg', 'qianchuan_v2')]:
+        guard = f'''            identity_context = await load_group_context(DB_PATH, group_id)
+            from db import aio_connect
+            async with aio_connect() as identity_db:
+                if await hold_for_review(identity_db, group_id, identity_context.get("identity"), {version!r}):
+                    return
+'''
+        text = _insert_before(text, name, '            voice_result = await voice_director.generate_voiceover(', guard, optional=name.endswith('_v2_bg'))
+    compile(text, 'api_v2.py', 'exec')
+    return _encode_like(text, data)
+
+
+def patch_review_health(data):
+    text = data.decode("utf-8-sig").replace("\r\n", "\n")
+    old = '(-4, "probe_fail")]'
+    if text.count(old) != 1:
+        raise ValueError("Unknown health status mapping")
+    text = text.replace(old, '(-4, "probe_fail"), (-5, "review_required")]', 1)
+    compile(text, 'main.py', 'exec')
+    return _encode_like(text, data)
 
 
 def patch_matcher(data):
@@ -46,7 +117,7 @@ def patch_matcher(data):
     return (b"\xef\xbb\xbf" if data.startswith(b"\xef\xbb\xbf") else b"") + text.replace("\n", newline).encode()
 
 
-def prepare(backend, release, module):
+def prepare(backend, release, module, review_sources=None):
     backend, release, module = Path(backend).resolve(), Path(release).resolve(), Path(module).resolve()
     if release == backend or backend in release.parents:
         raise ValueError("Release must be outside backend")
@@ -56,15 +127,29 @@ def prepare(backend, release, module):
     compile(identity.decode("utf-8-sig"), "wig_identity.py", "exec")
     if (backend / "wig_identity.py").exists():
         raise ValueError("Existing identity module requires a separate reviewed upgrade")
+    originals = {"qianchuan_matcher.py": before, "wig_identity.py": None}
+    payloads = {"qianchuan_matcher.py": after, "wig_identity.py": identity}
+    if review_sources:
+        for name, patch in [('api_v2.py', patch_review_api), ('main.py', patch_review_health)]:
+            originals[name] = (backend / name).read_bytes()
+            payloads[name] = patch(originals[name])
+        for name in ['wig_identity_review.py', 'wig_identity_routes.py']:
+            if (backend / name).exists():
+                raise ValueError(f"Existing review module requires a reviewed upgrade: {name}")
+            originals[name] = None
+            payloads[name] = (Path(review_sources) / name).read_bytes()
+            compile(payloads[name].decode('utf-8-sig'), name, 'exec')
     release.mkdir(parents=True, exist_ok=False)
     (release / "before").mkdir()
     (release / "after").mkdir()
-    (release / "before/qianchuan_matcher.py").write_bytes(before)
-    (release / "after/qianchuan_matcher.py").write_bytes(after)
-    (release / "after/wig_identity.py").write_bytes(identity)
-    manifest = {"backend": str(backend), "policy_version": "wig-identity-v1",
-                "before": {"qianchuan_matcher.py": digest(before), "wig_identity.py": None},
-                "after": {"qianchuan_matcher.py": digest(after), "wig_identity.py": digest(identity)}}
+    for name, data in originals.items():
+        if data is not None:
+            (release / "before" / name).write_bytes(data)
+    for name, data in payloads.items():
+        (release / "after" / name).write_bytes(data)
+    manifest = {"backend": str(backend), "policy_version": "wig-identity-review-v2" if review_sources else "wig-identity-v1",
+                "before": {name: digest(data) if data is not None else None for name, data in originals.items()},
+                "after": {name: digest(data) for name, data in payloads.items()}}
     (release / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return manifest
 
@@ -86,7 +171,9 @@ def transition(release, rollback=False):
     # These two replacements require a maintenance window: do not hot-apply to
     # running workers. An OS failure between replacements needs manual recovery
     # from before/; this is not a transactional multi-file deploy.
-    names = ["qianchuan_matcher.py", "wig_identity.py"] if rollback else ["wig_identity.py", "qianchuan_matcher.py"]
+    existing = [name for name, sha in manifest['before'].items() if sha is not None]
+    introduced = [name for name, sha in manifest['before'].items() if sha is None]
+    names = existing + introduced if rollback else introduced + existing
     for name in names:
         p = backend / name
         if manifest[target][name] is None:
@@ -105,11 +192,12 @@ if __name__ == "__main__":
     parser.add_argument("--release", required=True)
     parser.add_argument("--backend")
     parser.add_argument("--module")
+    parser.add_argument("--review-sources", help="Directory containing the two review modules")
     args = parser.parse_args()
     if args.action == "prepare":
         if not args.backend or not args.module:
             parser.error("prepare requires --backend and --module")
-        prepare(args.backend, args.release, args.module)
+        prepare(args.backend, args.release, args.module, args.review_sources)
     else:
         transition(args.release, rollback=args.action == "rollback")
     print(json.dumps({"action": args.action, "ok": True, "service_restarted": False}))
