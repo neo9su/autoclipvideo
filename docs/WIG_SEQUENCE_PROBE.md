@@ -120,3 +120,28 @@ and has physical-identity/SKU verification false. Keep this result separate from
 the native-video trial, rather than crediting sampled-image observations as a
 successful continuous-video action detector. Raw observations and independent
 policy output are both retained.
+
+## Observed diagnostic results
+
+On six privately retained continuous exports (312 seconds of source intervals),
+the 2B greedy and recommended-decoding native-video trials did not pass the
+acceptance criteria. The 4B native-video trial also did not pass: it could
+recognize straight versus curled hair in descriptions but still call the
+relation matching; valid JSON did not imply truthful actions.
+
+The separate 4B three-frame feature diagnostic produced useful candidates for
+one matching-appearance rewear, three visibly different styles and one stable
+appearance example. The screen-occlusion example failed target visibility: it
+mistook screen hair for presenter hair. A close-fitting middle head/net was also
+misclassified in another example despite a correct before/after style-conflict
+candidate. Preserve these errors; do not claim six fully correct examples or a
+production accuracy rate. Three-frame comparison is not continuous action
+verification and does not resolve offscreen product identity.
+
+Observed MLX allocator peaks: approximately 3.07 GB for 2B native video, 4.54 GB
+for 4B native video and 4.04 GB for the 4B three-frame diagnostic (decimal GB).
+These are Apple unified-memory measurements under this protocol, not NVIDIA
+VRAM measurements or general hardware requirements. No production acceptance or
+service activation follows from this experiment. Target-person tracking,
+screen/occlusion rejection and held-out continuous-state validation remain
+required before automated use.
