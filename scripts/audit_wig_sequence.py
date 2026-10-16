@@ -43,7 +43,7 @@ def read_cases(path):
         if digest(file) != c['sha256']:
             raise ValueError('clip checksum mismatch')
         if c.get('expected') not in RELATIONS:
-            raise ValueError('missing explicit human label, including uncertain')
+            raise ValueError('missing explicit review label, including uncertain')
         c['_path'] = str(file)
     return cases
 
@@ -138,8 +138,8 @@ def main():
                 video_pixel_budget=len(frames)*256*256,
                 elapsed_seconds=round(time.monotonic()-t,2), mlx_peak_bytes=mx.get_peak_memory(),
                 approval='review_required', eligible_for_render=False, sku_verified=False)
-            # Human labels never enter the model prompt. A parse failure is no success.
-            result['matches_human_label'] = error is None and parsed['relation'] == case['expected']
+            # Reference labels never enter the model prompt. A parse failure is no success.
+            result['matches_reference_label'] = error is None and parsed['relation'] == case['expected']
             results.append(result)
             progress.write(json.dumps(result, ensure_ascii=False) + '\n')
             progress.flush()

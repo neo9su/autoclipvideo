@@ -19,7 +19,7 @@ private. Only code, tests and methodology belong in the public repository.
 
 `scripts/audit_wig_sequence.py` consumes 1–8 explicitly selected continuous clips,
 each at most 150 seconds. A local manifest lists their SHA-256, recording ID,
-source offset, duration and human appearance/action label. Source media is never
+source offset, duration and reference appearance/action label. Source media is never
 written. Exporting a sample must use a fresh output and preserve the full frame;
 record resize, frame rate, re-encoding and audio omission. Do not concatenate
 separate source moments to construct an allegedly continuous wear cycle.
@@ -33,16 +33,18 @@ to sampled-frame count times 256*256 pixels. Otherwise a long clip can be shrunk
 to unhelpfully tiny per-frame views. This remains a bounded test configuration;
 fast actions can occur between sampled frames.
 
-```text
-HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 ISOLATED_PYTHON scripts/audit_wig_sequence.py --manifest PRIVATE_MANIFEST.json --model-dir VERIFIED_LOCAL_SNAPSHOT --output NEW_REPORT.json --fps 1 --max-frames 128
-```
+The original direct invocation was a historical local experiment. For new
+GPU-backed reruns, use the configured scheduler and its actual allow-listed
+profile; do not reuse a direct model command as an unmanaged fallback. See
+`WIG_TARGET_VISIBILITY.md` for the CPU-only follow-up and current resource
+boundary.
 
 No API service, scheduler, database write, renderer, TTS or publication action is
 created. No production dependency is installed, upgraded or uninstalled.
 
 ## Labels and uncertainty
 
-The fixed prompt does not receive expected labels or human notes. The revised
+The fixed prompt does not receive expected labels or reference notes. The revised
 protocol uses concise Chinese questions and the source model's recommended VL
 sampling (temperature 0.7, top-p 0.8, top-k 20, presence penalty 1.5), with seed 0.
 Greedy English-schema trial outputs are retained separately: repetition and
@@ -145,3 +147,14 @@ VRAM measurements or general hardware requirements. No production acceptance or
 service activation follows from this experiment. Target-person tracking,
 screen/occlusion rejection and held-out continuous-state validation remain
 required before automated use.
+
+
+## Annotation provenance correction
+
+The initial diagnostic labels were assigned by Codex through image inspection,
+not by an independent human annotator or the business operator. Earlier private
+artifacts used legacy names such as `human_review_note` and
+`matches_human_label`; those names do not establish human review. Preserve frozen
+manifests/reports for reproducibility and attach a provenance erratum rather than
+silently changing their hashes. New outputs use `matches_reference_label`.
+No trial establishes independent accuracy or product identity.
