@@ -39,7 +39,13 @@ created. No production dependency is installed, upgraded or uninstalled.
 
 ## Labels and uncertainty
 
-The fixed prompt does not receive expected labels or human notes. It asks for
+The fixed prompt does not receive expected labels or human notes. The revised
+protocol uses concise Chinese questions and the source model's recommended VL
+sampling (temperature 0.7, top-p 0.8, top-k 20, presence penalty 1.5), with seed 0.
+Greedy English-schema trial outputs are retained separately: repetition and
+truncation are failures, not successful abstentions. A per-case `.progress.jsonl`
+preserves observations if a later case fails. Prompt/code hashes, generation
+settings and token counts are recorded. It asks for
 before/after appearance, an event timeline and an explicit identity-gap flag.
 Black close-fitting hair/net after removal is an unworn state, not a new black
 product. Combing, tying and illumination are not alone proof of a product switch.

@@ -12,10 +12,11 @@ from audit_wig_visual import verify_snapshot
 MODEL = 'mlx-community/Qwen3-VL-2B-Instruct-4bit'
 REVISION = '9c4f5209e57b31f4b9dfba735de3fb983739c9cc'
 RELATIONS = {'visually_matching_rewear', 'different_style_or_color', 'no_wear_change', 'put_on_only', 'remove_only', 'uncertain'}
-PROMPT = '''Analyze this continuous, silent wig livestream clip in time order. Follow the central live presenter, not people on a phone screen or a held wig. Do not infer product identity from hair color alone. A black close-fitting head or hair net after removal is an unworn state, not a new black wig. Combing, tying hair or lighting changes are not by themselves product switches. Distinguish removing and putting back a visually matching style from putting on a visibly different style or color. If the presenter cannot be tracked or before/after appearance cannot be compared, say uncertain. Mark identity_gap true when the held wig leaves view: matching appearance after a gap is not confirmed physical identity. Never assert a real SKU or natural hair identity from appearance. Only use the video, not presumed sales speech.
-Return ONLY one JSON object with:
-{"relation":"visually_matching_rewear|different_style_or_color|no_wear_change|put_on_only|remove_only|uncertain", "before":"visible hair color, bangs, length, curl", "after":"visible hair color, bangs, length, curl", "events":[{"start_s":0,"end_s":1,"action":"remove|put_on|unworn|occluded|display","evidence":"what is visibly happening"}], "identity_gap":true, "reason":"visible evidence and uncertainty"}.
-Times are seconds within this clip. No unobserved actions. A visually_matching_rewear decision requires a removal, an unworn interval and a later matching worn appearance. Matching appearance does not certify that the physical wig or SKU is identical.'''
+PROMPT = '''观看这一段连续的假发直播视频，只跟踪真实主播，不把手机里的照片当主播。比较开始和结束时的发色、刘海、长度、卷直程度，并观察中间摘下和戴上的过程。黑色贴头的头发或发网是未佩戴状态，不能当作另一款黑色假发。梳理、扎发或光线变化本身不算换款。假发离开画面要记录identity_gap=true；外观一致不代表实物或SKU已确认。看不清前后发型就回答uncertain。
+仅输出一个简短JSON，不要Markdown。relation只能选：visually_matching_rewear（前后外观一致且有摘下、未佩戴、戴回完整过程）、different_style_or_color（前后发型或颜色明显不同）、no_wear_change、put_on_only、remove_only、uncertain。
+字段：relation；before和after（实际看到的发型，各20字以内）；events（最多4个关键动作，按顺序，每项含start_s、end_s、action、evidence；时间为片段内秒数；action只能是remove、put_on、unworn、occluded或display）；identity_gap（布尔）；reason（40字以内）。不能虚构没看到的动作。'''
+GENERATION = dict(temperature=0.7, top_p=0.8, top_k=20, presence_penalty=1.5)
+
 
 
 def digest(path):
@@ -92,10 +93,11 @@ def main():
     p.add_argument('--fps', type=float, choices=[1.0, 2.0], default=1.0)
     p.add_argument('--max-frames', type=int, choices=[32, 64, 128], default=128)
     a = p.parse_args()
+    script_sha256 = digest(__file__)
     cases = read_cases(a.manifest)
     root = verify_snapshot(a.model_dir, MODEL, REVISION)
     # Reserve before model import; duplicate runs cannot replace prior evidence.
-    with Path(a.output).open('x', encoding='utf-8') as report:
+    with Path(a.output).open('x', encoding='utf-8') as report, Path(a.output + '.progress.jsonl').open('x', encoding='utf-8') as progress:
         import mlx.core as mx
         from mlx_vlm import load, generate
         from mlx_vlm.prompt_utils import apply_chat_template
@@ -103,6 +105,7 @@ def main():
         mx.set_memory_limit(6 * 1024**3)
         mx.set_cache_limit(256 * 1024**2)
         mx.reset_peak_memory()
+        mx.random.seed(0)
         started = time.monotonic()
         model, processor = load(str(root), trust_remote_code=False)
         if getattr(processor, 'video_processor', None) is None:
@@ -123,10 +126,11 @@ def main():
             processor.video_processor.max_pixels = len(frames) * 256 * 256
             processor.video_processor.min_pixels = len(frames) * 32 * 32
             prompt = apply_chat_template(processor, model.config, PROMPT, video=case['_path'], fps=metadata.sampled_fps, max_pixels=256*256)
-            answer = generate(model, processor, prompt, video=[frames], video_metadata=[asdict(metadata)], fps=metadata.sampled_fps, max_pixels=256*256, max_tokens=700, temperature=0, verbose=False)
+            answer = generate(model, processor, prompt, video=[frames], video_metadata=[asdict(metadata)], fps=metadata.sampled_fps, max_pixels=256*256, max_tokens=500, verbose=False, **GENERATION)
             parsed, error = parse_observation(answer.text, actual_duration)
             result = {k:v for k,v in case.items() if k != '_path'}
             result.update(raw=answer.text, observation=parsed, parse_error=error,
+                prompt_tokens=answer.prompt_tokens, generation_tokens=answer.generation_tokens, finish_reason=answer.finish_reason,
                 sampled_frames=len(metadata.frames_indices), sampled_timestamps_s=metadata.timestamps,
                 video_pixel_budget=len(frames)*256*256,
                 elapsed_seconds=round(time.monotonic()-t,2), mlx_peak_bytes=mx.get_peak_memory(),
@@ -134,9 +138,11 @@ def main():
             # Human labels never enter the model prompt. A parse failure is no success.
             result['matches_human_label'] = error is None and parsed['relation'] == case['expected']
             results.append(result)
+            progress.write(json.dumps(result, ensure_ascii=False) + '\n')
+            progress.flush()
             print(case['id'], parsed['relation'], 'seconds',result['elapsed_seconds'],'peak_bytes',result['mlx_peak_bytes'], flush=True)
             del frames, answer
-        data = dict(model=MODEL, revision=REVISION, runtime='mlx-vlm 0.7.8, Apple Metal 4bit',
+        data = dict(script_sha256=script_sha256, manifest_sha256=digest(a.manifest), generation=GENERATION, seed=0, model=MODEL, revision=REVISION, runtime='mlx-vlm 0.7.8, Apple Metal 4bit',
             hardware_memory_kind='Apple unified memory; not NVIDIA CUDA VRAM',
             model_load_peak_bytes=model_peak, process_peak_resident_bytes=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
             total_seconds=round(time.monotonic()-started,2), prompt_sha256=hashlib.sha256(PROMPT.encode()).hexdigest(),
