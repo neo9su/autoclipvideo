@@ -15,6 +15,25 @@ QUESTIONS = {
 }
 
 
+def verify_snapshot(directory, model, revision):
+    """Verify a local, fixed snapshot without importing a model runtime."""
+    root = Path(directory).resolve(strict=True)
+    manifest = json.loads((root / 'source_manifest.json').read_text())
+    if manifest['model'] != model or manifest['revision'] != revision:
+        raise ValueError('offline snapshot model/revision mismatch')
+    if not manifest.get('files'):
+        raise ValueError('offline snapshot has no verified files')
+    for item in manifest['files']:
+        file = (root / item['path']).resolve(strict=True)
+        if not file.is_relative_to(root):
+            raise ValueError('snapshot path escapes model directory')
+        with file.open('rb') as stream:
+            digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+        if digest != item['sha256']:
+            raise ValueError('offline snapshot checksum mismatch: ' + item['path'])
+    return root
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--image', action='append', required=True)
@@ -29,18 +48,10 @@ def main():
         p.error('at most 12 explicit images')
     model_source = MODEL
     if a.model_dir:
-        model_source = str(Path(a.model_dir).resolve(strict=True))
-        manifest = json.loads((Path(model_source) / 'source_manifest.json').read_text())
-        if manifest['model'] != MODEL or manifest['revision'] != REVISION:
-            p.error('offline snapshot model/revision mismatch')
-        for item in manifest['files']:
-            file = (Path(model_source) / item['path']).resolve(strict=True)
-            if not file.is_relative_to(Path(model_source)):
-                p.error('snapshot path escapes model directory')
-            with file.open('rb') as stream:
-                digest = hashlib.file_digest(stream, 'sha256').hexdigest()
-            if digest != item['sha256']:
-                p.error('offline snapshot checksum mismatch: ' + item['path'])
+        try:
+            model_source = str(verify_snapshot(a.model_dir, MODEL, REVISION))
+        except ValueError as exc:
+            p.error(str(exc))
     out = Path(a.output)
     # Reserve a fresh output before expensive work; never overwrite prior evidence.
     with out.open('x', encoding='utf-8') as report:
