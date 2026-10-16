@@ -3,7 +3,10 @@
 The single-frame 500M probe missed visible features. This experiment uses
 `mlx-community/Qwen3-VL-2B-Instruct-4bit`, fixed revision
 `9c4f5209e57b31f4b9dfba735de3fb983739c9cc`, with `mlx-vlm==0.7.8` in a
-separate local virtual environment. Source model and quantized model carry
+separate local virtual environment. `--model-size 4b` selects the established
+`mlx-community/Qwen3-VL-4B-Instruct-4bit` checkpoint at fixed revision
+`2fd8dacbdb8f1e54b8c005f081ec5bf79c56376b`; it uses the same clips, prompt,
+sampling and parser so model-size comparisons retain the protocol. Source model and quantized model carry
 Apache-2.0:
 https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct
 https://huggingface.co/mlx-community/Qwen3-VL-2B-Instruct-4bit
@@ -70,3 +73,27 @@ reports and source provenance. Revert the experiment's isolated Git commits;
 the shared snapshot-helper extraction is behavior-preserving and covered by the
 existing visual-probe tests. No database restoration or production restart is
 required. This code is not imported by workers.
+
+
+## Reuse escalation and acceptance
+
+The prior 500M still-image probe missed hairstyle evidence. Native continuous
+video with 2B weights also produced repeated/truncated greedy outputs; the
+recommended-decoding comparison eliminated some repetition but still invented
+wear actions in a stable clip and called genuine style switches matching.
+These are actual failures; conservative parsing must not conceal them as good
+abstention. Stop tuning the same prompt to these selected examples.
+
+The next bounded candidate is the maintained 4B quantized checkpoint in the
+same existing MLX runtime, instead of a new custom model or a production install:
+https://huggingface.co/mlx-community/Qwen3-VL-4B-Instruct-4bit
+The fallback remains the existing review gate, with no automatic acceptance.
+Both fit the current source architecture; only the experiment environment is
+used. Published weight size is not runtime memory or demonstrated accuracy.
+
+Acceptance requires correct appearance/action classification on the selected
+matching-rewear and actual-switch examples, no invented removal on a stable or
+screen-occluded example, a valid bounded timeline, and preserved identity gaps.
+Any model errors must remain visible alongside parser failures. Even passing
+these few diagnostic examples is not sufficient for production deployment;
+new held-out clips and independent annotations are still required.

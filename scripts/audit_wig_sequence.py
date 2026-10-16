@@ -11,6 +11,7 @@ from audit_wig_visual import verify_snapshot
 
 MODEL = 'mlx-community/Qwen3-VL-2B-Instruct-4bit'
 REVISION = '9c4f5209e57b31f4b9dfba735de3fb983739c9cc'
+MODELS = {'2b': (MODEL, REVISION), '4b': ('mlx-community/Qwen3-VL-4B-Instruct-4bit', '2fd8dacbdb8f1e54b8c005f081ec5bf79c56376b')}
 RELATIONS = {'visually_matching_rewear', 'different_style_or_color', 'no_wear_change', 'put_on_only', 'remove_only', 'uncertain'}
 PROMPT = '''观看这一段连续的假发直播视频，只跟踪真实主播，不把手机里的照片当主播。比较开始和结束时的发色、刘海、长度、卷直程度，并观察中间摘下和戴上的过程。黑色贴头的头发或发网是未佩戴状态，不能当作另一款黑色假发。梳理、扎发或光线变化本身不算换款。假发离开画面要记录identity_gap=true；外观一致不代表实物或SKU已确认。看不清前后发型就回答uncertain。
 仅输出一个简短JSON，不要Markdown。relation只能选：visually_matching_rewear（前后外观一致且有摘下、未佩戴、戴回完整过程）、different_style_or_color（前后发型或颜色明显不同）、no_wear_change、put_on_only、remove_only、uncertain。
@@ -87,6 +88,7 @@ def parse_observation(raw, duration):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--model-size', choices=['2b', '4b'], default='2b')
     p.add_argument('--manifest', required=True)
     p.add_argument('--model-dir', required=True)
     p.add_argument('--output', required=True)
@@ -95,7 +97,8 @@ def main():
     a = p.parse_args()
     script_sha256 = digest(__file__)
     cases = read_cases(a.manifest)
-    root = verify_snapshot(a.model_dir, MODEL, REVISION)
+    model_name, revision = MODELS[a.model_size]
+    root = verify_snapshot(a.model_dir, model_name, revision)
     # Reserve before model import; duplicate runs cannot replace prior evidence.
     with Path(a.output).open('x', encoding='utf-8') as report, Path(a.output + '.progress.jsonl').open('x', encoding='utf-8') as progress:
         import mlx.core as mx
@@ -142,7 +145,7 @@ def main():
             progress.flush()
             print(case['id'], parsed['relation'], 'seconds',result['elapsed_seconds'],'peak_bytes',result['mlx_peak_bytes'], flush=True)
             del frames, answer
-        data = dict(script_sha256=script_sha256, manifest_sha256=digest(a.manifest), generation=GENERATION, seed=0, model=MODEL, revision=REVISION, runtime='mlx-vlm 0.7.8, Apple Metal 4bit',
+        data = dict(script_sha256=script_sha256, manifest_sha256=digest(a.manifest), generation=GENERATION, seed=0, model=model_name, revision=revision, runtime='mlx-vlm 0.7.8, Apple Metal 4bit',
             hardware_memory_kind='Apple unified memory; not NVIDIA CUDA VRAM',
             model_load_peak_bytes=model_peak, process_peak_resident_bytes=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
             total_seconds=round(time.monotonic()-started,2), prompt_sha256=hashlib.sha256(PROMPT.encode()).hexdigest(),
