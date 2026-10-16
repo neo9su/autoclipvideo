@@ -43,6 +43,20 @@ names rather than what the host says. No alias hit means insufficient evidence,
 not proof of one product. A separate reviewed mapping from spoken names/link
 numbers to actual product and variant identities is needed before automatic use.
 
+## Required visual review before editing
+
+Transcript evidence cannot resolve two different hairstyles visible in the same
+frame. Review must identify the target person and product for the entire proposed
+shot, including other people in the background. Multiple visible styles without
+an unambiguous target remain blocked for review. A close-up phone, hands, motion
+blur or other occlusion is missing evidence, never a successful identity check.
+
+Spoken-link changes locate review candidates, not exact visual cut boundaries.
+Inspect the surrounding interval and preserve uncertainty between observations.
+Do not automatically crop away a second person or bridge an occluded interval to
+claim product consistency. These are requirements for the next visual stage;
+this audit does not implement a visual detector or certify any rendered clip.
+
 ## Rollout and rollback
 
 This is a standalone audit with no production imports, routes, worker changes or
