@@ -52,12 +52,17 @@ def main():
                 raise RuntimeError('CUDA unavailable; no silent fallback')
             torch.cuda.reset_peak_memory_stats()
         started = time.monotonic()
+        print('Loading fixed model snapshot', flush=True)
         processor = AutoProcessor.from_pretrained(model_source, revision=REVISION, cache_dir=a.cache_dir, trust_remote_code=False, local_files_only=bool(a.model_dir))
+        # Explicit low-memory probe: one 512px tile, full frame, no crop.
+        processor.image_processor.size = {'longest_edge': 512}
+        processor.image_processor.do_image_splitting = False
         model = AutoModelForImageTextToText.from_pretrained(
             model_source, revision=REVISION, cache_dir=a.cache_dir, local_files_only=bool(a.model_dir),
             torch_dtype=torch.float16 if a.device == 'cuda' else torch.float32,
             trust_remote_code=False, attn_implementation='eager',
         ).to(a.device).eval()
+        print('Model loaded; starting explicit-image probe', flush=True)
         results = []
         for path in paths:
             with Image.open(path) as source:
@@ -70,9 +75,10 @@ def main():
                     inputs = inputs.to(dtype=torch.float16)
                 with torch.inference_mode():
                     tokens = model.generate(**inputs, max_new_tokens=80, do_sample=False)
+                print(f'Completed {path.name}: {key}', flush=True)
                 answers[key] = processor.decode(tokens[0, inputs['input_ids'].shape[1]:], skip_special_tokens=True)
             results.append({'image':str(path),'sha256':hashlib.sha256(path.read_bytes()).hexdigest(), 'answers':answers,'approval':'review_required','eligible_for_render':False})
-        result = {'model':MODEL,'revision':REVISION,'device':a.device,'elapsed_seconds':round(time.monotonic()-started,2), 'peak_allocated_bytes':torch.cuda.max_memory_allocated() if a.device=='cuda' else None, 'peak_reserved_bytes':torch.cuda.max_memory_reserved() if a.device=='cuda' else None,'visual_verified':False,'sku_verified':False,'results':results}
+        result = {'model':MODEL,'revision':REVISION,'device':a.device,'image_longest_edge':512,'image_splitting':False,'elapsed_seconds':round(time.monotonic()-started,2), 'peak_allocated_bytes':torch.cuda.max_memory_allocated() if a.device=='cuda' else None, 'peak_reserved_bytes':torch.cuda.max_memory_reserved() if a.device=='cuda' else None,'visual_verified':False,'sku_verified':False,'results':results}
         json.dump(result, report, ensure_ascii=False, indent=2)
 
 if __name__ == '__main__':

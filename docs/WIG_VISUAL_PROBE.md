@@ -26,6 +26,10 @@ PyTorch, Pillow and a compatible Transformers are already present. The model
 weights download into the dedicated cache. Transformers 5 uses
 `AutoModelForImageTextToText` rather than the removed `AutoModelForVision2Seq`.
 
+The probe explicitly limits the longest edge to 512 pixels and disables image
+splitting. It keeps the full frame rather than cropping a target person. This is
+a measured configuration candidate, not the model default (2048px with splitting).
+
 Questions separate people, hair appearance, evidence of wearing/removing a wig,
 and occlusion. Responses are raw model observations, not trusted labels or
 calibrated probabilities. Every result remains `review_required`,
