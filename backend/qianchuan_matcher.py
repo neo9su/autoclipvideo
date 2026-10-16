@@ -141,6 +141,9 @@ async def load_group_context(db_path: str, group_id: int, product_id: Optional[s
         if not group:
             return {}
 
+        from wig_identity import load_identity_evidence
+        identity = await load_identity_evidence(db, group)
+
         products = []
         async with db.execute("PRAGMA table_info(products)") as cur:
             product_columns = {row[1] for row in await cur.fetchall()}
@@ -207,6 +210,7 @@ async def load_group_context(db_path: str, group_id: int, product_id: Optional[s
 
     return {
         "group": group_dict,
+        "identity": identity,
         "products": products,
         "srt_text": "\n".join(srt_texts),
         "director_script_text": str(director_script)[:8000],
@@ -214,6 +218,12 @@ async def load_group_context(db_path: str, group_id: int, product_id: Optional[s
 
 
 def score_product_match(context: Dict, product_id: Optional[str] = None, keywords: Optional[List[str]] = None, threshold: float = 0.58) -> Dict:
+    # Hard gate: an exact product ID or threshold=0 must not override mixed footage.
+    identity = context.get("identity")
+    if not identity or not identity.get("ok"):
+        return {"ok": False, "score": 0.0, "product": None, "hits": [], "missing": [],
+                "threshold": threshold, "identity": identity,
+                "reason": "款式一致性待审核：录像款式、颜色或商品证据缺失/冲突，禁止自动混剪"}
     group = context.get("group") or {}
     products = context.get("products") or []
     corpus = " ".join([
@@ -258,6 +268,7 @@ def score_product_match(context: Dict, product_id: Optional[str] = None, keyword
             }
 
     best["ok"] = best["score"] >= threshold
+    best["identity"] = identity
     if not best["ok"]:
         best["reason"] = f"商品强匹配不足: {best['score']:.2f} < {threshold:.2f}; hits={','.join(best['hits'][:8]) or 'none'}"
     return best
