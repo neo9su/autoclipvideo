@@ -25,3 +25,15 @@ Preserve full product/URL/shop associations from complete shop response objects,
 Before production writes, back up the database, create a per-row before/after manifest, check unchanged values, and support conditional rollback. Product link resolution must use stored real URLs for both single and multiple selections, and hold cart-required tasks with missing/invalid links rather than silently substituting IDs. Validate storefront availability and creator cart acceptance separately; syntactic URL checks cannot prove either.
 
 Private catalogue snapshots and the candidate URL remain outside the public repository. No runtime fix or data recovery was applied in this audit.
+
+## Follow-up retrieval attempts
+
+Read-only checks covered 43 local SQLite files (42 with product tables, one without). Only one missing-link product had an exact-name URL candidate in the historical databases; the candidate belonged to a different catalogue identity. These copies do not provide an automatic restoration set.
+
+The existing Buyin service reported online, but its current page had zero cached material-list responses. One historical signed list URL returned HTTP 200 with business error code 10001010A and a risk-environment message, not product data. That URL was not retried.
+
+A normal shop-read request through the existing service failed before navigation with BrowserContext.add_init_script: Target crashed. No service restart, profile modification or production code change was performed. The service's online status is insufficient evidence of browser usability.
+
+A separate temporary browser used the saved storage state without changing the shared profile. It navigated normally to the shop URL, ended at www.douyinec.com/, and captured no material-list responses. The temporary browser was closed. This did not validate the stored login state; it does not establish that all possible sessions are expired.
+
+Bulk recovery still requires a working authenticated Buyin browser and complete list response capture. The existing single candidate remains review-only. No production products, cart snapshots or publishing tasks were updated; no publications were retried. Audit/request/result artifacts remain in a separate private working directory. The read-only GET and normal page navigation do not require production rollback; temporary audit files may be removed after retaining needed evidence.
