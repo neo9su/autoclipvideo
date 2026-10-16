@@ -860,13 +860,14 @@ const selectedGroupRoomId = computed(() => {
 })
 
 const roomFilteredProducts = computed(() => {
+  const linkable = products.value.filter(p => Boolean(p.product_url))
   // Use selected group's room first, fall back to room chip filter, then show all
   const roomId = selectedGroupRoomId.value || (roomFilter.value !== 0 ? roomFilter.value : null)
-  if (!roomId) return products.value
-  const byRoom = products.value.filter(p => p.room_id === roomId)
-  const globals = products.value.filter(p => !p.room_id)
+  if (!roomId) return linkable
+  const byRoom = linkable.filter(p => p.room_id === roomId)
+  const globals = linkable.filter(p => !p.room_id)
   const combined = [...byRoom, ...globals]
-  return combined.length > 0 ? combined : products.value
+  return combined.length > 0 ? combined : linkable
 })
 
 const cartSearch = ref('')

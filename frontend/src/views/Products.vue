@@ -37,6 +37,7 @@
             <th>直播间</th>
             <th>商品名称</th>
             <th>平台商品ID</th>
+            <th>商品链接</th>
             <th>匹配关键词</th>
             <th>状态</th>
             <th>操作</th>
@@ -61,6 +62,10 @@
               </span>
             </td>
             <td class="mono">{{ p.product_id || '—' }}</td>
+            <td class="url-cell">
+              <a v-if="p.product_url" :href="p.product_url" target="_blank" rel="noopener" class="link">打开链接</a>
+              <span v-else class="link-missing">未绑定</span>
+            </td>
             <td>
               <span v-if="editingId === p.id">
                 <input v-model="editKeywords" class="inline-input" @keyup.enter="saveKeywords(p.id)" @keyup.escape="editingId = null" />
@@ -432,6 +437,8 @@ tr:hover td { background: #1a1a1a; }
 .room-select { background: #1e1e1e; border: 1px solid #333; color: #ccc; border-radius: 4px; padding: 2px 4px; font-size: 11px; cursor: pointer; }
 .room-select:focus { outline: none; border-color: #fe2c55; }
 .mono { font-family: monospace; font-size: 12px; }
+.url-cell { white-space: nowrap; }
+.link-missing { color: #f59e0b; font-size: 12px; }
 .link { color: #fe2c55; text-decoration: none; }
 .link:hover { text-decoration: underline; }
 .keywords { cursor: pointer; display: flex; gap: 4px; flex-wrap: wrap; }
