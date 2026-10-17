@@ -25,7 +25,8 @@ def stage(root: Path, release: Path, wig_module: Path) -> dict:
     before = json.loads((release / "manifest-before.json").read_text(encoding="utf-8"))
     backend = root / "backend"
     gpu = root / "gpu_service" / "main.py"
-    sources = [backend / "qianchuan_script.py", backend / "qianchuan_video.py", gpu]
+    processor_gpu = root.parent / "douyin_processor" / "gpu_service" / "main.py"
+    sources = [backend / "qianchuan_script.py", backend / "qianchuan_video.py", gpu, processor_gpu]
     for source in sources:
         expected = before["files"][str(source)]["sha256"]
         if digest(source) != expected:
@@ -164,6 +165,7 @@ def transition(root: Path, release: Path, rollback: bool = False) -> dict:
         backend / "qianchuan_script.py": release / "after" / "backend" / "qianchuan_script.py",
         backend / "qianchuan_video.py": release / "after" / "backend" / "qianchuan_video.py",
         root / "gpu_service" / "main.py": release / "after" / "gpu_service" / "main.py",
+        root.parent / "douyin_processor" / "gpu_service" / "main.py": release / "after" / "gpu_service" / "main.py",
     }
     before = json.loads((release / "manifest-before.json").read_text(encoding="utf-8"))
     if rollback:
