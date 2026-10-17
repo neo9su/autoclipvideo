@@ -75,6 +75,12 @@ def stage(root: Path, release: Path, wig_module: Path) -> dict:
     text = gpu.read_text(encoding="utf-8-sig")
     text = replace_once(
         text,
+        "import logging\n",
+        "import logging\nimport re\n",
+        "gpu regex import",
+    )
+    text = replace_once(
+        text,
         "    total_tts_duration: float = 0.0  # 总 TTS 时长，用于 -t 精确控制输出时长（替代 -shortest）\n",
         "    total_tts_duration: float = 0.0  # 总 TTS 时长，用于 -t 精确控制输出时长（替代 -shortest）\n    qianchuan_output_spec: dict = {}\n",
         "gpu request field",
@@ -115,6 +121,22 @@ def stage(root: Path, release: Path, wig_module: Path) -> dict:
         "            else:\n                video_filter = f\"[0:v]ass=filename='{escaped}',format=yuv420p[vout]\"\n            if audio_filter:\n",
         "            else:\n                video_filter = f\"[0:v]scale={output_w}:{output_h}:flags=lanczos,fps={output_fps},ass=filename='{escaped}',format=yuv420p[vout]\"\n            if audio_filter:\n",
         "gpu subtitle scale",
+    )
+    text = replace_once(
+        text,
+        '''        else:
+            if audio_filter:
+                filter_complex = audio_filter
+            else:
+                filter_complex = None
+            vmap = "0:v"
+''',
+        '''        else:
+            video_filter = f"[0:v]scale={output_w}:{output_h}:flags=lanczos,fps={output_fps},format=yuv420p[vout]"
+            filter_complex = f"{audio_filter};{video_filter}" if audio_filter else video_filter
+            vmap = "[vout]"
+''',
+        "gpu scale without subtitles",
     )
     text = replace_once(
         text,
