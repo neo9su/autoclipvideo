@@ -1139,18 +1139,18 @@ async def _do_tts_job(job_id: str, text: str, emotion: str, ref_audio_path: str,
                 os.replace(fixed_path, out_path)
                 _log.info(f"TTS job {job_id}: speed={speed:.2f}x applied")
 
-        _tts_jobs[job_id].update({"status": "done", "output_path": out_path})
+        _tts_jobs[job_id].update({"status": "done", "output_path": out_path, "_finished_at": time.time()})
         _db_update_tts_job(job_id, status="done", output_path=out_path)
         _log.info(f"TTS job {job_id} done ({os.path.getsize(out_path)//1024} KB)")
     except asyncio.TimeoutError:
         err = f"TTS TIMED OUT after {_TTS_TIMEOUT}s"
         _log.error(f"TTS job {job_id} {err}")
-        _tts_jobs[job_id].update({"status": "error", "error": err})
+        _tts_jobs[job_id].update({"status": "error", "error": err, "_finished_at": time.time()})
         _db_update_tts_job(job_id, status="error", error=err)
     except Exception as e:
         err = str(e)[:300]
         _log.error(f"TTS job {job_id} failed: {err}")
-        _tts_jobs[job_id].update({"status": "error", "error": err})
+        _tts_jobs[job_id].update({"status": "error", "error": err, "_finished_at": time.time()})
         _db_update_tts_job(job_id, status="error", error=err)
 
 
@@ -1236,6 +1236,16 @@ async def _disk_guard_loop():
             logger.error(f"Disk guard error: {e}")
 
 
+def _tts_cleanup_ready(job, now=None):
+    """Keep fresh results available long enough for their consumer to download."""
+    if job.get("status") not in ("done", "error"):
+        return False
+    finished = job.get("_finished_at") or job.get("_created_at")
+    if finished is None:
+        return False
+    return (time.time() if now is None else now) - finished >= 3600
+
+
 async def _cleanup_old_jobs():
     """Clean up completed/errored job output directories and in-memory state."""
     import shutil
@@ -1278,7 +1288,7 @@ async def _cleanup_old_jobs():
     # Clean TTS outputs
     tts_dir = os.path.join(STORAGE_DIR, "tts_outputs")
     for jid, job in list(_tts_jobs.items()):
-        if job.get("status") not in ("done", "error"):
+        if not _tts_cleanup_ready(job):
             continue
         out_path = job.get("output_path")
         if out_path and os.path.isfile(out_path):
@@ -2896,7 +2906,7 @@ async def cleanup_clips():
     tts_dir = os.path.join(STORAGE_DIR, "tts_outputs")
     terminal_tts_ids = [
         jid for jid, j in list(_tts_jobs.items())
-        if j.get("status") in ("done", "error")
+        if _tts_cleanup_ready(j)
     ]
     for jid in terminal_tts_ids:
         job = _tts_jobs.get(jid)
