@@ -118,6 +118,29 @@ def _align_observations(observations: list, frame_meta: list) -> list:
     return aligned
 
 
+def _infer_window(images: list, frame_meta: list, target_name: str, target_color: str) -> list:
+    content = []
+    for meta, image in zip(frame_meta, images):
+        content += [{"type": "text", "text": f"frame={json.dumps(meta)}"}, {"type": "image", "image": image}]
+    content.append({"type": "text", "text": (
+        "逐帧判断主播状态。wear_state只能是 no_wig、transition、stable_wearing。"
+        "transition包括正在戴、正在摘、手持假发、发网阶段或严重遮挡。"
+        "对stable_wearing生成稳定style_signature，格式为颜色|长短|直卷|刘海|头顶工艺；"
+        "同一款摘下再戴回必须给相同signature，真正换款必须不同。"
+        f"商品提示：{target_name}，颜色提示：{target_color}。"
+        "只返回JSON数组，每帧恰好一项，含window_index,time_sec,wear_state,"
+        "style_signature,confidence,reason；reason不超过12个汉字。"
+    )})
+    inputs = processor.apply_chat_template(
+        [{"role": "user", "content": content}], add_generation_prompt=True, tokenize=True,
+        return_dict=True, return_tensors="pt",
+    ).to(model.device)
+    with torch.inference_mode():
+        output = model.generate(**inputs, max_new_tokens=800, do_sample=False)
+    raw = processor.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True)
+    return _align_observations(_parse(raw), frame_meta)
+
+
 @app.get("/health")
 def health():
     return {"ok": True, "model": MODEL_ID, "loaded": model is not None, "gpu_free_mib": _free_mib()}
@@ -133,38 +156,25 @@ def analyze(req: AnalyzeRequest):
     try:
         _load()
         cap = cv2.VideoCapture(str(path))
-        images, frame_meta = [], []
+        window_batches = []
         try:
             for window_index, window in enumerate(req.windows):
+                images, frame_meta = [], []
                 for second in window.sample_times:
                     image = _frame(cap, second)
                     if image is not None:
                         images.append(image)
                         frame_meta.append({"window_index": window_index, "time_sec": second})
+                if images:
+                    window_batches.append((images, frame_meta))
         finally:
             cap.release()
-        if not images:
+        if not window_batches:
             raise HTTPException(422, "no frames decoded")
-        content = []
-        for meta, image in zip(frame_meta, images):
-            content += [{"type": "text", "text": f"frame={json.dumps(meta)}"}, {"type": "image", "image": image}]
-        content.append({"type": "text", "text": (
-            "逐帧判断主播状态。wear_state只能是 no_wig、transition、stable_wearing。"
-            "transition包括正在戴、正在摘、手持假发、发网阶段或严重遮挡。"
-            "对stable_wearing生成稳定style_signature，格式为颜色|长短|直卷|刘海|头顶工艺；"
-            "同一款摘下再戴回必须给相同signature，真正换款必须不同。"
-            f"商品提示：{req.target_name}，颜色提示：{req.target_color}。"
-            "只返回JSON数组，每项含window_index,time_sec,wear_state,style_signature,confidence,reason。"
-        )})
-        messages = [{"role": "user", "content": content}]
-        inputs = processor.apply_chat_template(
-            messages, add_generation_prompt=True, tokenize=True,
-            return_dict=True, return_tensors="pt",
-        ).to(model.device)
-        with torch.inference_mode():
-            output = model.generate(**inputs, max_new_tokens=800, do_sample=False)
-        raw = processor.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True)
-        return {"model": MODEL_ID, "observations": _align_observations(_parse(raw), frame_meta)}
+        observations = []
+        for images, frame_meta in window_batches:
+            observations.extend(_infer_window(images, frame_meta, req.target_name, req.target_color))
+        return {"model": MODEL_ID, "observations": observations}
     finally:
         if UNLOAD:
             _unload()
