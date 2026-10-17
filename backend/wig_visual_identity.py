@@ -56,23 +56,24 @@ def verify_windows(video_path: str | Path, windows: List[Dict], target_name: str
     url = os.environ.get("WIG_VISUAL_IDENTITY_URL", "").strip()
     if not url:
         return windows
-    payload = {
-        "video_path": str(video_path),
-        "target_name": target_name,
-        "target_color": target_color,
-        "windows": [
-            {**window, "sample_times": sample_times(window)} for window in windows
-        ],
-    }
-    req = request.Request(
-        url.rstrip("/") + "/analyze-wig-windows",
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with request.urlopen(req, timeout=float(os.environ.get("WIG_VISUAL_TIMEOUT", "300"))) as response:
-            result = json.loads(response.read().decode("utf-8"))
-    except Exception as exc:
-        raise VisualIdentityUnavailable(str(exc)) from exc
-    return accepted_visual_windows(windows, result.get("observations") or [])
+    observations = []
+    for offset in range(0, len(windows), 3):
+        chunk = windows[offset:offset + 3]
+        payload = {
+            "video_path": str(video_path), "target_name": target_name, "target_color": target_color,
+            "windows": [{**window, "sample_times": sample_times(window)} for window in chunk],
+        }
+        req = request.Request(
+            url.rstrip("/") + "/analyze-wig-windows",
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        try:
+            with request.urlopen(req, timeout=float(os.environ.get("WIG_VISUAL_TIMEOUT", "900"))) as response:
+                result = json.loads(response.read().decode("utf-8"))
+        except Exception as exc:
+            raise VisualIdentityUnavailable(str(exc)) from exc
+        for item in result.get("observations") or []:
+            item["window_index"] = int(item.get("window_index", -1)) + offset
+            observations.append(item)
+    return accepted_visual_windows(windows, observations)

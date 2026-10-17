@@ -40,7 +40,7 @@ class AnalyzeRequest(BaseModel):
     video_path: str
     target_name: str = ""
     target_color: str = ""
-    windows: List[Window] = Field(min_length=1, max_length=8)
+    windows: List[Window] = Field(min_length=1, max_length=3)
 
 
 def _allowed(path: Path) -> bool:
