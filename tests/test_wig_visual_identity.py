@@ -21,3 +21,12 @@ def test_takeoff_or_uncertain_window_is_rejected():
         for state in ("stable_wearing", "transition", "no_wig", "stable_wearing", "stable_wearing")
     ]
     assert accepted_visual_windows(windows, observations) == []
+
+
+def test_absent_presenter_is_rejected():
+    windows = [{"start_sec": 0, "end_sec": 20}]
+    observations = [
+        {"window_index": 0, "wear_state": state, "style_signature": "深色|长发|直|齐刘海|未知"}
+        for state in ("stable_wearing", "no_person", "no_person", "stable_wearing", "stable_wearing")
+    ]
+    assert accepted_visual_windows(windows, observations) == []

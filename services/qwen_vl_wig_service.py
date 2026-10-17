@@ -125,7 +125,7 @@ def _infer_window(images: list, frame_meta: list, target_name: str, target_color
     content.append({"type": "text", "text": (
         "这些图片是同一候选区间的静态抽样，逐帧独立判断可见事实；"
         "禁止根据图片顺序猜测摘戴过程，禁止把梳头、摸头发、转身或主播暂时离开画面当成摘戴。"
-        "wear_state只能是 no_wig、transition、stable_wearing。"
+        "wear_state只能是 no_person、no_wig、transition、stable_wearing；看不到主播头部时必须判no_person。"
         "只有清楚看见发网、本发、手持未佩戴假发，或假发正离开/接触头部时才判transition或no_wig；"
         "完整造型头发已覆盖头部时判stable_wearing，即使主播正在梳理或触摸头发。"
         "对stable_wearing生成稳定style_signature，格式为颜色族|长度|直卷|刘海|头顶工艺。"

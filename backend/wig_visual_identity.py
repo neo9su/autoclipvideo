@@ -36,7 +36,7 @@ def accepted_visual_windows(
     for index, raw in enumerate(windows):
         items = by_window.get(index, [])
         stable = [item for item in items if item.get("wear_state") == "stable_wearing"]
-        unsafe = [item for item in items if item.get("wear_state") in {"no_wig", "transition"}]
+        unsafe = [item for item in items if item.get("wear_state") in {"no_person", "no_wig", "transition"}]
         signatures = {str(item.get("style_signature") or "").strip() for item in stable} - {""}
         if len(stable) < 3 or len(unsafe) > 1 or len(signatures) != 1:
             continue
