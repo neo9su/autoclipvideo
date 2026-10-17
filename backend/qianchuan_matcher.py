@@ -279,6 +279,61 @@ class QianchuanMatcher(SemanticMatcher):
 
     allow_thumbnail_optional_sources = True
 
+    async def _get_group_recordings(self, group_id: int) -> List[Dict]:
+        """Constrain every candidate to the requested wig's approved windows."""
+        recordings = await super()._get_group_recordings(group_id)
+        if not recordings:
+            return []
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT wig_model, wig_color, label FROM clip_groups WHERE id=?", (group_id,)
+            ) as cursor:
+                group = await cursor.fetchone()
+        if not group:
+            return []
+        target_name = group["wig_model"] or group["label"] or ""
+        target_color = group["wig_color"] or ""
+        from media_contract import resolve_srt_file
+        from wig_boundary import detect_boundaries
+        from wig_preprocess import filter_entries_to_windows, select_identity_windows
+
+        constrained = []
+        window_cache = getattr(self, "_wig_window_cache", None)
+        if window_cache is None:
+            window_cache = self._wig_window_cache = {}
+        for recording in recordings:
+            srt_path = resolve_srt_file(recording.get("source_filename") or recording.get("filename"))
+            if not srt_path:
+                continue
+            cache_key = (
+                recording.get("recording_id"), str(srt_path), srt_path.stat().st_mtime_ns,
+                target_name, target_color,
+            )
+            windows = window_cache.get(cache_key)
+            if windows is None:
+                boundaries = await detect_boundaries(str(srt_path))
+                windows = select_identity_windows(boundaries, target_name, target_color)
+                window_cache[cache_key] = windows
+            entries = filter_entries_to_windows(recording.get("srt_entries") or [], windows)
+            if not entries:
+                logger.warning(
+                    "Qianchuan recording %s excluded: no approved window for %s/%s",
+                    recording.get("recording_id"), target_name, target_color,
+                )
+                continue
+            clone = dict(recording)
+            clone["srt_entries"] = entries
+            clone["transcript_text"] = " ".join(entry["text"] for entry in entries)
+            clone["wig_windows"] = windows
+            # SRT timestamps refer to the original recording, not a pre-cut clip.
+            clone["filename"] = clone.get("source_filename") or clone.get("filename")
+            clone["duration"] = max(float(entry["end"]) for entry in entries)
+            constrained.append(clone)
+        if not constrained:
+            self.match_error = "no single-wig source window matched the requested product"
+        return constrained
+
     def _qianchuan_bias(self, segment: Dict, text: str) -> float:
         text_l = text.lower()
         score = 0.0

@@ -89,6 +89,49 @@ def group_same_wig_segments(segments: Iterable[Mapping[str, object]]) -> Dict[st
     return grouped
 
 
+def select_identity_windows(
+    boundaries: Iterable[Mapping[str, object]],
+    target_name: str,
+    target_color: Optional[str] = None,
+) -> List[Dict]:
+    """Select only boundary windows that can be tied to one requested wig.
+
+    Ampersand-separated names are aliases of one catalogue item (夺回&人生).
+    Slash/comma-separated target values describe multiple styles and are unsafe.
+    """
+    raw_name = str(target_name or "").strip()
+    if not raw_name or re.search(r"[/／、,，;；|｜]", raw_name):
+        return []
+    aliases = product_aliases({"product_name": raw_name})
+    color = normalize(target_color)
+    selected = []
+    for raw in boundaries:
+        item = dict(raw)
+        start = float(item.get("start_sec") or 0)
+        end = float(item.get("end_sec") or 0)
+        if end <= start:
+            continue
+        observed = normalize(" ".join(str(item.get(key) or "") for key in ("wig", "name", "product_name")))
+        if not observed or not any(alias in observed or observed in alias for alias in aliases):
+            continue
+        observed_color = normalize(item.get("color"))
+        if color and observed_color and color not in observed_color and observed_color not in color:
+            continue
+        item["identity_key"] = f"wig:{normalize(raw_name)}:{color or 'unknown-color'}"
+        item["identity_evidence"] = "boundary_name_and_compatible_color"
+        selected.append(item)
+    return sorted(selected, key=lambda item: (float(item["start_sec"]), float(item["end_sec"])))
+
+
+def filter_entries_to_windows(entries: Iterable[Mapping[str, object]], windows: Iterable[Mapping[str, object]]) -> List[Dict]:
+    """Keep complete SRT cues inside approved windows; never fill from outside."""
+    ranges = [(float(window["start_sec"]), float(window["end_sec"])) for window in windows]
+    return [dict(entry) for entry in entries if any(
+        float(entry.get("start") or 0) >= start and float(entry.get("end") or 0) <= end
+        for start, end in ranges
+    )]
+
+
 def retention_hook_plan(duration: float) -> List[Dict]:
     """Plan repeated open loops without duplicating the whole sales structure."""
     beats = (

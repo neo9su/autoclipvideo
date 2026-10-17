@@ -1,10 +1,12 @@
 from backend.wig_preprocess import (
     build_asset_name,
     extract_features,
+    filter_entries_to_windows,
     group_same_wig_segments,
     qianchuan_output_spec,
     resolve_spoken_product,
     retention_hook_plan,
+    select_identity_windows,
 )
 
 
@@ -53,3 +55,24 @@ def test_vertical_2k_spec_is_inside_qianchuan_limits():
     assert spec["resolution"] == "1440x2560"
     assert spec["min_video_bitrate_kbps"] == 516
     assert spec["duration_range_seconds"] == [4, 300]
+
+
+def test_same_wig_rewear_windows_are_kept_and_other_wig_is_excluded():
+    boundaries = [
+        {"wig": "夺回", "color": "自然黑", "start_sec": 10, "end_sec": 50},
+        {"wig": "氧气少女", "color": "棕色", "start_sec": 50, "end_sec": 90},
+        {"wig": "人生", "color": "自然黑", "start_sec": 100, "end_sec": 140},
+    ]
+    selected = select_identity_windows(boundaries, "夺回&人生", "自然黑")
+    assert [(item["start_sec"], item["end_sec"]) for item in selected] == [(10, 50), (100, 140)]
+    entries = [
+        {"start": 12, "end": 15, "text": "夺回"},
+        {"start": 55, "end": 58, "text": "另一款"},
+        {"start": 105, "end": 108, "text": "人生"},
+    ]
+    assert [item["text"] for item in filter_entries_to_windows(entries, selected)] == ["夺回", "人生"]
+
+
+def test_ambiguous_multi_style_target_has_no_render_windows():
+    boundaries = [{"wig": "直发", "start_sec": 0, "end_sec": 20}]
+    assert select_identity_windows(boundaries, "直发/卷发", "黑色/橘色") == []
