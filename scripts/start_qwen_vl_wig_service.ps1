@@ -1,0 +1,11 @@
+$ErrorActionPreference = "Stop"
+$env:HF_HUB_OFFLINE = "1"
+$env:HUGGINGFACE_HUB_OFFLINE = "1"
+$env:TRANSFORMERS_OFFLINE = "1"
+$env:QWEN_VL_MODEL = "F:\models\Qwen3-VL-2B-Instruct"
+$env:QWEN_VL_ALLOWED_ROOTS = "F:\douyin_recordings;C:\Users\neo\douyin_backend\recordings"
+$env:QWEN_VL_UNLOAD_AFTER_REQUEST = "1"
+$env:QWEN_VL_MIN_FREE_MIB = "6000"
+$env:QWEN_VL_GPU_WAIT_SEC = "600"
+Set-Location "C:\douyin_login\qwen_vl_wig"
+& "C:\Python313\python.exe" -m uvicorn qwen_vl_wig_service:app --host 127.0.0.1 --port 8897
