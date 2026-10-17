@@ -123,8 +123,11 @@ def _infer_window(images: list, frame_meta: list, target_name: str, target_color
     for meta, image in zip(frame_meta, images):
         content += [{"type": "text", "text": f"frame={json.dumps(meta)}"}, {"type": "image", "image": image}]
     content.append({"type": "text", "text": (
-        "逐帧判断主播状态。wear_state只能是 no_wig、transition、stable_wearing。"
-        "transition包括正在戴、正在摘、手持假发、发网阶段或严重遮挡。"
+        "这些图片是同一候选区间的静态抽样，逐帧独立判断可见事实；"
+        "禁止根据图片顺序猜测摘戴过程，禁止把梳头、摸头发、转身或主播暂时离开画面当成摘戴。"
+        "wear_state只能是 no_wig、transition、stable_wearing。"
+        "只有清楚看见发网、本发、手持未佩戴假发，或假发正离开/接触头部时才判transition或no_wig；"
+        "完整造型头发已覆盖头部时判stable_wearing，即使主播正在梳理或触摸头发。"
         "对stable_wearing生成稳定style_signature，格式为颜色|长短|直卷|刘海|头顶工艺；"
         "同一款摘下再戴回必须给相同signature，真正换款必须不同。"
         f"商品提示：{target_name}，颜色提示：{target_color}。"
