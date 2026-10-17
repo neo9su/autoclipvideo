@@ -93,7 +93,7 @@ def _frame(cap, second: float):
 def _parse(raw: str) -> list:
     match = re.search(r"\[.*\]", raw, re.S)
     if not match:
-        raise HTTPException(502, "model returned no JSON array")
+        raise HTTPException(502, f"model returned no JSON array: {raw[:500]!r}")
     data = json.loads(match.group())
     return data if isinstance(data, list) else []
 
