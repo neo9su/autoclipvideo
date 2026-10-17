@@ -15,8 +15,7 @@ import torch
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-MODEL_ID = os.environ.get("QWEN_VL_MODEL", "Qwen/Qwen3-VL-2B-Instruct")
-MODEL_CACHE = os.environ.get("QWEN_VL_CACHE", r"F:\models\huggingface")
+MODEL_ID = os.environ.get("QWEN_VL_MODEL", r"F:\models\Qwen3-VL-2B-Instruct")
 MIN_FREE_MIB = int(os.environ.get("QWEN_VL_MIN_FREE_MIB", "6000"))
 GPU_WAIT_SEC = int(os.environ.get("QWEN_VL_GPU_WAIT_SEC", "600"))
 ALLOWED_ROOTS = tuple(
@@ -64,9 +63,9 @@ def _load():
     if _free_mib() < MIN_FREE_MIB:
         raise HTTPException(503, f"GPU busy; free={_free_mib()} MiB, required={MIN_FREE_MIB} MiB")
     from transformers import AutoModelForMultimodalLM, AutoProcessor
-    processor = AutoProcessor.from_pretrained(MODEL_ID, cache_dir=MODEL_CACHE)
+    processor = AutoProcessor.from_pretrained(MODEL_ID, local_files_only=True)
     model = AutoModelForMultimodalLM.from_pretrained(
-        MODEL_ID, cache_dir=MODEL_CACHE, torch_dtype=torch.bfloat16,
+        MODEL_ID, local_files_only=True, torch_dtype=torch.bfloat16,
         device_map="cuda", low_cpu_mem_usage=True,
     ).eval()
 
