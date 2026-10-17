@@ -39,6 +39,7 @@ class LinkCandidatesTest(unittest.TestCase):
 
     def test_existing_link_and_missing_shop_metadata_untouched(self):
         self.assertEqual(audit_module.audit([dict(self.product, product_url="existing")], [self.row])["candidates"], [])
+        self.assertEqual(audit_module.audit([dict(self.product, enabled=0)], [self.row])["candidates"], [])
         self.assertEqual(audit_module.audit([dict(self.product, link_meta="[]")], [self.row])["candidates"], [])
 
 

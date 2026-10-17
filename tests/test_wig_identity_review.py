@@ -122,6 +122,7 @@ def test_actual_pipeline_returns_before_script_or_tts_on_conflict(connection, mo
     voice = AsyncMock(side_effect=AssertionError('TTS must not run'))
     ns = dict(Dict=Dict, logger=logging.getLogger('test'), hold_for_review=hold_for_review,
               score_product_match=Mock(return_value={'ok': False, 'identity': BAD}),
+                  _saved_qianchuan_resume=Mock(return_value=(None, None)),
               load_group_context=AsyncMock(return_value=context), generate_qianchuan_script=script,
               voice_director=types.SimpleNamespace(generate_voiceover=voice), _COMPOSE_SEM=asyncio.Semaphore(1))
     exec(compile(ast.Module(body=[node], type_ignores=[]), 'real-pipeline', 'exec'), ns)

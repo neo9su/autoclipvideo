@@ -27,7 +27,10 @@ def valid_record(row):
 def audit(products, records):
     candidates = []
     for product in products:
-        if product.get("product_url"):
+        # Disabled placeholders are retained solely for rollback after a real
+        # link-bearing replacement has been inserted.  They must not be
+        # proposed again by a later incremental audit.
+        if not product.get("enabled", 1) or product.get("product_url"):
             continue
         try:
             meta = json.loads(product.get("link_meta") or "{}")
@@ -66,7 +69,10 @@ def main():
     inputs = [args.catalogue, args.records]
     if args.output.resolve() in [p.resolve() for p in inputs]:
         parser.error("Output must not overwrite an input")
-    result = audit(json.loads(args.catalogue.read_text()), json.loads(args.records.read_text()))
+    result = audit(
+        json.loads(args.catalogue.read_text(encoding="utf-8")),
+        json.loads(args.records.read_text(encoding="utf-8")),
+    )
     result["input_sha256"] = {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs}
     with args.output.open("x", encoding="utf-8") as stream:
         json.dump(result, stream, ensure_ascii=False, indent=2)

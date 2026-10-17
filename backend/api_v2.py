@@ -368,6 +368,22 @@ def _loads_qianchuan_json(value: Optional[str]) -> Optional[Any]:
         return {"raw": str(value)[:1000], "parse_error": True}
 
 
+def _saved_qianchuan_resume(group: Dict) -> tuple[Optional[Dict], Optional[str]]:
+    """Return a resumable script and its pinned catalogue identity.
+
+    A restarted worker must never reselect a different product for an already
+    claimed job.  Only scripts that pin a link-bearing catalogue row qualify.
+    """
+    script = _loads_qianchuan_json(group.get("qianchuan_script"))
+    if not isinstance(script, dict):
+        return None, None
+    product = script.get("product_context")
+    if not isinstance(product, dict) or not str(product.get("product_url") or "").startswith(("http://", "https://")):
+        return None, None
+    identity = product.get("id") or product.get("product_id")
+    return (script, str(identity)) if identity else (None, None)
+
+
 async def _set_qianchuan_error(group_id: int, status: int, error: str, review: Optional[Dict] = None):
     import aiosqlite
     from db import DB_PATH
@@ -400,23 +416,30 @@ async def _run_qianchuan_pipeline(group_id: int) -> None:
         if not context:
             raise RuntimeError("group not found")
         group = context["group"]
-        match = score_product_match(context, keywords=[group.get("label"), group.get("wig_model"), group.get("wig_color")], threshold=0.0)
+        script, pinned_product_id = _saved_qianchuan_resume(group)
+        if pinned_product_id:
+            context = await load_group_context(DB_PATH, group_id, pinned_product_id)
+        match = score_product_match(
+            context,
+            product_id=pinned_product_id,
+            keywords=[group.get("label"), group.get("wig_model"), group.get("wig_color")],
+            threshold=0.58,
+        )
         async with aiosqlite.connect(DB_PATH) as db:
             if await hold_for_review(db, group_id, match.get("identity")):
                 return
-        # Production recordings may have no matching product catalog row. The
-        # recording's own SRT is still the authoritative source for a
-        # validation render, so retain group metadata as product context.
-        product_context = match.get("product") or {
-            "product_name": group.get("wig_model") or group.get("label") or "假发",
-            "matched_color": group.get("wig_color") or "自然色",
-            "keywords": [group.get("label"), group.get("wig_model"), group.get("wig_color")],
-            "source": "group_metadata_srt_fallback",
-        }
-        script = generate_qianchuan_script(
-            group, product_context=product_context, selling_points=[]
-        )
-        script["preview_mode"] = False
+        product_context = match.get("product")
+        if not match.get("ok") or not product_context or not product_context.get("product_url"):
+            raise RuntimeError(match.get("reason") or "商品链接或商品强匹配不足，拒绝自动续跑")
+        if script is None:
+            script = generate_qianchuan_script(
+                group, product_context=product_context, selling_points=[]
+            )
+            script["preview_mode"] = False
+        else:
+            # Refresh mutable catalogue fields while retaining the exact script,
+            # preview flag, hooks, and product chosen by the original request.
+            script["product_context"] = product_context
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("UPDATE clip_groups SET qianchuan_script=?, qianchuan_score=?, qianchuan_review=? WHERE id=?", (json.dumps(script, ensure_ascii=False), match.get("score"), json.dumps(match, ensure_ascii=False), group_id))
             await db.commit()
