@@ -488,13 +488,19 @@ class VoiceDirector:
             deadline = time.time() + gpu_tts_timeout
             while time.time() < deadline:
                 await asyncio.sleep(2)
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(f"{_GPU_SERVICE_URL}/tts-jobs/{job_id}",
-                                           timeout=aiohttp.ClientTimeout(total=10)) as r:
-                        if r.status != 200:
-                            logger.warning(f"GPU TTS poll {job_id} returned {r.status}, aborting")
-                            return 0.0
-                        r_body = await r.json()
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(f"{_GPU_SERVICE_URL}/tts-jobs/{job_id}",
+                                               timeout=aiohttp.ClientTimeout(total=10)) as r:
+                            if r.status != 200:
+                                logger.warning(f"GPU TTS poll {job_id} returned {r.status}, aborting")
+                                return 0.0
+                            r_body = await r.json()
+                except (asyncio.TimeoutError, aiohttp.ClientConnectionError) as exc:
+                    # Polling is read-only: retry the existing job, never submit
+                    # another synthesis because a busy worker delayed a response.
+                    logger.warning("GPU TTS poll %s temporarily unavailable: %s", job_id, type(exc).__name__)
+                    continue
                 status = r_body.get("status")
                 if status == "done":
                     break
