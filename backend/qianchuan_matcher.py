@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -294,9 +295,10 @@ class QianchuanMatcher(SemanticMatcher):
             return []
         target_name = group["wig_model"] or group["label"] or ""
         target_color = group["wig_color"] or ""
-        from media_contract import resolve_srt_file
+        from media_contract import resolve_media_file, resolve_srt_file
         from wig_boundary import detect_boundaries
         from wig_preprocess import filter_entries_to_windows, select_identity_windows
+        from wig_visual_identity import VisualIdentityUnavailable, verify_windows
 
         constrained = []
         window_cache = getattr(self, "_wig_window_cache", None)
@@ -314,6 +316,15 @@ class QianchuanMatcher(SemanticMatcher):
             if windows is None:
                 boundaries = await detect_boundaries(str(srt_path))
                 windows = select_identity_windows(boundaries, target_name, target_color)
+                media_path = resolve_media_file(recording.get("source_filename") or recording.get("filename"))
+                if windows and media_path:
+                    try:
+                        windows = await asyncio.to_thread(
+                            verify_windows, media_path, windows, target_name, target_color
+                        )
+                    except VisualIdentityUnavailable as exc:
+                        logger.warning("Visual identity unavailable for %s: %s", media_path, exc)
+                        windows = []
                 window_cache[cache_key] = windows
             entries = filter_entries_to_windows(recording.get("srt_entries") or [], windows)
             if not entries:
