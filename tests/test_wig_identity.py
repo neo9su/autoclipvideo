@@ -148,3 +148,16 @@ def test_rollout_audit_reads_real_database_without_mutating_it(tmp_path):
     report = audit_database(p)
     assert report["statuses"] == {"conflict": 1}
     assert p.read_bytes() == before
+
+
+@pytest.mark.parametrize('products', [
+    [{'id': 741, 'product_id': 'other', 'enabled': 1}],
+    [{'id': 740, 'product_id': 'original', 'enabled': 0}],
+    [],
+])
+def test_pinned_product_never_falls_back_to_other_or_disabled_product(products):
+    result = score_function()({'group': group(), 'identity': {'ok': True},
+                               'products': products}, product_id='740', threshold=0.0)
+    assert result['ok'] is False
+    assert result['product'] is None
+    assert '禁止自动换款' in result['reason']

@@ -158,7 +158,7 @@ async def load_group_context(db_path: str, group_id: int, product_id: Optional[s
                 (str(product_id), str(product_id)),
             ) as cur:
                 products = [dict(r) for r in await cur.fetchall()]
-        if not products:
+        if not products and not product_id:
             room_id = group["room_id"]
             params = (room_id, room_id) if "room_id" in product_columns else ()
             async with db.execute(
@@ -227,6 +227,14 @@ def score_product_match(context: Dict, product_id: Optional[str] = None, keyword
                 "reason": "款式一致性待审核：录像款式、颜色或商品证据缺失/冲突，禁止自动混剪"}
     group = context.get("group") or {}
     products = context.get("products") or []
+    if product_id:
+        products = [p for p in products
+                    if str(product_id) in {str(p.get("id")), str(p.get("product_id"))}
+                    and p.get("enabled", 1)]
+        if not products:
+            return {"ok": False, "score": 0.0, "product": None, "hits": [],
+                    "missing": [str(product_id)], "threshold": threshold,
+                    "identity": identity, "reason": "指定商品不存在或已停用，禁止自动换款"}
     corpus = " ".join([
         group.get("label") or "",
         group.get("wig_model") or "",
