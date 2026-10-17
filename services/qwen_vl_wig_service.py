@@ -98,6 +98,26 @@ def _parse(raw: str) -> list:
     return data if isinstance(data, list) else []
 
 
+def _align_observations(observations: list, frame_meta: list) -> list:
+    """Restore window ids from requested timestamps instead of trusting model ids."""
+    aligned = []
+    for item in observations:
+        try:
+            second = float(item.get("time_sec"))
+        except (TypeError, ValueError):
+            continue
+        if not frame_meta:
+            continue
+        meta = min(frame_meta, key=lambda value: abs(float(value["time_sec"]) - second))
+        if abs(float(meta["time_sec"]) - second) > 0.25:
+            continue
+        normalized = dict(item)
+        normalized["window_index"] = int(meta["window_index"])
+        normalized["time_sec"] = float(meta["time_sec"])
+        aligned.append(normalized)
+    return aligned
+
+
 @app.get("/health")
 def health():
     return {"ok": True, "model": MODEL_ID, "loaded": model is not None, "gpu_free_mib": _free_mib()}
@@ -144,7 +164,7 @@ def analyze(req: AnalyzeRequest):
         with torch.inference_mode():
             output = model.generate(**inputs, max_new_tokens=800, do_sample=False)
         raw = processor.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True)
-        return {"model": MODEL_ID, "observations": _parse(raw)}
+        return {"model": MODEL_ID, "observations": _align_observations(_parse(raw), frame_meta)}
     finally:
         if UNLOAD:
             _unload()
