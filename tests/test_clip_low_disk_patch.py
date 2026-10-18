@@ -63,3 +63,12 @@ def test_empty_segments_still_rejected():
 def test_source_drift_refused():
     with pytest.raises(RuntimeError):
         patch.patch_source(SOURCE.replace("CLIP_MIN_FREE_GB", "OTHER_LIMIT"))
+
+
+def test_windows_line_endings_preserved():
+    result = patch.patch_source(SOURCE.replace("\n", "\r\n"))
+    assert "\r\n" in result
+    assert "\n" not in result.replace("\r\n", "")
+    with pytest.raises(HTTPException) as error:
+        run(result)
+    assert error.value.status_code == 507

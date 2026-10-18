@@ -15,9 +15,11 @@ NEW = OLD.replace('        _clip_jobs.pop(job_id, None)\n', '')
 
 def patch_source(source):
     # The job is created after admission, so there is nothing to remove here.
-    if source.count(OLD) != 1:
+    newline = "\r\n" if "\r\n" in source else "\n"
+    old, new = OLD.replace("\n", newline), NEW.replace("\n", newline)
+    if source.count(old) != 1:
         raise RuntimeError("Legacy disk guard differs; refusing patch")
-    patched = source.replace(OLD, NEW)
+    patched = source.replace(old, new)
     compile(patched, "gpu_service/main.py", "exec")
     return patched
 
