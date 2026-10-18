@@ -1837,19 +1837,25 @@ class AudioConcatJobResponse(BaseModel):
     status: str
 
 
-async def _run_audio_concat_job(job_id: str, input_paths: list[str]):
+async def _run_audio_concat_job(job_id: str, input_paths: list[str], speed_ratio: float = 1.0):
     job = _audio_concat_jobs[job_id]
     output_dir = os.path.join(STORAGE_DIR, "audio_concat", job_id)
     output_path = os.path.join(output_dir, "merged.wav")
     list_path = os.path.join(output_dir, "list.txt")
     try:
+        job.update(status="processing")
+        if not 0.5 <= speed_ratio <= 2.0:
+            raise ValueError("speed_ratio must be between 0.5 and 2.0")
         os.makedirs(output_dir, exist_ok=True)
         with open(list_path, "w", encoding="utf-8") as list_file:
             for path in input_paths:
                 list_file.write(f"file '{path}'\n")
+        audio_args = ("-c", "copy") if speed_ratio == 1.0 else (
+            "-filter:a", f"atempo={speed_ratio:.6f}", "-c:a", "pcm_s16le",
+        )
         return_code = await _run_ffmpeg(
             "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path,
-            "-c", "copy", output_path,
+            *audio_args, output_path,
         )
         if return_code != 0 or not os.path.exists(output_path):
             raise RuntimeError("remote audio concat ffmpeg failed")
@@ -1870,7 +1876,10 @@ async def _run_audio_concat_job(job_id: str, input_paths: list[str]):
 
 
 @app.post("/audio-concat-jobs", status_code=201, response_model=AudioConcatJobResponse)
-async def create_audio_concat_job(files: list[UploadFile] = File(...)):
+async def create_audio_concat_job(
+    files: list[UploadFile] = File(...),
+    speed_ratio: float = Form(1.0, ge=0.5, le=2.0),
+):
     if not files:
         raise HTTPException(status_code=422, detail="files is empty")
     job_id = uuid.uuid4().hex[:16]
@@ -1892,7 +1901,7 @@ async def create_audio_concat_job(files: list[UploadFile] = File(...)):
                 pass
         raise
     _audio_concat_jobs[job_id] = {"status": "queued", "output_path": None, "error": None}
-    asyncio.create_task(_run_audio_concat_job(job_id, input_paths))
+    asyncio.create_task(_run_audio_concat_job(job_id, input_paths, speed_ratio))
     return {"job_id": job_id, "status": "queued"}
 
 
