@@ -76,3 +76,45 @@ def analyze_sequence(frames, *, max_gap_seconds=2):
             'issue_count': sum(len(r['issues']) for r in rows),
             'same_object_rewear': 'unverified', 'sku_verified': False,
             'eligible_for_render': False, 'read_only': True}
+
+
+def attach_catalogue_evidence(sequence, cues, products):
+    """Attach local original subtitle mentions, without extending sampled runs.
+
+    This enriches an offline audit only. Equal catalogue candidates do not prove
+    the same physical wig; different mentions do not prove a visible change.
+    """
+    from copy import deepcopy
+    from wig_transcript_evidence import catalogue_mentions
+
+    result = deepcopy(sequence)
+    mentions = catalogue_mentions(cues, products)
+    known = {p['id']: p for p in products}
+    runs = result['wearing_candidate_runs']
+    for run in runs:
+        lo, hi = run['first_observed_sec'], run['last_observed_sec']
+        # No text propagation across takeoff, gaps, or beyond observed coverage.
+        local = [m for m in mentions if lo <= m['start_sec'] and m['end_sec'] <= hi]
+        run['spoken_mentions'] = local
+        current = [m for m in local if m['current_assertion']]
+        ids = sorted({i for m in current for i in m['catalogue_ids']}, key=str)
+        run['catalogue_candidates'] = [
+            {'catalogue_id': i, 'hairstyle_name': next(m['hairstyle_name'] for m in current if i in m['catalogue_ids']),
+             'product_id': known[i].get('product_id'), 'product_url': known[i].get('product_url')}
+            for i in ids]
+        run['spoken_names'] = sorted({m['hairstyle_name'] for m in current})
+        run['name_evidence_status'] = ('multiple_current_names' if len(run['spoken_names']) > 1
+                                       else 'current_name_candidate' if current else 'no_local_current_name')
+    comparisons = []
+    for left, right in zip(runs, runs[1:]):
+        a, b = set(left['spoken_names']), set(right['spoken_names'])
+        if len(a) == len(b) == 1:
+            relation = 'same_spoken_name_candidates' if a == b else 'different_spoken_name_candidates'
+        else:
+            relation = 'insufficient_or_conflicting_name_evidence'
+        comparisons.append({'left_last_observed_sec': left['last_observed_sec'],
+                            'right_first_observed_sec': right['first_observed_sec'],
+                            'name_relation': relation, 'same_physical_object': 'unverified',
+                            'visible_style_change': 'unverified', 'sku_verified': False})
+    result['run_comparisons'] = comparisons
+    return result

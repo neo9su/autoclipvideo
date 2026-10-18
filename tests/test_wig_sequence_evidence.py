@@ -1,3 +1,6 @@
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 import pytest
 from backend.wig_sequence_evidence import analyze_sequence
 
@@ -40,3 +43,42 @@ def test_invalid_times_duplicates_and_missing_visibility_cannot_supply_runs():
     with pytest.raises(ValueError): analyze_sequence([frame(1, 'wearing'), frame(1, 'no_wig')])
     f=frame(1,'wearing');f['head_visible']=False
     assert not analyze_sequence([f])['wearing_candidate_runs']
+
+
+def test_spoken_aliases_preserve_different_urls_and_never_confirm_physical_rewear():
+    from backend.wig_sequence_evidence import attach_catalogue_evidence
+    products=[{'id':i, 'product_name':'小圆-夺回&人生【仿递针】长卷发',
+               'product_url':f'https://example.invalid/{i}'} for i in (1,2)]
+    frames=[frame(t,'wearing') for t in (1,2,3)] + [frame(4,'no_wig')] + [frame(t,'wearing') for t in (5,6,7)]
+    sequence=analyze_sequence(frames)
+    cues=[{'start_sec':1.1,'end_sec':2.1,'text':'这是夺回'},
+          {'start_sec':5.1,'end_sec':6.1,'text':'这是人生'}]
+    result=attach_catalogue_evidence(sequence,cues,products)
+    assert 'catalogue_candidates' not in sequence['wearing_candidate_runs'][0]
+    assert all(len(r['catalogue_candidates']) == 2 for r in result['wearing_candidate_runs'])
+    assert result['run_comparisons'][0]['name_relation'] == 'same_spoken_name_candidates'
+    assert result['run_comparisons'][0]['same_physical_object'] == 'unverified'
+    assert not result['eligible_for_render']
+
+
+def test_transition_names_history_and_future_do_not_name_current_wig():
+    from backend.wig_sequence_evidence import attach_catalogue_evidence
+    sequence=analyze_sequence([frame(1,'wearing'),frame(2,'wearing'),frame(3,'taking_off'),
+                               frame(4,'no_wig'),frame(5,'wearing'),frame(6,'wearing')])
+    products=[{'id':1,'product_name':'小圆-人生【仿递针】长卷发'}]
+    cues=[{'start_sec':3,'end_sec':4,'text':'这是人生'},
+          {'start_sec':5.1,'end_sec':5.8,'text':'人生已过'}]
+    result=attach_catalogue_evidence(sequence,cues,products)
+    assert all(r['catalogue_candidates'] == [] for r in result['wearing_candidate_runs'])
+
+
+def test_two_current_names_remain_conflicting_candidates():
+    from backend.wig_sequence_evidence import attach_catalogue_evidence
+    sequence=analyze_sequence([frame(t,'wearing') for t in (1,2,3,4,5)])
+    products=[{'id':1,'product_name':'小圆-人生【仿递针】长卷发'},
+              {'id':2,'product_name':'小圆-天蝎座【仿递针】长卷发'}]
+    cues=[{'start_sec':1,'end_sec':2,'text':'这是人生'},
+          {'start_sec':4,'end_sec':5,'text':'这是天蝎座'}]
+    result=attach_catalogue_evidence(sequence,cues,products)
+    assert result['wearing_candidate_runs'][0]['name_evidence_status'] == 'multiple_current_names'
+    assert len(result['wearing_candidate_runs'][0]['catalogue_candidates']) == 2
