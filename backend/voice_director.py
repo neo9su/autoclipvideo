@@ -721,6 +721,12 @@ class VoiceDirector:
         )
         pending = merged_wav + ".download"
         try:
+            expected_duration = None
+            if speed_ratio != 1.0:
+                durations = [await self._probe_duration(segment["audio_path"]) for segment in segments]
+                if any(duration <= 0 for duration in durations):
+                    return None
+                expected_duration = sum(durations) / speed_ratio
             async with aiohttp.ClientSession() as session:
                 form = aiohttp.FormData()
                 form.add_field("speed_ratio", str(speed_ratio))
@@ -754,8 +760,12 @@ class VoiceDirector:
                     with open(pending, "wb") as output:
                         async for chunk in response.content.iter_chunked(1024 * 1024):
                             output.write(chunk)
-            if await self._probe_duration(pending) <= 0:
+            measured_duration = await self._probe_duration(pending)
+            if measured_duration <= 0:
                 logger.error("Remote audio job %s returned invalid or empty WAV", job_id)
+                return None
+            if expected_duration is not None and abs(measured_duration - expected_duration) > max(0.25, expected_duration * 0.03):
+                logger.error("Remote audio job %s did not apply requested retiming", job_id)
                 return None
             os.replace(pending, merged_wav)
             return merged_wav

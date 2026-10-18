@@ -124,6 +124,15 @@ async def test_single_unmodified_track_needs_no_job(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_old_worker_ignoring_speed_is_rejected(tmp_path):
+    source = tmp_path / 'input.wav'; source.write_bytes(wav_bytes())
+    env, owner, _ = client_env(tmp_path, wav_bytes())
+    result = await env['_merge_audio_segments'](owner, [{'audio_path': str(source)}], 1, 0.5)
+    assert result is None and source.exists()
+    assert list(tmp_path.iterdir()) == [source]
+
+
+@pytest.mark.asyncio
 async def test_retimed_scene_durations_follow_measured_audio():
     tree = ast.parse((ROOT / 'backend/voice_director.py').read_text())
     branch = next(n for n in ast.walk(tree) if isinstance(n, ast.If)
