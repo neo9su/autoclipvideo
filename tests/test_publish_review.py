@@ -9,7 +9,7 @@ class HTTPException(Exception):
 
 src=(Path(__file__).parents[1]/'backend/publish_review.py').read_text()
 tree=ast.parse(src)
-keep={'PublishReviewRequired','Review','register_review','close_review','get_review','wait_for_review','confirm','screenshot'}
+keep={'PublishReviewRequired','Review','register_review','close_review','get_review','wait_for_review','confirm','screenshot','observe_result'}
 nodes=[n for n in tree.body if isinstance(n,(ast.ClassDef,ast.FunctionDef,ast.AsyncFunctionDef)) and n.name in keep]
 for n in nodes:n.decorator_list=[] if not isinstance(n,ast.ClassDef) else n.decorator_list
 nodes=[n for n in nodes if n.name!='Review']
@@ -70,3 +70,23 @@ async def test_ambiguous_browser_click_is_not_repeated():
     assert p.clicks==1
     with pytest.raises(HTTPException):await ns['confirm'](3,SimpleNamespace(token=''))
     ns['close_review'](3)
+
+@pytest.mark.asyncio
+async def test_unavailable_button_is_not_recorded_as_clicked():
+    class Disabled(Page):
+        async def is_enabled(self):return False
+    p=Disabled();ns['register_review'](p,{'id':4});r=ns['get_review'](4);r.event.set()
+    with pytest.raises(ns['PublishReviewRequired'],match='未点击'):await ns['wait_for_review'](p,4,True,1)
+    assert not r.clicked and r.phase=='not_clicked' and p.clicks==0
+    ns['close_review'](4)
+
+@pytest.mark.asyncio
+async def test_result_requires_platform_redirect_and_stall_is_reported():
+    p=Page();ns['register_review'](p,{'id':5});r=ns['get_review'](5)
+    r.clicked=True;r.click_started=time.monotonic()-61
+    await ns['observe_result'](r)
+    assert r.phase=='needs_check' and '60秒' in r.message
+    p.url='https://creator.douyin.com/creator-micro/content/manage'
+    await ns['observe_result'](r)
+    assert r.phase=='platform_confirmed'
+    ns['close_review'](5)
