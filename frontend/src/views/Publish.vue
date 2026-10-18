@@ -603,6 +603,7 @@
 </template>
 
 <script setup>
+import { catalogSearchProducts } from '../publishCatalog.mjs'
 import { REMOTE_API_BASE } from '../remoteApi.js'
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import {
@@ -890,15 +891,7 @@ const roomFilteredProducts = computed(() => {
 })
 
 const cartSearch = ref('')
-const cartFilteredProducts = computed(() => {
-  const base = roomFilteredProducts.value
-  const q = cartSearch.value.trim().toLowerCase()
-  if (!q) return base
-  return base.filter(p =>
-    (p.product_name || '').toLowerCase().includes(q) ||
-    (p.keywords || '').toLowerCase().includes(q)
-  )
-})
+const cartFilteredProducts = computed(() => catalogSearchProducts(roomFilteredProducts.value, cartSearch.value))
 
 // Compute next scheduled_at from scheduleTime
 const schedulePreview = computed(() => {
@@ -1405,13 +1398,12 @@ async function autoMatchProduct() { return publishSelection.runEditing(autoMatch
 async function autoMatchProductForCurrent() {
   if (!newTask.value.group_id) return
   try {
-    const result = await matchGroupProduct(newTask.value.group_id)
-    if (result.product) {
-      matchedProduct.value = result.product
-      if (!newTask.value.product_ids.includes(result.product.id)) {
-        newTask.value.product_ids.push(result.product.id)
-      }
-      showToast(`自动匹配: ${result.product.product_name}`, 'success')
+    const result = await matchGroupProduct(newTask.value.group_id, cartSearch.value)
+    if (result.products?.length || result.product) {
+      const matches = result.products || [result.product]
+      matchedProduct.value = matches[0]
+      newTask.value.product_ids = matches.map(p => p.id)
+      showToast(`已匹配 ${matches.length} 件商品${matches.length > 5 ? '，平台最多挂5件，请减少选择后创建' : ''}`, matches.length > 5 ? 'info' : 'success')
     } else {
       showToast('未找到匹配商品', 'info')
     }

@@ -32,12 +32,21 @@ class Review:
     token: str = ''
     captured: float = 0
     message: str = '正在准备视频、文案和挂车'
+    cart_message: str = ''
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     event: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 def register_review(page, task):
     SESSIONS[int(task['id'])] = Review(page, task.get('title') or '', task.get('product_ids') or [])
+
+
+def update_cart_result(task_id, result):
+    review = SESSIONS.get(int(task_id))
+    if review:
+        review.cart_message = f"实际成功挂车 {len(result['attached'])} 件；未通过 {len(result['failed'])} 件。"
+        if result['failed']:
+            review.cart_message += " 未通过：" + "；".join(f"{r['name'] or '商品'}：{r['reason']}" for r in result['failed'])
 
 
 def close_review(task_id):
@@ -83,7 +92,7 @@ async def wait_for_review(page, task_id, check_passed, timeout=1800):
 @router.get('/api/publish-review')
 async def list_reviews():
     return [dict(id=key, title=value.title, product_ids=value.product_ids,
-                 ready=value.ready and not value.requested, message=value.message,
+                 ready=value.ready and not value.requested, message=value.message + ("\n" + value.cart_message if value.cart_message else ""),
                  clicked=value.clicked) for key,value in SESSIONS.items() if not value.page.is_closed()]
 
 

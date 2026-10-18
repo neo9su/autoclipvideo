@@ -4660,14 +4660,24 @@ async def get_group_cover(group_id: int, filename: str):
 # ── Product matching ──────────────────────────────────────────────────────────
 
 @app.post("/api/groups/{group_id}/match-product")
-async def match_group_product(group_id: int):
+async def match_group_product(group_id: int, q: str = ""):
+    from publish_catalog_match import match_candidates, search_term
     async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT id FROM clip_groups WHERE id = ?", (group_id,)) as cur:
-            if not await cur.fetchone():
-                raise HTTPException(status_code=404, detail="Group not found")
-    product = await match_product(group_id)
-    return {"group_id": group_id, "product": product}
+        async with db.execute("SELECT * FROM clip_groups WHERE id = ?", (group_id,)) as cur:
+            group = await cur.fetchone()
+        if not group:
+            raise HTTPException(status_code=404, detail="Group not found")
+        async with db.execute("SELECT * FROM products WHERE enabled=1") as cur:
+            products = [dict(row) for row in await cur.fetchall()]
+    term = search_term(dict(group), q)
+    matched = match_candidates(dict(group), products, q)
+    if not term:
+        product = await match_product(group_id)
+        matched = [product] if product and product.get("product_url") else []
+    return {"group_id": group_id, "product": matched[0] if matched else None,
+            "products": matched, "query": term, "max_products": 5, "overflow": len(matched)>5}
+
 
 
 

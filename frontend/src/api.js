@@ -530,8 +530,8 @@ export async function generatePublishMeta(groupId) {
   return res.json()
 }
 
-export async function matchGroupProduct(groupId) {
-  const res = await fetchWithTimeout(`${BASE}/api/groups/${groupId}/match-product`, { method: 'POST' })
+export async function matchGroupProduct(groupId, query = '') {
+  const res = await fetchWithTimeout(`${BASE}/api/groups/${groupId}/match-product?q=${encodeURIComponent(query)}`, { method: 'POST' })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }

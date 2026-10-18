@@ -1,4 +1,5 @@
-from publish_review import register_review, close_review, wait_for_review, confirmation_sent, PublishReviewRequired
+from publish_cart_flow import attach_selected_products
+from publish_review import register_review, close_review, wait_for_review, confirmation_sent, PublishReviewRequired, update_cart_result
 """
 Douyin (TikTok CN) publisher via Playwright browser automation.
 Upload page: https://creator.douyin.com/creator-micro/content/upload
@@ -310,9 +311,9 @@ class DouyinPublisher(BasePublisher):
                     # 共创 tooltip, etc.) are gone before interacting with 添加标签
                     await _dismiss_overlays(page)
                     await _ensure_shopping_cart_tag(page)
-                    for i, pid in enumerate(product_ids):
-                        name = product_names[i] if i < len(product_names) else ""
-                        await _attach_product(page, pid, short_title=name)
+                    cart_result = await attach_selected_products(page, product_ids, product_names, _attach_product)
+                    update_cart_result(task_id, cart_result)
+                    await progress(f"已挂车 {len(cart_result['attached'])} 件；{len(cart_result['failed'])} 件链接未通过，详情见发布确认页")
 
                 await _dismiss_tooltips(page)
 
