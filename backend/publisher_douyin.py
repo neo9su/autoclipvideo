@@ -245,9 +245,11 @@ class DouyinPublisher(BasePublisher):
                         await title_el.wait_for(state="visible", timeout=10000)
                         await title_el.clear()
                         await title_el.fill(title[:30])
+                        if await title_el.input_value() != title[:30]:
+                            raise RuntimeError("标题输入框内容与任务文案不一致")
                         logger.info(f"Title filled: {title[:30]}")
                     except Exception as e:
-                        logger.warning(f"Title fill failed: {e}")
+                        raise RuntimeError("发布标题填写失败，请检查发布页面后重试") from e
 
                 # 5. Fill description + hashtags (max 5 tags)
                 desc = task.get("description") or ""
@@ -268,6 +270,7 @@ class DouyinPublisher(BasePublisher):
                         await desc_el.wait_for(state="visible", timeout=10000)
                         await desc_el.scroll_into_view_if_needed()
                         await desc_el.click(force=True)
+                        await desc_el.fill("")
                         await asyncio.sleep(0.3)
                         if desc:
                             await desc_el.focus()
@@ -290,7 +293,7 @@ class DouyinPublisher(BasePublisher):
                         # the suggestion dropdown before scrolling further
                         await _dismiss_overlays(page)
                     except Exception as e:
-                        logger.warning(f"Description/tags fill failed: {e}")
+                        raise RuntimeError("发布描述或话题填写失败，请检查发布页面后重试") from e
 
                 # 6. Attach products via 购物车 → 粘贴商品链接 (max 5)
                 #    Skipped for "无车发布" tasks (no_cart=True)
