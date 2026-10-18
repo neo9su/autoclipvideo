@@ -144,7 +144,7 @@ async def hairstyle_evidence(recording_id: int):
     """Read original subtitles; no inference, cutting or archive writes."""
     def run():
         import hashlib
-        from media_contract import resolve_media_file, srt_candidates
+        from media_contract import resolve_media_file, resolve_srt_file
         from wig_transcript_evidence import parse_srt, catalogue_mentions
         if recording_id <= 0:
             raise ValueError('无效录像ID')
@@ -165,10 +165,9 @@ async def hairstyle_evidence(recording_id: int):
         root = base.storage.resolve()
         if not source.resolve().is_relative_to(root):
             raise ValueError('源录像不在本机存储目录')
-        subtitle = next((p for p in srt_candidates(source)
-                         if p.resolve().is_relative_to(root) and p.is_file()), None)
-        if not subtitle:
-            raise ValueError('没有原始字幕，尚不能核对口播证据')
+        subtitle = resolve_srt_file(row['filename'])
+        if not subtitle or not subtitle.resolve().is_relative_to(root):
+            raise ValueError('没有本机原始字幕，尚不能核对口播证据')
         with subtitle.open('rb') as f:
             raw = f.read(8*1024*1024+1)
         if len(raw) > 8*1024*1024:
