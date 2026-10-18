@@ -85,7 +85,7 @@ def wait_health(port, required=None, seconds=90):
     raise RuntimeError(f'Service readiness timeout: {port}')
 
 
-def main(expected=None, rollback_order=None, label='audio-activation'):
+def main(expected=None, rollback_order=None, label='audio-activation', restart_worker=True):
     for path, digest in (EXPECTED if expected is None else expected).items():
         if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
             raise RuntimeError('Source drift; no maintenance action')
@@ -133,18 +133,21 @@ def main(expected=None, rollback_order=None, label='audio-activation'):
                     raise
                 time.sleep(5)
         record('worker_drained')
-        result = request(8878, '/restart/gpu', 'POST', timeout=20)
-        if result.get('ok') is not True:
-            raise RuntimeError('Watchdog did not confirm restart')
-        worker_restarted = True
-        health = wait_health(8877, lambda value: value.get('pid') != before_gpu['pid'] and 'media_jobs_active' in value)
+        if restart_worker:
+            result = request(8878, '/restart/gpu', 'POST', timeout=20)
+            if result.get('ok') is not True:
+                raise RuntimeError('Watchdog did not confirm restart')
+            worker_restarted = True
+            health = wait_health(8877, lambda value: value.get('pid') != before_gpu['pid'] and 'media_jobs_active' in value)
+        else:
+            health = request(8877, '/health')
         journal['gpu_pid_after'] = health['pid']
         schema = request(8877, '/openapi.json')
         ref = schema['paths']['/audio-concat-jobs']['post']['requestBody']['content']['multipart/form-data']['schema']['$ref'].split('/')[-1]
         speed = schema['components']['schemas'][ref]['properties']['speed_ratio']
         if speed.get('minimum') != 0.5 or speed.get('maximum') != 2.0:
             raise RuntimeError('New audio API speed constraints not loaded')
-        record('worker_updated')
+        record('worker_updated' if restart_worker else 'worker_unchanged')
     finally:
         if stopped:
             subprocess.run(['schtasks', '/Run', '/TN', 'Uvicorn8899'], capture_output=True, check=True)
