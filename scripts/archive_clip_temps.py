@@ -34,7 +34,7 @@ def send(root,plan,stream):
     for f in plan['files']:
         path=base/f['name'];s=path.stat()
         if (s.st_size,s.st_mtime_ns)!=(f['bytes'],f['mtime_ns']):raise ValueError('Source changed before transfer')
-        with path.open('rb') as source:shutil.copyfileobj(source,stream,4*1024**2)
+        with path.open('rb') as source:shutil.copyfileobj(source,stream,64*1024)
     stream.flush()
 
 
@@ -49,7 +49,7 @@ def receive(root,stream):
         path=stage/f['name'];remaining=f['bytes'];h=hashlib.sha256()
         with path.open('xb') as dest:
             while remaining:
-                block=stream.read(min(remaining,4*1024**2))
+                block=stream.read(min(remaining,64*1024))
                 if not block:raise ValueError('Truncated transfer; source must be retained')
                 dest.write(block);h.update(block);remaining-=len(block)
             dest.flush();os.fsync(dest.fileno())
