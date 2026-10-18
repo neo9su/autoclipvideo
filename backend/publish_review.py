@@ -135,13 +135,15 @@ REVIEW_HTML = '''<!doctype html><html lang="zh"><meta charset="utf-8"><meta name
 <h2>发布页面确认</h2><a href="/">返回平台</a><p>直接查看服务器上的发布页面。确认视频、文案和挂车商品正确后，再点击确认发布。</p>
 <select id="tasks"></select><button id="refresh">刷新截图</button><p id="msg"></p>
 <label><input type="checkbox" id="checked">我已查看本次截图，确认视频、文案和挂车商品正确，并检查平台提示</label><br>
-<button id="submit" disabled>确认发布这一个作品</button><p id="empty"></p><img id="shot" hidden>
+<button id="submit" disabled>确认发布这一个作品</button><p id="hint" role="status"></p><p id="empty"></p><img id="shot" hidden>
 <script>
-const tasks=document.querySelector('#tasks'),msg=document.querySelector('#msg'),shot=document.querySelector('#shot'),checked=document.querySelector('#checked'),submit=document.querySelector('#submit');let rows=[],token='',loadedId='',busy=false,url='';
-function enabled(){submit.disabled=busy||!checked.checked||!token||loadedId!==tasks.value||!rows.find(x=>String(x.id)===tasks.value)?.ready}
+const tasks=document.querySelector('#tasks'),msg=document.querySelector('#msg'),shot=document.querySelector('#shot'),checked=document.querySelector('#checked'),submit=document.querySelector('#submit');let rows=[],token='',loadedId='',url='';const pendingConfirmations=new Set();
+function enabled(){const row=rows.find(x=>String(x.id)===tasks.value),pending=pendingConfirmations.has(tasks.value);submit.disabled=pending||!checked.checked||!token||loadedId!==tasks.value||!row?.ready;document.querySelector('#hint').textContent=!row?'':pending?'本任务已提交确认，正在等待结果，请勿重复提交。':!row.ready?'正在准备发布页面，请稍候。':!token||loadedId!==tasks.value?'任务已准备好，请刷新截图后重新勾选确认。':!checked.checked?'请核对本次截图，再勾选上方确认框。':''}
+
 async function list(){const r=await fetch('/api/publish-review',{cache:'no-store'});if(!r.ok)throw Error('无法读取任务');rows=await r.json();const old=tasks.value;tasks.replaceChildren();for(const t of rows){const o=document.createElement('option');o.value=t.id;o.textContent=t.id+' · '+t.title;tasks.append(o)}if(rows.some(x=>String(x.id)===old))tasks.value=old;document.querySelector('#empty').textContent=rows.length?'':'当前没有运行中的发布页面。请返回平台查看任务状态；失败任务可重试。';msg.textContent=rows.find(x=>String(x.id)===tasks.value)?.message||'';enabled()}
 async function capture(){token='';checked.checked=false;loadedId='';shot.hidden=true;enabled();const id=tasks.value;if(!id)return;const r=await fetch('/api/publish-review/'+id+'/screenshot',{cache:'no-store'});if(!r.ok)throw Error((await r.json()).detail||'截图失败');const blob=await r.blob();if(tasks.value!==id)return;if(url)URL.revokeObjectURL(url);url=URL.createObjectURL(blob);shot.src=url;shot.hidden=false;token=r.headers.get('X-Review-Token');loadedId=id;enabled()}
 tasks.onchange=()=>capture().catch(e=>msg.textContent=e.message);checked.onchange=enabled;document.querySelector('#refresh').onclick=()=>capture().catch(e=>msg.textContent=e.message);
-submit.onclick=async()=>{if(submit.disabled)return;busy=true;enabled();try{const r=await fetch('/api/publish-review/'+loadedId+'/confirm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})});token='';if(!r.ok)throw Error((await r.json()).detail||'提交失败');msg.textContent='确认已送达，正在等待抖音发布结果。请勿重复创建任务。'}catch(e){msg.textContent=e.message+'；请先核对任务状态，不要重复提交。'}finally{enabled()}};
+submit.onclick=async()=>{if(submit.disabled)return;const id=loadedId;pendingConfirmations.add(id);enabled();try{const r=await fetch('/api/publish-review/'+id+'/confirm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})});token='';if(!r.ok){pendingConfirmations.delete(id);throw Error((await r.json()).detail||'提交失败')}msg.textContent='确认已送达，正在等待抖音发布结果。请勿重复创建任务。'}catch(e){msg.textContent=e.message+'；请先核对任务状态，不要重复提交。'}finally{enabled()}};
+
 list().then(capture).catch(e=>msg.textContent=e.message);setInterval(()=>list().catch(e=>msg.textContent=e.message),5000);
 </script></html>'''
