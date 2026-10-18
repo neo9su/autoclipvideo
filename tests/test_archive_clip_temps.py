@@ -37,3 +37,12 @@ def test_receipt_and_source_drift_block_reclaim(tmp_path):
     with pytest.raises(ValueError):reclaim(root,plan,{})
     (root/plan['job_id']/'seg0.mp4').write_bytes(b'new')
     with pytest.raises(ValueError):reclaim(root,plan,{'fingerprint':fingerprint(plan)})
+
+
+def test_restore_is_idempotent_and_preserves_changed_source(tmp_path):
+    root,plan=fixture(tmp_path);stream=io.BytesIO();send(root,plan,stream);stream.seek(0)
+    archive=tmp_path/'archive';receive(archive,stream)
+    assert restore(root,archive/plan['job_id'])==0
+    (root/plan['job_id']/'seg0.mp4').write_bytes(b'newer user file')
+    with pytest.raises(ValueError):restore(root,archive/plan['job_id'])
+    assert (root/plan['job_id']/'seg0.mp4').read_bytes()==b'newer user file'

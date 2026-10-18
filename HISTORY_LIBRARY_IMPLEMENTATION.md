@@ -278,3 +278,7 @@
 - 管理脚本archive_clip_temps.py和quarantine_generated_videos.py，6项隔离测试通过，含传输截断、回执/源变化、禁止原片名称、保留新文件及完整恢复。
 
 跨机传输调整：自定义大块标准输出传输在Windows管道阻塞，222只生成首文件0字节partial目录，203源文件全部保留；已停止该传输，不把partial算归档成功。验证220可免交互SSH访问222，改用标准SFTP/scp -3 经220中转，并在222逐文件SHA校验、提交目录后才回收203副本。恢复工具restore_clip_temp_scp.py先复制到203新建暂存目录，再按原清单恢复，禁止覆盖现有生产文件。
+
+220旧视频核对后清理实绩：524个旧生成视频/32.759GiB已从生产目录移至同卷隔离区 `/Users/claw/work/douyin-recorder/codex_rollbacks/generated-cleanup-3dce2df-20261018-143018`。两端recordings.filename及活跃发布引用的同名文件保留，近期重生成版本保留。原inode/大小/mtime逐项一致，原生产目录文件名已移除，manifest状态applied及rollback.py可用。客户端SSH等待超时发生在清理已提交之后；已独立读取服务器清单确认结果，未重复执行清理。隔离保留故220不增加可用容量；原录像未操作，分组可能仍含近期有效成片，未按旧组日期整组删除。
+
+恢复链路：标准SFTP经220中转，已用独立CPU测试文件从222复制到203新暂存目录并恢复至专用测试目录成功。最终保留restore_clip_temp_scp.py，移除未采用的自定义流恢复工具。恢复支持重复调用和部分恢复，匹配旧内容可跳过，新内容拒绝覆盖，并用原子no-overwrite链接提交。13项归档/隔离/目录迁移测试通过。

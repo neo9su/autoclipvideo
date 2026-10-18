@@ -77,11 +77,16 @@ def restore(root,archive):
     base=Path(root)/plan['job_id'];base.mkdir(parents=True,exist_ok=True)
     for f in plan['files']:
         dest=base/f['name']
-        if dest.exists():raise ValueError('Restore would overwrite existing data')
+        if dest.exists() and (dest.stat().st_size!=f['bytes'] or digest(dest)!=f['sha256']):
+            raise ValueError('Restore would overwrite changed existing data')
         if digest(archive/f['name'])!=f['sha256']:raise ValueError('Archive checksum mismatch')
+    restored=0
     for f in plan['files']:
-        dest=base/f['name'];temporary=base/(f['name']+'.restore-'+uuid.uuid4().hex)
+        dest=base/f['name']
+        if dest.exists():continue
+        temporary=base/(f['name']+'.restore-'+uuid.uuid4().hex)
         shutil.copy2(archive/f['name'],temporary)
         if digest(temporary)!=f['sha256']:raise ValueError('Restore copy mismatch')
-        os.replace(temporary,dest)
-    return len(plan['files'])
+        os.link(temporary,dest)  # Do not overwrite a file created during copy.
+        temporary.unlink();restored+=1
+    return restored
