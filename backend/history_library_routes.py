@@ -347,3 +347,15 @@ async def restore_product_link(batch: str):
             return await asyncio.to_thread(restore_link,base.database,base.storage/'_product_link_edits',batch)
         except (ValueError,OSError) as exc:
             raise HTTPException(409,str(exc)) from exc
+
+
+@router.get('/products/{product_id}/link')
+async def read_product_link(product_id: int):
+    base=service()
+    con=base.connect()
+    try:
+        row=con.execute('SELECT id,product_name,product_url FROM products WHERE id=?',(product_id,)).fetchone()
+        if row is None:raise HTTPException(404,'商品不存在')
+        return dict(row)
+    finally:
+        con.close()
