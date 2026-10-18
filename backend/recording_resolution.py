@@ -1,5 +1,6 @@
 """Bounded resolution checks and reversible quarantine of unused local sources."""
 import json
+from contextlib import contextmanager
 import os
 from pathlib import Path
 import subprocess
@@ -20,11 +21,28 @@ def probe(path):
 
 
 class RecordingResolution(HistoryLibrary):
-    def __init__(self, database, storage, prober=probe):
+    def __init__(self, database, storage, prober=probe, resolver=None):
         super().__init__(database, storage)
         self.quarantine = self.storage / '_recoverable_low_resolution'
         self.prober = prober
+        self.resolver = resolver
         self._path_errors = set()
+
+    @contextmanager
+    def connect(self):
+        con = super().connect()
+        try:
+            with con:
+                yield con
+        finally:
+            con.close()
+
+    def source_path(self, filename):
+        direct = self.path(filename)
+        if direct or self.resolver is None:
+            return direct
+        resolved = self.resolver(filename)
+        return self.path(resolved) if resolved else None
 
     def inspect(self, ids, con=None):
         ids = list(dict.fromkeys(ids))
@@ -52,7 +70,7 @@ class RecordingResolution(HistoryLibrary):
             if con.execute('SELECT 1 FROM recordings WHERE filename LIKE ? AND id!=? LIMIT 1', ('%' + str(row['filename']).replace('\\', '/').rsplit('/', 1)[-1], rid)).fetchone():
                 item['reason'] = 'shared_source'; continue
             try:
-                path = self.path(row['filename'])
+                path = self.source_path(row['filename'])
                 if not path:
                     item['reason'] = 'missing_or_external_file'; continue
                 stat = path.stat()
@@ -104,7 +122,7 @@ class RecordingResolution(HistoryLibrary):
                     if con.execute('SELECT 1 FROM recording_clips WHERE recording_id=?', (x['id'],)).fetchone() or con.execute('SELECT 1 FROM recordings WHERE filename LIKE ? AND id!=?', ('%' + str(row['filename']).replace('\\', '/').rsplit('/', 1)[-1], x['id'])).fetchone():
                         raise ValueError('录像新增了引用')
                     p = Path(x['source']); st = p.stat()
-                    if row['filename'] != x['filename'] or st.st_size != x['size'] or st.st_mtime_ns != x['mtime_ns'] or self.path(row['filename']) != p:
+                    if row['filename'] != x['filename'] or st.st_size != x['size'] or st.st_mtime_ns != x['mtime_ns'] or self.source_path(row['filename']) != p:
                         raise ValueError('源录像已变化')
                     p.rename(x['destination']); moved.append(x)
                     con.execute('UPDATE recordings SET local_deleted=?,clipped=?,transcribed=?,skip_reason=? WHERE id=?', (*MARK.values(), x['id']))

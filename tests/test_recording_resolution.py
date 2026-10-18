@@ -75,3 +75,20 @@ def test_queued_processing_is_protected(tmp_path):
     lib=fixture(tmp_path)
     with lib.connect() as c:c.execute('UPDATE recordings SET clipped=0 WHERE id=1')
     assert lib.inspect([1])['count']==0
+
+
+def test_nested_source_uses_existing_media_resolver(tmp_path):
+    lib=fixture(tmp_path)
+    nested=lib.storage/'1';nested.mkdir()
+    (lib.storage/'1.mp4').rename(nested/'1.mp4')
+    lib.resolver=lambda name:nested/name
+    plan=lib.inspect([1]);assert plan['count']==1
+    batch=lib.execute_low([1],plan['fingerprint'])
+    lib.restore_low(batch['batch_id'])
+    assert (nested/'1.mp4').exists()
+
+
+def test_connections_close_on_context_exit(tmp_path):
+    lib=fixture(tmp_path)
+    with lib.connect() as c:assert c.execute('SELECT 1').fetchone()[0]==1
+    with pytest.raises(sqlite3.ProgrammingError):c.execute('SELECT 1')

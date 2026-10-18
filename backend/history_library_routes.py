@@ -92,7 +92,8 @@ class InspectRequest(BaseModel):
 def resolution_service():
     from recording_resolution import RecordingResolution
     base = service()
-    return RecordingResolution(base.database, base.storage)
+    from media_contract import resolve_media_file
+    return RecordingResolution(base.database, base.storage, resolver=resolve_media_file)
 
 
 @router.post('/recordings/inspect')
