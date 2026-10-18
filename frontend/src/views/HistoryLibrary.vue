@@ -36,6 +36,16 @@
     <p v-if="evidence">字幕 {{ evidence.cue_count }} 条，名称提及 {{ evidence.mention_count }} 处{{ evidence.truncated?'（显示前500处）':'' }}；时间均为原录像时间。</p>
     <table v-if="evidence"><thead><tr><th>源时间</th><th>发型名称候选</th><th>口播原文及上下文</th><th>判断</th></tr></thead>
       <tbody><tr v-for="(m,i) in evidence.mentions" :key="i"><td>{{ clock(m.start_sec) }}–{{ clock(m.end_sec) }}</td><td>{{ m.hairstyle_name }}</td><td>{{ m.context }}</td><td>{{ m.current_assertion?'当前介绍候选，画面待确认':'仅提及，不能确定当前款' }}</td></tr></tbody></table>
+    <h3>分段计划登记（待视觉复核）</h3>
+    <p>使用上方口播时间线的录像ID登记源时间区间。保存会读取原片生成内容校验值，不复制或切割原片；这里录入的名称与特征不会自动成为同款确认。</p>
+    <div class="controls"><input v-model.number="draft.start_sec" type="number" min="0" step="0.001" placeholder="源开始秒" aria-label="源开始秒" /><input v-model.number="draft.end_sec" type="number" min="0" step="0.001" placeholder="源结束秒" aria-label="源结束秒" /></div>
+    <div class="controls"><input v-model="draft.wig" placeholder="发型名称" aria-label="发型名称" /><input v-model="draft.color" placeholder="颜色" aria-label="颜色" /><input v-model="draftFeatures" placeholder="特征，逗号分隔" aria-label="特征" /></div>
+    <div class="controls"><input v-model="draft.current_evidence" placeholder="支持当前展示款的口播原话" aria-label="口播原话" /><button :disabled="busy" @click="saveArchive">保存待复核分段计划</button><button :disabled="busy" @click="refreshArchive">查看最近计划</button></div>
+    <p v-if="archiveMessage">{{ archiveMessage }}</p>
+    <div v-for="p in archivePlans" :key="p.plan_id" class="batch">
+      <span>录像 {{ p.recording_id }} · {{ p.document.segments.length }} 个区间 · {{ p.state==='withdrawn'?'已撤销':'待视觉复核' }} · 原片已校验，尚未生成片段<br /><span v-for="s in p.document.segments" :key="s.segment_id">{{ clock(s.start_sec) }}–{{ clock(s.end_sec) }} · {{ s.hairstyle_name }} {{ s.color }} {{ s.features?.join(' / ') }} · {{ s.transcript_evidence?.verified?'口播已核对':'口播待核对' }}；画面待确认<br /></span></span>
+      <button :disabled="busy" @click="changeArchive(p)">{{ p.state==='withdrawn'?'恢复计划':'撤销计划' }}</button>
+    </div>
     <h3>商品发型名预览</h3>
     <p>按商品名提取主播命名。同名商品保留各自商品记录，颜色和规格在素材分段时另行区分。</p>
     <table><thead><tr><th>商品</th><th>发型名称候选</th><th>商品全名</th></tr></thead>
@@ -48,6 +58,22 @@ import { ref, onMounted } from 'vue'
 import { remoteFetch } from '../remoteApi.js'
 const mode=ref('all'), plan=ref(null), batches=ref([]), names=ref([]), busy=ref(false), error=ref('')
 const evidenceId=ref(''), evidence=ref(null)
+const draft=ref({start_sec:0,end_sec:0,wig:'',color:'',current_evidence:''}), draftFeatures=ref(''), archivePlans=ref([]), archiveMessage=ref('')
+async function loadArchive(){archivePlans.value=await request('/archive-plans')}
+function refreshArchive(){return action(loadArchive)}
+function saveArchive(){return action(async()=>{
+  const id=Number(evidenceId.value)
+  if(!Number.isSafeInteger(id)||id<=0)throw new Error('请先在口播时间线输入有效录像ID')
+  if(!Number.isFinite(draft.value.start_sec)||!Number.isFinite(draft.value.end_sec)||draft.value.start_sec<0||draft.value.end_sec<=draft.value.start_sec)throw new Error('请输入有效源时间区间（秒）')
+  const body={boundaries:[{...draft.value,features:draftFeatures.value.split(/[,，]/).map(s=>s.trim()).filter(Boolean)}]}
+  archiveMessage.value='正在校验原片并保存计划，大文件需要一些时间…'
+  try{
+    const result=await request(`/recordings/${id}/archive-plan`,body)
+    archiveMessage.value=`计划已保存：${result.document.segments.length} 个区间，待视觉复核；原片未复制或切割。`
+    await loadArchive()
+  }catch(e){archiveMessage.value='';throw e}
+})}
+function changeArchive(p){return action(async()=>{await request(`/archive-plans/${p.plan_id}/${p.state==='withdrawn'?'restore':'withdraw'}`,{});await loadArchive()})}
 const clock=v=>`${Math.floor(v/60)}:${String(Math.floor(v%60)).padStart(2,'0')}`
 function inspectEvidence(){return action(async()=>{
   const id=Number(evidenceId.value);if(!Number.isSafeInteger(id)||id<=0)throw new Error('请输入一个有效录像ID')
@@ -80,7 +106,7 @@ function apply(){
   return action(async()=>{await request('/cleanup/apply',{mode:plan.value.mode,cutoff:plan.value.cutoff,fingerprint:plan.value.fingerprint});plan.value=null;await refresh()})
 }
 function restore(b){return action(async()=>{await request(`/cleanup/${b.batch_id}/restore`,{});await refresh()})}
-onMounted(()=>action(async()=>{await refresh();names.value=await request('/catalogue-names')}))
+onMounted(()=>action(async()=>{await refresh();await loadArchive();names.value=await request('/catalogue-names')}))
 </script>
 <style scoped>
 .controls,.batch{display:flex;gap:16px;align-items:center;margin:16px 0}table{width:100%;text-align:left;border-collapse:collapse}td,th{padding:10px;border-bottom:1px solid #333}p{color:#aaa}button,select{padding:8px} [role=alert]{color:#ff7070}

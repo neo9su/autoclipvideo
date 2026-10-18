@@ -31,3 +31,33 @@ def test_route_uses_existing_root_sidecar_resolver(tmp_path,monkeypatch):
     assert result['mentions'][0]['catalogue_ids']==[1]
     assert result['mentions'][0]['current_assertion']
     assert source.read_bytes()==b'fixture'
+
+
+def test_client_cannot_assert_visual_identity():
+    import pytest
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        routes.ArchiveBoundary(start_sec=0,end_sec=10,visual_verified=True)
+    with pytest.raises(ValidationError):
+        routes.ArchiveBoundary(start_sec=float('nan'),end_sec=10)
+
+
+def test_save_plan_stays_pending_and_can_be_restored(tmp_path,monkeypatch):
+    import wig_library_index
+    source=tmp_path/'source.mp4';source.write_bytes(b'fixture')
+    raw=b'1\n00:00:06,000 --> 00:00:07,000\n'+ '这是人生'.encode()+b'\n'
+    monkeypatch.setattr(routes,'recording_context',lambda rid:({'room_id':1},[{'id':1,'product_name':'小圆-夺回&人生【仿递针】'}],source,raw))
+    index=wig_library_index.WigLibraryIndex(tmp_path/'index.db')
+    monkeypatch.setattr(routes,'library_index',lambda:index)
+    monkeypatch.setattr(wig_library_index,'video_info',lambda p:{'duration_seconds':20,'width':1080,'height':1920})
+    body=routes.ArchivePlanRequest(boundaries=[routes.ArchiveBoundary(start_sec=5,end_sec=10,wig='人生',current_evidence='这是人生')])
+    result=asyncio.run(routes.save_archive_plan(8,body))
+    segment=result['document']['segments'][0]
+    assert segment['transcript_evidence']['verified']
+    assert segment['status']=='needs_evidence' and result['document']['ready_count']==0
+    assert result['document']['media_created'] is False
+    asyncio.run(routes.change_archive_plan(result['plan_id'],'withdraw'))
+    assert index.list_plans()[0]['state']=='withdrawn'
+    asyncio.run(routes.change_archive_plan(result['plan_id'],'restore'))
+    assert index.list_plans()[0]['state']=='active'
+    assert source.read_bytes()==b'fixture'
