@@ -42,3 +42,9 @@ def test_names_do_not_merge_specification_suffixes():
 def test_color_alone_is_not_a_hairstyle_name():
     assert hairstyle_name('小圆【可以不戴发网的假发-黑色 昭和美人】精修日常长卷发')=='昭和美人'
     assert hairstyle_name('小圆-黑色【免发网假发】长卷发')==''
+
+
+def test_no_styling_specification_does_not_hide_real_name():
+    assert hairstyle_name('小圆【免醒发仿递针-天蝎座】精修进口混丝黑茶色齐刘海全头套假发') == '天蝎座'
+    assert hairstyle_name('小圆【免醒发仿递针-焦糖栗子系列】精修进口混丝棕色假发') == '焦糖栗子系列'
+    assert hairstyle_name('小圆【免醒发仿递针-升级版天蝎座】黑茶色全头套假发') == '天蝎座'
