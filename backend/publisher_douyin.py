@@ -11,6 +11,7 @@ import time
 from typing import Optional
 
 from publisher_base import BasePublisher
+from publish_product_links import ProductLinkUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -293,7 +294,9 @@ class DouyinPublisher(BasePublisher):
 
                 # 6. Attach products via 购物车 → 粘贴商品链接 (max 5)
                 #    Skipped for "无车发布" tasks (no_cart=True)
-                product_ids = (task.get("_product_douyin_ids") or [])[:5]
+                product_ids = task.get("_product_douyin_ids") or []
+                if len(product_ids) > 5 and not task.get("no_cart"):
+                    raise ProductLinkUnavailable("一次最多挂车5个商品，请减少商品选择后重试")
                 product_names = (task.get("_product_names") or [])
                 if product_ids and not task.get("no_cart"):
                     await progress(f"正在添加购物车商品链接（共 {len(product_ids)} 件）...")
@@ -1344,9 +1347,8 @@ async def _attach_product(page, product_link: str, short_title: str = ""):
             add_btn = await _find_sibling_button(link_input, "添加链接")
 
         if add_btn is None:
-            logger.warning(f"添加链接 element not found for: {product_link}")
             await link_input.clear()
-            return
+            raise RuntimeError("商品挂车失败：未找到添加链接入口，请检查发布页面")
 
         # 3. Wait up to 5 s for the element to become enabled / not greyed-out
         #    Douyin validates the link asynchronously — stays disabled until done
@@ -1366,9 +1368,8 @@ async def _attach_product(page, product_link: str, short_title: str = ""):
             await asyncio.sleep(0.2)
 
         if not enabled:
-            logger.warning(f"添加链接 still disabled after 5 s — invalid link: {product_link}")
             await link_input.clear()
-            return
+            raise ProductLinkUnavailable("商品链接未通过发布页面校验，请检查链接及账号挂车权限")
 
         # 4. Scroll into view → fresh bounding box → page.mouse.click (trusted events)
         await add_btn.scroll_into_view_if_needed()
@@ -1415,7 +1416,7 @@ async def _attach_product(page, product_link: str, short_title: str = ""):
         # 6. Check for "未搜索到对应商品" error dialog
         error_dialog = page.locator(':text("未搜索到对应商品")').first
         if await error_dialog.is_visible(timeout=3000):
-            logger.warning(f"Product not found / unsupported link: {product_link}")
+            logger.warning("Product not found / unsupported link")
             ok_btn = page.locator('button:has-text("确定")').first
             if await ok_btn.is_visible(timeout=2000):
                 await ok_btn.click()
@@ -1425,7 +1426,7 @@ async def _attach_product(page, product_link: str, short_title: str = ""):
                 await link_input.clear()
             except Exception:
                 pass
-            return
+            raise ProductLinkUnavailable("发布页面未搜索到对应商品，请修改商品链接或检查账号挂车权限")
 
         # 7. Handle 编辑商品 dialog
         edit_dialog = page.locator(':text("编辑商品")').first
@@ -1443,13 +1444,13 @@ async def _attach_product(page, product_link: str, short_title: str = ""):
             done_btn = page.locator('button:has-text("完成编辑")').first
             await done_btn.wait_for(state="visible", timeout=5000)
             await done_btn.click()
-            await asyncio.sleep(1)
-            logger.info(f"编辑商品 confirmed for {product_link}")
+            await edit_dialog.wait_for(state="hidden", timeout=8000)
+            logger.info("编辑商品 dialog completed")
         else:
-            logger.info(f"Product added (no dialog): {product_link}")
+            raise RuntimeError("未确认商品挂车结果：未出现编辑商品确认，请检查发布页面后重试")
 
     except Exception as e:
-        logger.warning(f"_attach_product failed ({product_link}): {e}")
+        logger.warning("商品挂车未完成 (%s)", type(e).__name__)
         try:
             for btn_text in ["取消", "关闭"]:
                 btn = page.locator(f'button:has-text("{btn_text}")').first
@@ -1458,3 +1459,4 @@ async def _attach_product(page, product_link: str, short_title: str = ""):
                     break
         except Exception:
             pass
+        raise
