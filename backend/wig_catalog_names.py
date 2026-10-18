@@ -14,6 +14,8 @@ def hairstyle_name(title):
             part = re.sub(MODIFIERS, '', part).strip('-.·')
             # A specification is not a name, even if removing modifiers leaves
             # a short fragment such as “全” or “套”.
+            if re.fullmatch(r'黑色|白色|棕色|粉色|蓝色|紫色|红色|灰色|黄色|自然黑|黑茶色|奶咖色|齐刘海|中分|偏分|长发|短发|卷发|直发', part):
+                continue
             if len(part) < 2 or re.search(
                 r'工艺|头套|发网|假发|进口丝|蕾丝|刘海|长发|短发|卷发|直发|'
                 r'大波浪|画染|弹力网|日常|自然|高质量|颜色|推荐|升级|福利', part

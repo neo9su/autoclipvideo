@@ -37,3 +37,8 @@ def test_names_do_not_merge_specification_suffixes():
     }
     for title, expected in examples.items():
         assert hairstyle_name(title) == expected, title
+
+
+def test_color_alone_is_not_a_hairstyle_name():
+    assert hairstyle_name('小圆【可以不戴发网的假发-黑色 昭和美人】精修日常长卷发')=='昭和美人'
+    assert hairstyle_name('小圆-黑色【免发网假发】长卷发')==''
