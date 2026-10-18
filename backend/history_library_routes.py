@@ -251,3 +251,47 @@ async def change_archive_plan(plan_id: str, action: str):
             return await asyncio.to_thread(library_index().set_state,plan_id,'withdrawn' if action=='withdraw' else 'active')
         except (ValueError,OSError) as e:
             raise HTTPException(409,str(e)) from e
+
+
+def archive_renderer():
+    from wig_archive_render import ArchiveRenderer
+    return ArchiveRenderer(library_index(),service().storage)
+
+
+@router.get('/archive-plans/{plan_id}/export-preview')
+async def preview_archive_export(plan_id: str):
+    def run():
+        plan,asset,source=archive_renderer().prepare(plan_id)
+        return {'plan_id':plan_id,'asset_id':asset['asset_id'],'count':len(plan['segments']),
+                'duration_seconds':sum(s['end_sec']-s['start_sec'] for s in plan['segments']),
+                'execution':'cpu','source_unchanged':True,'read_only':True}
+    try:
+        return await asyncio.to_thread(run)
+    except (ValueError,OSError) as e:
+        raise HTTPException(409,str(e)) from e
+
+
+@router.post('/archive-exports/{plan_id}/create')
+async def create_archive_export(plan_id: str):
+    import subprocess
+    async with _LOCK:
+        try:
+            job=await asyncio.to_thread(archive_renderer().export,plan_id)
+            return {'batch_id':job['batch_id'],'state':job['state'],'files':len(job['files'])}
+        except (ValueError,OSError,subprocess.SubprocessError) as e:
+            raise HTTPException(409,str(e)) from e
+
+
+@router.get('/archive-exports')
+async def list_archive_exports():
+    return await asyncio.to_thread(archive_renderer().list_batches)
+
+
+@router.post('/archive-exports/{batch_id}/{action}')
+async def change_archive_export(batch_id: str, action: str):
+    async with _LOCK:
+        try:
+            job=await asyncio.to_thread(archive_renderer().batch_state,batch_id,action)
+            return {'batch_id':job['batch_id'],'state':job['state'],'files':len(job['files'])}
+        except (ValueError,OSError) as e:
+            raise HTTPException(409,str(e)) from e

@@ -43,8 +43,16 @@
     <div class="controls"><input v-model="draft.current_evidence" placeholder="支持当前展示款的口播原话" aria-label="口播原话" /><button :disabled="busy" @click="saveArchive">保存待复核分段计划</button><button :disabled="busy" @click="refreshArchive">查看最近计划</button></div>
     <p v-if="archiveMessage">{{ archiveMessage }}</p>
     <div v-for="p in archivePlans" :key="p.plan_id" class="batch">
-      <span>录像 {{ p.recording_id }} · {{ p.document.segments.length }} 个区间 · {{ p.state==='withdrawn'?'已撤销':'待视觉复核' }} · 原片已校验，尚未生成片段<br /><span v-for="s in p.document.segments" :key="s.segment_id">{{ clock(s.start_sec) }}–{{ clock(s.end_sec) }} · {{ s.hairstyle_name }} {{ s.color }} {{ s.features?.join(' / ') }} · {{ s.transcript_evidence?.verified?'口播已核对':'口播待核对' }}；画面待确认<br /></span></span>
+      <span>录像 {{ p.recording_id }} · {{ p.document.segments.length }} 个区间 · {{ p.state==='withdrawn'?'已撤销':p.document.segments.every(s=>s.status==='ready')?'身份已核验':'待视觉复核' }} · 原片已校验，分段计划<br /><span v-for="s in p.document.segments" :key="s.segment_id">{{ clock(s.start_sec) }}–{{ clock(s.end_sec) }} · {{ s.hairstyle_name }} {{ s.color }} {{ s.features?.join(' / ') }} · {{ s.transcript_evidence?.verified?'口播已核对':'口播待核对' }}；{{ s.status==='ready'?'画面已核验':'画面待确认' }}<br /></span></span>
+      <button :disabled="busy || p.state!=='active' || !p.document.segments.every(s=>s.status==='ready')" @click="exportArchive(p)">按源时间导出片段</button>
       <button :disabled="busy" @click="changeArchive(p)">{{ p.state==='withdrawn'?'恢复计划':'撤销计划' }}</button>
+    </div>
+    <h3>已导出的原片分段</h3>
+    <p v-if="!exportBatches.length">暂无导出批次。候选计划待视觉核验后才能执行；此处生成的是按款归档素材，不是广告成片。</p>
+    <div v-for="b in exportBatches" :key="b.batch_id" class="batch"><span>{{ b.files }} 个片段 · {{ exportStates[b.state] || b.state }}</span>
+      <button v-if="['complete','failed','prepared','withdrawing'].includes(b.state)" :disabled="busy" @click="changeExport(b,'withdraw')">撤回此批片段</button>
+      <button v-if="b.state==='withdrawn' && b.can_restore" :disabled="busy" @click="changeExport(b,'restore')">恢复完整批次</button>
+      <button v-if="b.state==='prepared'" :disabled="busy" @click="changeExport(b,'recover')">检查并恢复落位</button>
     </div>
     <h3>商品发型名预览</h3>
     <p>按商品名提取主播命名。同名商品保留各自商品记录，颜色和规格在素材分段时另行区分。</p>
@@ -58,8 +66,14 @@ import { ref, onMounted } from 'vue'
 import { remoteFetch } from '../remoteApi.js'
 const mode=ref('all'), plan=ref(null), batches=ref([]), names=ref([]), busy=ref(false), error=ref('')
 const evidenceId=ref(''), evidence=ref(null)
+const exportBatches=ref([]), exportStates={complete:'已完成',prepared:'等待完成核验',failed:'未完成，临时结果保留',withdrawn:'已撤回',withdrawing:'撤回待恢复'}
+function exportArchive(p){return action(async()=>{
+  archiveMessage.value='正在按源时间切片并校验，原片保留…'
+  try{await request(`/archive-exports/${p.plan_id}/create`,{});archiveMessage.value='片段已生成，来源清单已保存。';await loadArchive()}catch(e){archiveMessage.value='';throw e}
+})}
+function changeExport(b,actionName){return action(async()=>{await request(`/archive-exports/${b.batch_id}/${actionName}`,{});await loadArchive()})}
 const draft=ref({start_sec:0,end_sec:0,wig:'',color:'',current_evidence:''}), draftFeatures=ref(''), archivePlans=ref([]), archiveMessage=ref('')
-async function loadArchive(){archivePlans.value=await request('/archive-plans')}
+async function loadArchive(){archivePlans.value=await request('/archive-plans');exportBatches.value=await request('/archive-exports')}
 function refreshArchive(){return action(loadArchive)}
 function saveArchive(){return action(async()=>{
   const id=Number(evidenceId.value)
