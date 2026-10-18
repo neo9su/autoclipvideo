@@ -91,7 +91,7 @@ def main():
             raise RuntimeError('Source drift; no maintenance action')
     if request(8899, '/api/gpu/status').get('maintenance') is not False:
         raise RuntimeError('Existing maintenance state must be preserved; no action')
-    before_gpu = assert_worker_idle(director_ids())
+    before_gpu = request(8877, '/health')
     backup = ROOT / 'codex_rollbacks' / ('audio-activation-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
     backup.mkdir()
     with sqlite3.connect(ROOT / 'douyin.db') as db:
@@ -113,7 +113,6 @@ def main():
     try:
         request(8899, '/api/gpu/maintenance', 'POST')
         maintenance = True
-        assert_worker_idle(director_ids())
         pids = backend_pids()
         if len(pids) != 1:
             raise RuntimeError('Expected exactly one backend listener')
@@ -123,6 +122,7 @@ def main():
             subprocess.run(['taskkill', '/PID', str(pid), '/F'], capture_output=True, check=True)
         record('backend_paused')
         # A last submission may have raced the maintenance flag. Drain it instead of killing it.
+        record('draining_worker')
         deadline = time.monotonic() + 120
         while True:
             try:
