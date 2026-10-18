@@ -4870,6 +4870,10 @@ async def stream_login_refresh():
 
 # ── Static frontend ───────────────────────────────────────────────────────────
 
+history_library_dist = os.path.join(os.path.dirname(__file__), "..", "frontend", "history-library-dist")
+if os.path.isdir(history_library_dist):
+    app.mount("/history-library", StaticFiles(directory=history_library_dist, html=True), name="history-library")
+
 frontend_dist = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
 if os.path.exists(frontend_dist):
     # Serve compiled assets directly (JS/CSS/images)
