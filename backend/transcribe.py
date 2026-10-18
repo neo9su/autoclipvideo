@@ -287,7 +287,7 @@ async def _try_dispatch():
         while _pending_heap and len(_running_ids) < MAX_CONCURRENT_CLIPS and not _memory_pressure:
             entry = heapq.heappop(_pending_heap)
             recording_id = entry[2]
-            if recording_id in _paused_ids:
+            if recording_id in _paused_ids or recording_id in _running_ids:
                 skipped.append(entry)
                 continue
             meta = _pending_meta.pop(recording_id, None)
@@ -921,7 +921,27 @@ async def _fetch_srt(recording_id: int, job_id: str, filename: str, clip_count: 
         logger.error(f"SRT fetch error for {job_id}: {e}")
 
 
+_enqueuing_ids: set = set()
+
+
 async def _run_editor(recording_id: int, mp4_path: str, srt_path: str, clip_duration: Optional[float] = None, clip_count: int = 1, broadcast_fn=None, feedback: Optional[str] = None):
+    """Admit one request per recording across validation, queuing and execution."""
+    async with _dispatch_lk():
+        if recording_id in _enqueuing_ids or recording_id in _pending_meta or recording_id in _running_ids:
+            logger.info("Clip request already queued/running for recording %s; skipping duplicate", recording_id)
+            return
+        _enqueuing_ids.add(recording_id)
+    try:
+        return await _enqueue_editor(
+            recording_id, mp4_path, srt_path, clip_duration=clip_duration,
+            clip_count=clip_count, broadcast_fn=broadcast_fn, feedback=feedback,
+        )
+    finally:
+        async with _dispatch_lk():
+            _enqueuing_ids.discard(recording_id)
+
+
+async def _enqueue_editor(recording_id: int, mp4_path: str, srt_path: str, clip_duration: Optional[float] = None, clip_count: int = 1, broadcast_fn=None, feedback: Optional[str] = None):
     """Enqueue a clip job into the priority queue and dispatch if a slot is free."""
     global _job_seq
 

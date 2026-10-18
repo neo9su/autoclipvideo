@@ -95,7 +95,10 @@ def _recording_file_path(filename: str | None) -> str | None:
 def _recording_file_exists(filename: str | None) -> bool:
     """Return True when the recording source file is present locally."""
     path = _recording_file_path(filename)
-    return bool(path and os.path.exists(path))
+    if path and os.path.exists(path):
+        return True
+    legacy = os.path.join(os.path.dirname(__file__), "..", "recordings", filename) if filename else None
+    return bool(legacy and os.path.exists(legacy))
 
 
 def _parse_recording_time(value: str | None) -> datetime | None:
@@ -211,8 +214,8 @@ async def _reset_stuck_clip_tasks():
 
         missing = [
             r["id"] for r in done_rows
-            if not os.path.exists(os.path.join(recordings_dir, r["clip_filename"]))
-            and os.path.exists(os.path.join(recordings_dir, r["filename"]))
+            if not _recording_file_exists(r["clip_filename"])
+            and _recording_file_exists(r["filename"])
         ]
         if missing:
             placeholders = ",".join("?" * len(missing))
