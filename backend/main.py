@@ -28,6 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from backend_instance_lock import single_backend_instance
 from db import init_db, DB_PATH, aio_connect
 from models import RoomCreate, Room, Recording, ProductCreate, ProductUpdate, PublishAccountCreate, PublishTaskCreate, BatchScheduleCreate
 from monitor import MonitorManager
@@ -630,6 +631,7 @@ async def _periodic_cleanup():
             logger.debug(f"Periodic cleanup error: {e}")
 
 
+@single_backend_instance(Path(DB_PATH).resolve().with_suffix(".backend.lock"))
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Deployment role is validated at module load (see _DEPLOYMENT_ROLE above)
