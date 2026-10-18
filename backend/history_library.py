@@ -52,15 +52,27 @@ class HistoryLibrary:
     def path(self, value):
         if not value:
             return None
-        p = Path(str(value))
-        candidates = [p] if p.is_absolute() else [self.storage/p]
-        for p in candidates:
-            p = p.resolve()
-            if p.is_relative_to(self.storage) and not p.is_relative_to(self.quarantine) and p.is_file() and not p.is_symlink():
-                return p
-        return None
+        key = str(value)
+        cache = getattr(self, '_path_cache', None)
+        if cache is not None and key in cache:
+            return cache[key]
+        p = Path(key)
+        if not p.is_absolute():
+            p = self.storage / p
+        # Reject other drives/network shares before filesystem resolution.
+        # Path.resolve on an offline UNC share may block for minutes.
+        p = Path(os.path.abspath(p))
+        result = None
+        if p.is_relative_to(self.storage) and not p.is_relative_to(self.quarantine) and not p.is_symlink():
+            resolved = p.resolve()
+            if resolved.is_relative_to(self.storage) and not resolved.is_relative_to(self.quarantine) and resolved.is_file():
+                result = resolved
+        if cache is not None:
+            cache[key] = result
+        return result
 
     def preview(self, mode='all', cutoff=None):
+        self._path_cache = {}
         if mode not in {'all', 'published', 'unpublished'}:
             raise ValueError('无效的发布状态')
         cutoff = date(cutoff) if cutoff else three_months_before(datetime.now(timezone.utc))
