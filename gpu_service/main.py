@@ -173,6 +173,13 @@ _clip_sem: asyncio.Semaphore = asyncio.Semaphore(2)
 # ── Clip pipeline constants ───────────────────────────────────────────────────
 CLIP_W    = 1080
 CLIP_H    = 1920
+# Keep intermediate frames light; publish at vertical 2K in the final encode.
+PUBLISH_W = 1440
+PUBLISH_H = 2560
+PUBLISH_SCALE = (
+    f"scale={PUBLISH_W}:{PUBLISH_H}:force_original_aspect_ratio=decrease:flags=lanczos,"
+    f"pad={PUBLISH_W}:{PUBLISH_H}:(ow-iw)/2:(oh-ih)/2"
+)
 CLIP_FADE = 1.5   # xfade duration (seconds)
 SEG_PAD   = 0.0   # no padding — avoids duplicate audio at segment boundaries
 
@@ -863,14 +870,14 @@ async def _do_clip_job(
                     fonts_escaped = fonts_fwd[0] + "\\:" + fonts_fwd[2:]
                 else:
                     fonts_escaped = fonts_fwd
-                video_filter = f"[0:v]ass=filename='{escaped}':fontsdir='{fonts_escaped}',format=yuv420p[vout]"
+                video_filter = f"[0:v]{PUBLISH_SCALE},ass=filename='{escaped}':fontsdir='{fonts_escaped}',format=yuv420p[vout]"
             else:
-                video_filter = f"[0:v]ass=filename='{escaped}',format=yuv420p[vout]"
+                video_filter = f"[0:v]{PUBLISH_SCALE},ass=filename='{escaped}',format=yuv420p[vout]"
             filter_complex = f"{audio_filter};{video_filter}"
             vmap, amap = "[vout]", "[aout]"
         else:
-            filter_complex = audio_filter
-            vmap, amap = "0:v", "[aout]"
+            filter_complex = f"{audio_filter};[0:v]{PUBLISH_SCALE},format=yuv420p[vout]"
+            vmap, amap = "[vout]", "[aout]"
 
         rc = await _run_ffmpeg(
             FFMPEG_ASS, "-y", "-i", merged,
@@ -965,7 +972,10 @@ async def _do_concat_job(job_id: str, clip_job_ids: list):
             "ffmpeg", "-y",
             "-f", "concat", "-safe", "0",
             "-i", list_file,
-            "-c", "copy",
+            "-vf", PUBLISH_SCALE + ",fps=25",
+            "-pix_fmt", "yuv420p",
+            "-c:v", "h264_nvenc", "-b:v", "10M",
+            "-c:a", "copy",
             out_path,
         )
         if rc != 0 or not os.path.exists(out_path):
@@ -1989,7 +1999,7 @@ async def _do_classic_concat_job(job_id: str, clip_paths: list):
             # Single clip — NVENC re-encode for codec normalisation
             rc = await _run_ffmpeg(
                 "ffmpeg", "-y", "-i", clip_paths[0],
-                "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2",
+                "-vf", PUBLISH_SCALE + ",fps=25",
                 "-c:v", "h264_nvenc", "-b:v", "10M",
                 "-c:a", "aac", "-b:a", "192k",
                 out_path,
@@ -2018,7 +2028,10 @@ async def _do_classic_concat_job(job_id: str, clip_paths: list):
                 "ffmpeg", "-y",
                 "-f", "concat", "-safe", "0",
                 "-i", list_file,
-                "-c", "copy",
+                "-vf", PUBLISH_SCALE + ",fps=25",
+                "-pix_fmt", "yuv420p",
+                "-c:v", "h264_nvenc", "-b:v", "10M",
+                "-c:a", "copy",
                 out_path,
             )
             # Clean up intermediates
@@ -2694,20 +2707,18 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
             if FONTS_DIR:
                 ff = FONTS_DIR.replace("\\", "/")
                 fonts_esc = (ff[0] + "\\:" + ff[2:]) if len(ff) > 1 and ff[1] == ":" else ff
-                video_filter = f"[0:v]ass=filename='{escaped}':fontsdir='{fonts_esc}',format=yuv420p[vout]"
+                video_filter = f"[0:v]{PUBLISH_SCALE},ass=filename='{escaped}':fontsdir='{fonts_esc}',format=yuv420p[vout]"
             else:
-                video_filter = f"[0:v]ass=filename='{escaped}',format=yuv420p[vout]"
+                video_filter = f"[0:v]{PUBLISH_SCALE},ass=filename='{escaped}',format=yuv420p[vout]"
             if audio_filter:
                 filter_complex = f"{audio_filter};{video_filter}"
             else:
                 filter_complex = video_filter
             vmap = "[vout]"
         else:
-            if audio_filter:
-                filter_complex = audio_filter
-            else:
-                filter_complex = None
-            vmap = "0:v"
+            video_filter = f"[0:v]{PUBLISH_SCALE},format=yuv420p[vout]"
+            filter_complex = f"{audio_filter};{video_filter}" if audio_filter else video_filter
+            vmap = "[vout]"
 
         ff_args = [FFMPEG_ASS, "-y", *inputs]
         if filter_complex:
