@@ -296,3 +296,27 @@ async def change_archive_export(batch_id: str, action: str):
             return {'batch_id':job['batch_id'],'state':job['state'],'files':len(job['files'])}
         except (ValueError,OSError,subprocess.SubprocessError) as e:
             raise HTTPException(409,str(e)) from e
+
+
+class HomophoneReviewRequest(BaseModel):
+    start_sec: float = 0
+    end_sec: float = 600
+
+
+@router.post('/recordings/{recording_id}/homophone-review')
+async def homophone_review(recording_id: int, body: HomophoneReviewRequest):
+    """Read-only candidate retrieval; never rewrite subtitles or attach a product."""
+    def run():
+        from wig_text_review import review_subtitles
+        row, products, source, raw = recording_context(recording_id)
+        result = review_subtitles(raw, products, body.start_sec, body.end_sec)
+        return dict(result, recording_id=recording_id)
+    try:
+        # Bound optional worker concurrency without interfering with GPU services.
+        async with _TEXT_REVIEW_LOCK:
+            return await asyncio.to_thread(run)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+_TEXT_REVIEW_LOCK = asyncio.Lock()

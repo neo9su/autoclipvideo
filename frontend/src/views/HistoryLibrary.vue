@@ -32,10 +32,17 @@
       <button v-if="['prepared','quarantined'].includes(b.state)" :disabled="busy" @click="restoreRecordings(b)">恢复此批录像</button></div>
     <h3>发型口播时间线</h3>
     <p>输入一条录像ID，核对原始字幕中提到的商品名称及时间。“当前介绍候选”仍需画面确认，不会据此自动切片。</p>
-    <div class="controls"><input v-model="evidenceId" :disabled="busy" placeholder="录像ID" @input="evidence=null" /><button :disabled="busy" @click="inspectEvidence">读取口播证据</button></div>
+    <div class="controls"><input v-model="evidenceId" :disabled="busy" placeholder="录像ID" @input="evidence=null;homophones=null" /><button :disabled="busy" @click="inspectEvidence">读取口播证据</button></div>
     <p v-if="evidence">字幕 {{ evidence.cue_count }} 条，名称提及 {{ evidence.mention_count }} 处{{ evidence.truncated?'（显示前500处）':'' }}；时间均为原录像时间。</p>
     <table v-if="evidence"><thead><tr><th>源时间</th><th>发型名称候选</th><th>口播原文及上下文</th><th>判断</th></tr></thead>
       <tbody><tr v-for="(m,i) in evidence.mentions" :key="i"><td>{{ clock(m.start_sec) }}–{{ clock(m.end_sec) }}</td><td>{{ m.hairstyle_name }}</td><td>{{ m.context }}</td><td>{{ m.current_assertion?'当前介绍候选，画面待确认':'仅提及，不能确定当前款' }}</td></tr></tbody></table>
+    <h3>疑似同音名称复核</h3>
+    <p>使用上方录像ID和原录像秒数，每次最多10分钟。只列出同音线索；请核对原声、画面及商品规格后再判断，不会自动改名或挂车。</p>
+    <div class="controls"><input v-model.number="reviewStart" type="number" min="0" step="0.001" aria-label="同音复核开始秒" @input="homophones=null" /><input v-model.number="reviewEnd" type="number" min="0" step="0.001" aria-label="同音复核结束秒" @input="homophones=null" /><button :disabled="busy" @click="inspectHomophones">查找疑似同音名称</button></div>
+    <p v-if="homophones">录像 {{ homophones.recording_id }}，{{ clock(homophones.start_sec) }}–{{ clock(homophones.end_sec) }}：{{ homophones.candidate_count }} 处线索{{ homophones.truncated?'（显示前500处）':'' }}。无结果不表示没有提到商品。</p>
+    <table v-if="homophones?.candidates.length"><thead><tr><th>源时间</th><th>原字幕</th><th>疑似名称</th><th>商品候选与链接</th></tr></thead><tbody>
+      <tr v-for="(h,i) in homophones.candidates" :key="i"><td>{{ clock(h.start_sec) }}–{{ clock(h.end_sec) }}</td><td>{{ h.original_text }}<br />疑似误听：{{ h.observed_text }}</td><td>{{ h.hairstyle_name }}<br />待原声及画面复核</td><td><div v-for="p in h.product_candidates" :key="p.id">{{ p.id }} · {{ p.product_name }} <a v-if="productHref(p.product_url)" :href="productHref(p.product_url)" target="_blank" rel="noopener noreferrer">查看商品</a><span v-else> · 未绑定有效链接</span></div></td></tr>
+    </tbody></table>
     <h3>分段计划登记（待视觉复核）</h3>
     <p>使用上方口播时间线的录像ID登记源时间区间。保存会读取原片生成内容校验值，不复制或切割原片；这里录入的名称与特征不会自动成为同款确认。</p>
     <div class="controls"><input v-model.number="draft.start_sec" type="number" min="0" step="0.001" placeholder="源开始秒" aria-label="源开始秒" /><input v-model.number="draft.end_sec" type="number" min="0" step="0.001" placeholder="源结束秒" aria-label="源结束秒" /></div>
@@ -67,6 +74,14 @@ import { ref, onMounted } from 'vue'
 import { remoteFetch } from '../remoteApi.js'
 const mode=ref('all'), plan=ref(null), batches=ref([]), names=ref([]), busy=ref(false), error=ref('')
 const evidenceId=ref(''), evidence=ref(null)
+const reviewStart=ref(0),reviewEnd=ref(600),homophones=ref(null)
+function productHref(value){try{const u=new URL(value);return ['http:','https:'].includes(u.protocol)?u.href:''}catch{return ''}}
+function inspectHomophones(){return action(async()=>{
+  const id=Number(evidenceId.value),start=reviewStart.value,end=reviewEnd.value
+  if(!Number.isSafeInteger(id)||id<=0)throw new Error('请输入一个有效录像ID')
+  if(!Number.isFinite(start)||!Number.isFinite(end)||start<0||end<=start||end-start>600)throw new Error('请输入有效时间，单次最多600秒')
+  homophones.value=null;homophones.value=await request(`/recordings/${id}/homophone-review`,{start_sec:start,end_sec:end})
+})}
 const exportBatches=ref([]), exportStates={complete:'已完成',prepared:'等待完成核验',failed:'未完成，临时结果保留',withdrawn:'已撤回',withdrawing:'撤回待恢复',retrying:'重试待恢复'}
 function exportArchive(p){return action(async()=>{
   archiveMessage.value='正在按源时间切片并校验，原片保留…'
