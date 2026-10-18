@@ -178,6 +178,7 @@ async def _execute_task(task: dict, broadcast_fn: Optional[Callable] = None):
         # Content gate: require title and description before publishing
         title = task.get("title")
         description = task.get("description")
+        tags = task.get("tags")
         if not title:
             # Try to generate meta on-the-fly if we have a group_id
             if task.get("group_id"):
@@ -209,6 +210,7 @@ async def _execute_task(task: dict, broadcast_fn: Optional[Callable] = None):
 
         # Build task context
         task_ctx = dict(task)
+        task_ctx.update(title=title, description=description, tags=tags)
         if task.get("cookie_file"):
             task_ctx["_cookie_file"] = task["cookie_file"]
 
@@ -225,7 +227,7 @@ async def _execute_task(task: dict, broadcast_fn: Optional[Callable] = None):
         published_at = datetime.now(timezone.utc).isoformat()
         await _set_status("done", published_at=published_at)
         logger.info(f"Task {task_id} published: {url}")
-        title = task.get("title") or f"任务#{task_id}"
+        title = task_ctx.get("title") or f"任务#{task_id}"
         asyncio.create_task(notify(f"✅ 抖音发布成功：{title}"))
 
     except Exception as e:
