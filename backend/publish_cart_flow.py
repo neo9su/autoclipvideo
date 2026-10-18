@@ -15,6 +15,8 @@ async def attach_selected_products(page, links, names, attach):
             failed.append({'index':index,'name':name,'reason':str(exc)})
         else:
             attached.append(index)
+            # One confirmed cart item satisfies the task; later candidates cannot undo it.
+            return {'attached':attached,'failed':failed}
     if not attached:
         raise ProductLinkUnavailable('所选商品链接均未能挂车，请检查商品链接及账号权限；未执行发布')
     return {'attached':attached,'failed':failed}
