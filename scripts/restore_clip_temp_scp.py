@@ -8,13 +8,13 @@ import subprocess
 def restore(job,archive,admin,destination_root=r'F:\douyin_recordings\clips'):
     if len(job)!=16 or any(c not in '0123456789abcdef' for c in job):raise ValueError('Invalid job')
     code='JOB='+repr(job)+'\nARCHIVE='+repr(archive)+'\nADMIN='+repr(admin)+'\nDESTINATION_ROOT='+repr(destination_root)+'\n'+r'''
-import subprocess,json,shlex
+import subprocess,json,shlex,uuid
 
 def win(code):
  r=subprocess.run(['ssh','-o','BatchMode=yes','dyy',r'C:\Python313\python.exe -X utf8 -'],input=code,text=True,capture_output=True,check=True);return r.stdout
 r=subprocess.run(['ssh','-o','BatchMode=yes','neo@10.190.0.222','cat '+shlex.quote(ARCHIVE+'/'+JOB+'/manifest.json')],capture_output=True,text=True,check=True)
 plan=json.loads(r.stdout);assert plan['job_id']==JOB
-stage=ADMIN+'\\restore-scp-stage\\'+JOB
+stage=ADMIN+'\\restore-scp-stage\\'+JOB+'-'+uuid.uuid4().hex
 win('import pathlib\np=pathlib.Path('+repr(stage)+');p.mkdir(parents=True,exist_ok=False)')
 sources=['neo@10.190.0.222:'+ARCHIVE+'/'+JOB+'/'+f['name'] for f in plan['files']]+['neo@10.190.0.222:'+ARCHIVE+'/'+JOB+'/manifest.json']
 # Copy into a new staging directory, then let the checked restore implementation
