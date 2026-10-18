@@ -1,3 +1,4 @@
+import { codexPostPublishTask } from './publishSelection.mjs'
 const BASE = (import.meta.env.VITE_API_BASE || 'http://10.190.0.203:8899').replace(/\/$/, '')
 const FETCH_TIMEOUT_MS = 15000
 const inFlightRequests = new Map()
@@ -446,13 +447,7 @@ export async function getPublishTasks(status = null) {
 }
 
 export async function createPublishTask(body) {
-  const res = await fetchWithTimeout(`${BASE}/api/publish-tasks`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  if (!res.ok) throw new Error(await res.text())
-  return res.json()
+  return codexPostPublishTask(`${BASE}/api/publish-tasks`, body)
 }
 
 export async function retryPublishTask(id) {
