@@ -72,6 +72,72 @@ def backend_pids():
     return {int(value) for value in result.stdout.split() if value.isdigit()}
 
 
+BACKEND_TASKS = (
+    'Uvicorn8899', 'DouyinBackend8899SusunInteractive',
+    'DouyinBackend8899System', 'DouyinRemoteBackend8899',
+    'DouyinRemoteBackend8899Interactive',
+)
+GUARD_TASK = 'Wd8899Sys'
+
+
+def backend_task_plan():
+    # Emit only task identity/state, never action arguments or environment values.
+    names = ','.join("'" + name + "'" for name in (*BACKEND_TASKS, GUARD_TASK))
+    command = ("$names=@(" + names + "); @(Get-ScheduledTask -ErrorAction Stop | "
+               "Where-Object {$_.TaskPath -eq '\\' -and $_.TaskName -in $names} | "
+               "ForEach-Object { [pscustomobject]@{name=$_.TaskName; "
+               "enabled=[bool]$_.Settings.Enabled; running=([int]$_.State -eq 4)} }) | ConvertTo-Json -Compress")
+    result = subprocess.run(['powershell', '-NoProfile', '-Command', command],
+                            capture_output=True, check=True)
+    tasks = json.loads(result.stdout.decode('utf-8-sig'))
+    if isinstance(tasks, dict):
+        tasks = [tasks]
+    by_name = {task['name']: task for task in tasks}
+    if GUARD_TASK not in by_name or 'Uvicorn8899' not in by_name:
+        raise RuntimeError('Known backend/guard task inventory incomplete; no maintenance')
+    if any(task['name'] not in (*BACKEND_TASKS, GUARD_TASK) for task in tasks):
+        raise RuntimeError('Unexpected task inventory')
+    owners = [task['name'] for task in tasks if task['name'] != GUARD_TASK and task['running']]
+    if len(owners) != 1:
+        raise RuntimeError('Expected exactly one running backend owner task; no maintenance')
+    if not by_name[owners[0]]['enabled']:
+        raise RuntimeError('Running backend owner is disabled; preserve existing state')
+    return dict(tasks=tasks, restart_task=owners[0])
+
+
+def task_action(action, name):
+    if name not in (*BACKEND_TASKS, GUARD_TASK):
+        raise RuntimeError('Unknown maintenance task')
+    if action in ('Enable', 'Disable'):
+        args = ['schtasks', '/Change', '/TN', name, '/' + action.upper()]
+    else:
+        args = ['schtasks', '/' + action, '/TN', name]
+    subprocess.run(args, capture_output=True, check=True)
+
+
+def pause_backend_tasks(plan, changed):
+    # Disable triggers first; the independent two-minute guard must not undo maintenance.
+    for task in plan['tasks']:
+        if task['enabled']:
+            task_action('Disable', task['name'])
+            changed.append(task['name'])
+    for task in plan['tasks']:
+        if task['running']:
+            task_action('End', task['name'])
+
+
+def restore_backend_tasks(plan, changed):
+    # Keep the guard disabled until the original owner has started and passed readiness.
+    owner = plan['restart_task']
+    for name in changed:
+        if name != GUARD_TASK:
+            task_action('Enable', name)
+    task_action('Run', owner)
+    wait_health(8899)
+    if GUARD_TASK in changed:
+        task_action('Enable', GUARD_TASK)
+
+
 def wait_health(port, required=None, seconds=90):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
@@ -85,12 +151,36 @@ def wait_health(port, required=None, seconds=90):
     raise RuntimeError(f'Service readiness timeout: {port}')
 
 
+TASK_RECOVERY = """from pathlib import Path
+import json,subprocess,time,urllib.request
+plan=json.loads((Path(__file__).parent/'task-state.json').read_text())
+def action(verb,name):
+    args=['schtasks','/Change','/TN',name,'/ENABLE'] if verb=='Enable' else ['schtasks','/Run','/TN',name]
+    subprocess.run(args,capture_output=True,check=True)
+for task in plan['tasks']:
+    if task['enabled'] and task['name']!='Wd8899Sys':action('Enable',task['name'])
+action('Run',plan['restart_task'])
+for attempt in range(30):
+    try:
+        with urllib.request.urlopen('http://127.0.0.1:8899/health',timeout=3) as response:
+            assert response.status==200
+        break
+    except (OSError,AssertionError):
+        if attempt==29:raise RuntimeError('Backend not ready; guard remains paused. Inspect service before retry.')
+        time.sleep(3)
+for task in plan['tasks']:
+    if task['enabled'] and task['name']=='Wd8899Sys':action('Enable',task['name'])
+print('Original task owner restored; database and recordings unchanged.')
+"""
+
+
 def main(expected=None, rollback_order=None, label='audio-activation', restart_worker=True):
     for path, digest in (EXPECTED if expected is None else expected).items():
         if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
             raise RuntimeError('Source drift; no maintenance action')
     if request(8899, '/api/gpu/status').get('maintenance') is not False:
         raise RuntimeError('Existing maintenance state must be preserved; no action')
+    task_plan = backend_task_plan()
     before_gpu = request(8877, '/health')
     backup = ROOT / 'codex_rollbacks' / (label + '-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
     backup.mkdir()
@@ -100,14 +190,17 @@ def main(expected=None, rollback_order=None, label='audio-activation', restart_w
         with sqlite3.connect(backup / 'douyin.db.snapshot') as snapshot:
             db.backup(snapshot)
     journal = dict(backup=str(backup), gpu_pid_before=before_gpu['pid'],
-                   interrupted_control_plane_groups=active, phase='backed_up',
+                   interrupted_control_plane_groups=active, backend_task_plan=task_plan, phase='backed_up',
                    database_restore='never automatic', rollback_order=rollback_order if rollback_order is not None else ['remote-audio-20261018-162521', 'remote-audio-20261018-162339'])
     def record(phase):
         journal['phase'] = phase
         (backup / 'activation.json').write_text(json.dumps(journal, indent=2), encoding='utf-8')
         print(json.dumps({'phase': phase, 'backup': str(backup)}), flush=True)
+    (backup / 'task-state.json').write_text(json.dumps(task_plan, indent=2), encoding='utf-8')
+    (backup / 'restore_tasks.py').write_text(TASK_RECOVERY, encoding='utf-8')
     record('backed_up')
     stopped = False
+    changed_tasks = []
     maintenance = False
     worker_restarted = False
     try:
@@ -117,9 +210,11 @@ def main(expected=None, rollback_order=None, label='audio-activation', restart_w
         if len(pids) != 1:
             raise RuntimeError('Expected exactly one backend listener')
         stopped = True  # Ensure startup recovery also runs if stopping fails part-way.
-        subprocess.run(['schtasks', '/End', '/TN', 'Uvicorn8899'], capture_output=True)
+        pause_backend_tasks(task_plan, changed_tasks)
         for pid in pids & backend_pids():
             subprocess.run(['taskkill', '/PID', str(pid), '/F'], capture_output=True, check=True)
+        if backend_pids():
+            raise RuntimeError('Backend listener survived task pause; no worker maintenance')
         record('backend_paused')
         # A last submission may have raced the maintenance flag. Drain it instead of killing it.
         record('draining_worker')
@@ -150,8 +245,12 @@ def main(expected=None, rollback_order=None, label='audio-activation', restart_w
         record('worker_updated' if restart_worker else 'worker_unchanged')
     finally:
         if stopped:
-            subprocess.run(['schtasks', '/Run', '/TN', 'Uvicorn8899'], capture_output=True, check=True)
-            wait_health(8899)
+            try:
+                restore_backend_tasks(task_plan, changed_tasks)
+            except Exception as error:
+                journal['recovery_error'] = type(error).__name__
+                record('backend_restore_failed')
+                raise
             record('backend_restored' if not worker_restarted else 'services_started')
         elif maintenance:
             request(8899, '/api/gpu/maintenance', 'DELETE')
@@ -165,4 +264,10 @@ def main(expected=None, rollback_order=None, label='audio-activation', restart_w
 
 
 if __name__ == '__main__':
-    main()
+    import sys
+    if sys.argv[1:] == ['--plan']:
+        print(json.dumps(backend_task_plan()))
+    elif sys.argv[1:]:
+        raise SystemExit('Usage: activate_remote_audio.py [--plan]')
+    else:
+        main()
