@@ -78,18 +78,18 @@ def generate_qianchuan_script(
     points = [p for p in (selling_points or []) if p]
     if not points:
         points = []
-    # Preserve product-specific keywords first, then defaults.
-    merged_points = list(dict.fromkeys(points + KEY_SELLING_POINTS))[:8]
+    # Caller keywords remain retrieval metadata, not proof for spoken claims.
+    merged_points = list(dict.fromkeys(points))[:8]
     product_name = _compact_product_name(group_data, product_context)
     color = (group_data.get("wig_color") or (product_context or {}).get("matched_color") or "").strip()
     model = (group_data.get("wig_model") or "").strip()
 
     scene_text = {
-        "result_hook": f"戴上直接看效果，{color or product_name}真的很显白，发缝也很自然。",
-        "pain_point": f"不想戴发网、怕勒头又怕假？这款重点就是省步骤，出门前快速整理。",
-        "product_proof": f"近看发丝和头顶细节，{('、'.join(merged_points[:3]))}，颜色和卷度都要对版。",
-        "tryon_result": f"正脸侧脸都看一下，梳理和轻甩也稳，日常通勤拍照都能撑住。",
-        "cta": f"喜欢{model or color or '这款'}的姐妹，点小黄车看同款，先收藏再下单。",
+        "result_hook": f"先看{color or model or '这款假发'}的上脸效果，再看近景细节。",
+        "pain_point": "选假发先看哪里？先看整体轮廓，再看刘海和发尾。",
+        "product_proof": "近看头顶、发丝和发尾，具体细节放大给你看。",
+        "tryon_result": "正脸、侧脸换个角度看，再对照整体轮廓和发尾。",
+        "cta": "喜欢这个发型，先收藏，再对照细节选适合自己的款。",
     }
 
     scenes: List[Dict] = []
@@ -106,16 +106,17 @@ def generate_qianchuan_script(
             "voiceover_text": scene_text[tmpl.scene_type],
             "visual_requirements": tmpl.visual_keywords,
             "priority_shots": tmpl.visual_keywords,
-            "subtitle_keywords": [kw for kw in merged_points if kw in scene_text[tmpl.scene_type]] or merged_points[:3],
+            "subtitle_keywords": [kw for kw in merged_points if kw in scene_text[tmpl.scene_type]],
         })
 
     return {
         "mode": "qianchuan",
-        "version": "1.0",
+        "version": "1.1",
         "target_duration": duration,
         "structure": "0-3s结果钩子 / 3-7s痛点 / 7-13s产品证据 / 13-19s上脸效果 / 19-23s CTA",
         "product_context": product_context or {},
         "selling_points": merged_points,
+        "selling_points_source": "caller_supplied_unverified" if points else "none",
         "retention_hooks": retention_hook_plan(duration),
         "generated_at": time.time(),
         "scenes": scenes,
