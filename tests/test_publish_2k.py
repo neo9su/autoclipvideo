@@ -127,3 +127,20 @@ def test_production_migration_preserves_working_frames_and_explicit_options():
     assert 'output_spec.get("resolution") or "1440x2560"' in result
     assert 'PUBLISH_SCALE + ",fps=25"' in result
     with pytest.raises(RuntimeError): patch.patch_gpu(result)
+
+
+def test_mixed_line_endings_are_preserved_outside_replacements():
+    original = 'alpha=1\r\nbeta=2\ngamma=3\r\n'
+    patched = 'alpha=1\nbeta=20\ngamma=3\n'
+    result = original
+    for old,new in patch.raw_replacements(original,patched):
+        assert result.count(old)==1
+        result=result.replace(old,new)
+    assert result.replace('\r\n','\n')==patched
+    assert result.startswith('alpha=1\r\n') and result.endswith('gamma=3\r\n')
+
+
+def test_generated_deployer_does_not_double_normalize_raw_pairs():
+    script=patch.build()
+    assert "old=old.replace('\\n',newline)" not in script
+    compile(script,'<prepared-2k>','exec')
