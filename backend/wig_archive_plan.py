@@ -1,18 +1,23 @@
 """Build auditable single-hairstyle archive plans, never cut ambiguous footage."""
 import hashlib
-import json
+import math
 from pathlib import Path
 from wig_catalog_names import hairstyle_name, mention_evidence
-from wig_preprocess import build_asset_name, extract_features, normalize
+from wig_preprocess import build_asset_name, normalize
+from wig_transcript_evidence import parse_srt, corroborate_quote
 
 
-def build_archive_plan(recording_id, source_path, boundaries, products):
+def build_archive_plan(recording_id, source_path, boundaries, products, *, srt_text=None):
     """Keep catalogue candidates distinct; display names do not imply SKU identity."""
+    cues = parse_srt(srt_text)
     plans = []
     for index, boundary in enumerate(boundaries):
-        start = float(boundary.get('start_sec') or 0)
-        end = float(boundary.get('end_sec') or 0)
-        if start < 0 or end <= start:
+        try:
+            start = float(boundary.get('start_sec'))
+            end = float(boundary.get('end_sec'))
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end <= start:
             continue
         spoken = str(boundary.get('wig') or '')
         evidence = str(boundary.get('current_evidence') or '')
@@ -42,10 +47,12 @@ def build_archive_plan(recording_id, source_path, boundaries, products):
         segment_id = hashlib.sha256(f'{recording_id}:{source_path}:{start:.3f}:{end:.3f}'.encode()).hexdigest()[:24]
         folder = build_asset_name(name,color,features)
         verified = boundary.get('visual_verified') is True and bool(boundary.get('visual_style_signature'))
-        ready = bool(candidates) and len(identity_names)==1 and verified and boundary.get('identity_confirmed') is True
+        transcript = corroborate_quote(cues, evidence, name, start, end)
+        ready = transcript['verified'] and bool(candidates) and len(identity_names)==1 and verified and boundary.get('identity_confirmed') is True
         plans.append({'segment_id':segment_id,'recording_id':recording_id,'source_path':str(source_path),
             'start_sec':start,'end_sec':end,'hairstyle_name':name,'color':color,'features':features,
             'catalogue_candidates':candidates,'spoken_evidence':evidence,
+            'transcript_evidence':transcript,
             'visual_style_signature':boundary.get('visual_style_signature'),
             'status':'ready' if ready else 'needs_evidence',
             'relative_output':str(Path(folder)/(folder+'_'+segment_id+'.mp4'))})

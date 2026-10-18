@@ -30,6 +30,12 @@
       <tbody><tr v-for="r in resolutionPlan.recordings" :key="r.id"><td>{{ r.id }}</td><td>{{ r.filename }}</td><td>{{ r.width ? `${r.width}×${r.height}` : '未确认' }}</td><td>{{ reasons[r.reason] || r.reason }}</td></tr></tbody></table>
     <div v-for="b in recordingBatches" :key="b.batch_id" class="batch"><span>{{ b.count }} 条低清录像 · {{ b.state==='restored'?'已恢复':b.state==='rolled_back'?'已回退':'可恢复' }}</span>
       <button v-if="['prepared','quarantined'].includes(b.state)" :disabled="busy" @click="restoreRecordings(b)">恢复此批录像</button></div>
+    <h3>发型口播时间线</h3>
+    <p>输入一条录像ID，核对原始字幕中提到的商品名称及时间。“当前介绍候选”仍需画面确认，不会据此自动切片。</p>
+    <div class="controls"><input v-model="evidenceId" :disabled="busy" placeholder="录像ID" @input="evidence=null" /><button :disabled="busy" @click="inspectEvidence">读取口播证据</button></div>
+    <p v-if="evidence">字幕 {{ evidence.cue_count }} 条，名称提及 {{ evidence.mention_count }} 处{{ evidence.truncated?'（显示前500处）':'' }}；时间均为原录像时间。</p>
+    <table v-if="evidence"><thead><tr><th>源时间</th><th>发型名称候选</th><th>口播原文及上下文</th><th>判断</th></tr></thead>
+      <tbody><tr v-for="(m,i) in evidence.mentions" :key="i"><td>{{ clock(m.start_sec) }}–{{ clock(m.end_sec) }}</td><td>{{ m.hairstyle_name }}</td><td>{{ m.context }}</td><td>{{ m.current_assertion?'当前介绍候选，画面待确认':'仅提及，不能确定当前款' }}</td></tr></tbody></table>
     <h3>商品发型名预览</h3>
     <p>按商品名提取主播命名。同名商品保留各自商品记录，颜色和规格在素材分段时另行区分。</p>
     <table><thead><tr><th>商品</th><th>发型名称候选</th><th>商品全名</th></tr></thead>
@@ -41,6 +47,12 @@
 import { ref, onMounted } from 'vue'
 import { remoteFetch } from '../remoteApi.js'
 const mode=ref('all'), plan=ref(null), batches=ref([]), names=ref([]), busy=ref(false), error=ref('')
+const evidenceId=ref(''), evidence=ref(null)
+const clock=v=>`${Math.floor(v/60)}:${String(Math.floor(v%60)).padStart(2,'0')}`
+function inspectEvidence(){return action(async()=>{
+  const id=Number(evidenceId.value);if(!Number.isSafeInteger(id)||id<=0)throw new Error('请输入一个有效录像ID')
+  evidence.value=null;evidence.value=await request(`/recordings/${id}/hairstyle-evidence`)
+})}
 const recordingIds=ref(''), resolutionPlan=ref(null), recordingBatches=ref([])
 const reasons={below_1080p:'低于1080P，可恢复弃用', '1080p_or_higher':'保留', linked_material:'已关联分组或片段，跳过', active_or_unavailable:'正在处理或不可用，跳过', shared_source:'多个记录引用同一源文件，跳过', missing_or_external_file:'文件不在本机存储或不可用', source_changed:'文件正在变化', probe_failed:'探测失败，待检查', missing_recording:'录像ID不存在'}
 let inspectedIds=[]

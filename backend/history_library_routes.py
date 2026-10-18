@@ -137,3 +137,50 @@ async def restore_recordings(body: dict, batch: str):
             return await asyncio.to_thread(resolution_service().restore_low, batch)
         except (ValueError, OSError) as e:
             raise HTTPException(409, str(e)) from e
+
+
+@router.get('/recordings/{recording_id}/hairstyle-evidence')
+async def hairstyle_evidence(recording_id: int):
+    """Read original subtitles; no inference, cutting or archive writes."""
+    def run():
+        import hashlib
+        from media_contract import resolve_media_file, srt_candidates
+        from wig_transcript_evidence import parse_srt, catalogue_mentions
+        if recording_id <= 0:
+            raise ValueError('无效录像ID')
+        base = service()
+        con = base.connect()
+        try:
+            row = con.execute('SELECT * FROM recordings WHERE id=?', (recording_id,)).fetchone()
+            if row is None or row['local_deleted'] or not row['end_time']:
+                raise ValueError('录像不存在、已弃用或尚未录制完成')
+            row = dict(row)
+            products = [p for p in base.rows(con, 'products')
+                        if p.get('enabled') and p.get('room_id') in (None, row['room_id'])]
+        finally:
+            con.close()
+        source = resolve_media_file(row['filename'])
+        if not source:
+            raise ValueError('源录像不在本机或不可访问')
+        root = base.storage.resolve()
+        if not source.resolve().is_relative_to(root):
+            raise ValueError('源录像不在本机存储目录')
+        subtitle = next((p for p in srt_candidates(source)
+                         if p.resolve().is_relative_to(root) and p.is_file()), None)
+        if not subtitle:
+            raise ValueError('没有原始字幕，尚不能核对口播证据')
+        with subtitle.open('rb') as f:
+            raw = f.read(8*1024*1024+1)
+        if len(raw) > 8*1024*1024:
+            raise ValueError('字幕超过单次检查范围，请分批检查')
+        cues = parse_srt(raw.decode('utf-8-sig'))
+        hits = catalogue_mentions(cues, products)
+        return {'recording_id': recording_id, 'filename': row['filename'], 'read_only': True,
+                'time_basis': 'original_video_seconds', 'subtitle_sha256': hashlib.sha256(raw).hexdigest(),
+                'cue_count': len(cues), 'mention_count': len(hits), 'truncated': len(hits)>500,
+                'mentions': hits[:500], 'visual_verified': False,
+                'note': '口播候选不代表画面正在展示该款；尚未生成分段或归档文件'}
+    try:
+        return await asyncio.to_thread(run)
+    except (ValueError, OSError) as e:
+        raise HTTPException(409, str(e)) from e
