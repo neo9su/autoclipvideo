@@ -9,7 +9,7 @@ assert(codexGroupMatches({ id: 1, room_name: 'KUKU', codex_final_video: '雪_短
 
 function fixture(failing = new Set()) {
   const groups = [{ id: 1, label: '人生' }, { id: 2, label: '夺回' }, { id: 3, label: '天蝎座' }]
-  let form = { group_id: '', platform: 'douyin', account_id: 9, product_ids: [] }
+  let form = { group_id: '', platform: 'douyin', account_id: 9, product_ids: [101] }
   let extras = { version: 'codex', schemes: [], scheme: '', matched: null }
   const calls = [], messages = []
   let closed = 0, refreshFails = false, release
@@ -28,12 +28,12 @@ function fixture(failing = new Set()) {
   const f = fixture()
   f.batch.focus(f.groups[0]); Object.assign(f.form(), { title: '人生标题', description: '人生文案', product_ids: [101, 102] })
   f.batch.focus(f.groups[1]); Object.assign(f.form(), { title: '夺回标题', description: '夺回文案', product_ids: [201] })
-  f.batch.focus(f.groups[0]); assert.deepEqual(f.form().product_ids, [101, 102]); assert.equal(f.form().title, '人生标题')
+  f.batch.focus(f.groups[0]); assert.deepEqual(f.form().product_ids, [201]); assert.equal(f.form().title, '人生标题')
   f.batch.query.value = '找不到'; assert.deepEqual(f.batch.ids.value, [1, 2])
   await f.batch.submit()
   assert.equal(f.calls.length, 2); assert.equal(f.calls[0].group_id, 1); assert.equal(f.calls[1].group_id, 2)
   assert.deepEqual(f.calls.map(x => x.title), ['人生标题', '夺回标题'])
-  assert.deepEqual(f.calls.map(x => x.product_ids), [[101, 102], [201]])
+  assert.deepEqual(f.calls.map(x => x.product_ids), [[201], [201]])
   assert(f.calls.every(x => x.publish_version === 'codex' && x.account_id === 9))
   assert.deepEqual(f.calls.map(x => x.scheduled_at), ['2026-10-19T08:00', '2026-10-19T08:30'])
   assert.equal(f.closed(), 1)
@@ -66,4 +66,11 @@ console.log('publish selection: search, isolated drafts, per-video tasks, partia
   attempts = 0
   await assert.rejects(codexPostPublishTask('/mock', { group_id: 1 }, async () => { attempts++; throw Error('network') }), /未确认/)
   assert.equal(attempts, 1)
+}
+
+{
+  const f=fixture();f.batch.focus(f.groups[0]);f.batch.focus(f.groups[1]);f.form().product_ids=[]
+  await f.batch.submit();assert.equal(f.calls.length,0)
+  f.form().no_cart=true;await f.batch.submit();assert.equal(f.calls.length,2)
+  assert(f.calls.every(x=>x.no_cart && x.product_ids===null))
 }

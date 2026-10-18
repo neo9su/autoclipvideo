@@ -103,7 +103,7 @@ export function patchPublishBundle(source, helper) {
   walk(setupOf(source).body, n => { if (n.type === 'CallExpression' && n.callee.name === 'K' && literal(n.arguments[0]) === 'div' && n.arguments[1]?.name === 'Nb') lists.push(n) })
   const list = unique(lists, 'list wrapper')
   const controls = `K('input',{class:'input',type:'search',placeholder:'搜索视频/发型/颜色/分组编号，空格组合搜索','aria-label':'搜索分组视频',value:codexPublishBatch.query.value,onInput:event=>codexPublishBatch.query.value=event.target.value,style:{width:'100%',boxSizing:'border-box'}},null,8,['value']),
-K('div',{style:{fontSize:'12px',margin:'8px 0'}},'已选 '+codexPublishBatch.ids.value.length+' 个视频；点击名称逐条编辑文案和商品，空白文案会分别自动生成。',1),
+K('div',{style:{fontSize:'12px',margin:'8px 0'}},'已选 '+codexPublishBatch.ids.value.length+' 个视频；点击名称逐条编辑文案；本批所有视频共用下方商品，空白文案会分别自动生成。',1),
 K('div',{class:'room-filter-chips',style:{display:'flex',gap:'6px',flexWrap:'wrap',marginBottom:'8px'}},codexPublishBatch.ids.value.map(id=>K('button',{type:'button',class:['room-chip',I.value.group_id===id?'active':''],onClick:()=>codexPublishBatch.focus(ee.value.find(g=>g.id===id))},'编辑 '+(ee.value.find(g=>g.id===id)?.label||id),1))),
 K('button',{type:'button',class:'btn-xs',onClick:()=>codexPublishBatch.clear(),disabled:codexPublishBatch.submitting.value},'清空选择',8,['disabled']),
 K('div',{'aria-live':'polite'},codexPublishBatch.errors.value.map(error=>K('div',{role:'alert',style:{color:'#f59e0b',fontSize:'12px'}},'分组 '+error.id+'：'+error.message+'（成功项不会重复提交）',1)))`

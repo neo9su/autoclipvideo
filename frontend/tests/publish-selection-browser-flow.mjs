@@ -12,7 +12,7 @@ async page => {
   await search.fill('夺回')
   await modal.getByRole('checkbox', { name: /^选择视频.*夺回/ }).check()
   if (await modal.getByPlaceholder('最多25字').inputValue()) throw Error('Copy leaked to second video')
-  if (await modal.getByRole('checkbox', { name: '人生 同名商品', exact: true }).nth(0).isChecked()) throw Error('Products leaked to second video')
+  if (!await modal.getByRole('checkbox', { name: '人生 同名商品', exact: true }).nth(0).isChecked()) throw Error('Shared cart did not follow video selection')
   await modal.getByPlaceholder('最多25字').fill('夺回独立文案')
   await modal.getByPlaceholder('100-200字，含卖点和互动引导').fill('夺回说明只属于第二条视频')
   await modal.getByRole('checkbox', { name: '夺回 商品', exact: true }).check()
@@ -33,7 +33,7 @@ async page => {
   const posts = await page.evaluate(() => window.__publishFixturePosts)
   if (JSON.stringify(posts.map(p => p.group_id)) !== '[11,12]') throw Error('Not one independent task per selected video')
   if (JSON.stringify(posts.map(p => p.title)) !== '["人生独立文案","夺回独立文案"]') throw Error('Copy mixed across tasks')
-  if (JSON.stringify(posts.map(p => p.product_ids)) !== '[[101,102],[201]]') throw Error('Product lists mixed across tasks')
+  if (JSON.stringify(posts.map(p => p.product_ids)) !== '[[101,102,201],[101,102,201]]') throw Error('Batch cart is not identical across tasks')
   if (posts.some(p => p.publish_version !== 'codex' || p.account_id !== 9 || p.auto_meta)) throw Error('Task version/account/meta mismatch')
   if ((await page.evaluate(() => window.__unexpectedMutations || [])).length) throw Error('Unexpected mutation was attempted')
   return { mock_only: true, task_count: posts.length, group_ids: posts.map(p => p.group_id), product_ids: posts.map(p => p.product_ids), copy_isolated: true }
