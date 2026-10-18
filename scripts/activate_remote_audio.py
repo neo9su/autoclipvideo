@@ -80,7 +80,7 @@ BACKEND_TASKS = (
 GUARD_TASK = 'Wd8899Sys'
 
 
-def backend_task_plan():
+def backend_task_plan(preferred_owner=None):
     # Emit only task identity/state, never action arguments or environment values.
     names = ','.join("'" + name + "'" for name in (*BACKEND_TASKS, GUARD_TASK))
     command = ("$names=@(" + names + "); @(Get-ScheduledTask -ErrorAction Stop | "
@@ -98,11 +98,18 @@ def backend_task_plan():
     if any(task['name'] not in (*BACKEND_TASKS, GUARD_TASK) for task in tasks):
         raise RuntimeError('Unexpected task inventory')
     owners = [task['name'] for task in tasks if task['name'] != GUARD_TASK and task['running']]
-    if len(owners) != 1:
+    if preferred_owner is not None:
+        allowed_pair = {'Uvicorn8899', 'DouyinBackend8899SusunInteractive'}
+        if set(owners) != allowed_pair or preferred_owner not in owners:
+            raise RuntimeError('Explicit owner requires the verified System/interactive task pair')
+        owner = preferred_owner
+    elif len(owners) == 1:
+        owner = owners[0]
+    else:
         raise RuntimeError('Expected exactly one running backend owner task; no maintenance')
-    if not by_name[owners[0]]['enabled']:
+    if not by_name[owner]['enabled']:
         raise RuntimeError('Running backend owner is disabled; preserve existing state')
-    return dict(tasks=tasks, restart_task=owners[0])
+    return dict(tasks=tasks, restart_task=owner)
 
 
 def task_action(action, name):
@@ -134,6 +141,9 @@ def restore_backend_tasks(plan, changed):
             task_action('Enable', name)
     task_action('Run', owner)
     wait_health(8899)
+    for task in plan['tasks']:
+        if task['running'] and task['name'] not in (owner, GUARD_TASK):
+            task_action('Run', task['name'])
     if GUARD_TASK in changed:
         task_action('Enable', GUARD_TASK)
 
@@ -169,18 +179,20 @@ for attempt in range(30):
         if attempt==29:raise RuntimeError('Backend not ready; guard remains paused. Inspect service before retry.')
         time.sleep(3)
 for task in plan['tasks']:
+    if task['running'] and task['name'] not in (plan['restart_task'],'Wd8899Sys'):action('Run',task['name'])
+for task in plan['tasks']:
     if task['enabled'] and task['name']=='Wd8899Sys':action('Enable',task['name'])
 print('Original task owner restored; database and recordings unchanged.')
 """
 
 
-def main(expected=None, rollback_order=None, label='audio-activation', restart_worker=True):
+def main(expected=None, rollback_order=None, label='audio-activation', restart_worker=True, backend_owner=None):
     for path, digest in (EXPECTED if expected is None else expected).items():
         if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
             raise RuntimeError('Source drift; no maintenance action')
     if request(8899, '/api/gpu/status').get('maintenance') is not False:
         raise RuntimeError('Existing maintenance state must be preserved; no action')
-    task_plan = backend_task_plan()
+    task_plan = backend_task_plan(backend_owner) if backend_owner is not None else backend_task_plan()
     before_gpu = request(8877, '/health')
     backup = ROOT / 'codex_rollbacks' / (label + '-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
     backup.mkdir()

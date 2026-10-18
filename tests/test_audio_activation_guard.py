@@ -133,3 +133,21 @@ def test_guard_not_reenabled_before_backend_is_ready(monkeypatch):
     with pytest.raises(RuntimeError,match='not ready'):
         activation.restore_backend_tasks({'restart_task':'Uvicorn8899'},['Uvicorn8899','Wd8899Sys'])
     assert ('Enable','Wd8899Sys') not in calls
+
+
+def test_explicit_verified_pair_restores_listener_then_waiting_supervisor(monkeypatch):
+    import json
+    from types import SimpleNamespace
+    tasks=[{'name':name,'enabled':True,'running':name!='Wd8899Sys'}
+           for name in ['Uvicorn8899','DouyinBackend8899SusunInteractive','Wd8899Sys']]
+    monkeypatch.setattr(activation.subprocess,'run',lambda *a,**kw:SimpleNamespace(stdout=json.dumps(tasks).encode()))
+    plan=activation.backend_task_plan('Uvicorn8899')
+    assert plan['restart_task']=='Uvicorn8899'
+    calls=[]
+    monkeypatch.setattr(activation,'task_action',lambda action,name:calls.append((action,name)))
+    monkeypatch.setattr(activation,'wait_health',lambda port:calls.append(('healthy',port)))
+    activation.restore_backend_tasks(plan,[t['name'] for t in tasks])
+    assert calls[-4:]==[('Run','Uvicorn8899'),('healthy',8899),
+                       ('Run','DouyinBackend8899SusunInteractive'),('Enable','Wd8899Sys')]
+    with pytest.raises(RuntimeError,match='verified System/interactive'):
+        activation.backend_task_plan('DouyinBackend8899System')
