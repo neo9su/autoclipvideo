@@ -299,3 +299,13 @@
 剩余批次完成验证：本轮69任务/1411个片段/25.231GiB全部完成，无错误；与首批合计91任务/1871文件/33.430GiB。203逐项核对applied回执、源副本已回收、归档文件名与当前录像源文件名不相交；222独立核对91个提交目录的清单和文件尺寸。两端清单集合SHA256完全一致：4ebf338626aa7109499ac1718ac7e034fb63ec76be720373ea0724a3bf59f3b7。
 
 203 F盘剩51.326GiB；健康/前端/商品链接编辑接口全部200。222 disk2约剩4967GiB。220实际执行批处理脚本SHA256与仓库一致（8ca3b43ca3818c41da3c745b3f570765b912799cf6d6b6ea0396ed47d8419665）。结果分别保存203归档管理目录与222归档根的remaining-result.json。保留所有计划、逐文件SHA、回执及恢复工具；没有移动/删除录像源文件、最终成片或字幕，没有重启服务、改保护阈值、提交GPU作业或触发发布。近期、活跃、被引用的临时文件仍留203；后续复用已归档中间片段需按清单从222恢复。
+
+### 2026-10-18 Director output-spec compatibility fix
+
+- Read-only post-storage audit found ordinary recording 45289 rejected with HTTP 500 before job creation; its exact server exception remains unresolved. No retry was submitted.
+- Director/creative composition logs explicitly returned HTTP 422 because `qianchuan_output_spec` was null while the deployed GPU request schema requires a dictionary.
+- Commit cce9795 changes the caller to send an empty dictionary for absent/null configuration and preserves explicit settings (including 1440x2560). Empty settings retain the worker's existing 1080x1920 default; this compatibility fix does not establish universal 2K output.
+- Production was patched with a single checked replacement, preserving deployment drift. Backup: `C:\Users\neo\douyin_backend\codex_rollbacks\director-output-spec-20261018-154249`; contains previous source, SHA manifest, SQLite snapshot and conditional `rollback.py`. Rollback restores only code and requires an idle backend restart; never automatically restore the database snapshot.
+- GitHub push completed before deployment. Backend Uvicorn8899 restarted only after a fresh database check found no running recording/group work. No GPU job or publishing task was submitted as a test.
+- Targeted payload tests: 4 passed. Five broader existing GPU contract assertions also fail against the unmodified HEAD baseline; left unchanged and unresolved.
+- Post-restart verification: production schema CPU validation passed; `/health`, frontend `/`, and `/api/history-library/products/739/link` all returned HTTP 200. Startup log confirms successful application startup. Initial requests during startup were unavailable, followed by successful bounded readiness check.
