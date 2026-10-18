@@ -16,9 +16,9 @@ import publish_scheduler as scheduler
 def test_resolved_metadata_reaches_publisher(tmp_path, monkeypatch, mode):
     database = tmp_path / 'metadata.sqlite'
     with closing(sqlite3.connect(database)) as db:
-        db.executescript('''CREATE TABLE publish_tasks(id INTEGER PRIMARY KEY,status TEXT,error_msg TEXT,published_at TEXT,retry_count INTEGER DEFAULT 0,group_id INTEGER,platform TEXT,title TEXT,description TEXT,tags TEXT);
+        db.executescript('''CREATE TABLE publish_tasks(id INTEGER PRIMARY KEY,status TEXT,error_msg TEXT,published_at TEXT,retry_count INTEGER DEFAULT 0,group_id INTEGER,platform TEXT,title TEXT,description TEXT,tags TEXT,video_path TEXT);
         INSERT INTO publish_tasks(id,status,group_id,platform) VALUES(1,'pending',7,'douyin');
-        CREATE TABLE clip_groups(id INTEGER PRIMARY KEY,merged_filename TEXT,qianchuan_final_video TEXT,realistic_final_video TEXT,conservative_final_video TEXT,creative_final_video TEXT,director_final_video TEXT);
+        CREATE TABLE clip_groups(id INTEGER PRIMARY KEY,merged_filename TEXT,qianchuan_final_video TEXT,realistic_final_video TEXT,conservative_final_video TEXT,creative_final_video TEXT,director_final_video TEXT,qianchuan_v2_final_video TEXT,codex_final_video TEXT);
         INSERT INTO clip_groups(id) VALUES(7);''')
     task = dict(id=1, platform='douyin', group_id=7, no_cart=1, retry_count=2,
                 video_path='test.mp4', title='用户标题' if mode == 'existing' else None,
