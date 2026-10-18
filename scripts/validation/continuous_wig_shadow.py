@@ -16,10 +16,12 @@ def main():
     p.add_argument('--source',required=True);p.add_argument('--output',required=True)
     p.add_argument('--start',type=float,required=True);p.add_argument('--end',type=float,required=True)
     p.add_argument('--phase',required=True);p.add_argument('--times',required=True)
+    p.add_argument('--window-size',type=int,choices=[1,2,4,8],default=8)
     a=p.parse_args()
     if not 0<a.end-a.start<=600:raise ValueError('One source interval must be at most 600 seconds')
     times=sorted(set(float(t) for t in a.times.split(',')))
     if not 1<=len(times)<=24 or any(t<a.start or t>a.end for t in times):raise ValueError('1-24 explicit times must stay inside the authorised source interval')
+    if len(times)>a.window_size*3:raise ValueError('Service supports at most three windows per request')
     if not a.phase.isidentifier():raise ValueError('Invalid phase name')
     root=Path(a.output);root.mkdir(parents=True,exist_ok=True)
     result_path=root/(a.phase+'.json')
@@ -42,7 +44,7 @@ def main():
             sheet.paste(preview,(x,y+20));draw.text((x+3,y+3),f'{t:.1f}s',fill='white')
     finally:cap.release()
     sheet.save(root/(a.phase+'-sheet.jpg'),quality=90)
-    windows=[{'start_sec':chunk[0],'end_sec':chunk[-1]+0.01,'sample_times':chunk} for offset in range(0,len(times),8) if (chunk:=times[offset:offset+8])]
+    windows=[{'start_sec':chunk[0],'end_sec':chunk[-1]+0.01,'sample_times':chunk} for offset in range(0,len(times),a.window_size) if (chunk:=times[offset:offset+a.window_size])]
     payload={'video_path':str(source),'target_name':'','target_color':'','windows':windows}
     record={'state':'in_progress','source_path':str(source),'source_size':stat.st_size,'source_mtime_ns':stat.st_mtime_ns,
             'scope_start_sec':a.start,'scope_end_sec':a.end,'frames':frames,'request':payload,
