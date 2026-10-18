@@ -309,3 +309,13 @@
 - GitHub push completed before deployment. Backend Uvicorn8899 restarted only after a fresh database check found no running recording/group work. No GPU job or publishing task was submitted as a test.
 - Targeted payload tests: 4 passed. Five broader existing GPU contract assertions also fail against the unmodified HEAD baseline; left unchanged and unresolved.
 - Post-restart verification: production schema CPU validation passed; `/health`, frontend `/`, and `/api/history-library/products/739/link` all returned HTTP 200. Startup log confirms successful application startup. Initial requests during startup were unavailable, followed by successful bounded readiness check.
+
+### 2026-10-18 Legacy clip low-disk admission patch (runtime pending)
+
+- Deployed processor source and backend mirror referenced `job_id` in `_clip_jobs.pop()` before assigning it. Historical GPU stderr contains the matching `UnboundLocalError`; the exact October 18 recording 45289 request could not be correlated to that historical trace, so its individual cause remains unconfirmed.
+- Minimal patch removes only that premature pop; admission still enforces the original free-space floor and returns HTTP 507. Existing jobs and the empty-segment HTTP 422 validation remain unchanged. Repository GPU implementation differs, so no wholesale file replacement was performed.
+- Added `scripts/patch_clip_low_disk.py` and `tests/test_clip_low_disk_patch.py`. Ten targeted tests passed together with the director output-spec regression tests. Windows CRLF is retained; an initial source preflight refusal changed no production files.
+- GitHub commits: 1d9537e and 141487e. Production source backup: `C:\Users\neo\douyin_backend\codex_rollbacks\clip-low-disk-20261018-155428`; both files have manifest-backed, drift-checked `rollback.py`. No database was changed.
+- Both patched file SHA256: `ed822011036a726bd35605d677d489b1e13f573ef343cf02fbaedae1ad16ea4a`.
+- GPU service was briefly idle but accepted new work before the final restart check. The guard correctly aborted before calling the watchdog restart endpoint. **Running PID 19956 has not loaded this patch; activation requires an idle maintenance restart.** No forced stop, new GPU test job or publishing action occurred.
+- Post-write CPU execution of the deployed guard returned HTTP 507. GPU8877 health, backend8899 health/frontend and watchdog8878 status all returned HTTP 200; GPU PID remained 19956, confirming no restart.
