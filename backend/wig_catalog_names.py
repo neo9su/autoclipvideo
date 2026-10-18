@@ -7,25 +7,31 @@ MODIFIERS = r'福利款|升级版|升级款|新款推荐|精修版|精修|发型
 
 
 def hairstyle_name(title):
-    title = re.sub(r'^(?:小圆圆不圆|小圆|kuku公主|kuku|lucylee)\s*[.·：:\-]?\s*', '', title or '', flags=re.I)
-    # Brackets containing a distinctive name (e.g. "免发网仿递针假发-布蕾兔")
-    # take precedence over generic prose outside them.
-    for block in re.findall(r'【([^】]+)】', title):
-        parts = re.split(r'[-·：:]', block)
-        named = [p.strip() for p in parts if p.strip() and not re.fullmatch(MODIFIERS, p.strip())]
-        if len(parts) > 1 and named:
-            candidate = named[-1]
-            if not re.search(r'工艺|头套|发网|假发|精修', candidate):
-                return candidate
-    title = re.sub(r'【[^】]*】|\[[^\]]*\]', '', title)
-    for part in re.split(r'[·\s：:]', title):
-        part = re.sub(MODIFIERS, '', part).strip('-.·')
-        if not part:
-            continue
-        # Specification prose starts after the distinctive spoken name.
-        part = re.split(r'混进口丝|进口丝|全头套|齐刘海|中长发|长卷发|长直发|短卷发|短直发', part)[0]
-        if part and not re.search(r'颜色|自然日常|高质量', part):
+    title = re.sub(r'^(?:小圆圆不圆|小圆|kuku公主|kuku|lucylee)(?:假发)?\s*[.·：:\-]?\s*', '', title or '', flags=re.I)
+
+    def candidate(text):
+        for part in re.split(r'[-·•\s：:]', text):
+            part = re.sub(MODIFIERS, '', part).strip('-.·')
+            # A specification is not a name, even if removing modifiers leaves
+            # a short fragment such as “全” or “套”.
+            if len(part) < 2 or re.search(
+                r'工艺|头套|发网|假发|进口丝|蕾丝|刘海|长发|短发|卷发|直发|'
+                r'大波浪|画染|弹力网|日常|自然|高质量|颜色|推荐|升级|福利', part
+            ):
+                continue
             return part
+        return ''
+
+    # Preserve the prefix boundary: removing brackets and joining the suffix
+    # can turn “夺回&人生” into “夺回&人生日常大波浪套”.
+    prefix = re.split(r'[【\[]', title, maxsplit=1)[0]
+    name = candidate(prefix)
+    if name:
+        return name
+    for block in re.findall(r'【([^】]+)】|\[([^\]]+)\]', title):
+        name = candidate(next(part for part in block if part))
+        if name:
+            return name
     return ''
 
 

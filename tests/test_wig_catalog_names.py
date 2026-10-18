@@ -22,3 +22,18 @@ def test_resolution_both_orientations_and_failed_probe():
     assert resolution_policy(1920,1080)['usable']
     assert not resolution_policy(720,1280)['usable']
     assert resolution_policy(None,None)['action']=='review'
+
+
+def test_names_do_not_merge_specification_suffixes():
+    examples = {
+        'KuKu公主假发-【宝宝冰蓝】发型师精修前蕾丝巴黎画染大波浪长卷发': '宝宝冰蓝',
+        'kuku【美式拉拉队】进口弹力网假发': '美式拉拉队',
+        'kuku【西梅乌龙】发型师精修中长发假发': '西梅乌龙',
+        '小圆-夺回&人生【仿递针】发型师精修日常大波浪假发套': '夺回&人生',
+        '小圆-芝麻乌龙·直发版【免发网】': '芝麻乌龙',
+        '小圆-澳洲紫玫瑰【免发网】lolita假发': '澳洲紫玫瑰',
+        '全进口丝假发': '',
+        '【仿递针工艺·免发网假发】中长发假发': '',
+    }
+    for title, expected in examples.items():
+        assert hairstyle_name(title) == expected, title
