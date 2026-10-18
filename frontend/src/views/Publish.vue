@@ -4,6 +4,7 @@
     <div class="task-list-panel">
       <div class="panel-header">
         <h3>发布任务</h3>
+        <a class="btn-secondary" href="/publish-review" target="_blank" rel="noopener">查看发布页面 / 确认发布</a>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
           <button class="btn-secondary" @click="openBatchModal">批量排期</button>
           <button class="btn-secondary" @click="doBulkRegenMeta" :disabled="bulkRegenning" title="为待发布/定时任务批量生成缺失的标题和描述">{{ bulkRegenning ? '生成中…' : '批量生成文案' }}</button>

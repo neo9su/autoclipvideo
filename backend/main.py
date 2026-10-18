@@ -721,6 +721,8 @@ _qianchuan_api_error = None
 _qianchuan_upload_loaded = False
 
 app = FastAPI(title="Douyin Recorder", lifespan=lifespan)
+from publish_review import router as publish_review_router
+app.include_router(publish_review_router)
 from history_library_routes import router as history_library_router
 app.include_router(history_library_router)
 

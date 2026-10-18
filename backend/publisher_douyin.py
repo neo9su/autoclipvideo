@@ -1,3 +1,4 @@
+from publish_review import register_review, close_review, wait_for_review, confirmation_sent, PublishReviewRequired
 """
 Douyin (TikTok CN) publisher via Playwright browser automation.
 Upload page: https://creator.douyin.com/creator-micro/content/upload
@@ -158,6 +159,7 @@ class DouyinPublisher(BasePublisher):
             )
             await _load_cookies(ctx, account_cookie)
             page = await ctx.new_page()
+            register_review(page, task)
             await page.bring_to_front()
 
             try:
@@ -328,34 +330,8 @@ class DouyinPublisher(BasePublisher):
                 await _show_banner(page, "正在等待快速检测（检测中请耐心等待）…", "system")
                 auto_ok = await _wait_for_quick_check(page, max_wait=900)
 
-                if auto_ok:
-                    await progress("✅ 检测通过，正在自动点击发布…")
-                    await _show_banner(page, "检测通过 ✅  正在自动发布，请勿操作…", "system")
-                    await _click_publish_button(page)
-                    logger.info(f"[task {task_id}] Auto-publish button clicked")
-                else:
-                    # Check if publish button is already visible (quick-check may be indeterminate)
-                    publish_btn = page.locator('button:has-text("发布")').last
-                    btn_visible = False
-                    try:
-                        btn_visible = await publish_btn.is_visible(timeout=3000)
-                    except Exception:
-                        pass
-
-                    if btn_visible:
-                        await progress("检测状态不明确，发布按钮可见，直接自动发布...")
-                        await _show_banner(page, "检测状态不明确，发布按钮已可见 — 正在自动发布，请勿操作…", "system")
-                        await _click_publish_button(page)
-                        logger.info(f"[task {task_id}] Auto-publish button clicked (quick-check indeterminate but btn visible)")
-                    else:
-                        # Fall back to user handoff
-                        await progress("⚠️ 检测未通过或超时，请手动确认后点击【发布】")
-                        await _show_banner(
-                            page,
-                            "⚠️ 检测未通过或仍在检测中，请手动检查后点击【发布】按钮",
-                            "warning",
-                        )
-                        logger.info(f"[task {task_id}] Auto-publish skipped, waiting for user (up to 15 min)…")
+                await progress("请打开平台的发布页面确认入口，查看截图后确认发布")
+                await wait_for_review(page, task_id, auto_ok)
 
                 # Handle possible scan-to-verify popup after clicking publish
                 await _handle_scan_verify(page, progress)
@@ -386,7 +362,12 @@ class DouyinPublisher(BasePublisher):
                 logger.info(f"Publish finished for task {task_id}, url={page.url}")
                 return page.url
 
+            except Exception as exc:
+                if confirmation_sent(task_id):
+                    raise PublishReviewRequired("已确认发布但结果尚未核实，请先核对作品列表，勿重复发布：" + str(exc)) from exc
+                raise
             finally:
+                close_review(task_id)
                 # Save refreshed cookies back to file before closing
                 try:
                     refreshed = await ctx.cookies()
