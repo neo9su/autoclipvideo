@@ -320,3 +320,30 @@ async def homophone_review(recording_id: int, body: HomophoneReviewRequest):
 
 
 _TEXT_REVIEW_LOCK = asyncio.Lock()
+
+
+class ProductLinkEditRequest(BaseModel):
+    product_url: str
+    expected_before: str
+
+
+@router.post('/products/{product_id}/link')
+async def edit_product_link(product_id: int, body: ProductLinkEditRequest):
+    from product_link_edit import edit_link
+    base=service()
+    async with _LOCK:
+        try:
+            return await asyncio.to_thread(edit_link,base.database,base.storage/'_product_link_edits',product_id,body.product_url,body.expected_before)
+        except (ValueError,OSError) as exc:
+            raise HTTPException(409,str(exc)) from exc
+
+
+@router.post('/product-link-edits/{batch}/restore')
+async def restore_product_link(batch: str):
+    from product_link_edit import restore_link
+    base=service()
+    async with _LOCK:
+        try:
+            return await asyncio.to_thread(restore_link,base.database,base.storage/'_product_link_edits',batch)
+        except (ValueError,OSError) as exc:
+            raise HTTPException(409,str(exc)) from exc
