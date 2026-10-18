@@ -42,7 +42,7 @@ def download_file(base, folder, item):
     verify(partial,item);partial.rename(target)
 
 
-def install(manifest, destination):
+def install(manifest, destination, source="huggingface"):
     destination=Path(destination)
     if destination.exists():
         for item in manifest['files']:verify(destination/item['name'],item)
@@ -51,11 +51,16 @@ def install(manifest, destination):
     missing=sum(item['size']-(stage/item['name']).stat().st_size if (stage/item['name']).exists() else item['size'] for item in manifest['files'])
     # Allow room for ordinary system activity; never clear other models/media.
     if shutil.disk_usage(stage).free<missing+5*1024**3:raise ValueError('Insufficient free disk space')
-    status=stage/'download-status.json';lock=threading.Lock();state={'state':'downloading','model':manifest['model'],'revision':manifest['revision'],'verified_files':[]}
+    status=stage/'download-status.json';lock=threading.Lock();state={'state':'downloading','model':manifest['model'],'revision':manifest['revision'],'verified_files':[],'download_source':source}
     def save():
         tmp=status.with_suffix('.tmp');tmp.write_text(json.dumps(state,indent=2),encoding='utf-8');tmp.replace(status)
     save()
-    base='https://huggingface.co/'+manifest['model']+'/resolve/'+manifest['revision']
+    if source=='huggingface':
+        base='https://huggingface.co/'+manifest['model']+'/resolve/'+manifest['revision']
+    elif source=='modelscope':
+        # Mirror revision is not trusted: every byte must match the pinned HF checksums.
+        base='https://modelscope.cn/models/'+manifest['model']+'/resolve/master'
+    else:raise ValueError('Unknown official source')
     def run(item):
         download_file(base,stage,item)
         with lock:state['verified_files'].append(item['name']);save()
@@ -72,5 +77,5 @@ def install(manifest, destination):
 
 
 if __name__=='__main__':
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--manifest',required=True);p.add_argument('--destination',required=True);a=p.parse_args()
-    print(json.dumps(install(json.loads(Path(a.manifest).read_text(encoding='utf-8')),a.destination)),flush=True)
+    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--manifest',required=True);p.add_argument('--destination',required=True);p.add_argument('--source',choices=['huggingface','modelscope'],default='huggingface');a=p.parse_args()
+    print(json.dumps(install(json.loads(Path(a.manifest).read_text(encoding='utf-8')),a.destination,a.source)),flush=True)
