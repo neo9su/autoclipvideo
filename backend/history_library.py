@@ -110,8 +110,17 @@ class HistoryLibrary:
                            'published': published, 'files': list(files.values())})
         selected = {x['group']['id'] for x in groups}
         selected_recs = {r['id'] for x in groups for r in x['recordings']}
-        # Preserve original recordings and every media reference outside the plan.
-        protected = {str(p) for r in tables['recordings'] if (p := self.path(r.get('filename')))}
+        # Resolve references only when their basename could refer to an output
+        # in this plan. Most historical sources live on offline archive shares.
+        candidate_paths = {f['path'] for item in groups for f in item['files']}
+        candidate_names = {Path(p).name.casefold() for p in candidate_paths}
+        protected = set()
+        for r in tables['recordings']:
+            value = r.get('filename')
+            if value and Path(str(value)).name.casefold() in candidate_names:
+                # Conservatively protect same-basename source aliases even if
+                # an archive share is currently unavailable.
+                protected.update(p for p in candidate_paths if Path(p).name.casefold() == Path(str(value)).name.casefold())
         for table, rows in tables.items():
             for row in rows:
                 own = (row.get('id') in selected if table == 'clip_groups' else
@@ -121,8 +130,8 @@ class HistoryLibrary:
                 if not own:
                     for key, value in row.items():
                         if key in OUTPUT_FIELDS or key in {'filename', 'clip_filename', 'video_path'}:
-                            p = self.path(value)
-                            if p: protected.add(str(p))
+                            if value and Path(str(value)).name.casefold() in candidate_names:
+                                protected.update(p for p in candidate_paths if Path(p).name.casefold() == Path(str(value)).name.casefold())
         for item in groups:
             item['files'] = [f for f in item['files'] if f['path'] not in protected]
         plan = {'mode': mode, 'cutoff': cutoff.isoformat(), 'groups': groups}
