@@ -41,7 +41,13 @@ while ($true) {
         continue
     }
 
-    $conflictingProcesses = Get-BackendFromOtherSession -SessionId $sessionId
+    # Check the socket too: another account's command line may be inaccessible.
+    $listeners = @(Get-NetTCPConnection -State Listen -ErrorAction Stop | Where-Object { $_.LocalPort -eq $Port })
+    if ($listeners.Count -gt 0) {
+        Start-Sleep -Seconds 15
+        continue
+    }
+    $conflictingProcesses = @(Get-BackendFromOtherSession -SessionId $sessionId)
     if ($conflictingProcesses.Count -gt 0) {
         Write-Warning "Backend listener conflict detected on port $Port; an existing backend process is active. No process was stopped."
         Start-Sleep -Seconds 15
@@ -50,7 +56,7 @@ while ($true) {
     Push-Location $scriptRoot
     try {
         Write-Host "Starting backend in interactive Windows session $sessionId"
-        $backend = Start-Process -FilePath $Python `
+        $backend = Start-Process -FilePath $Python -WindowStyle Hidden `
             -ArgumentList @("-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "$Port") `
             -WorkingDirectory $scriptRoot -PassThru
         while (-not $backend.HasExited) {

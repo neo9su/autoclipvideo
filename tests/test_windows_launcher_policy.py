@@ -46,4 +46,4 @@ def test_repository_launcher_contains_no_forced_session_shutdown():
     source=(Path(__file__).parents[1]/'backend/start_windows_backend.ps1').read_text()
     assert 'Stop-Process' not in source
     assert WATCH_LOOP in source
-    assert 'Get-BackendFromOtherSession -SessionId $sessionId' in source
+    assert 'Get-BackendFromOtherSession -SessionId $sessionId)' in source
