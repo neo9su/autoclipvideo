@@ -1333,7 +1333,9 @@ async def download_clip(recording_id: int):
         raise HTTPException(status_code=404, detail="Recording not found")
     if rec["clipped"] != 2 or not rec["clip_filename"]:
         raise HTTPException(status_code=404, detail="Clip not ready")
-    clip_path = os.path.join(os.path.dirname(__file__), "..", "recordings", rec["clip_filename"])
+    clip_path = _recording_file_path(rec["clip_filename"])
+    if not clip_path or not os.path.isfile(clip_path):
+        clip_path = os.path.join(os.path.dirname(__file__), "..", "recordings", rec["clip_filename"])
     if not os.path.exists(clip_path):
         raise HTTPException(status_code=404, detail="Clip file missing")
     return FileResponse(clip_path, media_type="video/mp4", filename=os.path.basename(rec["clip_filename"]))
@@ -1359,7 +1361,9 @@ async def download_recording_clip(clip_id: int):
             clip = await cur.fetchone()
     if not clip:
         raise HTTPException(status_code=404, detail="Clip not found")
-    clip_path = os.path.join(os.path.dirname(__file__), "..", "recordings", clip["clip_filename"])
+    clip_path = _recording_file_path(clip["clip_filename"])
+    if not clip_path or not os.path.isfile(clip_path):
+        clip_path = os.path.join(os.path.dirname(__file__), "..", "recordings", clip["clip_filename"])
     if not os.path.exists(clip_path):
         raise HTTPException(status_code=404, detail="Clip file missing")
     return FileResponse(clip_path, media_type="video/mp4", filename=os.path.basename(clip["clip_filename"]))
