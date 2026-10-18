@@ -54,13 +54,8 @@ while ($true) {
             -ArgumentList @("-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "$Port") `
             -WorkingDirectory $scriptRoot -PassThru
         while (-not $backend.HasExited) {
+            # Session discovery must never terminate in-flight backend work.
             Start-Sleep -Seconds 10
-            $activeSessionId = Get-ActiveSession
-            if ($null -eq $activeSessionId -or $activeSessionId -ne $backend.SessionId) {
-                Write-Host "Interactive session changed; restarting backend in the active session"
-                Stop-Process -Id $backend.Id -Force -ErrorAction SilentlyContinue
-                break
-            }
             $backend.Refresh()
         }
         if ($backend.ExitCode -ne 0) {
