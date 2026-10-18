@@ -20,6 +20,16 @@
       <span>{{ b.count }} 个分组 · {{ size(b.bytes) }} · {{ b.state === 'restored' ? '已恢复' : '可恢复' }}</span>
       <button v-if="['quarantined','prepared'].includes(b.state)" :disabled="busy" @click="restore(b)">恢复此批次</button>
     </div>
+    <h3>录像分辨率检查与可恢复弃用</h3>
+    <p>输入录像ID（逗号分隔，每批最多100条）。仅处理本机未关联分组的完整录像；正在处理、已有关联或探测失败的文件会跳过。低于1080P的文件移入可恢复区，暂不释放磁盘空间。</p>
+    <div class="controls"><input v-model="recordingIds" :disabled="busy" placeholder="录像ID，例如 45259,45260" @input="resolutionPlan=null" />
+      <button :disabled="busy" @click="inspectResolution">检查分辨率</button>
+      <button :disabled="busy || !resolutionPlan?.count" @click="discardLow">弃用预览中的低清录像</button></div>
+    <p v-if="resolutionPlan">可弃用 {{ resolutionPlan.count }} 条，{{ size(resolutionPlan.bytes) }}</p>
+    <table v-if="resolutionPlan"><thead><tr><th>录像ID</th><th>文件</th><th>分辨率</th><th>结果</th></tr></thead>
+      <tbody><tr v-for="r in resolutionPlan.recordings" :key="r.id"><td>{{ r.id }}</td><td>{{ r.filename }}</td><td>{{ r.width ? `${r.width}×${r.height}` : '未确认' }}</td><td>{{ reasons[r.reason] || r.reason }}</td></tr></tbody></table>
+    <div v-for="b in recordingBatches" :key="b.batch_id" class="batch"><span>{{ b.count }} 条低清录像 · {{ b.state==='restored'?'已恢复':b.state==='rolled_back'?'已回退':'可恢复' }}</span>
+      <button v-if="['prepared','quarantined'].includes(b.state)" :disabled="busy" @click="restoreRecordings(b)">恢复此批录像</button></div>
     <h3>商品发型名预览</h3>
     <p>按商品名提取主播命名。同名商品保留各自商品记录，颜色和规格在素材分段时另行区分。</p>
     <table><thead><tr><th>商品</th><th>发型名称候选</th><th>商品全名</th></tr></thead>
@@ -31,13 +41,27 @@
 import { ref, onMounted } from 'vue'
 import { remoteFetch } from '../remoteApi.js'
 const mode=ref('all'), plan=ref(null), batches=ref([]), names=ref([]), busy=ref(false), error=ref('')
+const recordingIds=ref(''), resolutionPlan=ref(null), recordingBatches=ref([])
+const reasons={below_1080p:'低于1080P，可恢复弃用', '1080p_or_higher':'保留', linked_material:'已关联分组或片段，跳过', active_or_unavailable:'正在处理或不可用，跳过', shared_source:'多个记录引用同一源文件，跳过', missing_or_external_file:'文件不在本机存储或不可用', source_changed:'文件正在变化', probe_failed:'探测失败，待检查', missing_recording:'录像ID不存在'}
+let inspectedIds=[]
+function inspectResolution(){return action(async()=>{
+  const ids=recordingIds.value.split(/[,，\s]+/).filter(Boolean).map(Number)
+  if(!ids.length || ids.length>100 || ids.some(n=>!Number.isSafeInteger(n)||n<=0))throw new Error('请输入1至100个有效录像ID')
+  resolutionPlan.value=null
+  resolutionPlan.value=await request('/recordings/inspect',{recording_ids:ids});inspectedIds=ids
+})}
+function discardLow(){
+  if(!confirm(`将 ${resolutionPlan.value.count} 条低清录像移入可恢复区，是否继续？`))return
+  return action(async()=>{await request('/recordings/quarantine',{recording_ids:inspectedIds,fingerprint:resolutionPlan.value.fingerprint});resolutionPlan.value=null;await refresh()})
+}
+function restoreRecordings(b){return action(async()=>{await request(`/recordings/${b.batch_id}/restore`,{});await refresh()})}
 const size=v=>`${(v/1024**3).toFixed(2)} GB`
 async function request(path, data) {
   const r=await remoteFetch('/api/history-library'+path, data === undefined ? {} : {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}, 0)
   const d=await r.json(); if(!r.ok) throw new Error(typeof d.detail==='string'?d.detail:'操作失败'); return d
 }
 async function action(fn) { busy.value=true;error.value='';try{await fn()}catch(e){error.value=e.message}finally{busy.value=false} }
-async function refresh(){batches.value=await request('/cleanup/batches')}
+async function refresh(){batches.value=await request('/cleanup/batches');recordingBatches.value=await request('/recordings/batches')}
 function preview(){return action(async()=>{plan.value=await request('/cleanup/preview',{mode:mode.value})})}
 function apply(){
   if(!confirm(`将 ${plan.value.count} 个分组及旧成片移入可恢复区，是否继续？`))return

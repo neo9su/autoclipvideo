@@ -89,34 +89,50 @@ class InspectRequest(BaseModel):
     recording_ids: list[int]
 
 
+def resolution_service():
+    from recording_resolution import RecordingResolution
+    base = service()
+    return RecordingResolution(base.database, base.storage)
+
+
 @router.post('/recordings/inspect')
 async def inspect_recordings(body: InspectRequest):
-    """Read-only resolution inventory; failed probes never become delete candidates."""
-    if not body.recording_ids or len(body.recording_ids) > 100:
-        raise HTTPException(422, '每批选择1至100条录像')
-    def run():
-        import json
-        import subprocess
-        from media_contract import resolve_media_file
-        from wig_catalog_names import resolution_policy
-        result = []
-        with service().connect() as con:
-            for rid in dict.fromkeys(body.recording_ids):
-                row = con.execute('SELECT * FROM recordings WHERE id=?', (rid,)).fetchone()
-                if row is None:
-                    result.append({'id':rid,'action':'review','reason':'missing_recording'});continue
-                p = resolve_media_file(row['filename'])
-                if not p or not p.is_file():
-                    result.append({'id':rid,'action':'review','reason':'missing_file'});continue
-                try:
-                    proc = subprocess.run(['ffprobe','-v','error','-select_streams','v:0',
-                        '-show_entries','stream=width,height:stream_side_data=rotation','-of','json',str(p)],
-                        capture_output=True,text=True,timeout=15,check=True)
-                    stream=json.loads(proc.stdout)['streams'][0]
-                    policy=resolution_policy(stream.get('width'),stream.get('height'))
-                    result.append({'id':rid,'filename':row['filename'],'width':stream.get('width'),
-                                   'height':stream.get('height'),**policy})
-                except (OSError, ValueError, KeyError, IndexError, subprocess.SubprocessError):
-                    result.append({'id':rid,'action':'review','reason':'probe_failed'})
-        return {'read_only':True,'recordings':result}
-    return await asyncio.to_thread(run)
+    try:
+        return await asyncio.to_thread(resolution_service().inspect, body.recording_ids)
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
+
+
+class DiscardRequest(InspectRequest):
+    fingerprint: str
+
+
+@router.post('/recordings/quarantine')
+async def quarantine_recordings(body: DiscardRequest):
+    async with _LOCK:
+        try:
+            return await asyncio.to_thread(resolution_service().execute_low, body.recording_ids, body.fingerprint)
+        except (ValueError, OSError) as e:
+            raise HTTPException(409, str(e)) from e
+
+
+@router.get('/recordings/batches')
+async def recording_batches():
+    import json
+    result = []
+    for p in resolution_service().quarantine.glob('*/journal.json'):
+        try:
+            j = json.loads(p.read_text(encoding='utf-8'))
+            result.append({'batch_id': j['batch_id'], 'state': j['state'], 'count': len(j['entries'])})
+        except (ValueError, KeyError, OSError):
+            continue
+    return result
+
+
+@router.post('/recordings/{batch}/restore')
+async def restore_recordings(body: dict, batch: str):
+    async with _LOCK:
+        try:
+            return await asyncio.to_thread(resolution_service().restore_low, batch)
+        except (ValueError, OSError) as e:
+            raise HTTPException(409, str(e)) from e
