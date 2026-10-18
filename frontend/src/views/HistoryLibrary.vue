@@ -52,6 +52,7 @@
     <div v-for="b in exportBatches" :key="b.batch_id" class="batch"><span>{{ b.files }} 个片段 · {{ exportStates[b.state] || b.state }}</span>
       <button v-if="['complete','failed','prepared','withdrawing'].includes(b.state)" :disabled="busy" @click="changeExport(b,'withdraw')">撤回此批片段</button>
       <button v-if="b.state==='withdrawn' && b.can_restore" :disabled="busy" @click="changeExport(b,'restore')">恢复完整批次</button>
+      <button v-if="b.can_retry" :disabled="busy" @click="changeExport(b,'retry')">保留旧结果并重试</button>
       <button v-if="b.state==='prepared'" :disabled="busy" @click="changeExport(b,'recover')">检查并恢复落位</button>
     </div>
     <h3>商品发型名预览</h3>
@@ -66,7 +67,7 @@ import { ref, onMounted } from 'vue'
 import { remoteFetch } from '../remoteApi.js'
 const mode=ref('all'), plan=ref(null), batches=ref([]), names=ref([]), busy=ref(false), error=ref('')
 const evidenceId=ref(''), evidence=ref(null)
-const exportBatches=ref([]), exportStates={complete:'已完成',prepared:'等待完成核验',failed:'未完成，临时结果保留',withdrawn:'已撤回',withdrawing:'撤回待恢复'}
+const exportBatches=ref([]), exportStates={complete:'已完成',prepared:'等待完成核验',failed:'未完成，临时结果保留',withdrawn:'已撤回',withdrawing:'撤回待恢复',retrying:'重试待恢复'}
 function exportArchive(p){return action(async()=>{
   archiveMessage.value='正在按源时间切片并校验，原片保留…'
   try{await request(`/archive-exports/${p.plan_id}/create`,{});archiveMessage.value='片段已生成，来源清单已保存。';await loadArchive()}catch(e){archiveMessage.value='';throw e}

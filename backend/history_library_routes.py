@@ -289,9 +289,10 @@ async def list_archive_exports():
 
 @router.post('/archive-exports/{batch_id}/{action}')
 async def change_archive_export(batch_id: str, action: str):
+    import subprocess
     async with _LOCK:
         try:
             job=await asyncio.to_thread(archive_renderer().batch_state,batch_id,action)
             return {'batch_id':job['batch_id'],'state':job['state'],'files':len(job['files'])}
-        except (ValueError,OSError) as e:
+        except (ValueError,OSError,subprocess.SubprocessError) as e:
             raise HTTPException(409,str(e)) from e

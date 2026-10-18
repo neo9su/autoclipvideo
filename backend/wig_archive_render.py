@@ -6,6 +6,7 @@ import math
 from pathlib import Path
 import socket
 import subprocess
+import uuid
 from wig_library_index import encoded, video_info
 from wig_preprocess import build_asset_name
 
@@ -156,6 +157,27 @@ class ArchiveRenderer:
         final=self.root/'exports'/batch
         staging=self.root/'export_staging'/batch
         trash=self.root/'recoverable_exports'/batch
+        if action=='retry':
+            if job['state'] not in ('failed','retrying') and not (job['state']=='withdrawn' and job.get('previous_state')=='failed'):
+                raise ValueError('只能重试已停止的失败批次')
+            if final.exists():
+                raise ValueError('已存在落位文件，先检查恢复')
+            if job['state']!='retrying':
+                token=uuid.uuid4().hex
+                job.update(state='retrying',retry_from='recoverable_exports' if trash.exists() else 'export_staging',
+                           attempt_directory='export_attempts/'+batch+'_'+token,
+                           attempt_journal='export_journals/attempts/'+batch+'_'+token+'.json')
+                write_json(journal,job)
+            origin=self.root/job['retry_from']/batch
+            retained=self.root/job['attempt_directory']
+            retained.parent.mkdir(parents=True,exist_ok=True)
+            if origin.exists() and not retained.exists():
+                origin.rename(retained)
+            elif not (retained.exists() and not origin.exists()):
+                raise ValueError('失败临时目录冲突')
+            audit=self.root/job['attempt_journal'];audit.parent.mkdir(parents=True,exist_ok=True)
+            journal.rename(audit)
+            return self.export(job['plan_id'])
         if action in ('restore','recover') and job['state']=='complete':
             self.validate_files(final,job)
             return job
@@ -218,7 +240,8 @@ class ArchiveRenderer:
                 j=json.loads(p.read_text(encoding='utf-8'))
                 result.append({'batch_id':j['batch_id'],'plan_id':j['plan_id'],'state':j['state'],
                                'files':len(j['files']),'created_at':j['created_at'],
-                               'can_restore':j.get('previous_state')=='complete'})
+                               'can_restore':j.get('previous_state')=='complete',
+                               'can_retry':j['state'] in ('failed','retrying') or (j['state']=='withdrawn' and j.get('previous_state')=='failed')})
             except (OSError,ValueError,KeyError):
                 continue
         return result

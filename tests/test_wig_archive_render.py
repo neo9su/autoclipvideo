@@ -101,3 +101,19 @@ def test_withdraw_interruption_is_retryable_and_pending_plan_api_rejects_export(
     with pytest.raises(HTTPException) as failure:asyncio.run(routes.create_archive_export(plan))
     assert failure.value.status_code==409
     assert len(renderer.list_batches())==1
+
+
+def test_failed_cut_can_retry_without_overwriting_old_results(tmp_path,monkeypatch):
+    import wig_archive_render
+    source,index,renderer,plan=fixture(tmp_path)
+    original=wig_archive_render.precise_cut
+    def fail(*args):raise OSError('isolated transient failure')
+    monkeypatch.setattr(wig_archive_render,'precise_cut',fail)
+    with pytest.raises(OSError):renderer.export(plan)
+    old=renderer.list_batches()[0]
+    assert old['state']=='failed' and old['can_retry']
+    monkeypatch.setattr(wig_archive_render,'precise_cut',original)
+    job=renderer.batch_state(old['batch_id'],'retry')
+    assert job['state']=='complete' and job['batch_id']==old['batch_id']
+    assert len(list((renderer.root/'export_journals'/'attempts').glob('*.json')))==1
+    assert len(list((renderer.root/'export_attempts').iterdir()))==1
