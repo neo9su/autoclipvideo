@@ -372,13 +372,13 @@ def _saved_qianchuan_resume(group: Dict) -> tuple[Optional[Dict], Optional[str]]
     """Return a resumable script and its pinned catalogue identity.
 
     A restarted worker must never reselect a different product for an already
-    claimed job.  Only scripts that pin a link-bearing catalogue row qualify.
+    claimed job.  A stable catalogue identity is sufficient; its editable URL may still be blank.
     """
     script = _loads_qianchuan_json(group.get("qianchuan_script"))
     if not isinstance(script, dict):
         return None, None
     product = script.get("product_context")
-    if not isinstance(product, dict) or not str(product.get("product_url") or "").startswith(("http://", "https://")):
+    if not isinstance(product, dict):
         return None, None
     identity = product.get("id") or product.get("product_id")
     return (script, str(identity)) if identity else (None, None)
@@ -429,8 +429,8 @@ async def _run_qianchuan_pipeline(group_id: int) -> None:
             if await hold_for_review(db, group_id, match.get("identity")):
                 return
         product_context = match.get("product")
-        if not match.get("ok") or not product_context or not product_context.get("product_url"):
-            raise RuntimeError(match.get("reason") or "商品链接或商品强匹配不足，拒绝自动续跑")
+        if not match.get("ok") or not product_context:
+            raise RuntimeError(match.get("reason") or "商品匹配不足，无法确定当前商品")
         if script is None:
             script = generate_qianchuan_script(
                 group, product_context=product_context, selling_points=[]

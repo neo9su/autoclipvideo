@@ -23,8 +23,15 @@ def test_resume_keeps_pinned_link_bearing_product():
     assert identity == "740"
 
 
-def test_resume_rejects_unlinked_or_malformed_saved_product():
+def test_resume_rejects_missing_or_malformed_saved_identity():
     assert _saved_qianchuan_resume({"qianchuan_script": "{}"}) == (None, None)
     assert _saved_qianchuan_resume({"qianchuan_script": json.dumps({
-        "product_context": {"id": 740, "product_url": ""}
+        "product_context": {"product_url": ""}
     })}) == (None, None)
+
+
+def test_resume_preserves_identity_without_url():
+    for url in (None, "", "not-a-link"):
+        script = {"preview_mode": False, "product_context": {"id": 740, "product_url": url}}
+        saved, identity = _saved_qianchuan_resume({"qianchuan_script": json.dumps(script)})
+        assert saved == script and identity == "740"
