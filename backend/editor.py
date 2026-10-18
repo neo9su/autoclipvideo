@@ -3039,7 +3039,7 @@ async def _edit_via_gpu(
             break
         if status == "error":
             logger.warning(f"GPU clip job {job_id} error: {data.get('error')}")
-            return None
+            raise RuntimeError(f"Remote GPU clip job {job_id} failed: {data.get('error') or 'unknown worker error'}")
     else:
         logger.warning(f"GPU clip job {job_id} timed out")
         return None

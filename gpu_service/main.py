@@ -659,7 +659,13 @@ async def _nvenc_xfade_merge(seg_files_with_dur: list, out_dir: str):
               f"[va][vb]xfade=transition={tr_used}:duration={fade}:offset={off:.3f}[vout]")
 
         if ha1 and ha2:
-            fc = vf + f";[0:a][1:a]acrossfade=d={fade}[aout]"
+            # acrossfade overlaps audio ends; its 'o' option is a boolean, not an offset.
+            # Align each audio input to its video span before overlapping the ends.
+            fc = vf + (
+                f";[0:a]aresample=async=1:first_pts=0,apad,atrim=duration={d1:.3f},asetpts=PTS-STARTPTS[a0];"
+                f"[1:a]aresample=async=1:first_pts=0,apad,atrim=duration={d2:.3f},asetpts=PTS-STARTPTS[a1];"
+                f"[a0][a1]acrossfade=d={fade}:c1=tri:c2=tri[aout]"
+            )
             maps = ["-map", "[vout]", "-map", "[aout]"]
             aargs = ["-c:a", "aac", "-b:a", "128k"]
         elif ha1:

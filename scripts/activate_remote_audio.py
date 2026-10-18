@@ -85,14 +85,14 @@ def wait_health(port, required=None, seconds=90):
     raise RuntimeError(f'Service readiness timeout: {port}')
 
 
-def main():
-    for path, digest in EXPECTED.items():
+def main(expected=None, rollback_order=None, label='audio-activation'):
+    for path, digest in (EXPECTED if expected is None else expected).items():
         if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
             raise RuntimeError('Source drift; no maintenance action')
     if request(8899, '/api/gpu/status').get('maintenance') is not False:
         raise RuntimeError('Existing maintenance state must be preserved; no action')
     before_gpu = request(8877, '/health')
-    backup = ROOT / 'codex_rollbacks' / ('audio-activation-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
+    backup = ROOT / 'codex_rollbacks' / (label + '-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
     backup.mkdir()
     with sqlite3.connect(ROOT / 'douyin.db') as db:
         db.row_factory = sqlite3.Row
@@ -101,7 +101,7 @@ def main():
             db.backup(snapshot)
     journal = dict(backup=str(backup), gpu_pid_before=before_gpu['pid'],
                    interrupted_control_plane_groups=active, phase='backed_up',
-                   database_restore='never automatic', rollback_order=['remote-audio-20261018-162521', 'remote-audio-20261018-162339'])
+                   database_restore='never automatic', rollback_order=rollback_order if rollback_order is not None else ['remote-audio-20261018-162521', 'remote-audio-20261018-162339'])
     def record(phase):
         journal['phase'] = phase
         (backup / 'activation.json').write_text(json.dumps(journal, indent=2), encoding='utf-8')
