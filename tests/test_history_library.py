@@ -77,3 +77,14 @@ def test_stale_preview_rejected_before_file_move(tmp_path):
     with library.connect() as c:c.execute("UPDATE publish_tasks SET status='scheduled' WHERE id=1")
     with pytest.raises(ValueError):library.execute('all',plan['cutoff'],plan['fingerprint'])
     assert clip.exists()
+
+
+def test_unreadable_media_excludes_group_instead_of_deleting_its_record(tmp_path, monkeypatch):
+    library, clip=inventory(tmp_path)
+    original=Path.is_symlink
+    def inaccessible(path):
+        if path==clip:raise PermissionError('offline or restricted archive')
+        return original(path)
+    monkeypatch.setattr(Path,'is_symlink',inaccessible)
+    assert not library.preview()['groups']
+    assert clip.exists()

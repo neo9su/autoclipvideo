@@ -63,16 +63,20 @@ class HistoryLibrary:
         # Path.resolve on an offline UNC share may block for minutes.
         p = Path(os.path.abspath(p))
         result = None
-        if p.is_relative_to(self.storage) and not p.is_relative_to(self.quarantine) and not p.is_symlink():
-            resolved = p.resolve()
-            if resolved.is_relative_to(self.storage) and not resolved.is_relative_to(self.quarantine) and resolved.is_file():
-                result = resolved
+        try:
+            if p.is_relative_to(self.storage) and not p.is_relative_to(self.quarantine) and not p.is_symlink():
+                resolved = p.resolve()
+                if resolved.is_relative_to(self.storage) and not resolved.is_relative_to(self.quarantine) and resolved.is_file():
+                    result = resolved
+        except OSError:
+            self._path_errors.add(key)
         if cache is not None:
             cache[key] = result
         return result
 
     def preview(self, mode='all', cutoff=None):
         self._path_cache = {}
+        self._path_errors = set()
         if mode not in {'all', 'published', 'unpublished'}:
             raise ValueError('无效的发布状态')
         cutoff = date(cutoff) if cutoff else three_months_before(datetime.now(timezone.utc))
@@ -104,6 +108,8 @@ class HistoryLibrary:
                 continue
             files = {str(p): {'path': str(p), 'size': p.stat().st_size, 'mtime_ns': p.stat().st_mtime_ns}
                      for v in outputs if (p := self.path(v))}
+            if any(str(v) in self._path_errors for v in outputs if v):
+                continue
             if any(datetime.fromtimestamp(f['mtime_ns']/1e9, timezone.utc) >= cutoff for f in files.values()):
                 continue
             groups.append({'group': g, 'recordings': recs, 'clips': clips, 'tasks': tasks,
