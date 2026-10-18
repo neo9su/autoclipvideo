@@ -266,3 +266,7 @@
 - 只读盘点：F盘约19.84GiB/C盘约75.13GiB；clips约170.98GiB，director_outputs约53.77GiB，codex约1.46GiB，旧音频修复备份_opening_fix_audio_backup约0.715GiB/225文件。现有成片文件最老约9天，并非均符合三个月清理条件。
 - 安全检查发现媒体路径解析拒绝跨根目录映射，因此不直接迁移成片目录、不放宽访问限制。先仅迁移不参与正常播放的旧音频修复备份到C盘，保留原F路径目录映射，供既有回退流程读取。此操作仅应急恢复少量余量，不代表批量生产容量已足够。
 - 管理工具scripts/relocate_media_tree.py：逐文件SHA256校验复制，源变化/空间不足/嵌套链接时拒绝；映射验证后仅回收已验证的重复原件；记录逐文件清单与阶段。恢复时拒绝覆盖目标新内容，复制回F盘并保留C盘备份。6项临时文件测试通过，覆盖正常回退、映射失败、损坏复制、复制期间源变化与链接拒绝。
+
+备份迁移完成：管理工具版本8c8eb40，Windows回退演练通过后，将225个旧音频修复备份共767236803字节迁到 `C:\Users\neo\douyin_backend\media_overflow\_opening_fix_audio_backup`。原 `F:\douyin_recordings\_opening_fix_audio_backup` 保留目录映射，逐文件SHA256一致；原录像/成片/商品/分组/发布任务未修改。C盘剩余约74.25GiB；F盘从19.837恢复20.551GiB，稍后20.424GiB，健康/前端分别200约0.106/0.046秒。未提交人工GPU作业或真实发布。
+
+迁移记录及回退：`C:\Users\neo\douyin_backend\codex_rollbacks\storage-relocation-8c8eb40-20261018-141445`，包含管理工具、SQLite一致性快照、relocation.json逐文件清单、rollback.py及post-deploy.json。rollback.py校验C盘备份无新内容、F盘足够后复制回原处并恢复普通目录，保留C盘备份；不覆盖数据库。仅回收已验证重复副本，无媒体内容丢弃。现有6项迁移测试通过。F盘只略高于20GiB底线，长期批量生产仍需扩容或经平台兼容验证的成片分层迁移，不可把应急措施当容量问题完全解决。
