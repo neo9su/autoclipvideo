@@ -1449,6 +1449,21 @@ async def admin_health():
     }
 
 
+def _active_media_job_counts():
+    """Include every media queue; unknown states remain active for safe maintenance."""
+    terminal = {"done", "error", "cancelled", "canceled"}
+    return {
+        name: sum(1 for job in globals().get(registry, {}).values()
+                  if job.get("status") not in terminal)
+        for name, registry in (
+            ("transcription", "_jobs"), ("clip", "_clip_jobs"),
+            ("tts", "_tts_jobs"), ("audio_concat", "_audio_concat_jobs"),
+            ("concat", "_concat_jobs"), ("classic_concat", "_classic_concat_jobs"),
+            ("director", "_director_jobs"),
+        )
+    }
+
+
 @app.get("/health")
 async def health():
     _w = getattr(_gpu_sem, "_waiters", None)
@@ -1481,6 +1496,7 @@ async def health():
         "queue_depth": queued,
         "clip_jobs_running": clip_running,
         "clip_jobs_pending": clip_pending,
+        "media_jobs_active": _active_media_job_counts(),
         "transcription_watchdog": {
             **_watchdog_stats,
             "interval_seconds": _WATCHDOG_INTERVAL_SECONDS,

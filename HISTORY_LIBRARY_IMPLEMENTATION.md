@@ -319,3 +319,10 @@
 - Both patched file SHA256: `ed822011036a726bd35605d677d489b1e13f573ef343cf02fbaedae1ad16ea4a`.
 - GPU service was briefly idle but accepted new work before the final restart check. The guard correctly aborted before calling the watchdog restart endpoint. **Running PID 19956 has not loaded this patch; activation requires an idle maintenance restart.** No forced stop, new GPU test job or publishing action occurred.
 - Post-write CPU execution of the deployed guard returned HTTP 507. GPU8877 health, backend8899 health/frontend and watchdog8878 status all returned HTTP 200; GPU PID remained 19956, confirming no restart.
+
+### 2026-10-18 Complete media activity health reporting (repository only)
+
+- Activation audit: GPU PID19956 reported all legacy clip/concat counters idle, but backend had 6 recording tasks and 12 group tasks active. Recent logs show group5305 entering director composition after voiceover. Existing health counters omit director, TTS and audio-concat activity; they cannot authorize a safe restart by themselves. No restart was attempted this round.
+- Repository `gpu_service/main.py` now adds `media_jobs_active` counts for transcription, clips, TTS, audio concat, concat, classic concat and director. Unknown or missing states count as active, terminal historical jobs do not. Existing API fields are preserved. **This health change is not yet applied to production; the low-disk production source fix also remains unloaded in PID19956.**
+- Four new CPU tests plus prior regression tests: 14 passed. No GPU workload was submitted.
+- Further root cause: production `voice_director.py` forces non-Qianchuan audio shorter than 30 seconds through `local_media_slot("voice director audio stretch")` and local ffmpeg. This triggers the existing GPU-only execution protection, explaining creative failures for groups5259/5260. Protection remains enabled. A remote audio duration-adjustment design is still needed; no untested audio-path change was deployed.
