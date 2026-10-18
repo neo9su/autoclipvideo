@@ -270,3 +270,9 @@
 备份迁移完成：管理工具版本8c8eb40，Windows回退演练通过后，将225个旧音频修复备份共767236803字节迁到 `C:\Users\neo\douyin_backend\media_overflow\_opening_fix_audio_backup`。原 `F:\douyin_recordings\_opening_fix_audio_backup` 保留目录映射，逐文件SHA256一致；原录像/成片/商品/分组/发布任务未修改。C盘剩余约74.25GiB；F盘从19.837恢复20.551GiB，稍后20.424GiB，健康/前端分别200约0.106/0.046秒。未提交人工GPU作业或真实发布。
 
 迁移记录及回退：`C:\Users\neo\douyin_backend\codex_rollbacks\storage-relocation-8c8eb40-20261018-141445`，包含管理工具、SQLite一致性快照、relocation.json逐文件清单、rollback.py及post-deploy.json。rollback.py校验C盘备份无新内容、F盘足够后复制回原处并恢复普通目录，保留C盘备份；不覆盖数据库。仅回收已验证重复副本，无媒体内容丢弃。现有6项迁移测试通过。F盘只略高于20GiB底线，长期批量生产仍需扩容或经平台兼容验证的成片分层迁移，不可把应急措施当容量问题完全解决。
+
+### 2026-10-18 用户授权旧成片清理与临时片段跨机归档
+
+- 用户明确授权清理三个月前生成的视频，录像源文件保留。截止2026-07-18当地零点（UTC06:00）。203主要生成池未发现早于截止的现存视频；220生产根目录和director_outputs初查约2224个候选/254.87GiB，尚需排除两端源录像和活跃引用。清理先同卷隔离，保留inode/大小/mtime清单和禁止覆盖新文件的回退；不按旧分组日期误删近期重生成版本。
+- 222 SSH可达，disk2约5TB可用；220约895GiB可用。203有91个至少7天未修改且GPU登记已done/error的剪辑任务中间片段，共33.43GiB，先归档22个任务约8.199GiB。仅seg数字.mp4，保留最终成片/原录像/字幕；同时核对数据库引用，传输SHA256及回执验证后才回收源副本。
+- 管理脚本archive_clip_temps.py和quarantine_generated_videos.py，6项隔离测试通过，含传输截断、回执/源变化、禁止原片名称、保留新文件及完整恢复。
