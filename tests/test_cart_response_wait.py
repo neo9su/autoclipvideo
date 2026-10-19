@@ -1,8 +1,9 @@
 """Exercise real cart submission function against a delayed/absent platform response."""
-import ast,asyncio,logging
+import ast,asyncio,logging,sys
 from pathlib import Path
 from types import SimpleNamespace
 import pytest
+sys.path.insert(0,str(Path(__file__).parents[1]/"backend"))
 from publish_cart_flow import CartOutcomeUnclear,ProductLinkUnavailable
 source=(Path(__file__).parents[1]/'backend/publisher_douyin.py').read_text()
 node=next(n for n in ast.parse(source).body if isinstance(n,ast.AsyncFunctionDef) and n.name=='_attach_product')
