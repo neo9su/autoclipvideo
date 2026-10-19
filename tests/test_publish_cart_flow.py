@@ -31,3 +31,13 @@ async def test_first_success_stops_before_later_error():
         if link=='later_error':raise RuntimeError('must not be attempted')
     result=await attach_selected_products(None,['good','later_error'],[],attach)
     assert calls==['good'] and result['attached']==[0]
+
+@pytest.mark.asyncio
+async def test_uncertain_cart_is_not_retried_with_another_link():
+    from publish_cart_flow import CartOutcomeUnclear
+    calls=[]
+    async def attach(page,link,short_title):
+        calls.append(link);raise CartOutcomeUnclear('需要核对现场')
+    with pytest.raises(CartOutcomeUnclear):
+        await attach_selected_products(None,['uncertain','good'],[],attach)
+    assert calls==['uncertain']

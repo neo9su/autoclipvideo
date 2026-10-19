@@ -1,3 +1,4 @@
+from publish_cart_flow import CartOutcomeUnclear
 from publish_cart_flow import attach_selected_products
 from publish_review import register_review, close_review, wait_for_review, confirmation_sent, PublishReviewRequired, update_cart_result
 """
@@ -1356,47 +1357,15 @@ async def _attach_product(page, product_link: str, short_title: str = ""):
             await link_input.clear()
             raise ProductLinkUnavailable("商品链接未通过发布页面校验，请检查链接及账号挂车权限")
 
-        # 4. Scroll into view → fresh bounding box → page.mouse.click (trusted events)
-        await add_btn.scroll_into_view_if_needed()
-        await asyncio.sleep(0.4)
-        box = await add_btn.bounding_box()
-        logger.info(f"添加链接 bounding_box: {box}")
-        if box:
-            cx = box["x"] + box["width"] / 2
-            cy = box["y"] + box["height"] / 2
-            await page.mouse.move(cx, cy)
-            await asyncio.sleep(0.15)
-            await page.mouse.click(cx, cy)
-        else:
-            await add_btn.click()
-        await asyncio.sleep(1.2)
-
-        # 5. Verify click landed: expect 编辑商品 dialog or a product-added indicator
-        edit_visible = await page.locator(':text("编辑商品")').first.is_visible()
-        if not edit_visible:
-            logger.info("No dialog after first click — trying JS fallback")
-            js_ok = await page.evaluate("""() => {
-                const input = document.querySelector(
-                    'input[placeholder*="粘贴商品链接"], input[placeholder*="商品链接"]'
-                );
-                if (!input) return false;
-                // Walk up and search any element type (span/div/button/a)
-                let el = input.parentElement;
-                for (let i = 0; i < 8; i++) {
-                    if (!el) break;
-                    for (const node of el.querySelectorAll('button, span, div, a')) {
-                        if (node.textContent.trim() === '添加链接') {
-                            node.scrollIntoView({block: 'center'});
-                            node.click();
-                            return true;
-                        }
-                    }
-                    el = el.parentElement;
-                }
-                return false;
-            }""")
-            logger.info(f"JS fallback result: {js_ok}")
-            await asyncio.sleep(1.2)
+        # Use Playwright hit testing; do not click through overlays or repeat an
+        # ambiguous cart submission. is_visible(timeout=...) does not wait.
+        await add_btn.click(timeout=10000)
+        try:
+            await page.locator(':text("编辑商品"):visible, :text("未搜索到对应商品"):visible').first.wait_for(
+                state="visible", timeout=30000)
+        except Exception as exc:
+            evidence = await _capture_upload_diagnostics(page, "cart", "cart_result_missing")
+            raise CartOutcomeUnclear("挂车点击后30秒未出现确认或明确拒绝；已保存现场：" + evidence) from exc
 
         # 6. Check for "未搜索到对应商品" error dialog
         error_dialog = page.locator(':text("未搜索到对应商品")').first
@@ -1432,7 +1401,7 @@ async def _attach_product(page, product_link: str, short_title: str = ""):
             await edit_dialog.wait_for(state="hidden", timeout=8000)
             logger.info("编辑商品 dialog completed")
         else:
-            raise RuntimeError("未确认商品挂车结果：未出现编辑商品确认，请检查发布页面后重试")
+            raise CartOutcomeUnclear("挂车结果不明确，请核对现场；未执行发布")
 
     except Exception as e:
         logger.warning("商品挂车未完成 (%s)", type(e).__name__)
