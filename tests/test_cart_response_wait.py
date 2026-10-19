@@ -31,7 +31,7 @@ class Locator:
 class Page:
     def __init__(self,missing=False):self.missing=missing;self.waited=False;self.clicks=0
     def locator(self,selector):return Locator(self,selector)
-    def get_by_text(self,*a,**kw):return Locator(self,'add')
+    def get_by_text(self,text,**kw):return Locator(self,'add' if text=='添加链接' else text)
 @pytest.mark.asyncio
 async def test_delayed_dialog_waited_for_without_second_submission():
     p=Page();await ns['_attach_product'](p,'https://example.test/product','商品')
@@ -40,5 +40,18 @@ async def test_delayed_dialog_waited_for_without_second_submission():
 async def test_absent_response_saves_evidence_and_stops():
     p=Page(True)
     with pytest.raises(CartOutcomeUnclear,match='cart-evidence.json'):
+        await ns['_attach_product'](p,'https://example.test/product','商品')
+    assert p.clicks==1
+
+@pytest.mark.asyncio
+async def test_account_quota_is_explicit_and_not_retried():
+    class QuotaLocator(Locator):
+        async def is_visible(self,**kw):
+            if self.selector in ['无法添加购物车','您可发布的购物车视频数量']:return True
+            return await super().is_visible(**kw)
+    class QuotaPage(Page):
+        def get_by_text(self,text,**kw):return QuotaLocator(self,'add' if text=='添加链接' else text)
+    p=QuotaPage()
+    with pytest.raises(CartOutcomeUnclear,match='已达限额'):
         await ns['_attach_product'](p,'https://example.test/product','商品')
     assert p.clicks==1

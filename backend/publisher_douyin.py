@@ -1361,11 +1361,16 @@ async def _attach_product(page, product_link: str, short_title: str = ""):
         # ambiguous cart submission. is_visible(timeout=...) does not wait.
         await add_btn.click(timeout=10000)
         try:
-            await page.locator(':text("编辑商品"):visible, :text("未搜索到对应商品"):visible').first.wait_for(
+            await page.locator(':text("编辑商品"):visible, :text("未搜索到对应商品"):visible, :text("无法添加购物车"):visible').first.wait_for(
                 state="visible", timeout=30000)
         except Exception as exc:
             evidence = await _capture_upload_diagnostics(page, "cart", "cart_result_missing")
             raise CartOutcomeUnclear("挂车点击后30秒未出现确认或明确拒绝；已保存现场：" + evidence) from exc
+
+        if (await page.get_by_text("无法添加购物车", exact=True).first.is_visible()
+                and await page.get_by_text("您可发布的购物车视频数量", exact=False).first.is_visible()):
+            evidence = await _capture_upload_diagnostics(page, "cart", "cart_account_limit")
+            raise CartOutcomeUnclear("抖音账号购物车视频发布数量已达限额；请按平台提示等待额度恢复。未执行发布，未自动换商品重试。现场：" + evidence)
 
         # 6. Check for "未搜索到对应商品" error dialog
         error_dialog = page.locator(':text("未搜索到对应商品")').first
