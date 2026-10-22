@@ -19,7 +19,7 @@ function notifyLoading(delta) {
 export function fetchWithTimeout(url, options = {}, timeout = FETCH_TIMEOUT_MS) {
   const method = (options.method || 'GET').toUpperCase()
   const key = method === 'GET' ? `${method}:${url}` : null
-  if (key && inFlightRequests.has(key)) return inFlightRequests.get(key)
+  if (key && inFlightRequests.has(key)) return inFlightRequests.get(key).then(response => response.clone())
 
   const request = (async () => {
     notifyLoading(1)
@@ -49,7 +49,8 @@ export function fetchWithTimeout(url, options = {}, timeout = FETCH_TIMEOUT_MS) 
       () => inFlightRequests.delete(key),
     )
   }
-  return request
+  // Each caller consumes its own body; only the network request is shared.
+  return key ? request.then(response => response.clone()) : request
 }
 
 async function readErrorMessage(response, fallback = '请求失败') {
