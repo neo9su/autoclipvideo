@@ -5,6 +5,13 @@ BASE=Path(r'C:\Users\neo\douyin_backend\codex_rollbacks\disk-cleanup-20261021')
 ROOT=Path(r'F:\douyin_recordings\clips')
 DB=Path(r'C:\Users\neo\douyin_backend\douyin.db')
 JOBS=Path(r'F:\douyin_recordings\jobs.db')
+def durable_bytes(path,data):
+    temporary=path.with_name(path.name+'.writing')
+    with temporary.open('xb') as stream:
+        stream.write(data);stream.flush();os.fsync(stream.fileno())
+    os.replace(temporary,path)
+def durable_json(path,value):durable_bytes(path,json.dumps(value,ensure_ascii=False,indent=2).encode())
+
 def business_ids():
     ids=set()
     with sqlite3.connect('file:'+str(DB)+'?mode=ro',uri=True) as c:
@@ -48,7 +55,7 @@ def make_plan():
         if current and size+r['bytes']>4*2**30:batches.append(current);current=[];size=0
         current.append(r['path']);size+=r['bytes']
     if current:batches.append(current)
-    p=BASE/'batches.json';assert not p.exists();p.write_text(json.dumps(batches,indent=2));print(json.dumps({'batches':len(batches)}))
+    p=BASE/'batches.json';assert not p.exists();durable_json(p,batches);print(json.dumps({'batches':len(batches)}))
 
 def prepare(index):
     dirs=json.loads((BASE/'batches.json').read_text())[index];validate_dirs(dirs)
@@ -69,9 +76,9 @@ def prepare(index):
             manifest=json.dumps(dict(directories=dirs,files=records),ensure_ascii=False,indent=2).encode()
             info=tarfile.TarInfo('manifest.json');info.size=len(manifest);archive.addfile(info,io.BytesIO(manifest))
         writer.flush();os.fsync(output.fileno());archive_hash=writer.hash.hexdigest()
-    (b/'manifest.json').write_bytes(manifest)
+    durable_bytes(b/'manifest.json',manifest)
     result=dict(index=index,bytes=sum(x['size'] for x in records),files=len(records),archive_sha256=archive_hash,archive=str(b/'clips.tar'))
-    (b/'archive-info.json').write_text(json.dumps(result));print(json.dumps(result),flush=True)
+    durable_json(b/'archive-info.json',result);print(json.dumps(result),flush=True)
 
 def finish(index,verified_sha,archive_location):
     b=BASE/f'batch-{index:03d}';info=json.loads((b/'archive-info.json').read_text());assert verified_sha==info['archive_sha256']
@@ -82,7 +89,7 @@ def finish(index,verified_sha,archive_location):
             h=hashlib.sha256()
             for data in iter(lambda:f.read(8*1024*1024),b''):h.update(data)
         assert h.hexdigest()==r['sha256'],'Source hash changed'
-    (b/'external-copy.json').write_text(json.dumps(dict(location=archive_location,sha256=verified_sha)))
+    durable_json(b/'external-copy.json',dict(location=archive_location,sha256=verified_sha))
     with (b/'removed.jsonl').open('x') as journal:
         for r in manifest['files']:
             p=Path(r['path']);assert p.stat().st_mtime_ns==r['mtime_ns'];p.unlink();journal.write(json.dumps(r)+'\n');journal.flush()
@@ -92,4 +99,4 @@ def finish(index,verified_sha,archive_location):
             except OSError:pass
     (b/'clips.tar').unlink()
     result=dict(index=index,removed_bytes=info['bytes'],free_f_gb=round(shutil.disk_usage('F:\\').free/2**30,3))
-    (b/'complete.json').write_text(json.dumps(result));print(json.dumps(result),flush=True)
+    durable_json(b/'complete.json',result);print(json.dumps(result),flush=True)

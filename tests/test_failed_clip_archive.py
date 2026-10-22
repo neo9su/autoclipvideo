@@ -24,3 +24,20 @@ def test_changed_source_aborts_before_removal(tmp_path):
     info=json.loads((m.BASE/'batch-000'/'archive-info.json').read_text());(p/'seg0.mp4').write_bytes(b'new')
     with pytest.raises(AssertionError,match='Source changed'):m.finish(0,info['archive_sha256'],'offhost')
     assert (p/'seg0.mp4').exists()
+
+def test_resume_reuses_prepared_archive_without_rearchiving(tmp_path,monkeypatch):
+    spec=importlib.util.spec_from_file_location('runner',Path(__file__).parents[1]/'scripts/run_failed_clip_archive.py');m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+    m.DEST=tmp_path/'offhost';content=b'archived-data';info={'archive':'C:\\journal\\clips.tar','archive_sha256':hashlib.sha256(content).hexdigest(),'bytes':len(content),'files':1};calls=[]
+    def remote(call):
+        calls.append(call)
+        if "'count'" in call:return {'count':1}
+        if 'b=BASE' in call:return {'done':None,'prepared':info,'exists':True}
+        if call.startswith('finish('):return {'index':0,'removed_bytes':len(content),'free_f_gb':40}
+        raise AssertionError('Prepared source must not be archived again')
+    def copy(args,**kwargs):
+        destination=Path(args[-1]);source=args[-2]
+        destination.write_bytes(content if source.endswith('clips.tar') else b'{}')
+    monkeypatch.setattr(m,'remote',remote);monkeypatch.setattr(m.subprocess,'run',copy)
+    m.main();m.main()
+    assert (m.DEST/'batch-000'/'clips.tar').read_bytes()==content
+    assert sum(x.startswith('finish(') for x in calls)==1
