@@ -74,3 +74,25 @@ console.log('publish selection: search, isolated drafts, per-video tasks, partia
   f.form().no_cart=true;await f.batch.submit();assert.equal(f.calls.length,2)
   assert(f.calls.every(x=>x.no_cart && x.product_ids===null))
 }
+
+// AI copy generated on one video is shared with every selected video.
+{
+  const f = fixture()
+  f.batch.focus(f.groups[0]); f.form().title = '人生标题'
+  f.batch.focus(f.groups[1]); f.form().title = '夺回标题'
+  f.batch.focus(f.groups[2]); f.form().title = '天蝎座标题'
+  f.batch.focus(f.groups[0]); Object.assign(f.form(), { description: '共同AI描述', tags: '#假发 #造型' })
+  f.batch.focus(f.groups[1]); assert.equal(f.form().description, '共同AI描述'); assert.equal(f.form().tags, '#假发 #造型')
+  await f.batch.submit()
+  assert.deepEqual(f.calls.map(x => x.title), ['人生标题', '夺回标题', '天蝎座标题'])
+  assert(f.calls.every(x => x.description === '共同AI描述' && x.tags === '#假发 #造型'))
+  f.batch.focus(f.groups[0]); assert.equal(f.form().description, ''); assert.equal(f.form().tags, '')
+}
+{
+  const failures = new Set([2]), f = fixture(failures)
+  f.batch.focus(f.groups[0]); Object.assign(f.form(), { description: '先生成再多选', tags: '#原标签' })
+  f.batch.focus(f.groups[1]); assert.equal(f.form().description, '先生成再多选')
+  Object.assign(f.form(), { description: '最终共同描述', tags: '#最终标签' })
+  await f.batch.submit(); failures.clear(); await f.batch.submit()
+  assert(f.calls.every(x => x.description === '最终共同描述' && x.tags === '#最终标签'))
+}

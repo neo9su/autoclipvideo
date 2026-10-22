@@ -14,11 +14,13 @@ export function codexCreatePublishSelection(options) {
   const ids = ref([]), query = ref(''), submitting = ref(false), errors = ref([]), busy = ref(false)
   const drafts = new Map()
   let cart = { product_ids: [], no_cart: false }
+  let copy = { description: '', tags: '' }
   const clone = value => JSON.parse(JSON.stringify(value))
   const locked = () => submitting.value || busy.value || options.editingBusy?.()
   function snapshot() {
     const form = options.getForm()
     cart = { product_ids: [...(form.product_ids || [])], no_cart: !!form.no_cart }
+    copy = { description: form.description || '', tags: form.tags || '' }
     if (ids.value.includes(form.group_id)) drafts.set(form.group_id, { form: clone(form), extras: clone(options.getExtras()) })
   }
   function adopt() {
@@ -35,7 +37,7 @@ export function codexCreatePublishSelection(options) {
     options.setForm(draft ? clone(draft.form) : { group_id: group.id, platform: shared.platform,
       account_id: shared.account_id || '', title: '', description: '', tags: '', product_ids: [], no_cart: false })
     // Platform/account/cart are shared; each video keeps its own copy.
-    Object.assign(options.getForm(), { platform: shared.platform, account_id: shared.account_id || '', ...clone(cart) })
+    Object.assign(options.getForm(), { platform: shared.platform, account_id: shared.account_id || '', ...clone(cart), ...clone(copy) })
     options.setExtras(draft ? clone(draft.extras) : { version: options.defaultVersion(group), schemes: [], scheme: '', matched: null })
     snapshot()
   }
@@ -52,6 +54,7 @@ export function codexCreatePublishSelection(options) {
     }
   }
   function clear() {
+    copy = { description: '', tags: '' }
     ids.value = []; drafts.clear(); query.value = ''; errors.value = []
     options.setForm({ ...options.getForm(), group_id: '', title: '', description: '', tags: '', product_ids: [] })
     options.setExtras({ version: '', schemes: [], scheme: '', matched: null })
@@ -68,6 +71,7 @@ export function codexCreatePublishSelection(options) {
     const shared = clone(options.getShared())
     if (!shared.platform) return
     const sharedCart = clone(cart)
+    const sharedCopy = clone(copy)
     if (!sharedCart.no_cart && !sharedCart.product_ids.length) { options.toast('请为本批视频选择共同挂车商品', 'error'); return }
     if (!sharedCart.no_cart && sharedCart.product_ids.length > 5) { options.toast('本批视频最多选择5件共同挂车商品', 'error'); return }
     const pending = ids.value.map(id => ({ id, draft: clone(drafts.get(id)) }))
@@ -82,10 +86,10 @@ export function codexCreatePublishSelection(options) {
         const form = draft.form
         const body = { group_id: id, platform: shared.platform, account_id: shared.account_id || null,
           scheduled_at: shared.scheduled_at ? new Date(Date.parse(/[zZ]|[+-]\d{2}:\d{2}$/.test(shared.scheduled_at) ? shared.scheduled_at : shared.scheduled_at + 'Z') + index * (shared.interval_minutes || 0) * 60000).toISOString().slice(0, 16) : null,
-          title: form.title || null, description: form.description || null, tags: form.tags || null,
+          title: form.title || null, description: sharedCopy.description || null, tags: sharedCopy.tags || null,
           product_ids: sharedCart.no_cart ? null : [...sharedCart.product_ids],
           publish_version: draft.extras.version, no_cart: sharedCart.no_cart,
-          auto_meta: !String(form.title || '').trim() || !String(form.description || '').trim() }
+          auto_meta: !String(form.title || '').trim() || !String(sharedCopy.description || '').trim() }
         try {
           await options.createTask(body)
           created++; ids.value = ids.value.filter(value => value !== id); drafts.delete(id)

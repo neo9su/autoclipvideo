@@ -178,7 +178,7 @@
         </div>
         <input v-model="publishSelection.query.value" class="input" type="search"
           placeholder="搜索视频/发型/颜色/分组编号，空格组合搜索" aria-label="搜索分组视频" />
-        <div style="font-size:12px;margin:8px 0">已选 {{ publishSelection.ids.value.length }} 个视频；点击下方名称逐条编辑文案；本批所有视频共用下方商品，空白文案会分别自动生成。</div>
+        <div style="font-size:12px;margin:8px 0">已选 {{ publishSelection.ids.value.length }} 个视频；标题按视频分别编辑；本批所有视频共用描述、标签及下方商品，空白内容会分别自动生成。</div>
         <button class="btn-xs" :disabled="publishSelection.submitting.value" @click="publishSelection.clear()">清空选择</button>
         <div class="room-filter-chips" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
           <button v-for="id in publishSelection.ids.value" :key="id" class="room-chip"
