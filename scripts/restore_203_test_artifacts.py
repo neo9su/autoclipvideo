@@ -9,7 +9,7 @@ def digest_file(path):
     return h.hexdigest()
 def restore(archive_path):
     info=json.loads((BASE/'archive-info.json').read_text());assert digest_file(archive_path)==info['archive_sha256']
-    manifest=json.loads((BASE/'manifest.json').read_text(encoding='utf-8'));roots=[Path(x) for x in manifest['roots']]
+    manifest=json.loads((BASE/'manifest.json').read_text(encoding='utf-8'));roots=[Path(x) for x in manifest.get('roots',manifest.get('directories',[]))];assert roots,'No restore allowlist'
     for r in manifest['files']:
         p=Path(r['path']);assert any(p.is_relative_to(root) for root in roots)
         if p.exists():assert digest_file(p)==r['sha256'],'Existing different file; no overwrite'
@@ -22,4 +22,6 @@ def restore(archive_path):
             with archive.extractfile(m) as src,tmp.open('xb') as dst:shutil.copyfileobj(src,dst,8*1024*1024)
             assert digest_file(tmp)==r['sha256'];os.replace(tmp,p);os.utime(p,ns=(r['mtime_ns'],r['mtime_ns']))
     print('All archived files restored and verified')
-if __name__=='__main__':restore(sys.argv[1])
+if __name__=='__main__':
+    if len(sys.argv)==3:BASE=Path(sys.argv[1])
+    restore(sys.argv[-1])
