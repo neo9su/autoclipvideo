@@ -8,20 +8,10 @@ $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $backendProcessPattern = "uvicorn main:app.*$Port"
 
 function Get-ActiveSession {
-    $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name.Split("\\")[-1]
-    $lines = @(quser 2>$null)
-    foreach ($line in $lines | Select-Object -Skip 1) {
-        $fields = ($line -replace "^>\s*", "").Trim() -split "\s+"
-        $idIndex = -1
-        for ($index = 0; $index -lt [Math]::Min(4, $fields.Count); $index++) {
-            if ($fields[$index] -match "^\d+$") { $idIndex = $index; break }
-        }
-        if ($idIndex -ge 0 -and $fields.Count -gt ($idIndex + 1) -and
-            $fields[$idIndex + 1] -match "^(Active|运行中)$" -and
-            $fields[0] -ieq $currentUser) {
-            return [int]$fields[$idIndex]
-        }
-    }
+    # InteractiveToken already places this supervisor in its user's desktop.
+    # A disconnected RDP session remains valid and must still recover children.
+    $sessionId = (Get-Process -Id $PID).SessionId
+    if ($sessionId -gt 0) { return [int]$sessionId }
     return $null
 }
 
