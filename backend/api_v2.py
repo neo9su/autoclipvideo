@@ -20,6 +20,7 @@ from qianchuan_matcher import (QianchuanMatcher, audit_qianchuan_segments,
                                 load_group_context, score_product_match)
 from qianchuan_video import QianchuanVideoComposer
 from qianchuan_quality import check_qianchuan_video_quality
+from wig_identity_review import REVIEW_REQUIRED, hold_for_review, release_after_recheck, review_message
 from qianchuan_policy import (
     build_qianchuan_metadata, validate_qianchuan_metadata, DEFAULT_POLICY,
 )
@@ -29,6 +30,8 @@ logger = logging.getLogger(__name__)
 # 创建导演模式路由
 director_router = APIRouter(prefix="/api/v2/director", tags=["director"])
 qianchuan_router = APIRouter(prefix="/api/v2/qianchuan", tags=["qianchuan"])
+from wig_identity_routes import identity_router
+qianchuan_router.include_router(identity_router)
 
 # WebSocket broadcast function — injected by main.py at startup
 _broadcast_fn = None
@@ -202,6 +205,12 @@ async def generate_qianchuan(request: QianchuanGenerateRequest):
     if not match.get("ok"):
         err = match.get("reason") or "商品强匹配不足"
         async with aiosqlite.connect(DB_PATH) as db:
+            if await hold_for_review(db, request.group_id, match.get("identity")):
+                return QianchuanGenerateResponse(
+                    success=False, group_id=request.group_id, status=REVIEW_REQUIRED,
+                    score=match.get("score"), review=match,
+                    error=review_message(match.get("identity")),
+                )
             await db.execute(
                 """UPDATE clip_groups SET qianchuan_status = -2, qianchuan_error = ?,
                    qianchuan_score = ?, qianchuan_review = ? WHERE id = ?""",
@@ -359,6 +368,22 @@ def _loads_qianchuan_json(value: Optional[str]) -> Optional[Any]:
         return {"raw": str(value)[:1000], "parse_error": True}
 
 
+def _saved_qianchuan_resume(group: Dict) -> tuple[Optional[Dict], Optional[str]]:
+    """Return a resumable script and its pinned catalogue identity.
+
+    A restarted worker must never reselect a different product for an already
+    claimed job.  A stable catalogue identity is sufficient; its editable URL may still be blank.
+    """
+    script = _loads_qianchuan_json(group.get("qianchuan_script"))
+    if not isinstance(script, dict):
+        return None, None
+    product = script.get("product_context")
+    if not isinstance(product, dict):
+        return None, None
+    identity = product.get("id") or product.get("product_id")
+    return (script, str(identity)) if identity else (None, None)
+
+
 async def _set_qianchuan_error(group_id: int, status: int, error: str, review: Optional[Dict] = None):
     import aiosqlite
     from db import DB_PATH
@@ -391,20 +416,30 @@ async def _run_qianchuan_pipeline(group_id: int) -> None:
         if not context:
             raise RuntimeError("group not found")
         group = context["group"]
-        match = score_product_match(context, keywords=[group.get("label"), group.get("wig_model"), group.get("wig_color")], threshold=0.0)
-        # Production recordings may have no matching product catalog row. The
-        # recording's own SRT is still the authoritative source for a
-        # validation render, so retain group metadata as product context.
-        product_context = match.get("product") or {
-            "product_name": group.get("wig_model") or group.get("label") or "假发",
-            "matched_color": group.get("wig_color") or "自然色",
-            "keywords": [group.get("label"), group.get("wig_model"), group.get("wig_color")],
-            "source": "group_metadata_srt_fallback",
-        }
-        script = generate_qianchuan_script(
-            group, product_context=product_context, selling_points=[]
+        script, pinned_product_id = _saved_qianchuan_resume(group)
+        if pinned_product_id:
+            context = await load_group_context(DB_PATH, group_id, pinned_product_id)
+        match = score_product_match(
+            context,
+            product_id=pinned_product_id,
+            keywords=[group.get("label"), group.get("wig_model"), group.get("wig_color")],
+            threshold=0.58,
         )
-        script["preview_mode"] = False
+        async with aiosqlite.connect(DB_PATH) as db:
+            if await hold_for_review(db, group_id, match.get("identity")):
+                return
+        product_context = match.get("product")
+        if not match.get("ok") or not product_context:
+            raise RuntimeError(match.get("reason") or "商品匹配不足，无法确定当前商品")
+        if script is None:
+            script = generate_qianchuan_script(
+                group, product_context=product_context, selling_points=[]
+            )
+            script["preview_mode"] = False
+        else:
+            # Refresh mutable catalogue fields while retaining the exact script,
+            # preview flag, hooks, and product chosen by the original request.
+            script["product_context"] = product_context
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("UPDATE clip_groups SET qianchuan_script=?, qianchuan_score=?, qianchuan_review=? WHERE id=?", (json.dumps(script, ensure_ascii=False), match.get("score"), json.dumps(match, ensure_ascii=False), group_id))
             await db.commit()
@@ -423,6 +458,10 @@ async def _qianchuan_generate_bg(group_id: int, script: Dict) -> None:
 
     async with _COMPOSE_SEM:
         try:
+            context = await load_group_context(DB_PATH, group_id)
+            async with aiosqlite.connect(DB_PATH) as db:
+                if await hold_for_review(db, group_id, context.get("identity")):
+                    return
             # 1) Voiceover: reuse existing voice clone/TTS controller but keep qianchuan DB fields isolated.
             voice_result = await voice_director.generate_voiceover(script=script, group_id=group_id, reference_audio_path=None)
             if not voice_result.get("success"):

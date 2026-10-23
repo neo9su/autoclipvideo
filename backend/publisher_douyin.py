@@ -1,3 +1,6 @@
+from publish_cart_flow import CartOutcomeUnclear
+from publish_cart_flow import attach_selected_products
+from publish_review import register_review, close_review, wait_for_review, confirmation_sent, PublishReviewRequired, update_cart_result
 """
 Douyin (TikTok CN) publisher via Playwright browser automation.
 Upload page: https://creator.douyin.com/creator-micro/content/upload
@@ -11,6 +14,7 @@ import time
 from typing import Optional
 
 from publisher_base import BasePublisher
+from publish_product_links import ProductLinkUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +161,7 @@ class DouyinPublisher(BasePublisher):
             )
             await _load_cookies(ctx, account_cookie)
             page = await ctx.new_page()
+            register_review(page, task)
             await page.bring_to_front()
 
             try:
@@ -244,9 +249,11 @@ class DouyinPublisher(BasePublisher):
                         await title_el.wait_for(state="visible", timeout=10000)
                         await title_el.clear()
                         await title_el.fill(title[:30])
+                        if await title_el.input_value() != title[:30]:
+                            raise RuntimeError("标题输入框内容与任务文案不一致")
                         logger.info(f"Title filled: {title[:30]}")
                     except Exception as e:
-                        logger.warning(f"Title fill failed: {e}")
+                        raise RuntimeError("发布标题填写失败，请检查发布页面后重试") from e
 
                 # 5. Fill description + hashtags (max 5 tags)
                 desc = task.get("description") or ""
@@ -267,6 +274,7 @@ class DouyinPublisher(BasePublisher):
                         await desc_el.wait_for(state="visible", timeout=10000)
                         await desc_el.scroll_into_view_if_needed()
                         await desc_el.click(force=True)
+                        await desc_el.fill("")
                         await asyncio.sleep(0.3)
                         if desc:
                             await desc_el.focus()
@@ -289,11 +297,13 @@ class DouyinPublisher(BasePublisher):
                         # the suggestion dropdown before scrolling further
                         await _dismiss_overlays(page)
                     except Exception as e:
-                        logger.warning(f"Description/tags fill failed: {e}")
+                        raise RuntimeError("发布描述或话题填写失败，请检查发布页面后重试") from e
 
                 # 6. Attach products via 购物车 → 粘贴商品链接 (max 5)
                 #    Skipped for "无车发布" tasks (no_cart=True)
-                product_ids = (task.get("_product_douyin_ids") or [])[:5]
+                product_ids = task.get("_product_douyin_ids") or []
+                if len(product_ids) > 5 and not task.get("no_cart"):
+                    raise ProductLinkUnavailable("一次最多挂车5个商品，请减少商品选择后重试")
                 product_names = (task.get("_product_names") or [])
                 if product_ids and not task.get("no_cart"):
                     await progress(f"正在添加购物车商品链接（共 {len(product_ids)} 件）...")
@@ -302,9 +312,9 @@ class DouyinPublisher(BasePublisher):
                     # 共创 tooltip, etc.) are gone before interacting with 添加标签
                     await _dismiss_overlays(page)
                     await _ensure_shopping_cart_tag(page)
-                    for i, pid in enumerate(product_ids):
-                        name = product_names[i] if i < len(product_names) else ""
-                        await _attach_product(page, pid, short_title=name)
+                    cart_result = await attach_selected_products(page, product_ids, product_names, _attach_product)
+                    update_cart_result(task_id, cart_result)
+                    await progress(f"已挂车 {len(cart_result['attached'])} 件；{len(cart_result['failed'])} 件链接未通过，详情见发布确认页")
 
                 await _dismiss_tooltips(page)
 
@@ -322,34 +332,8 @@ class DouyinPublisher(BasePublisher):
                 await _show_banner(page, "正在等待快速检测（检测中请耐心等待）…", "system")
                 auto_ok = await _wait_for_quick_check(page, max_wait=900)
 
-                if auto_ok:
-                    await progress("✅ 检测通过，正在自动点击发布…")
-                    await _show_banner(page, "检测通过 ✅  正在自动发布，请勿操作…", "system")
-                    await _click_publish_button(page)
-                    logger.info(f"[task {task_id}] Auto-publish button clicked")
-                else:
-                    # Check if publish button is already visible (quick-check may be indeterminate)
-                    publish_btn = page.locator('button:has-text("发布")').last
-                    btn_visible = False
-                    try:
-                        btn_visible = await publish_btn.is_visible(timeout=3000)
-                    except Exception:
-                        pass
-
-                    if btn_visible:
-                        await progress("检测状态不明确，发布按钮可见，直接自动发布...")
-                        await _show_banner(page, "检测状态不明确，发布按钮已可见 — 正在自动发布，请勿操作…", "system")
-                        await _click_publish_button(page)
-                        logger.info(f"[task {task_id}] Auto-publish button clicked (quick-check indeterminate but btn visible)")
-                    else:
-                        # Fall back to user handoff
-                        await progress("⚠️ 检测未通过或超时，请手动确认后点击【发布】")
-                        await _show_banner(
-                            page,
-                            "⚠️ 检测未通过或仍在检测中，请手动检查后点击【发布】按钮",
-                            "warning",
-                        )
-                        logger.info(f"[task {task_id}] Auto-publish skipped, waiting for user (up to 15 min)…")
+                await progress("请打开平台的发布页面确认入口，查看截图后确认发布")
+                await wait_for_review(page, task_id, auto_ok)
 
                 # Handle possible scan-to-verify popup after clicking publish
                 await _handle_scan_verify(page, progress)
@@ -380,7 +364,12 @@ class DouyinPublisher(BasePublisher):
                 logger.info(f"Publish finished for task {task_id}, url={page.url}")
                 return page.url
 
+            except Exception as exc:
+                if confirmation_sent(task_id):
+                    raise PublishReviewRequired("已确认发布但结果尚未核实，请先核对作品列表，勿重复发布：" + str(exc)) from exc
+                raise
             finally:
+                close_review(task_id)
                 # Save refreshed cookies back to file before closing
                 try:
                     refreshed = await ctx.cookies()
@@ -1344,9 +1333,8 @@ async def _attach_product(page, product_link: str, short_title: str = ""):
             add_btn = await _find_sibling_button(link_input, "添加链接")
 
         if add_btn is None:
-            logger.warning(f"添加链接 element not found for: {product_link}")
             await link_input.clear()
-            return
+            raise RuntimeError("商品挂车失败：未找到添加链接入口，请检查发布页面")
 
         # 3. Wait up to 5 s for the element to become enabled / not greyed-out
         #    Douyin validates the link asynchronously — stays disabled until done
@@ -1366,56 +1354,28 @@ async def _attach_product(page, product_link: str, short_title: str = ""):
             await asyncio.sleep(0.2)
 
         if not enabled:
-            logger.warning(f"添加链接 still disabled after 5 s — invalid link: {product_link}")
             await link_input.clear()
-            return
+            raise ProductLinkUnavailable("商品链接未通过发布页面校验，请检查链接及账号挂车权限")
 
-        # 4. Scroll into view → fresh bounding box → page.mouse.click (trusted events)
-        await add_btn.scroll_into_view_if_needed()
-        await asyncio.sleep(0.4)
-        box = await add_btn.bounding_box()
-        logger.info(f"添加链接 bounding_box: {box}")
-        if box:
-            cx = box["x"] + box["width"] / 2
-            cy = box["y"] + box["height"] / 2
-            await page.mouse.move(cx, cy)
-            await asyncio.sleep(0.15)
-            await page.mouse.click(cx, cy)
-        else:
-            await add_btn.click()
-        await asyncio.sleep(1.2)
+        # Use Playwright hit testing; do not click through overlays or repeat an
+        # ambiguous cart submission. is_visible(timeout=...) does not wait.
+        await add_btn.click(timeout=10000)
+        try:
+            await page.locator(':text("编辑商品"):visible, :text("未搜索到对应商品"):visible, :text("无法添加购物车"):visible').first.wait_for(
+                state="visible", timeout=30000)
+        except Exception as exc:
+            evidence = await _capture_upload_diagnostics(page, "cart", "cart_result_missing")
+            raise CartOutcomeUnclear("挂车点击后30秒未出现确认或明确拒绝；已保存现场：" + evidence) from exc
 
-        # 5. Verify click landed: expect 编辑商品 dialog or a product-added indicator
-        edit_visible = await page.locator(':text("编辑商品")').first.is_visible()
-        if not edit_visible:
-            logger.info("No dialog after first click — trying JS fallback")
-            js_ok = await page.evaluate("""() => {
-                const input = document.querySelector(
-                    'input[placeholder*="粘贴商品链接"], input[placeholder*="商品链接"]'
-                );
-                if (!input) return false;
-                // Walk up and search any element type (span/div/button/a)
-                let el = input.parentElement;
-                for (let i = 0; i < 8; i++) {
-                    if (!el) break;
-                    for (const node of el.querySelectorAll('button, span, div, a')) {
-                        if (node.textContent.trim() === '添加链接') {
-                            node.scrollIntoView({block: 'center'});
-                            node.click();
-                            return true;
-                        }
-                    }
-                    el = el.parentElement;
-                }
-                return false;
-            }""")
-            logger.info(f"JS fallback result: {js_ok}")
-            await asyncio.sleep(1.2)
+        if (await page.get_by_text("无法添加购物车", exact=True).first.is_visible()
+                and await page.get_by_text("您可发布的购物车视频数量", exact=False).first.is_visible()):
+            evidence = await _capture_upload_diagnostics(page, "cart", "cart_account_limit")
+            raise CartOutcomeUnclear("抖音账号购物车视频发布数量已达限额；请按平台提示等待额度恢复。未执行发布，未自动换商品重试。现场：" + evidence)
 
         # 6. Check for "未搜索到对应商品" error dialog
         error_dialog = page.locator(':text("未搜索到对应商品")').first
         if await error_dialog.is_visible(timeout=3000):
-            logger.warning(f"Product not found / unsupported link: {product_link}")
+            logger.warning("Product not found / unsupported link")
             ok_btn = page.locator('button:has-text("确定")').first
             if await ok_btn.is_visible(timeout=2000):
                 await ok_btn.click()
@@ -1425,7 +1385,7 @@ async def _attach_product(page, product_link: str, short_title: str = ""):
                 await link_input.clear()
             except Exception:
                 pass
-            return
+            raise ProductLinkUnavailable("发布页面未搜索到对应商品，请修改商品链接或检查账号挂车权限")
 
         # 7. Handle 编辑商品 dialog
         edit_dialog = page.locator(':text("编辑商品")').first
@@ -1443,13 +1403,13 @@ async def _attach_product(page, product_link: str, short_title: str = ""):
             done_btn = page.locator('button:has-text("完成编辑")').first
             await done_btn.wait_for(state="visible", timeout=5000)
             await done_btn.click()
-            await asyncio.sleep(1)
-            logger.info(f"编辑商品 confirmed for {product_link}")
+            await edit_dialog.wait_for(state="hidden", timeout=8000)
+            logger.info("编辑商品 dialog completed")
         else:
-            logger.info(f"Product added (no dialog): {product_link}")
+            raise CartOutcomeUnclear("挂车结果不明确，请核对现场；未执行发布")
 
     except Exception as e:
-        logger.warning(f"_attach_product failed ({product_link}): {e}")
+        logger.warning("商品挂车未完成 (%s)", type(e).__name__)
         try:
             for btn_text in ["取消", "关闭"]:
                 btn = page.locator(f'button:has-text("{btn_text}")').first
@@ -1458,3 +1418,4 @@ async def _attach_product(page, product_link: str, short_title: str = ""):
                     break
         except Exception:
             pass
+        raise

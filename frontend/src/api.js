@@ -1,8 +1,15 @@
+import { codexPostPublishTask } from './publishSelection.mjs'
 const BASE = (import.meta.env.VITE_API_BASE || 'http://10.190.0.203:8899').replace(/\/$/, '')
 const FETCH_TIMEOUT_MS = 15000
 const inFlightRequests = new Map()
 const MAX_RETRIES = 2
 const RETRYABLE_STATUS_MIN = 500
+
+export async function recheckQianchuanIdentity(id) {
+  const res = await fetchWithTimeout(`${BASE}/api/v2/qianchuan/group/${id}/identity-recheck`, { method: 'POST' })
+  if (!res.ok) throw new Error(await readErrorMessage(res, '重新检查失败'))
+  return res.json()
+}
 
 function notifyLoading(delta) {
   window.dispatchEvent(new CustomEvent('app:loading', { detail: delta }))
@@ -12,7 +19,7 @@ function notifyLoading(delta) {
 export function fetchWithTimeout(url, options = {}, timeout = FETCH_TIMEOUT_MS) {
   const method = (options.method || 'GET').toUpperCase()
   const key = method === 'GET' ? `${method}:${url}` : null
-  if (key && inFlightRequests.has(key)) return inFlightRequests.get(key)
+  if (key && inFlightRequests.has(key)) return inFlightRequests.get(key).then(response => response.clone())
 
   const request = (async () => {
     notifyLoading(1)
@@ -42,7 +49,8 @@ export function fetchWithTimeout(url, options = {}, timeout = FETCH_TIMEOUT_MS) 
       () => inFlightRequests.delete(key),
     )
   }
-  return request
+  // Each caller consumes its own body; only the network request is shared.
+  return key ? request.then(response => response.clone()) : request
 }
 
 async function readErrorMessage(response, fallback = '请求失败') {
@@ -440,13 +448,7 @@ export async function getPublishTasks(status = null) {
 }
 
 export async function createPublishTask(body) {
-  const res = await fetchWithTimeout(`${BASE}/api/publish-tasks`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  if (!res.ok) throw new Error(await res.text())
-  return res.json()
+  return codexPostPublishTask(`${BASE}/api/publish-tasks`, body)
 }
 
 export async function retryPublishTask(id) {
@@ -529,8 +531,8 @@ export async function generatePublishMeta(groupId) {
   return res.json()
 }
 
-export async function matchGroupProduct(groupId) {
-  const res = await fetchWithTimeout(`${BASE}/api/groups/${groupId}/match-product`, { method: 'POST' })
+export async function matchGroupProduct(groupId, query = '') {
+  const res = await fetchWithTimeout(`${BASE}/api/groups/${groupId}/match-product?q=${encodeURIComponent(query)}`, { method: 'POST' })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
 }

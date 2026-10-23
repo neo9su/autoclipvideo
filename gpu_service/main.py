@@ -173,6 +173,13 @@ _clip_sem: asyncio.Semaphore = asyncio.Semaphore(2)
 # ── Clip pipeline constants ───────────────────────────────────────────────────
 CLIP_W    = 1080
 CLIP_H    = 1920
+# Keep intermediate frames light; publish at vertical 2K in the final encode.
+PUBLISH_W = 1440
+PUBLISH_H = 2560
+PUBLISH_SCALE = (
+    f"scale={PUBLISH_W}:{PUBLISH_H}:force_original_aspect_ratio=decrease:flags=lanczos,"
+    f"pad={PUBLISH_W}:{PUBLISH_H}:(ow-iw)/2:(oh-ih)/2"
+)
 CLIP_FADE = 1.5   # xfade duration (seconds)
 SEG_PAD   = 0.0   # no padding — avoids duplicate audio at segment boundaries
 
@@ -659,7 +666,13 @@ async def _nvenc_xfade_merge(seg_files_with_dur: list, out_dir: str):
               f"[va][vb]xfade=transition={tr_used}:duration={fade}:offset={off:.3f}[vout]")
 
         if ha1 and ha2:
-            fc = vf + f";[0:a][1:a]acrossfade=d={fade}[aout]"
+            # acrossfade overlaps audio ends; its 'o' option is a boolean, not an offset.
+            # Align each audio input to its video span before overlapping the ends.
+            fc = vf + (
+                f";[0:a]aresample=async=1:first_pts=0,apad,atrim=duration={d1:.3f},asetpts=PTS-STARTPTS[a0];"
+                f"[1:a]aresample=async=1:first_pts=0,apad,atrim=duration={d2:.3f},asetpts=PTS-STARTPTS[a1];"
+                f"[a0][a1]acrossfade=d={fade}:c1=tri:c2=tri[aout]"
+            )
             maps = ["-map", "[vout]", "-map", "[aout]"]
             aargs = ["-c:a", "aac", "-b:a", "128k"]
         elif ha1:
@@ -857,14 +870,14 @@ async def _do_clip_job(
                     fonts_escaped = fonts_fwd[0] + "\\:" + fonts_fwd[2:]
                 else:
                     fonts_escaped = fonts_fwd
-                video_filter = f"[0:v]ass=filename='{escaped}':fontsdir='{fonts_escaped}',format=yuv420p[vout]"
+                video_filter = f"[0:v]{PUBLISH_SCALE},ass=filename='{escaped}':fontsdir='{fonts_escaped}',format=yuv420p[vout]"
             else:
-                video_filter = f"[0:v]ass=filename='{escaped}',format=yuv420p[vout]"
+                video_filter = f"[0:v]{PUBLISH_SCALE},ass=filename='{escaped}',format=yuv420p[vout]"
             filter_complex = f"{audio_filter};{video_filter}"
             vmap, amap = "[vout]", "[aout]"
         else:
-            filter_complex = audio_filter
-            vmap, amap = "0:v", "[aout]"
+            filter_complex = f"{audio_filter};[0:v]{PUBLISH_SCALE},format=yuv420p[vout]"
+            vmap, amap = "[vout]", "[aout]"
 
         rc = await _run_ffmpeg(
             FFMPEG_ASS, "-y", "-i", merged,
@@ -959,7 +972,10 @@ async def _do_concat_job(job_id: str, clip_job_ids: list):
             "ffmpeg", "-y",
             "-f", "concat", "-safe", "0",
             "-i", list_file,
-            "-c", "copy",
+            "-vf", PUBLISH_SCALE + ",fps=25",
+            "-pix_fmt", "yuv420p",
+            "-c:v", "h264_nvenc", "-b:v", "10M",
+            "-c:a", "copy",
             out_path,
         )
         if rc != 0 or not os.path.exists(out_path):
@@ -1139,18 +1155,18 @@ async def _do_tts_job(job_id: str, text: str, emotion: str, ref_audio_path: str,
                 os.replace(fixed_path, out_path)
                 _log.info(f"TTS job {job_id}: speed={speed:.2f}x applied")
 
-        _tts_jobs[job_id].update({"status": "done", "output_path": out_path})
+        _tts_jobs[job_id].update({"status": "done", "output_path": out_path, "_finished_at": time.time()})
         _db_update_tts_job(job_id, status="done", output_path=out_path)
         _log.info(f"TTS job {job_id} done ({os.path.getsize(out_path)//1024} KB)")
     except asyncio.TimeoutError:
         err = f"TTS TIMED OUT after {_TTS_TIMEOUT}s"
         _log.error(f"TTS job {job_id} {err}")
-        _tts_jobs[job_id].update({"status": "error", "error": err})
+        _tts_jobs[job_id].update({"status": "error", "error": err, "_finished_at": time.time()})
         _db_update_tts_job(job_id, status="error", error=err)
     except Exception as e:
         err = str(e)[:300]
         _log.error(f"TTS job {job_id} failed: {err}")
-        _tts_jobs[job_id].update({"status": "error", "error": err})
+        _tts_jobs[job_id].update({"status": "error", "error": err, "_finished_at": time.time()})
         _db_update_tts_job(job_id, status="error", error=err)
 
 
@@ -1236,6 +1252,16 @@ async def _disk_guard_loop():
             logger.error(f"Disk guard error: {e}")
 
 
+def _tts_cleanup_ready(job, now=None):
+    """Keep fresh results available long enough for their consumer to download."""
+    if job.get("status") not in ("done", "error"):
+        return False
+    finished = job.get("_finished_at") or job.get("_created_at")
+    if finished is None:
+        return False
+    return (time.time() if now is None else now) - finished >= 3600
+
+
 async def _cleanup_old_jobs():
     """Clean up completed/errored job output directories and in-memory state."""
     import shutil
@@ -1278,7 +1304,7 @@ async def _cleanup_old_jobs():
     # Clean TTS outputs
     tts_dir = os.path.join(STORAGE_DIR, "tts_outputs")
     for jid, job in list(_tts_jobs.items()):
-        if job.get("status") not in ("done", "error"):
+        if not _tts_cleanup_ready(job):
             continue
         out_path = job.get("output_path")
         if out_path and os.path.isfile(out_path):
@@ -1439,6 +1465,21 @@ async def admin_health():
     }
 
 
+def _active_media_job_counts():
+    """Include every media queue; unknown states remain active for safe maintenance."""
+    terminal = {"done", "error", "cancelled", "canceled"}
+    return {
+        name: sum(1 for job in globals().get(registry, {}).values()
+                  if job.get("status") not in terminal)
+        for name, registry in (
+            ("transcription", "_jobs"), ("clip", "_clip_jobs"),
+            ("tts", "_tts_jobs"), ("audio_concat", "_audio_concat_jobs"),
+            ("concat", "_concat_jobs"), ("classic_concat", "_classic_concat_jobs"),
+            ("director", "_director_jobs"),
+        )
+    }
+
+
 @app.get("/health")
 async def health():
     _w = getattr(_gpu_sem, "_waiters", None)
@@ -1471,6 +1512,7 @@ async def health():
         "queue_depth": queued,
         "clip_jobs_running": clip_running,
         "clip_jobs_pending": clip_pending,
+        "media_jobs_active": _active_media_job_counts(),
         "transcription_watchdog": {
             **_watchdog_stats,
             "interval_seconds": _WATCHDOG_INTERVAL_SECONDS,
@@ -1811,19 +1853,25 @@ class AudioConcatJobResponse(BaseModel):
     status: str
 
 
-async def _run_audio_concat_job(job_id: str, input_paths: list[str]):
+async def _run_audio_concat_job(job_id: str, input_paths: list[str], speed_ratio: float = 1.0):
     job = _audio_concat_jobs[job_id]
     output_dir = os.path.join(STORAGE_DIR, "audio_concat", job_id)
     output_path = os.path.join(output_dir, "merged.wav")
     list_path = os.path.join(output_dir, "list.txt")
     try:
+        job.update(status="processing")
+        if not 0.5 <= speed_ratio <= 2.0:
+            raise ValueError("speed_ratio must be between 0.5 and 2.0")
         os.makedirs(output_dir, exist_ok=True)
         with open(list_path, "w", encoding="utf-8") as list_file:
             for path in input_paths:
                 list_file.write(f"file '{path}'\n")
+        audio_args = ("-c", "copy") if speed_ratio == 1.0 else (
+            "-filter:a", f"atempo={speed_ratio:.6f}", "-c:a", "pcm_s16le",
+        )
         return_code = await _run_ffmpeg(
             "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path,
-            "-c", "copy", output_path,
+            *audio_args, output_path,
         )
         if return_code != 0 or not os.path.exists(output_path):
             raise RuntimeError("remote audio concat ffmpeg failed")
@@ -1844,7 +1892,10 @@ async def _run_audio_concat_job(job_id: str, input_paths: list[str]):
 
 
 @app.post("/audio-concat-jobs", status_code=201, response_model=AudioConcatJobResponse)
-async def create_audio_concat_job(files: list[UploadFile] = File(...)):
+async def create_audio_concat_job(
+    files: list[UploadFile] = File(...),
+    speed_ratio: float = Form(1.0, ge=0.5, le=2.0),
+):
     if not files:
         raise HTTPException(status_code=422, detail="files is empty")
     job_id = uuid.uuid4().hex[:16]
@@ -1866,7 +1917,7 @@ async def create_audio_concat_job(files: list[UploadFile] = File(...)):
                 pass
         raise
     _audio_concat_jobs[job_id] = {"status": "queued", "output_path": None, "error": None}
-    asyncio.create_task(_run_audio_concat_job(job_id, input_paths))
+    asyncio.create_task(_run_audio_concat_job(job_id, input_paths, speed_ratio))
     return {"job_id": job_id, "status": "queued"}
 
 
@@ -1948,7 +1999,7 @@ async def _do_classic_concat_job(job_id: str, clip_paths: list):
             # Single clip — NVENC re-encode for codec normalisation
             rc = await _run_ffmpeg(
                 "ffmpeg", "-y", "-i", clip_paths[0],
-                "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2",
+                "-vf", PUBLISH_SCALE + ",fps=25",
                 "-c:v", "h264_nvenc", "-b:v", "10M",
                 "-c:a", "aac", "-b:a", "192k",
                 out_path,
@@ -1977,7 +2028,10 @@ async def _do_classic_concat_job(job_id: str, clip_paths: list):
                 "ffmpeg", "-y",
                 "-f", "concat", "-safe", "0",
                 "-i", list_file,
-                "-c", "copy",
+                "-vf", PUBLISH_SCALE + ",fps=25",
+                "-pix_fmt", "yuv420p",
+                "-c:v", "h264_nvenc", "-b:v", "10M",
+                "-c:a", "copy",
                 out_path,
             )
             # Clean up intermediates
@@ -2653,20 +2707,18 @@ async def _do_director_job(job_id: str, clips: list, ass_content: str,
             if FONTS_DIR:
                 ff = FONTS_DIR.replace("\\", "/")
                 fonts_esc = (ff[0] + "\\:" + ff[2:]) if len(ff) > 1 and ff[1] == ":" else ff
-                video_filter = f"[0:v]ass=filename='{escaped}':fontsdir='{fonts_esc}',format=yuv420p[vout]"
+                video_filter = f"[0:v]{PUBLISH_SCALE},ass=filename='{escaped}':fontsdir='{fonts_esc}',format=yuv420p[vout]"
             else:
-                video_filter = f"[0:v]ass=filename='{escaped}',format=yuv420p[vout]"
+                video_filter = f"[0:v]{PUBLISH_SCALE},ass=filename='{escaped}',format=yuv420p[vout]"
             if audio_filter:
                 filter_complex = f"{audio_filter};{video_filter}"
             else:
                 filter_complex = video_filter
             vmap = "[vout]"
         else:
-            if audio_filter:
-                filter_complex = audio_filter
-            else:
-                filter_complex = None
-            vmap = "0:v"
+            video_filter = f"[0:v]{PUBLISH_SCALE},format=yuv420p[vout]"
+            filter_complex = f"{audio_filter};{video_filter}" if audio_filter else video_filter
+            vmap = "[vout]"
 
         ff_args = [FFMPEG_ASS, "-y", *inputs]
         if filter_complex:
@@ -2896,7 +2948,7 @@ async def cleanup_clips():
     tts_dir = os.path.join(STORAGE_DIR, "tts_outputs")
     terminal_tts_ids = [
         jid for jid, j in list(_tts_jobs.items())
-        if j.get("status") in ("done", "error")
+        if _tts_cleanup_ready(j)
     ]
     for jid in terminal_tts_ids:
         job = _tts_jobs.get(jid)

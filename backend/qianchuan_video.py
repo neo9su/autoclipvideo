@@ -11,6 +11,7 @@ from typing import Dict, List, Optional
 
 from director_video import DirectorVideoComposer
 from video_editing_skills import ensure_sfx_asset
+from wig_preprocess import qianchuan_output_spec
 
 QIANCHUAN_KEYWORDS = [
     "不用戴发网", "免发网", "蜜茶橘棕", "羊毛卷", "显白", "发缝自然", "稳固", "小黄车",
@@ -139,7 +140,9 @@ class QianchuanVideoComposer(DirectorVideoComposer):
         config["mode"] = "qianchuan"
         config["qianchuan_ass_content"] = build_qianchuan_ass(script, audio_segments)
         config["qianchuan_sound_cues"] = build_sound_cues(script, audio_segments)
-        config["qianchuan_output_spec"] = {"vcodec": "h264", "acodec": "aac", "resolution": "1080x1920", "fps": 30}
+        config["qianchuan_output_spec"] = {
+            "vcodec": "h264", "acodec": "aac", **qianchuan_output_spec("vertical")
+        }
         config["preview_mode"] = bool(config.get("preview_mode") or script.get("preview_mode"))
 
         enriched: List[Dict] = []
