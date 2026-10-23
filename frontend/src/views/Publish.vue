@@ -341,7 +341,7 @@
           <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">
             <label style="margin:0">
               小黄车商品（可多选）
-              <span v-if="selectedGroupRoomId" class="muted" style="font-weight:normal">· 已按直播间筛选</span>
+              <span v-if="selectedGroupRoomId" class="muted" style="font-weight:normal">{{ catalogIsCodexRoom(selectedGroupRoomId, rooms) ? '· 可选全部直播间商品' : '· 已按直播间筛选' }}</span>
             </label>
             <button v-if="cartFilteredProducts.length" class="btn-xs" @click="toggleAllProducts">
               {{ newTask.product_ids.length === cartFilteredProducts.length ? '取消全选' : '全选' }}
@@ -603,7 +603,7 @@
 </template>
 
 <script setup>
-import { catalogSearchProducts } from '../publishCatalog.mjs'
+import { catalogSearchProducts, catalogRoomProducts, catalogIsCodexRoom } from '../publishCatalog.mjs'
 import { REMOTE_API_BASE } from '../remoteApi.js'
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import {
@@ -880,14 +880,8 @@ const selectedGroupRoomId = computed(() => {
 })
 
 const roomFilteredProducts = computed(() => {
-  const linkable = products.value.filter(p => Boolean(p.product_url))
-  // Use selected group's room first, fall back to room chip filter, then show all
   const roomId = selectedGroupRoomId.value || (roomFilter.value !== 0 ? roomFilter.value : null)
-  if (!roomId) return linkable
-  const byRoom = linkable.filter(p => p.room_id === roomId)
-  const globals = linkable.filter(p => !p.room_id)
-  const combined = [...byRoom, ...globals]
-  return combined.length > 0 ? combined : linkable
+  return catalogRoomProducts(products.value, roomId, rooms.value)
 })
 
 const cartSearch = ref('')
