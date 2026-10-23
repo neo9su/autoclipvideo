@@ -96,3 +96,9 @@ console.log('publish selection: search, isolated drafts, per-video tasks, partia
   await f.batch.submit(); failures.clear(); await f.batch.submit()
   assert(f.calls.every(x => x.description === '最终共同描述' && x.tags === '#最终标签'))
 }
+{
+ const f=fixture();f.batch.focus(f.groups[0]);f.form().product_ids=[1,2,3,4,5,6]
+ await f.batch.submit();assert.equal(f.calls.length,0)
+ assert.match(f.batch.errors.value[0].message,/最多选择5件/)
+ f.form().product_ids=[1];await f.batch.submit();assert.equal(f.calls.length,1);assert.equal(f.batch.errors.value.length,0)
+}
