@@ -1,43 +1,49 @@
+import asyncio
 import sys
 from pathlib import Path
 import pytest
 sys.path.insert(0,str(Path(__file__).parents[1]/'backend'))
-from publish_cart_flow import attach_selected_products,ProductLinkUnavailable
+from publish_cart_flow import attach_selected_products,ProductLinkUnavailable,CartOutcomeUnclear
 
 @pytest.mark.asyncio
-async def test_known_unavailable_candidate_does_not_hide_other_successful_links():
+async def test_attempts_every_selected_item_despite_mixed_failures():
+    calls=[]
+    async def attach(page,link,short_title):
+        calls.append((link,short_title))
+        if link=='unavailable':raise ProductLinkUnavailable('下架')
+        if link=='uncertain':raise CartOutcomeUnclear('未确认')
+        if link=='error':raise RuntimeError('页面异常')
+    links=['good1','unavailable','uncertain','error','good2']
+    result=await attach_selected_products(None,links,['a','b','c','d','e'],attach)
+    assert [x[0] for x in calls]==links
+    assert result['attached']==[0,4]
+    assert [x['index'] for x in result['failed']]==[1,2,3]
+    assert [x['name'] for x in result['failed']]==['b','c','d']
+    assert [x['reason'] for x in result['failed']]==['下架','未确认','页面异常']
+
+@pytest.mark.asyncio
+async def test_all_failed_attempts_all_before_stopping_publish():
     calls=[]
     async def attach(page,link,short_title):
         calls.append(link)
-        if link=='bad':raise ProductLinkUnavailable('未搜索到对应商品')
-    result=await attach_selected_products(None,['bad','good1','good2'],['a','b','c'],attach)
-    assert calls==['bad','good1'] and result['attached']==[1]
-    assert result['failed'][0]['name']=='a'
-
-@pytest.mark.asyncio
-async def test_no_success_never_allows_publish_and_ambiguous_error_is_not_skipped():
-    async def unavailable(*args,**kwargs):raise ProductLinkUnavailable('无效')
+        if link=='uncertain':raise CartOutcomeUnclear('未知结果')
+        raise ProductLinkUnavailable('不可用')
     with pytest.raises(ProductLinkUnavailable,match='均未能挂车'):
-        await attach_selected_products(None,['bad'],[],unavailable)
-    async def uncertain(*args,**kwargs):raise RuntimeError('未确认挂车结果')
-    with pytest.raises(RuntimeError,match='未确认'):
-        await attach_selected_products(None,['uncertain','good'],[],uncertain)
+        await attach_selected_products(None,['bad','uncertain','bad2'],[],attach)
+    assert calls==['bad','uncertain','bad2']
 
 @pytest.mark.asyncio
-async def test_first_success_stops_before_later_error():
+async def test_one_success_survives_later_failures():
     calls=[]
     async def attach(page,link,short_title):
         calls.append(link)
-        if link=='later_error':raise RuntimeError('must not be attempted')
-    result=await attach_selected_products(None,['good','later_error'],[],attach)
-    assert calls==['good'] and result['attached']==[0]
+        if link!='good':raise RuntimeError('失败')
+    result=await attach_selected_products(None,['good','bad','bad2'],[],attach)
+    assert calls==['good','bad','bad2']
+    assert result['attached']==[0] and len(result['failed'])==2
 
 @pytest.mark.asyncio
-async def test_uncertain_cart_is_not_retried_with_another_link():
-    from publish_cart_flow import CartOutcomeUnclear
-    calls=[]
-    async def attach(page,link,short_title):
-        calls.append(link);raise CartOutcomeUnclear('需要核对现场')
-    with pytest.raises(CartOutcomeUnclear):
-        await attach_selected_products(None,['uncertain','good'],[],attach)
-    assert calls==['uncertain']
+async def test_task_cancellation_still_stops_work():
+    async def attach(*args,**kwargs):raise asyncio.CancelledError()
+    with pytest.raises(asyncio.CancelledError):
+        await attach_selected_products(None,['one','two'],[],attach)

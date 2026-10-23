@@ -1,4 +1,4 @@
-"""Try each explicitly selected related product; never ignore an ambiguous result."""
+"""Attempt every selected product; require at least one confirmed attachment."""
 try:
     from .publish_product_links import ProductLinkUnavailable
 except ImportError:
@@ -6,7 +6,7 @@ except ImportError:
 
 
 class CartOutcomeUnclear(ProductLinkUnavailable):
-    """Stop the task without retrying another link after an ambiguous click."""
+    """An unconfirmed item is recorded as failed, never counted as attached."""
 
 
 async def attach_selected_products(page, links, names, attach):
@@ -15,14 +15,10 @@ async def attach_selected_products(page, links, names, attach):
         name=names[index] if index<len(names) else ''
         try:
             await attach(page,link,short_title=name)
-        except CartOutcomeUnclear:
-            raise
-        except ProductLinkUnavailable as exc:
+        except Exception as exc:
             failed.append({'index':index,'name':name,'reason':str(exc)})
         else:
             attached.append(index)
-            # One confirmed cart item satisfies the task; later candidates cannot undo it.
-            return {'attached':attached,'failed':failed}
     if not attached:
         raise ProductLinkUnavailable('所选商品链接均未能挂车，请检查商品链接及账号权限；未执行发布')
     return {'attached':attached,'failed':failed}
