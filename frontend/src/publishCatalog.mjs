@@ -1,6 +1,6 @@
 export function catalogIsCodexRoom(roomId, rooms) {
   const room = rooms.find(r => String(r.id) === String(roomId))
-  return !!room && (room.url === '__codex_completed__' || room.name === 'codex 成片')
+  return !!room && (room.url === '__codex_completed__' || room.name === 'codex 成片' || room.url === '__custom__' || room.name === '自定义上传')
 }
 
 export function catalogRoomProducts(products, roomId, rooms) {

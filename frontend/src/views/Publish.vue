@@ -158,10 +158,20 @@
     </div>
 
     <!-- Create Task Modal -->
-    <div v-if="showCreateModal" class="modal-overlay" @click.self="showCreateModal = false">
+    <div v-if="showCreateModal" class="modal-overlay" @click.self="!manualUpload.busy.value && (showCreateModal = false)">
       <div class="modal">
         <h3>创建发布任务</h3>
-        <fieldset :disabled="publishSelection.submitting.value" style="border:0;padding:0;margin:0;min-width:0">
+        <section style="padding:12px;border:1px solid #444;border-radius:8px;margin-bottom:12px">
+          <label for="publish-manual-video">手动上传视频（可多选）</label>
+          <input id="publish-manual-video" type="file" accept=".mp4,.mov,video/mp4,video/quicktime" multiple
+            aria-label="上传发布视频" :disabled="manualUpload.busy.value || publishSelection.submitting.value || generating"
+            @change="onManualFiles" style="display:block;max-width:100%;margin:8px 0" />
+          <div class="muted" style="font-size:12px">上传成片原样用于发布：15–300秒，MP4/MOV，单个不超过1000MB；成功后自动加入“自定义上传”并选中。</div>
+          <div role="status" style="font-size:12px;margin-top:6px">{{ manualUpload.status.value }}</div>
+          <button v-if="manualUpload.busy.value" type="button" class="btn-xs" @click="manualUpload.cancel()">取消上传</button>
+          <div v-for="error in manualUpload.errors.value" :key="error" role="alert" style="color:#f59e0b;font-size:12px">{{ error }}</div>
+        </section>
+        <fieldset :disabled="publishSelection.submitting.value || manualUpload.busy.value" style="border:0;padding:0;margin:0;min-width:0">
         <p class="muted publish-duration-hint">发布视频时长要求：15–300 秒（含边界）</p>
 
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
@@ -605,12 +615,13 @@
 </template>
 
 <script setup>
+import { createPublishVideoUploader } from '../publishVideoUpload.mjs'
 import { publishPickerRooms } from '../publishPickerRooms.mjs'
 import { catalogSearchProducts, catalogRoomProducts, catalogIsCodexRoom } from '../publishCatalog.mjs'
 import { REMOTE_API_BASE } from '../remoteApi.js'
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import {
-  getRooms, getGroups, getGroup, getPublishTasks, createPublishTask, retryPublishTask, cancelPublishTask, bulkCancelPublishTasks,
+  uploadPublishVideo, getRooms, getGroups, getGroup, getPublishTasks, createPublishTask, retryPublishTask, cancelPublishTask, bulkCancelPublishTasks,
   getProducts, getPublishAccounts, createPublishAccount, deletePublishAccount, loginPublishAccount,
   generatePublishMeta, matchGroupProduct, createWS, deleteGroup, reclipRecording,
   getUnscheduledGroups, batchSchedulePublish, regenPublishTaskMeta, bulkRegenPublishTaskMeta, reschedulePublishTask,
@@ -966,6 +977,23 @@ function formatTaskId(task) {
   return 'DT' + modePrefix + String(task.group_id).padStart(7, '0')
 }
 
+
+const manualUpload = createPublishVideoUploader({
+  ref, isBusy: () => publishSelection.submitting.value || publishSelection.busy.value || generating.value,
+  upload: uploadPublishVideo,
+  addGroup: group => {
+    mergedGroups.value = [group, ...mergedGroups.value.filter(item => item.id !== group.id)]
+    if (!rooms.value.some(room => room.id === group.room_id)) rooms.value = [...rooms.value, { id: group.room_id, name: group.room_name, url: '__custom__' }]
+    roomFilter.value = group.room_id
+    publishSelection.query.value = ''
+    if (!publishSelection.ids.value.includes(group.id)) publishSelection.toggle(group)
+  },
+})
+function onManualFiles(event) {
+  const files = Array.from(event.target.files || [])
+  event.target.value = ''
+  return manualUpload.uploadFiles(files)
+}
 
 function availableVersionCount(group) {
   if (!group) return 0

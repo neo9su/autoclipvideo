@@ -1,3 +1,4 @@
+import { uploadPublishVideoRequest } from './publishVideoUpload.mjs'
 import { codexPostPublishTask } from './publishSelection.mjs'
 const BASE = (import.meta.env.VITE_API_BASE || 'http://10.190.0.203:8899').replace(/\/$/, '')
 const FETCH_TIMEOUT_MS = 15000
@@ -655,4 +656,8 @@ export function formatDuration(start, end) {
   const h = Math.floor(m / 60)
   if (h > 0) return `${h}h ${m % 60}m`
   return `${m}m ${sec % 60}s`
+}
+
+export function uploadPublishVideo(file, onProgress, signal) {
+  return uploadPublishVideoRequest(`${BASE}/api/publish-videos/upload`, file, onProgress, signal)
 }
