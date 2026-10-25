@@ -25,7 +25,8 @@ export function uploadPublishVideoRequest(url, file, onProgress, signal, XHR = X
 
 export function createPublishVideoUploader(options) {
   const { ref } = options
-  const busy = ref(false), status = ref(''), errors = ref([]), completed = ref([])
+  const busy = ref(false), status = ref(''), errors = ref([]), completed = ref([]), revision = ref(0)
+  const uploadedGroups = new Map()
   let controller = null, cancelled = false
   async function uploadFiles(fileList) {
     if (busy.value || options.isBusy()) return
@@ -45,6 +46,8 @@ export function createPublishVideoUploader(options) {
         progress(0)
         try {
           const result = await options.upload(file, progress, controller.signal)
+          revision.value++
+          uploadedGroups.set(result.group.id, { group: result.group, revision: revision.value })
           options.addGroup(result.group)
           completed.value = [...completed.value, { id: result.group.id, name: file.name, reused: result.reused }]
         } catch (error) {
@@ -55,5 +58,10 @@ export function createPublishVideoUploader(options) {
     } finally { busy.value = false; controller = null }
   }
   function cancel() { cancelled = true; controller?.abort() }
-  return { busy, status, errors, completed, uploadFiles, cancel }
+  function mergeGroups(groups, startedAt) {
+    const recent = [...uploadedGroups.values()].filter(item => item.revision > startedAt).map(item => item.group)
+    const ids = new Set(recent.map(group => group.id))
+    return [...recent, ...groups.filter(group => !ids.has(group.id))]
+  }
+  return { busy, status, errors, completed, revision, mergeGroups, uploadFiles, cancel }
 }

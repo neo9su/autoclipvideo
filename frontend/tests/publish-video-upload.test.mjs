@@ -21,3 +21,5 @@ const pending=cancelling.uploadFiles([{name:'x.mp4',size:1},{name:'y.mp4',size:1
 console.log('Multi-upload, partial failure, duplicate selection, shared copy/cart and cancel passed')
 
 const {catalogRoomProducts}=await import('../src/publishCatalog.mjs');assert.equal(catalogRoomProducts([{id:7,enabled:1,product_url:'https://shop/1',room_id:1},{id:8,enabled:1,product_url:'https://shop/2',room_id:2}],8,[{id:8,url:'__custom__',name:'自定义上传'}]).length,2);
+
+assert.deepEqual(uploader.mergeGroups([{id:1}],0).map(group=>group.id),[2,1]);assert.deepEqual(uploader.mergeGroups([{id:1}],uploader.revision.value).map(group=>group.id),[1]);console.log('Slow pre-upload refresh retains newly uploaded groups; later refresh can remove stale files');

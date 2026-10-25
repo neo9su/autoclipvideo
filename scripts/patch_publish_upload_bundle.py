@@ -14,6 +14,9 @@ def patch(source):
 });
 '''
     source=once(source,'return Qn(async()=>{C();',adapter+'return Qn(async()=>{C();')
+    source=once(source,'function gt(){if(publishGroupsLoad)return publishGroupsLoad;w.value=!0;', 'function gt(){if(publishGroupsLoad)return publishGroupsLoad;const uploadRevision=manualPublishUpload.revision.value;w.value=!0;')
+    source=once(source,'ee.value=items.filter(st)', 'ee.value=manualPublishUpload.mergeGroups(items.filter(st),uploadRevision)')
+
     panel='''K('section',{style:{padding:'12px',border:'1px solid #444',borderRadius:'8px',marginBottom:'12px'}},[
  K('label',{for:'publish-manual-video'},'手动上传视频（可多选）'),
  K('input',{id:'publish-manual-video',type:'file',accept:'.mp4,.mov,video/mp4,video/quicktime',multiple:true,'aria-label':'上传发布视频',disabled:manualPublishUpload.busy.value||codexPublishBatch.submitting.value||ie.value,onChange:event=>{const files=Array.from(event.target.files||[]);event.target.value='';manualPublishUpload.uploadFiles(files)},style:{display:'block',maxWidth:'100%',margin:'8px 0'}},null,8,['disabled']),

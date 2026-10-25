@@ -1080,13 +1080,14 @@ async function repeatTask(task) {
 
 function refreshGroups() {
   if (groupsLoadPromise) return groupsLoadPromise
+  const uploadRevision = manualUpload.revision.value
   groupsRefreshing.value = true
   groupsError.value = ''
   roomsError.value = ''
   groupsLoadPromise = Promise.allSettled([
     getRooms().then(list => { rooms.value = list })
       .catch(() => { roomsError.value = '直播间列表加载失败，已保留现有标签；可点击刷新重试' }),
-    getGroups().then(groups => { mergedGroups.value = groups.filter(isPublishableGroup) })
+    getGroups().then(groups => { mergedGroups.value = manualUpload.mergeGroups(groups.filter(isPublishableGroup), uploadRevision) })
       .catch(error => { groupsError.value = '视频分组加载失败，请点击刷新重试'; showToast(groupsError.value, 'error') }),
     getProducts().then(prods => { products.value = prods.filter(p => p.enabled) })
       .catch(() => showToast('商品加载失败，请点击刷新重试', 'error')),

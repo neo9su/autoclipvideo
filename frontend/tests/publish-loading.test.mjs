@@ -9,7 +9,7 @@ async function scenario(groupFailure,productFailure){
  const old=[{id:9}],w={value:false},ee={value:old},re={value:[{id:8}]},notices=[]
  let calls=0,release
  const pending=new Promise(r=>release=r)
- const context={w,ee,re,te:{value:[]},Y:fn=>({get value(){return fn()}}),publishPickerRooms,Do:async()=>[],Q:'',z:value=>({value}),st:x=>x.ready,t:msg=>notices.push(msg),
+ const context={manualPublishUpload:{revision:{value:0},mergeGroups:groups=>groups},w,ee,re,te:{value:[]},Y:fn=>({get value(){return fn()}}),publishPickerRooms,Do:async()=>[],Q:'',z:value=>({value}),st:x=>x.ready,t:msg=>notices.push(msg),
   Eo:async()=>{calls++;await pending;if(groupFailure)throw Error('offline');return [{id:1,ready:true},{id:2,ready:false}]},
   ss:async()=>{if(productFailure)throw Error('offline');return [{id:3,enabled:true}]}}
  vm.createContext(context);vm.runInContext(source.slice(a,b)+';globalThis.refresh=gt;globalThis.error=publishGroupsError;',context)

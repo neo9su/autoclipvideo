@@ -8,7 +8,7 @@ assert.equal(publishPickerRooms([{id:'1',name:'接口最新名称'}],groups)[0].
 assert.deepEqual(publishPickerRooms([], [{room_id:null,room_name:'无效'},{room_id:'bad',room_name:'无效'}]),[])
 const source=fs.readFileSync(process.argv[2],'utf8'),a=source.indexOf('let publishGroupsError=z('),b=source.indexOf('async function _t(',a)
 let roomsFailed=true,roomCalls=0
-const context={publishPickerRooms,z:value=>({value}),Y:fn=>({get value(){return fn()}}),te:{value:[]},ee:{value:[]},re:{value:[]},w:{value:false},Q:'',st:g=>g.ready,t:()=>{},
+const context={manualPublishUpload:{revision:{value:0},mergeGroups:groups=>groups},publishPickerRooms,z:value=>({value}),Y:fn=>({get value(){return fn()}}),te:{value:[]},ee:{value:[]},re:{value:[]},w:{value:false},Q:'',st:g=>g.ready,t:()=>{},
  Do:async()=>{roomCalls++;if(roomsFailed)throw Error('offline');return [{id:1,name:'接口最新名称'}]},
  Eo:async()=>groups,ss:async()=>[{id:3,enabled:true}]}
 vm.createContext(context);vm.runInContext(source.slice(a,b)+';globalThis.refresh=gt;globalThis.rooms=publishRoomChips;globalThis.error=publishRoomsError;',context)
