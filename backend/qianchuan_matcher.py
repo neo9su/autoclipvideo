@@ -164,8 +164,7 @@ async def load_group_context(db_path: str, group_id: int, product_id: Optional[s
             async with db.execute(
                 f"""SELECT * FROM products
                    WHERE enabled = 1 {room_filter}
-                   ORDER BY {room_order} id DESC
-                   LIMIT 30""",
+                   ORDER BY {room_order} id DESC""",
                 params,
             ) as cur:
                 products = [dict(r) for r in await cur.fetchall()]
@@ -187,19 +186,10 @@ async def load_group_context(db_path: str, group_id: int, product_id: Optional[s
         ) as cur:
             recs = await cur.fetchall()
 
-    srt_texts: List[str] = []
-    for rec in recs:
-        # Resolve the database filename through the storage contract.  Joining
-        # a Windows-style relative path to the Linux container recordings
-        # directory silently creates a wrong basename and loses valid SRTs.
-        srt_path = resolve_srt_file(rec["filename"]) if resolve_srt_file else None
-        if not srt_path:
-            continue
-        try:
-            with open(srt_path, encoding="utf-8") as f:
-                srt_texts.append(f.read()[:8000])
-        except Exception:
-            pass
+    from qianchuan_product_evidence import load_transcripts
+    srt_text, subtitle_audit = load_transcripts(
+        [rec["filename"] for rec in recs], resolve_srt_file
+    )
 
     group_dict = dict(group)
     director_script = group_dict.get("director_script") or ""
@@ -213,7 +203,8 @@ async def load_group_context(db_path: str, group_id: int, product_id: Optional[s
         "group": group_dict,
         "identity": identity,
         "products": products,
-        "srt_text": "\n".join(srt_texts),
+        "srt_text": srt_text,
+        "subtitle_audit": subtitle_audit,
         "director_script_text": str(director_script)[:8000],
     }
 
@@ -235,51 +226,9 @@ def score_product_match(context: Dict, product_id: Optional[str] = None, keyword
             return {"ok": False, "score": 0.0, "product": None, "hits": [],
                     "missing": [str(product_id)], "threshold": threshold,
                     "identity": identity, "reason": "指定商品不存在或已停用，禁止自动换款"}
-    corpus = " ".join([
-        group.get("label") or "",
-        group.get("wig_model") or "",
-        group.get("wig_color") or "",
-        context.get("srt_text") or "",
-        context.get("director_script_text") or "",
-    ]).lower()
-
-    requested = _tokens(product_id, keywords)
-    group_tokens = _tokens(group.get("label"), group.get("wig_model"), group.get("wig_color"))
-    best = {"score": 0.0, "product": None, "hits": [], "missing": requested, "threshold": threshold}
-
-    candidates = products or [None]
-    for product in candidates:
-        product_tokens = []
-        if product:
-            product_tokens = _tokens(product.get("product_id"), product.get("product_name"), product.get("keywords"))
-        candidate_tokens = list(dict.fromkeys(requested + product_tokens + group_tokens))
-        if not candidate_tokens:
-            candidate_tokens = group_tokens
-        hit_score, hits = _contains_score(corpus, candidate_tokens, 1.0)
-
-        exact_bonus = 0.0
-        if product_id and product and str(product_id) in {str(product.get("product_id")), str(product.get("id"))}:
-            exact_bonus = 0.25
-        color = (group.get("wig_color") or "").lower()
-        if color and color in corpus:
-            exact_bonus += 0.10
-        label = (group.get("label") or "").lower()
-        if label and label != "未分类" and label in corpus:
-            exact_bonus += 0.08
-        score = min(1.0, hit_score + exact_bonus)
-        if score > best["score"]:
-            best = {
-                "score": round(score, 3),
-                "product": product,
-                "hits": hits,
-                "missing": [t for t in candidate_tokens if t not in hits][:12],
-                "threshold": threshold,
-            }
-
-    best["ok"] = best["score"] >= threshold
+    from qianchuan_product_evidence import product_evidence
+    best = product_evidence(context, product_id=product_id, threshold=threshold)
     best["identity"] = identity
-    if not best["ok"]:
-        best["reason"] = f"商品强匹配不足: {best['score']:.2f} < {threshold:.2f}; hits={','.join(best['hits'][:8]) or 'none'}"
     return best
 
 
