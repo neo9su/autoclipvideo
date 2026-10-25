@@ -29,8 +29,18 @@ def journal(row):
 
 def save(state):
     temp = AUDIT / 'status.writing'
-    temp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding='utf-8')
-    os.replace(temp, AUDIT / 'status.json')
+    for attempt in range(12):
+        try:
+            with temp.open('w', encoding='utf-8') as f:
+                json.dump(state, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp, AUDIT / 'status.json')
+            return
+        except PermissionError:
+            if attempt == 11:
+                raise
+            time.sleep(0.2 * (attempt + 1))
 
 
 def files(root):
@@ -58,6 +68,15 @@ def run():
         f.write(str(os.getpid()))
     state = dict(phase='preflight', migrated_files=0, migrated_bytes=0, skipped=0, errors=0)
     try:
+        completed = {}
+        history = AUDIT / 'journal.jsonl'
+        if history.exists():
+            for line in history.read_text(encoding='utf-8').splitlines():
+                item = json.loads(line)
+                if item.get('phase') == 'complete':
+                    completed[item['source']] = item
+        state['migrated_files'] = len(completed)
+        state['migrated_bytes'] = sum(item['size'] for item in completed.values())
         assert os.environ.get('USERNAME', '').lower() == 'susun'
         DEST.mkdir(parents=True, exist_ok=True)
         probe = DEST / 'write-probe.tmp'
@@ -133,8 +152,10 @@ def run():
         state.update(phase='failed', error=str(exc))
         raise
     finally:
-        save(state)
-        lock.unlink(missing_ok=True)
+        try:
+            save(state)
+        finally:
+            lock.unlink(missing_ok=True)
 
 
 if __name__ == '__main__':
