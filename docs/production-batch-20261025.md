@@ -13,3 +13,7 @@ Worker task CodexAIDProduction45409 runs as susun, saves job ID/status and event
 Targeted CPU test passed: source resolver returning str is accepted; cached artifact avoids reupload; a rerun submits only once using durable job identity; successful transcript is saved; business database bytes unchanged. Python syntax compiled. No whole-pipeline render/publish validation.
 
 Rollback/control: cancel active job only through AID POST /v1/jobs/459/cancel if requested. Keep batch manifest and source. No media/database rollback is required since they have not been modified. Do not restart/retry with a new idempotency key. Source path can turn into a validated UNC link during migration without changing source bytes.
+
+First prerequisite completed: AID job 459 SUCCEEDED on gpu-222, assigned GPU-f68178f8-25b4-d393-ac2e-62339307190b. Result operation transcribe, segmentCount 1882, elapsedSeconds 318.555. This is transcript production, not an edited MP4.
+
+Located the existing qianchuan-render protocol in the local AID deployment source (gpu_qianchuan_render_worker.py). It accepts qianchuanRenderRequest with 1–30 clips, artifact IDs plus start/duration, 9:16 or 16:9 and bounded output duration. The current client's GET /v1/profiles does not include qianchuan-render, so no render job was submitted or private-port fallback used. Client Profile authorization remains required before clipping can proceed.
