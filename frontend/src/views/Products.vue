@@ -3,6 +3,8 @@
     <div class="page-header">
       <h2>商品库</h2>
       <div class="header-actions">
+        <button class="btn-secondary" :disabled="productsLoading" @click="loadProducts">{{ productsLoading ? '加载中…' : '刷新商品' }}</button>
+        <span v-if="productsError" role="alert" style="color:#fbbf24">{{ productsError }}</span>
         <!-- 直播间筛选 -->
         <select v-model="roomFilter" class="room-filter-select">
           <option :value="0">全部直播间</option>
@@ -97,7 +99,7 @@
           </tr>
         </tbody>
       </table>
-      <div v-else class="empty">暂无商品</div>
+      <div v-else class="empty">{{ productsLoading ? '正在加载商品…' : productsError ? '商品加载失败，请点击“刷新商品”重试' : searchKeyword || roomFilter ? '没有符合筛选条件的商品' : '暂无商品' }}</div>
     </div>
 
     <!-- 悬停预览浮层 -->
@@ -196,6 +198,8 @@ const apiBase = BASE
 const { showToast } = useToast()
 
 const products = ref([])
+const productsLoading = ref(true)
+const productsError = ref('')
 const rooms = ref([])
 const searchKeyword = ref('')
 const roomFilter = ref(0)
@@ -272,7 +276,18 @@ function applyFilter() { /* 触发 computed 重算 */ }
 const dupUrlCount = computed(() => new Set(duplicates.value.map(p => p.product_url)).size)
 
 async function loadProducts() {
-  products.value = await getProducts()
+  productsLoading.value = true
+  productsError.value = ''
+  try {
+    const items = await getProducts()
+    if (!Array.isArray(items)) throw new Error('商品数据格式错误')
+    products.value = items
+  } catch {
+    productsError.value = '商品加载失败，请重试'
+    showToast(productsError.value, 'error')
+  } finally {
+    productsLoading.value = false
+  }
 }
 
 async function loadDuplicates() {
@@ -430,9 +445,11 @@ async function submitBulk() {
   }
 }
 
-onMounted(async () => {
-  rooms.value = await getRooms()
-  await loadProducts()
+onMounted(() => {
+  Promise.allSettled([
+    getRooms().then(items => { rooms.value = items }).catch(() => showToast('直播间加载失败，商品仍可查看', 'error')),
+    loadProducts(),
+  ])
 })
 </script>
 
