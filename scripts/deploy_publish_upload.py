@@ -63,9 +63,12 @@ for item in reversed(items):
 print('Original frontend entry and backend integration restored. Restart desktop backend while idle. Keep uploaded videos/groups; no database rollback, no GPU restart.')
 ''')
     pids=maintenance.backend_pids();assert len(pids)==1
-    changed=[];applied=False
+    changed=[];applied=False;gate=None
     try:
         assert main_path.read_bytes()==old_main and index.read_bytes()==old_index,'Deployment drift'
+        gate=sqlite3.connect(ROOT/'douyin.db',timeout=5)
+        gate.execute('BEGIN IMMEDIATE')
+        assert not gate.execute("select id from publish_tasks where status='publishing'").fetchall(),'A publish started; no restart'
         maintenance.pause_backend_tasks(plan,changed)
         for pid in pids & maintenance.backend_pids():subprocess.run(['taskkill','/PID',str(pid),'/F'],capture_output=True)
         assert not maintenance.backend_pids()
@@ -76,7 +79,9 @@ print('Original frontend entry and backend integration restored. Restart desktop
         if not applied:
             for item in reversed(manifest):
                 if item['before'] is not None:atomic(Path(item['path']),(backup/item['backup']).read_bytes())
-        maintenance.restore_backend_tasks(plan,changed)
+        if gate is not None:
+            gate.rollback();gate.close()
+        if changed:maintenance.restore_backend_tasks(plan,changed)
     with urllib.request.urlopen('http://127.0.0.1:8899/api/publish-videos/capabilities',timeout=10) as response:
         capability=json.load(response);assert capability['min_duration']==15 and capability['max_duration']==300 and capability['auto_publish'] is False
     atomic(asset,(stage/meta['name']).read_bytes());atomic(index,changes[-1][1])

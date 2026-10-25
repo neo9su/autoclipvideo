@@ -1753,4 +1753,6 @@ label { display: block; font-size: 12px; color: #888; margin: 12px 0 4px; }
 .btn-mark-manual { background: rgba(96,165,250,0.12); color: #60a5fa; border: 1px solid rgba(96,165,250,0.3); border-radius: 8px; padding: 8px 20px; cursor: pointer; font-size: 13px; font-weight: 500; transition: all 0.15s; }
 .btn-mark-manual:hover { background: rgba(96,165,250,0.2); }
 .manual-hint { font-size: 11px; color: #666; margin-top: 6px; line-height: 1.4; }
+.group-item-custom.group-item-selected .group-item-name { color: #fff; }
+.group-item-custom.group-item-selected .group-item-sub { color: #ddd; }
 </style>

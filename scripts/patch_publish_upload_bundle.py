@@ -24,4 +24,5 @@ def patch(source):
     source=once(source,"K('fieldset',{disabled:codexPublishBatch.submitting.value,",panel+"K('fieldset',{disabled:codexPublishBatch.submitting.value||manualPublishUpload.busy.value,")
     source=once(source,'onClick:t[38]||=Z(e=>!codexPublishBatch.submitting.value&&(l.value=false)', 'onClick:t[38]||=Z(e=>!codexPublishBatch.submitting.value&&!manualPublishUpload.busy.value&&(l.value=false)')
     source=once(source,"room.url === '__codex_completed__' || room.name === 'codex 成片'", "room.url === '__codex_completed__' || room.name === 'codex 成片' || room.url === '__custom__' || room.name === '自定义上传'")
-    return source+'\n'+helper
+    contrast="\nif(!document.getElementById('publish-upload-contrast')){const style=document.createElement('style');style.id='publish-upload-contrast';style.textContent='.group-item-custom.group-item-selected .group-item-name{color:#fff!important}.group-item-custom.group-item-selected .group-item-sub{color:#ddd!important}';document.head.append(style)}\n"
+    return source+'\n'+helper+contrast
