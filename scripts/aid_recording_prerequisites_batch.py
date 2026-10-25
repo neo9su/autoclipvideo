@@ -15,6 +15,8 @@ def main(limit=3):
     progress = BATCH/'prerequisites-batch.json'
     state = json.loads(progress.read_text(encoding='utf-8')) if progress.exists() else {
         'stage':'ASR_PREREQUISITES_ONLY', 'source_deleted':False, 'business_db_changed':False, 'items':[]}
+    state.update(finished=False,bounded_limit=limit)
+    save(progress,state)
     done = {item['id'] for item in state['items']}
     completed = sum(item['status']=='TRANSCRIBED_NOT_CLIPPED' for item in state['items'])
     for row in rows:
@@ -46,6 +48,7 @@ def main(limit=3):
             if item['status']=='TRANSCRIBED_NOT_CLIPPED': completed+=1
         except Exception as exc:
             item.update(status='PREFLIGHT_OR_CLIENT_ERROR',reason=str(exc)[:300])
+        state.pop('active_recording_id',None)
         state['items'].append(item);save(progress,state)
     state.pop('active_recording_id',None)
     state.update(completed_transcripts=completed,bounded_limit=limit,finished=True)
