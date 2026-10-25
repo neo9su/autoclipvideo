@@ -76,3 +76,37 @@ def test_same_wig_rewear_windows_are_kept_and_other_wig_is_excluded():
 def test_ambiguous_multi_style_target_has_no_render_windows():
     boundaries = [{"wig": "直发", "start_sec": 0, "end_sec": 20}]
     assert select_identity_windows(boundaries, "直发/卷发", "黑色/橘色") == []
+
+
+def test_slash_parting_description_uses_shared_suffix_without_generic_parting_hit():
+    boundaries = [
+        {"wig": "中分长款假发", "color": "深黑色", "start_sec": 0, "end_sec": 20},
+        {"wig": "侧分长款假发", "color": "深黑色", "start_sec": 30, "end_sec": 50},
+        {"wig": "中分短发另一款", "color": "深黑色", "start_sec": 60, "end_sec": 80},
+    ]
+    selected = select_identity_windows(boundaries, "中分／侧分长款假发", "深黑色/深棕色")
+    assert [item["start_sec"] for item in selected] == [0, 30]
+    assert len({item["identity_key"] for item in selected}) == 1
+
+
+def test_slash_name_with_one_observed_style_is_not_automatically_rejected():
+    boundaries = [{"wig": "直发", "color": "黑色", "start_sec": 0, "end_sec": 20}]
+    selected = select_identity_windows(boundaries, "直发/卷发", "黑色/橘色")
+    assert len(selected) == 1
+    assert selected[0]["identity_key"] == "wig:直发:黑色"
+
+
+def test_actual_different_styles_are_not_combined_by_slash_aliases():
+    boundaries = [
+        {"wig": "直发", "color": "黑色", "start_sec": 0, "end_sec": 20},
+        {"wig": "卷发", "color": "橘色", "start_sec": 30, "end_sec": 50},
+    ]
+    assert select_identity_windows(boundaries, "直发/卷发", "黑色/橘色") == []
+
+
+def test_parting_alternatives_do_not_combine_different_confirmed_colors():
+    boundaries = [
+        {"wig": "中分长款假发", "color": "深黑色", "start_sec": 0, "end_sec": 20},
+        {"wig": "侧分长款假发", "color": "深棕色", "start_sec": 30, "end_sec": 50},
+    ]
+    assert select_identity_windows(boundaries, "中分/侧分长款假发", "深黑色/深棕色") == []

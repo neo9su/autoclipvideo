@@ -97,13 +97,23 @@ def select_identity_windows(
     """Select only boundary windows that can be tied to one requested wig.
 
     Ampersand-separated names are aliases of one catalogue item (夺回&人生).
-    Slash/comma-separated target values describe multiple styles and are unsafe.
+    Slashes are descriptive alternatives, not proof of different styles.
+    Retain only windows resolving to one name/color identity.
     """
     raw_name = str(target_name or "").strip()
-    if not raw_name or re.search(r"[/／、,，;；|｜]", raw_name):
+    if not raw_name or re.search(r"[、,，;；|｜]", raw_name):
         return []
     aliases = product_aliases({"product_name": raw_name})
+    # Expand shared suffixes: 中分/侧分长款假发 -> 中分长款假发, 侧分长款假发.
+    partings = r"(?:中分|侧分|偏分|三七分|四六分)"
+    alternatives = re.fullmatch(rf"({partings}(?:/{partings})+)(.+)", normalize(raw_name))
+    if alternatives:
+        aliases = [normalize(raw_name)] + [
+            part + alternatives.group(2) for part in alternatives.group(1).split("/")
+        ]
+    separate_names = "/" in normalize(raw_name) and not alternatives
     color = normalize(target_color)
+    colors = list(dict.fromkeys(normalize(c) for c in re.split(r"[/／]", str(target_color or "")) if normalize(c)))
     selected = []
     for raw in boundaries:
         item = dict(raw)
@@ -112,14 +122,23 @@ def select_identity_windows(
         if end <= start:
             continue
         observed = normalize(" ".join(str(item.get(key) or "") for key in ("wig", "name", "product_name")))
-        if not observed or not any(alias in observed or observed in alias for alias in aliases):
+        matches = [alias for alias in aliases if alias in observed] if observed else []
+        if not matches and observed:
+            matches = [alias for alias in aliases if observed in alias]
+        if not matches:
             continue
         observed_color = normalize(item.get("color"))
-        if color and observed_color and color not in observed_color and observed_color not in color:
+        if len(colors) > 1 and not observed_color:
             continue
-        item["identity_key"] = f"wig:{normalize(raw_name)}:{color or 'unknown-color'}"
+        if colors and observed_color and not any(c in observed_color or observed_color in c for c in colors):
+            continue
+        resolved_name = max(matches, key=len) if separate_names else normalize(raw_name)
+        resolved_color = observed_color if len(colors) > 1 else color
+        item["identity_key"] = f"wig:{resolved_name}:{resolved_color or 'unknown-color'}"
         item["identity_evidence"] = "boundary_name_and_compatible_color"
         selected.append(item)
+    if len({item["identity_key"] for item in selected}) > 1:
+        return []
     return sorted(selected, key=lambda item: (float(item["start_sec"]), float(item["end_sec"])))
 
 
