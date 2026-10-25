@@ -189,8 +189,9 @@
         <div v-for="error in publishSelection.errors.value" :key="error.id" role="alert" style="color:#f59e0b;font-size:12px">
           分组 {{ error.id }}：{{ error.message }}（成功项不会重复提交）
         </div>
+        <div v-if="groupsError" role="alert" style="color:#f59e0b;font-size:12px">{{ groupsError }}</div>
         <div class="group-list">
-          <div v-if="!filteredGroups.length" class="muted" style="padding:8px;font-size:12px">{{ publishSelection.query.value.trim() ? '未找到匹配的视频，请更换关键词' : '暂无已合并分组' }}</div>
+          <div v-if="!filteredGroups.length" class="muted" style="padding:8px;font-size:12px">{{ groupsRefreshing ? '正在加载视频分组…' : groupsError ? '加载失败，原有选择会保留，请刷新重试' : publishSelection.query.value.trim() ? '未找到匹配的视频，请更换关键词' : '暂无已合并分组' }}</div>
           <div v-for="g in filteredGroups" :key="g.id"
             :class="['group-item', publishSelection.ids.value.includes(g.id) && 'group-item-selected', g.is_custom && 'group-item-custom']"
             @click="publishSelection.focus(g)">
@@ -631,6 +632,8 @@ const taskSearch = ref('')
 const statusFilter = ref('')
 const mergedGroups = ref([])
 const groupsRefreshing = ref(false)
+const groupsError = ref('')
+let groupsLoadPromise = null
 const rooms = ref([])
 const roomFilter = ref(1)   // default: 小圆圆不圆 (id=1)
 const accounts = ref([])
@@ -1043,15 +1046,17 @@ async function repeatTask(task) {
   showCreateModal.value = true
 }
 
-async function refreshGroups() {
+function refreshGroups() {
+  if (groupsLoadPromise) return groupsLoadPromise
   groupsRefreshing.value = true
-  try {
-    const [groups, prods] = await Promise.all([getGroups(), getProducts()])
-    mergedGroups.value = groups.filter(isPublishableGroup)
-    products.value = prods.filter(p => p.enabled)
-  } finally {
-    groupsRefreshing.value = false
-  }
+  groupsError.value = ''
+  groupsLoadPromise = Promise.allSettled([
+    getGroups().then(groups => { mergedGroups.value = groups.filter(isPublishableGroup) })
+      .catch(error => { groupsError.value = '视频分组加载失败，请点击刷新重试'; showToast(groupsError.value, 'error') }),
+    getProducts().then(prods => { products.value = prods.filter(p => p.enabled) })
+      .catch(() => showToast('商品加载失败，请点击刷新重试', 'error')),
+  ]).finally(() => { groupsRefreshing.value = false; groupsLoadPromise = null })
+  return groupsLoadPromise
 }
 
 async function selectTask(t) {
@@ -1444,14 +1449,15 @@ async function loginAccount(id) {
 }
 
 onMounted(async () => {
-  await loadTasks()
-  const [groups, roomList] = await Promise.all([getGroups(), getRooms()])
-  mergedGroups.value = groups.filter(isPublishableGroup)
-  rooms.value = roomList
-  accounts.value = await getPublishAccounts()
-  const defaultAccount = accounts.value.find(a => a.account_name === '颜遇生活')
-  if (defaultAccount) newTask.value.account_id = defaultAccount.id
-  products.value = (await getProducts()).filter(p => p.enabled)
+  await Promise.allSettled([
+    loadTasks(), refreshGroups(),
+    getRooms().then(list => { rooms.value = list }).catch(() => showToast('直播间加载失败，请重试', 'error')),
+    getPublishAccounts().then(list => {
+      accounts.value = list
+      const defaultAccount = list.find(a => a.account_name === '颜遇生活')
+      if (defaultAccount) newTask.value.account_id = defaultAccount.id
+    }).catch(() => showToast('发布账号加载失败，请重试', 'error')),
+  ])
   wsCleanup = createWS((msg) => {
     if (msg.type === 'publish_task_update') {
       loadTasks()

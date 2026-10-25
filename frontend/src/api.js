@@ -75,8 +75,8 @@ async function readErrorMessage(response, fallback = '请求失败') {
   return fallback
 }
 
-async function requestJson(url, options, fallback = '请求失败') {
-  const response = await fetchWithTimeout(url, options)
+async function requestJson(url, options, fallback = '请求失败', timeout = FETCH_TIMEOUT_MS) {
+  const response = await fetchWithTimeout(url, options, timeout)
   if (!response.ok) throw new Error(await readErrorMessage(response, fallback))
   try {
     return await response.json()
@@ -169,7 +169,7 @@ export function createWS(onMessage) {
 }
 
 export async function getGroups() {
-  return requestJson(`${BASE}/api/groups`, undefined, '分组加载失败')
+  return requestJson(`${BASE}/api/groups`, undefined, '分组加载失败', 60000)
 }
 
 export async function getGroup(id) {
