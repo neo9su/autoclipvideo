@@ -11,6 +11,8 @@ ROOT = Path(r'C:\Users\neo\douyin_backend')
 AUDIT = ROOT / 'codex_rollbacks' / 'media-to-222-20261024'
 DEST = Path(r'\\10.190.0.222\disk2\douyin-203-c-media')
 ROOTS = ['recordings', 'voice_output', 'qianchuan_uploads', 'media_overflow']
+MEDIA_EXTENSIONS = None
+EXCLUDED_DIRECTORIES = set()
 
 
 def digest(path):
@@ -42,9 +44,11 @@ def files(root):
                     continue
                 path = Path(entry.path)
                 if stat.S_ISDIR(metadata.st_mode):
-                    pending.append(path)
+                    if path.name not in EXCLUDED_DIRECTORIES:
+                        pending.append(path)
                 elif stat.S_ISREG(metadata.st_mode):
-                    yield path
+                    if MEDIA_EXTENSIONS is None or path.suffix.lower() in MEDIA_EXTENSIONS or path.name.endswith(('.migration-original', '.migration-link')):
+                        yield path
 
 
 def run():
@@ -122,7 +126,7 @@ def run():
                 except Exception as exc:
                     state['errors'] += 1
                     journal(dict(row, phase='error', error=str(exc)))
-                state['C_free_bytes'] = shutil.disk_usage('C:\\').free
+                state[ROOT.drive[0] + '_free_bytes'] = shutil.disk_usage(ROOT.anchor).free
                 save(state)
         state['phase'] = 'finished'
     except BaseException as exc:

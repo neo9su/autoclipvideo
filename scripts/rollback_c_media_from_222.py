@@ -28,7 +28,7 @@ def run():
         if not source.is_symlink():
             continue
         assert os.path.normcase(str(source.resolve())) == os.path.normcase(str(target.resolve()))
-        assert shutil.disk_usage('C:\\').free > row['size'] + 5 * 2**30, 'Insufficient C space'
+        assert shutil.disk_usage(source.anchor).free > row['size'] + 5 * 2**30, 'Insufficient source-drive space'
         temporary = source.with_name(source.name + '.restore-partial')
         with target.open('rb') as inp, temporary.open('wb') as out:
             shutil.copyfileobj(inp, out, 8 * 1024 * 1024)
