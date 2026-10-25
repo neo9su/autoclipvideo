@@ -9,3 +9,13 @@
 部署脚本保存原api_codex.py、入口HTML、哈希与桌面启动任务状态；提供rollback.py和restore_tasks.py。不恢复数据库，不修改媒体，不重启GPU服务。激活前拒绝正在publishing的任务，确认后端启动所有者为DouyinBackend8899SusunInteractive。回退源文件后应在无正在发布任务时重启同一桌面后端。
 
 验证：文件检查/失效路径/回退/去重/下一请求文件变更2项测试；前端4种分组商品成功/失败组合、重复刷新和保留旧数据；Vue脚本与模板编译、生产补丁bundle语法检查通过。最终生产HTTP和桌面会话检查另记部署结果。
+
+## 生产验证
+
+已部署，回退目录：C:\Users\neo\douyin_backend\codex_rollbacks\publish-group-loading-20261025-233442。当前入口index-publish-loading-40433d572265.js；HTTP下载SHA与暂存资产一致。后端PID12760、Session2，桌面任务仍为susun交互式启动；GPU未重启。
+
+实测/api/codex/publish-groups HTTP200，17.91秒，1176组，其中1104组有可发布版本，145组codex可用。直播间5、商品375、账号3，独立请求0.14–0.19秒。发布任务总数部署前后均1178。
+
+Playwright通过只读SSH转发验证真实生产页面；拦截所有非GET/HEAD请求，未创建发布任务。弹窗显示直播间、分组及颜遇生活账号；搜索“夺回”返回匹配项；勾选两条后显示“已选2个视频”和“创建2个发布任务”。截图output/playwright/publish-groups-restored.png。用于测试的转发会话及独立浏览器随验证关闭。
+
+限制：首次完整文件可用性检查仍需约18秒，现显示加载状态且不会阻塞其它资料；网络盘不可达时仍会提示失败/不可用，不能保证离线成片可发布。没有通过删除分组或跳过文件存在检查来掩盖问题。
