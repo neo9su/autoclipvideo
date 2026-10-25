@@ -62,7 +62,7 @@ def run(recording_id, batch):
         assert source and source.is_file(), 'Recording is missing or inaccessible'
         probe = subprocess.run(['ffprobe', '-v', 'error', '-show_entries',
                                 'stream=codec_type,width,height:format=duration', '-of', 'json', str(source)],
-                               capture_output=True, timeout=30)
+                               capture_output=True, timeout=30, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         assert probe.returncode == 0, 'Invalid recording container'
         data = json.loads(probe.stdout)
         video = next(s for s in data['streams'] if s.get('codec_type') == 'video')
