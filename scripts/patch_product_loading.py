@@ -17,6 +17,6 @@ def patch(text):
     text = once(text, 'Qn(async()=>{a.value=await Do(),await T()})',
         'Qn(()=>{Promise.allSettled([Do().then(items=>{a.value=items}).catch(()=>r(`直播间加载失败，商品仍可查看`,`error`)),T()])})')
     text = once(text, 'K(`div`,I_,[V(K(`select`',
-        'K(`div`,I_,[K(`button`,{class:`btn-secondary`,disabled:productLoading.value,onClick:T},productLoading.value?`加载中…`:`刷新商品`),productError.value?K(`span`,{role:`alert`,style:{color:`#fbbf24`}},productError.value):J(``,!0),V(K(`select`')
+        'K(`div`,I_,[K(`button`,{class:`btn-secondary`,disabled:productLoading.value,onClick:T},productLoading.value?`加载中…`:`刷新商品`,9,[`disabled`]),productError.value?K(`span`,{role:`alert`,style:{color:`#fbbf24`}},productError.value):J(``,!0),V(K(`select`')
     return once(text, 'G(`div`,vv,`暂无商品`)',
-        'G(`div`,vv,productLoading.value?`正在加载商品…`:productError.value?`商品加载失败，请点击“刷新商品”重试`:o.value||s.value?`没有符合筛选条件的商品`:`暂无商品`)')
+        'G(`div`,vv,productLoading.value?`正在加载商品…`:productError.value?`商品加载失败，请点击“刷新商品”重试`:o.value||s.value?`没有符合筛选条件的商品`:`暂无商品`,1)')

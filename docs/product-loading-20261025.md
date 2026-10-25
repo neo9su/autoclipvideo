@@ -6,5 +6,7 @@
 
 检查：成功、网络错误、异常数据、正常空列表、直播间失败不阻塞商品；生产编译资源失败处理验证；JavaScript语法检查。部署后HTTP入口与新资源SHA验证通过，发布任务数1178→1178，未重启后端或修改数据库。
 
-生产资源：index-product-loading-248752dca415.js。
+生产资源：index-product-loading-4d5a20a07cba.js。
 回退目录：C:\Users\neo\douyin_backend\codex_rollbacks\product-loading-20261025-162129。执行该目录rollback.py可恢复原HTML入口；脚本先核对文件哈希，保留新旧静态资源供已打开页面使用。
+
+浏览器复测发现编译资源新增按钮需显式动态更新标记，已补齐按钮文本/禁用及空状态文本更新。第二次前端部署回退目录为 product-loading-20261025-162314；恢复此前稳定版本可使用首个回退目录。
