@@ -27,7 +27,7 @@ def run():
             continue
         if not source.is_symlink():
             continue
-        assert os.readlink(source) == str(target)
+        assert os.path.normcase(str(source.resolve())) == os.path.normcase(str(target.resolve()))
         assert shutil.disk_usage('C:\\').free > row['size'] + 5 * 2**30, 'Insufficient C space'
         temporary = source.with_name(source.name + '.restore-partial')
         with target.open('rb') as inp, temporary.open('wb') as out:
