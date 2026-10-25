@@ -5,3 +5,7 @@
 修复：每次打开/刷新发布窗口独立重载直播间；失败保留已有标签并显示窗口内提示。标签列表合并直播间接口与已加载分组的room_id/room_name，相同ID去重、优先接口最新名称；接口暂时不可用时仍可按实际分组的直播间筛选。分组搜索、多选及发布请求保持原逻辑。
 
 验证：接口失败分组成功的标签回退、同ID去重、非法ID忽略、接口名称优先、下一次刷新恢复；原分组/商品4种成功失败组合；Vue编译和生产bundle语法检查。只切换前端静态入口，保存原HTML及哈希保护回退脚本，不重启后端/GPU、不修改数据库或新增发布任务。
+
+生产部署完成：入口index-publish-rooms-0df6aa886cec.js；HTTP资产SHA校验通过，回退目录C:\Users\neo\douyin_backend\codex_rollbacks\publish-rooms-20261026-002950。任务总数部署前后1178；后端/GPU均未重启。
+
+Playwright只读验证：在测试浏览器拦截/api/rooms模拟持续503，生产接口未受影响。分组加载后“小圆圆不圆/codex成片/丸子假发/KUKU公主”标签仍从分组元数据出现，窗口内显示失败及重试提示；移除模拟故障并点击刷新，codex成片、自定义上传、丸子假发、KUKU公主、小圆圆不圆5项全部出现，失败提示清除。全程阻止非GET/HEAD请求。验证截图output/playwright/room-labels-restored.png。
