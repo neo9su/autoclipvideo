@@ -170,9 +170,10 @@
             {{ groupsRefreshing ? '…' : '↻ 刷新' }}
           </button>
         </div>
+        <div v-if="roomsError" role="alert" style="color:#f59e0b;font-size:12px">{{ roomsError }}</div>
         <div class="room-filter-chips">
           <button :class="['room-chip', roomFilter === 0 && 'active']" @click="roomFilter = 0">全部</button>
-          <button v-for="r in rooms" :key="r.id"
+          <button v-for="r in pickerRooms" :key="r.id"
             :class="['room-chip', roomFilter === r.id && 'active']"
             @click="roomFilter = r.id">{{ r.name }}</button>
         </div>
@@ -604,6 +605,7 @@
 </template>
 
 <script setup>
+import { publishPickerRooms } from '../publishPickerRooms.mjs'
 import { catalogSearchProducts, catalogRoomProducts, catalogIsCodexRoom } from '../publishCatalog.mjs'
 import { REMOTE_API_BASE } from '../remoteApi.js'
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
@@ -633,6 +635,8 @@ const statusFilter = ref('')
 const mergedGroups = ref([])
 const groupsRefreshing = ref(false)
 const groupsError = ref('')
+const roomsError = ref('')
+const pickerRooms = computed(() => publishPickerRooms(rooms.value, mergedGroups.value))
 let groupsLoadPromise = null
 const rooms = ref([])
 const roomFilter = ref(1)   // default: 小圆圆不圆 (id=1)
@@ -1050,7 +1054,10 @@ function refreshGroups() {
   if (groupsLoadPromise) return groupsLoadPromise
   groupsRefreshing.value = true
   groupsError.value = ''
+  roomsError.value = ''
   groupsLoadPromise = Promise.allSettled([
+    getRooms().then(list => { rooms.value = list })
+      .catch(() => { roomsError.value = '直播间列表加载失败，已保留现有标签；可点击刷新重试' }),
     getGroups().then(groups => { mergedGroups.value = groups.filter(isPublishableGroup) })
       .catch(error => { groupsError.value = '视频分组加载失败，请点击刷新重试'; showToast(groupsError.value, 'error') }),
     getProducts().then(prods => { products.value = prods.filter(p => p.enabled) })
@@ -1451,7 +1458,6 @@ async function loginAccount(id) {
 onMounted(async () => {
   await Promise.allSettled([
     loadTasks(), refreshGroups(),
-    getRooms().then(list => { rooms.value = list }).catch(() => showToast('直播间加载失败，请重试', 'error')),
     getPublishAccounts().then(list => {
       accounts.value = list
       const defaultAccount = list.find(a => a.account_name === '颜遇生活')
