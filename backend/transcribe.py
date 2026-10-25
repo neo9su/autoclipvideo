@@ -408,44 +408,8 @@ async def resume_clip_job(recording_id: int) -> bool:
 
 
 async def _validate_mp4(filepath: str) -> tuple[bool, str]:
-    """Validate media on the remote GPU; never invoke local ffprobe."""
-    # Local validation is acceptable for sync recovery on the main backend
-    try:
-        if os.path.getsize(filepath) <= 0:
-            return False, "invalid mp4: file is empty"
-    except OSError as exc:
-        return False, f"invalid mp4: cannot read file ({type(exc).__name__})"
-    cmd = [
-        "ffprobe", "-v", "error",
-        "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        filepath,
-    ]
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=3.0)
-        if proc.returncode != 0:
-            err = stderr.decode(errors="replace").strip()[-200:]
-            return False, f"invalid mp4: {err}"
-        duration_str = stdout.decode().strip()
-        try:
-            if float(duration_str) <= 0:
-                return False, "invalid mp4: duration is 0"
-        except ValueError:
-            return False, f"invalid mp4: bad duration '{duration_str}'"
-        return True, ""
-    except asyncio.TimeoutError:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        return False, "invalid mp4: ffprobe timeout (>3s)"
-    except Exception as e:
-        return False, f"invalid mp4: {e}"
+    from media_probe import validate_mp4
+    return await validate_mp4(filepath)
 
 
 async def flush_poll() -> None:
@@ -664,6 +628,9 @@ async def poll_transcriptions(broadcast_fn=None):
                     upload_path, primary_id = result
                     valid, err_msg = await _validate_mp4(upload_path)
                     if not valid:
+                        if err_msg.startswith('media probe pending:'):
+                            logger.warning("Deferring media check for %s: %s", primary_id, err_msg)
+                            continue
                         logger.warning(f"Skipping corrupt file {os.path.basename(upload_path)}: {err_msg}")
                         async with aio_connect() as db:
                             await db.execute(

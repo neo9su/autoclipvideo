@@ -86,6 +86,7 @@ def _srt_to_text(srt_path: str, max_chars: int = 4000) -> str:
 
 async def _get_or_create_group(room_id: int, wig_model: Optional[str], wig_color: Optional[str]) -> int:
     # Convert lists to strings (LLM may return lists)
+    from group_lifecycle import OPEN_GROUP_SQL
     if isinstance(wig_model, list):
         wig_model = ", ".join(str(x) for x in wig_model)
     if isinstance(wig_color, list):
@@ -95,8 +96,8 @@ async def _get_or_create_group(room_id: int, wig_model: Optional[str], wig_color
     async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            """SELECT id FROM clip_groups
-               WHERE room_id = ? AND (wig_model IS ? OR (wig_model IS NULL AND ? IS NULL))
+            f"""SELECT id FROM clip_groups
+               WHERE ({OPEN_GROUP_SQL}) AND room_id = ? AND (wig_model IS ? OR (wig_model IS NULL AND ? IS NULL))
                                  AND (wig_color IS ? OR (wig_color IS NULL AND ? IS NULL))""",
             (room_id, wig_model, wig_model, wig_color, wig_color),
         ) as cur:
@@ -109,6 +110,7 @@ async def _get_or_create_group(room_id: int, wig_model: Optional[str], wig_color
         )
         await db.commit()
         return cur.lastrowid
+
 
 
 async def analyze_recording(recording_id: int, filename: str, room_id: int):
