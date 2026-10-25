@@ -8,20 +8,22 @@ from pathlib import Path
 import ssl
 import time
 import urllib.parse
+import urllib.request
+import subprocess
 from aid_transcribe_recording import save
 
 BATCH = Path(r'C:\Users\neo\douyin_backend\codex_operations\production-20261025')
 
 
 def run():
-    config = json.loads(Path(r'C:\ProgramData\AIDGPU\douyin-client\environment-render.json').read_text())
+    config = json.loads(Path(r'C:\ProgramData\AIDGPU\douyin-client\environment-render.json').read_text(encoding='utf-8'))
     os.environ.update(config)
     spec = importlib.util.spec_from_file_location('aid', BATCH / 'aid_gpu_client.py')
     client = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(client)
     assert client.request('GET', '/v1/profiles')['qianchuan-render']['enabled']
     client.request('GET', '/v1/snapshot')
-    source_state = json.loads((BATCH / 'recording-45409.json').read_text())
+    source_state = json.loads((BATCH / 'recording-45409.json').read_text(encoding='utf-8'))
     source = Path(source_state['source'])
     timeline = {'recording_id':45409, 'source_sha256':source_state['source_sha256'],
                 'startSeconds':427.37, 'durationSeconds':45.64,
@@ -29,7 +31,8 @@ def run():
                 'review_status':'preview_pending_full_playback', 'source_unchanged':True}
     asset_id = hashlib.sha256(json.dumps(timeline, sort_keys=True).encode()).hexdigest()[:32]
     state_path = BATCH / 'render-45409-v1.json'
-    state = json.loads(state_path.read_text()) if state_path.exists() else {'timeline':timeline,'asset_id':asset_id}
+    state = json.loads(state_path.read_text(encoding='utf-8')) if state_path.exists() else {'timeline':timeline,'asset_id':asset_id}
+    state['timeline'] = timeline
     if not state.get('artifact_id'):
         url = urllib.parse.urlsplit(config['AID_GPU_MANAGER_URL'])
         ctx = ssl.create_default_context(cafile=config['AID_GPU_MANAGER_CA_FILE'])
@@ -74,6 +77,38 @@ def run():
             break
         save(state_path,state)
         time.sleep(10)
+
+
+    if state['status'] == 'SUCCEEDED':
+        result = state['result']
+        if isinstance(result, str):
+            result = json.loads(result)
+        output_dir = Path(r'\\10.190.0.222\disk2\douyin-203-f-media\production-20261025')
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output = output_dir / result['filename']
+        if not state.get('download_verified'):
+            partial = output.with_suffix('.mp4.partial')
+            req = urllib.request.Request(config['AID_GPU_MANAGER_URL'].rstrip('/') +
+                '/v1/jobs/' + str(state['job_id']) + '/download', headers={'Authorization':
+                'Bearer ' + Path(config['AID_GPU_MANAGER_API_KEY_FILE']).read_text().strip()})
+            digest = hashlib.sha256()
+            with urllib.request.urlopen(req, context=ssl.create_default_context(
+                    cafile=config['AID_GPU_MANAGER_CA_FILE']), timeout=600) as response, partial.open('wb') as f:
+                for chunk in iter(lambda: response.read(1024*1024), b''):
+                    f.write(chunk)
+                    digest.update(chunk)
+            assert digest.hexdigest() == result['sha256'], 'Output hash mismatch'
+            assert partial.stat().st_size == result['sizeBytes'], 'Output size mismatch'
+            os.replace(partial, output)
+            state.update(output=str(output), download_verified=True)
+            save(state_path, state)
+        decode = subprocess.run(['ffmpeg','-v','error','-hwaccel','none','-i',str(output),
+                                 '-f','null','-'], capture_output=True, timeout=180)
+        state.update(full_decode_ok=decode.returncode == 0,
+                     decode_errors=decode.stderr.decode('utf-8', 'replace')[-2000:])
+        save(state_path, state)
+        assert decode.returncode == 0, 'Output decode failed'
+        save(output_dir / 'recording-45409-preview-manifest.json', state)
 
 
 if __name__=='__main__':
