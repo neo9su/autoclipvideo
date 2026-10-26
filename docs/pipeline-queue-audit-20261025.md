@@ -19,3 +19,9 @@ The backend was **not restarted** while clip/transcription tasks were active. Un
 ## Verification and rollback
 
 Targeted SQLite regression test: one passing test covers deleted, unfinished, valid pending and completed records, plus patch drift rejection. Python compilation runs before source replacement. Rollback script checks the current and saved source hashes before restoring. Activate/revert only when publication and local media work are idle; preserve durable transcription job IDs and all recordings/groups.
+
+## Unusable historical retry repair
+
+Twelve failed creative groups had associated recordings but none that were both non-deleted and transcribed. The periodic director/creative retry EXISTS checks counted any associated row, including deliberately removed material. `patch_unusable_retry_sources.py` now requires a non-deleted, transcribed, finished recording for those two periodic retry queries. It does not delete groups, clear errors, change successful assets, or admit unrelated hairstyles. A SQLite regression test covers removed, untranscribed, unfinished, missing, and valid source associations.
+
+Server backup: `C:\Users\neo\douyin_backend\codex_rollbacks\unusable-retries-20261026-100634`. Like the stats repair, this is staged in source and awaits a safe backend restart; no running task was interrupted. The observed HTTP timeout did not reproduce in the subsequent py-spy sample (event loop idle, matching in a worker thread); its cause remains unproven.
