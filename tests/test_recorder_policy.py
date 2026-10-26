@@ -57,3 +57,19 @@ def test_boundary_finalized_segment_is_dispatched(tmp_path, monkeypatch):
     asyncio.run(finalize_and_wait())
     assert path.exists()
     assert dispatched == [(1, str(path), 0)]
+
+
+def test_unprobeable_segment_is_preserved_without_deleted_callback(tmp_path, monkeypatch):
+    path = tmp_path / "interrupted.mp4"
+    path.write_bytes(b"original recording evidence")
+    events = []
+
+    async def callback(*args):
+        events.append(args)
+
+    recorder = RoomRecorder(1, "room", "https://stream.invalid",
+                            on_segment_done=callback, on_segment_rejected=callback)
+    monkeypatch.setattr("recorder.probe_duration", lambda _: asyncio.sleep(0, result=None))
+    assert asyncio.run(recorder._finalize_segment(str(path), 0)) is False
+    assert path.read_bytes() == b"original recording evidence"
+    assert events == []
