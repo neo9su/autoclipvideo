@@ -1,0 +1,24 @@
+{
+  "qianchuan-render-203": {
+    "displayName": "千川视频分析与重混（203）",
+    "gpuCount": 1,
+    "gpuIndices": [
+      0
+    ],
+    "allowedNodeIds": [
+      "gpu-203"
+    ],
+    "enabled": true,
+    "defaultPriority": 60,
+    "maxClientPriority": 60,
+    "exclusive": true,
+    "nonPreemptible": true,
+    "warmKey": null,
+    "warmSeconds": 0,
+    "warmPriorityBoost": 0,
+    "switchPenaltySeconds": 30,
+    "expectedSeconds": 300,
+    "maxRunSeconds": 3600,
+    "minClientPriority": 0
+  }
+}
