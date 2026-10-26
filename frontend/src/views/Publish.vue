@@ -370,7 +370,7 @@
               <label v-for="p in cartFilteredProducts" :key="p.id" class="product-check-item">
                 <input type="checkbox" :value="p.id" v-model="newTask.product_ids" />
                 <span v-if="p.room_name" class="product-room-tag">{{ p.room_name }}</span>
-                <span>{{ p.product_name }}</span>
+                <span>ID: {{ p.id }} · {{ p.product_name }}</span>
               </label>
               <div v-if="!cartFilteredProducts.length" class="muted" style="font-size:12px;padding:6px 0">暂无商品</div>
             </div>
@@ -549,7 +549,7 @@
               <label v-for="p in batchFilteredProducts" :key="p.id" class="product-check-item">
                 <input type="checkbox" :value="p.id" v-model="batchForm.product_ids" />
                 <span v-if="p.room_name" class="product-room-tag">{{ p.room_name }}</span>
-                <span>{{ p.product_name }}</span>
+                <span>ID: {{ p.id }} · {{ p.product_name }}</span>
               </label>
               <div v-if="!batchFilteredProducts.length" class="muted" style="font-size:12px;padding:6px 0">暂无匹配商品</div>
             </div>
