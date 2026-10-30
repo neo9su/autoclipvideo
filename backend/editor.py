@@ -662,6 +662,7 @@ def build_ass(
             transition = (sel_seg.transition or "cut:0").split(":", 1)
             incoming_overlap = float(transition[1]) if len(transition) == 2 else 0.0
             incoming_overlap = max(0.0, min(incoming_overlap, sel_seg.duration))
+        offset = max(0.0, cursor - incoming_overlap)
         if sel_idx > 0:
             cursor += sel_seg.duration - incoming_overlap
         else:
