@@ -662,6 +662,7 @@ def build_ass(
             transition = (sel_seg.transition or "cut:0").split(":", 1)
             incoming_overlap = float(transition[1]) if len(transition) == 2 else 0.0
             incoming_overlap = max(0.0, min(incoming_overlap, sel_seg.duration))
+        offset = max(0.0, cursor - incoming_overlap)
         if sel_idx > 0:
             cursor += sel_seg.duration - incoming_overlap
         else:
@@ -736,8 +737,8 @@ ANIME_FADE = 0.5     # crossfade into/out of anime transition frame
 ANIME_TOTAL = 2.0    # total duration of anime still input (includes both fades)
 
 # Output resolution: 2K portrait (9:16)
-OUT_W = 1080
-OUT_H = 1920
+OUT_W = 1440
+OUT_H = 2560
 
 # ComfyUI input resolution: SD1.5-safe portrait (9:16), avoids VRAM OOM at 4K
 COMFY_W = 576   # 9:16 portrait, divisible by 64 (SD 1.5 requirement)
@@ -3039,7 +3040,7 @@ async def _edit_via_gpu(
             break
         if status == "error":
             logger.warning(f"GPU clip job {job_id} error: {data.get('error')}")
-            return None
+            raise RuntimeError(f"Remote GPU clip job {job_id} failed: {data.get('error') or 'unknown worker error'}")
     else:
         logger.warning(f"GPU clip job {job_id} timed out")
         return None
@@ -3162,8 +3163,8 @@ async def _fast_local_clip(
             audio_map = "[aout]"
 
         vf = (
-            "scale=1080:1920:force_original_aspect_ratio=decrease:flags=lanczos,"
-            "pad=1080:1920:(ow-iw)/2:(oh-ih)/2,"
+            "scale=1440:2560:force_original_aspect_ratio=decrease:flags=lanczos,"
+            "pad=1440:2560:(ow-iw)/2:(oh-ih)/2,"
             "unsharp=5:5:0.8:5:5:0.4,"
             "eq=contrast=1.1:brightness=0.05:saturation=1.2"
         )

@@ -4,6 +4,7 @@
     <div class="task-list-panel">
       <div class="panel-header">
         <h3>发布任务</h3>
+        <a class="btn-secondary" href="/frontend/publish-review.html" target="_blank" rel="noopener">查看发布页面 / 确认发布</a>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
           <button class="btn-secondary" @click="openBatchModal">批量排期</button>
           <button class="btn-secondary" @click="doBulkRegenMeta" :disabled="bulkRegenning" title="为待发布/定时任务批量生成缺失的标题和描述">{{ bulkRegenning ? '生成中…' : '批量生成文案' }}</button>
@@ -79,6 +80,7 @@
             <button v-if="selectedTask.status === 'done'" class="btn-secondary" @click="repeatTask(selectedTask)" title="以相同配置再次发布">🔁 重复发布</button>
           </div>
         </div>
+        <a v-if="selectedTask.status === 'waiting_input'" href="/publish-cart-input" target="_blank">补充挂车商品并继续</a>
         <div v-if="selectedTask.error_msg" class="error-box">{{ selectedTask.error_msg }}</div>
         <div v-if="progressLog[selectedTask.id]?.length" class="progress-log">
           <div class="progress-log-title">发布进度</div>
@@ -157,9 +159,20 @@
     </div>
 
     <!-- Create Task Modal -->
-    <div v-if="showCreateModal" class="modal-overlay" @click.self="showCreateModal = false">
+    <div v-if="showCreateModal" class="modal-overlay" @click.self="!manualUpload.busy.value && (showCreateModal = false)">
       <div class="modal">
         <h3>创建发布任务</h3>
+        <section style="padding:12px;border:1px solid #444;border-radius:8px;margin-bottom:12px">
+          <label for="publish-manual-video">手动上传视频（可多选）</label>
+          <input id="publish-manual-video" type="file" accept=".mp4,.mov,video/mp4,video/quicktime" multiple
+            aria-label="上传发布视频" :disabled="manualUpload.busy.value || publishSelection.submitting.value || generating"
+            @change="onManualFiles" style="display:block;max-width:100%;margin:8px 0" />
+          <div class="muted" style="font-size:12px">上传成片原样用于发布：15–300秒，MP4/MOV，单个不超过1000MB；成功后自动加入“自定义上传”并选中。</div>
+          <div role="status" style="font-size:12px;margin-top:6px">{{ manualUpload.status.value }}</div>
+          <button v-if="manualUpload.busy.value" type="button" class="btn-xs" @click="manualUpload.cancel()">取消上传</button>
+          <div v-for="error in manualUpload.errors.value" :key="error" role="alert" style="color:#f59e0b;font-size:12px">{{ error }}</div>
+        </section>
+        <fieldset :disabled="publishSelection.submitting.value || manualUpload.busy.value" style="border:0;padding:0;margin:0;min-width:0">
         <p class="muted publish-duration-hint">发布视频时长要求：15–300 秒（含边界）</p>
 
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
@@ -168,17 +181,34 @@
             {{ groupsRefreshing ? '…' : '↻ 刷新' }}
           </button>
         </div>
+        <div v-if="roomsError" role="alert" style="color:#f59e0b;font-size:12px">{{ roomsError }}</div>
         <div class="room-filter-chips">
-          <button :class="['room-chip', roomFilter === 0 && 'active']" @click="roomFilter = 0; newTask.group_id = ''; newTask.product_ids = []">全部</button>
-          <button v-for="r in rooms" :key="r.id"
+          <button :class="['room-chip', roomFilter === 0 && 'active']" @click="roomFilter = 0">全部</button>
+          <button v-for="r in pickerRooms" :key="r.id"
             :class="['room-chip', roomFilter === r.id && 'active']"
-            @click="roomFilter = r.id; newTask.group_id = ''; newTask.product_ids = []">{{ r.name }}</button>
+            @click="roomFilter = r.id">{{ r.name }}</button>
         </div>
+        <input v-model="publishSelection.query.value" class="input" type="search"
+          placeholder="搜索视频/发型/颜色/分组编号，空格组合搜索" aria-label="搜索分组视频" />
+        <div style="font-size:12px;margin:8px 0">已选 {{ publishSelection.ids.value.length }} 个视频；标题按视频分别编辑；本批所有视频共用描述、标签及下方商品，空白内容会分别自动生成。</div>
+        <button class="btn-xs" :disabled="publishSelection.submitting.value" @click="publishSelection.clear()">清空选择</button>
+        <div class="room-filter-chips" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+          <button v-for="id in publishSelection.ids.value" :key="id" class="room-chip"
+            :class="{ active: newTask.group_id === id }" @click="publishSelection.focus(mergedGroups.find(g => g.id === id))">
+            编辑 {{ mergedGroups.find(g => g.id === id)?.label || id }}
+          </button>
+        </div>
+        <div v-for="error in publishSelection.errors.value" :key="error.id" role="alert" style="color:#f59e0b;font-size:12px">
+          分组 {{ error.id }}：{{ error.message }}（成功项不会重复提交）
+        </div>
+        <div v-if="groupsError" role="alert" style="color:#f59e0b;font-size:12px">{{ groupsError }}</div>
         <div class="group-list">
-          <div v-if="!filteredGroups.length" class="muted" style="padding:8px;font-size:12px">暂无已合并分组</div>
+          <div v-if="!filteredGroups.length" class="muted" style="padding:8px;font-size:12px">{{ groupsRefreshing ? '正在加载视频分组…' : groupsError ? '加载失败，原有选择会保留，请刷新重试' : publishSelection.query.value.trim() ? '未找到匹配的视频，请更换关键词' : '暂无已合并分组' }}</div>
           <div v-for="g in filteredGroups" :key="g.id"
-            :class="['group-item', newTask.group_id === g.id && 'group-item-selected', g.is_custom && 'group-item-custom']"
-            @click="newTask.group_id = g.id; onGroupSelect()">
+            :class="['group-item', publishSelection.ids.value.includes(g.id) && 'group-item-selected', g.is_custom && 'group-item-custom']"
+            @click="publishSelection.focus(g)">
+            <input type="checkbox" style="float:left;margin-right:8px;width:16px;height:16px;accent-color:#fe2c55" :checked="publishSelection.ids.value.includes(g.id)" :disabled="publishSelection.submitting.value || publishSelection.busy.value || generating"
+              :aria-label="`选择视频 ${g.label}`" @click.stop="publishSelection.toggle(g)" />
             <div class="group-item-name">{{ g.label }}</div>
             <div class="group-item-sub">
               <span v-if="g.room_name" class="group-room-tag">{{ g.room_name }}</span>{{ g.wig_model }} · {{ g.wig_color }}
@@ -324,7 +354,7 @@
           <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">
             <label style="margin:0">
               小黄车商品（可多选）
-              <span v-if="selectedGroupRoomId" class="muted" style="font-weight:normal">· 已按直播间筛选</span>
+              <span v-if="selectedGroupRoomId" class="muted" style="font-weight:normal">{{ catalogIsCodexRoom(selectedGroupRoomId, rooms) ? '· 可选全部直播间商品' : '· 已按直播间筛选' }}</span>
             </label>
             <button v-if="cartFilteredProducts.length" class="btn-xs" @click="toggleAllProducts">
               {{ newTask.product_ids.length === cartFilteredProducts.length ? '取消全选' : '全选' }}
@@ -341,7 +371,7 @@
               <label v-for="p in cartFilteredProducts" :key="p.id" class="product-check-item">
                 <input type="checkbox" :value="p.id" v-model="newTask.product_ids" />
                 <span v-if="p.room_name" class="product-room-tag">{{ p.room_name }}</span>
-                <span>{{ p.product_name }}</span>
+                <span>ID: {{ p.id }} · {{ p.product_name }}</span>
               </label>
               <div v-if="!cartFilteredProducts.length" class="muted" style="font-size:12px;padding:6px 0">暂无商品</div>
             </div>
@@ -352,8 +382,9 @@
 
         <div class="modal-actions">
           <button class="btn-secondary" @click="showCreateModal = false">取消</button>
-          <button class="btn-primary" @click="submitCreate" :disabled="!newTask.group_id || !newTask.platform">发布</button>
+          <button class="btn-primary" @click="submitCreate" :disabled="!publishSelection.ids.value.length || !newTask.platform || publishSelection.submitting.value || publishSelection.busy.value">{{ publishSelection.submitting.value ? '正在创建…' : `创建 ${publishSelection.ids.value.length} 个发布任务` }}</button>
         </div>
+        </fieldset>
       </div>
     </div>
 
@@ -519,7 +550,7 @@
               <label v-for="p in batchFilteredProducts" :key="p.id" class="product-check-item">
                 <input type="checkbox" :value="p.id" v-model="batchForm.product_ids" />
                 <span v-if="p.room_name" class="product-room-tag">{{ p.room_name }}</span>
-                <span>{{ p.product_name }}</span>
+                <span>ID: {{ p.id }} · {{ p.product_name }}</span>
               </label>
               <div v-if="!batchFilteredProducts.length" class="muted" style="font-size:12px;padding:6px 0">暂无匹配商品</div>
             </div>
@@ -585,16 +616,20 @@
 </template>
 
 <script setup>
+import { createPublishVideoUploader } from '../publishVideoUpload.mjs'
+import { publishPickerRooms } from '../publishPickerRooms.mjs'
+import { catalogSearchProducts, catalogRoomProducts, catalogIsCodexRoom } from '../publishCatalog.mjs'
 import { REMOTE_API_BASE } from '../remoteApi.js'
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import {
-  getRooms, getGroups, getGroup, getPublishTasks, createPublishTask, retryPublishTask, cancelPublishTask, bulkCancelPublishTasks,
+  uploadPublishVideo, getRooms, getGroups, getGroup, getPublishTasks, createPublishTask, retryPublishTask, cancelPublishTask, bulkCancelPublishTasks,
   getProducts, getPublishAccounts, createPublishAccount, deletePublishAccount, loginPublishAccount,
   generatePublishMeta, matchGroupProduct, createWS, deleteGroup, reclipRecording,
   getUnscheduledGroups, batchSchedulePublish, regenPublishTaskMeta, bulkRegenPublishTaskMeta, reschedulePublishTask,
   checkAccountCookie, markManualPublish,
 } from '../api.js'
 import { useToast } from '../composables/toast.js'
+import { codexCreatePublishSelection } from '../publishSelection.mjs'
 
 const { showToast } = useToast()
 
@@ -606,11 +641,15 @@ const showRescheduleModal = ref(false)
 const rescheduleTask = ref(null)
 const rescheduleTime = ref('')
 const showCreateModal = ref(false)
-watch(showCreateModal, (v) => { if (v) refreshGroups() })
+watch(showCreateModal, (v) => { if (v) { refreshGroups(); publishSelection.adopt() } else publishSelection.clear() })
 const taskSearch = ref('')
 const statusFilter = ref('')
 const mergedGroups = ref([])
 const groupsRefreshing = ref(false)
+const groupsError = ref('')
+const roomsError = ref('')
+const pickerRooms = computed(() => publishPickerRooms(rooms.value, mergedGroups.value))
+let groupsLoadPromise = null
 const rooms = ref([])
 const roomFilter = ref(1)   // default: 小圆圆不圆 (id=1)
 const accounts = ref([])
@@ -849,7 +888,7 @@ const filteredGroups = computed(() => {
     ? mergedGroups.value
     : mergedGroups.value.filter(g => g.room_id === roomFilter.value)
   // 隐藏已发布（有 done 任务）的分组，避免重复发布
-  return base.filter(g => !publishedGroupIds.value.has(g.id))
+  return base.filter(g => !publishedGroupIds.value.has(g.id) && publishSelection.matches(g))
 })
 
 // Products filtered to match the selected group's room
@@ -860,25 +899,12 @@ const selectedGroupRoomId = computed(() => {
 })
 
 const roomFilteredProducts = computed(() => {
-  // Use selected group's room first, fall back to room chip filter, then show all
   const roomId = selectedGroupRoomId.value || (roomFilter.value !== 0 ? roomFilter.value : null)
-  if (!roomId) return products.value
-  const byRoom = products.value.filter(p => p.room_id === roomId)
-  const globals = products.value.filter(p => !p.room_id)
-  const combined = [...byRoom, ...globals]
-  return combined.length > 0 ? combined : products.value
+  return catalogRoomProducts(products.value, roomId, rooms.value)
 })
 
 const cartSearch = ref('')
-const cartFilteredProducts = computed(() => {
-  const base = roomFilteredProducts.value
-  const q = cartSearch.value.trim().toLowerCase()
-  if (!q) return base
-  return base.filter(p =>
-    (p.product_name || '').toLowerCase().includes(q) ||
-    (p.keywords || '').toLowerCase().includes(q)
-  )
-})
+const cartFilteredProducts = computed(() => catalogSearchProducts(roomFilteredProducts.value, cartSearch.value))
 
 // Compute next scheduled_at from scheduleTime
 const schedulePreview = computed(() => {
@@ -920,6 +946,22 @@ const statusFilters = [
 ]
 
 const newTask = ref({ group_id: '', platform: 'douyin', account_id: '', title: '', description: '', tags: '', product_ids: [], no_cart: false })
+const publishSelection = codexCreatePublishSelection({
+  ref, getForm: () => newTask.value, setForm: form => { newTask.value = form },
+  getGroups: () => mergedGroups.value,
+  getExtras: () => ({ version: selectedPublishVersion.value, schemes: metaSchemes.value, scheme: selectedScheme.value, matched: matchedProduct.value }),
+  setExtras: state => { selectedPublishVersion.value = state.version; metaSchemes.value = state.schemes; selectedScheme.value = state.scheme; matchedProduct.value = state.matched },
+  getShared: () => ({ platform: newTask.value.platform, account_id: newTask.value.account_id, scheduled_at: scheduleMode.value === 'later' ? computeScheduledAt() : null, interval_minutes: scheduleInterval.value }),
+  defaultVersion: group => group.publish_versions && group.publish_versions !== 'both' ? group.publish_versions : preferredPreviewVersion(group),
+  createTask: body => createPublishTask(body), loadTasks, toast: showToast, editingBusy: () => generating.value,
+  onComplete: () => {
+    showCreateModal.value = false
+    const defaultAcc = accounts.value.find(a => a.account_name === '颜遇生活')
+    newTask.value = { group_id: '', platform: 'douyin', account_id: defaultAcc?.id || '', title: '', description: '', tags: '', product_ids: [], no_cart: false }
+    matchedProduct.value = null
+  },
+})
+
 const newAccount = ref({ platform: 'douyin', account_name: '' })
 
 // ID formatting
@@ -936,6 +978,23 @@ function formatTaskId(task) {
   return 'DT' + modePrefix + String(task.group_id).padStart(7, '0')
 }
 
+
+const manualUpload = createPublishVideoUploader({
+  ref, isBusy: () => publishSelection.submitting.value || publishSelection.busy.value || generating.value,
+  upload: uploadPublishVideo,
+  addGroup: group => {
+    mergedGroups.value = [group, ...mergedGroups.value.filter(item => item.id !== group.id)]
+    if (!rooms.value.some(room => room.id === group.room_id)) rooms.value = [...rooms.value, { id: group.room_id, name: group.room_name, url: '__custom__' }]
+    roomFilter.value = group.room_id
+    publishSelection.query.value = ''
+    if (!publishSelection.ids.value.includes(group.id)) publishSelection.toggle(group)
+  },
+})
+function onManualFiles(event) {
+  const files = Array.from(event.target.files || [])
+  event.target.value = ''
+  return manualUpload.uploadFiles(files)
+}
 
 function availableVersionCount(group) {
   if (!group) return 0
@@ -963,10 +1022,10 @@ function isPublishableGroup(group) {
 }
 
 function statusLabel(s) {
-  return { pending: '待发布', scheduled: '定时', publishing: '发布中', done: '已完成', failed: '失败' }[s] || s
+  return { pending: '待发布', scheduled: '定时', publishing: '发布中', done: '已完成', waiting_input: '等待补充商品', failed: '失败' }[s] || s
 }
 function statusClass(s) {
-  return { pending: 'badge-yellow', scheduled: 'badge-blue', publishing: 'badge-orange', done: 'badge-green', failed: 'badge-red' }[s] || ''
+  return { pending: 'badge-yellow', scheduled: 'badge-blue', publishing: 'badge-orange', done: 'badge-green', waiting_input: 'badge-yellow', failed: 'badge-red' }[s] || ''
 }
 function splitTags(tags) {
   if (!tags) return []
@@ -1020,15 +1079,21 @@ async function repeatTask(task) {
   showCreateModal.value = true
 }
 
-async function refreshGroups() {
+function refreshGroups() {
+  if (groupsLoadPromise) return groupsLoadPromise
+  const uploadRevision = manualUpload.revision.value
   groupsRefreshing.value = true
-  try {
-    const [groups, prods] = await Promise.all([getGroups(), getProducts()])
-    mergedGroups.value = groups.filter(isPublishableGroup)
-    products.value = prods.filter(p => p.enabled)
-  } finally {
-    groupsRefreshing.value = false
-  }
+  groupsError.value = ''
+  roomsError.value = ''
+  groupsLoadPromise = Promise.allSettled([
+    getRooms().then(list => { rooms.value = list })
+      .catch(() => { roomsError.value = '直播间列表加载失败，已保留现有标签；可点击刷新重试' }),
+    getGroups().then(groups => { mergedGroups.value = manualUpload.mergeGroups(groups.filter(isPublishableGroup), uploadRevision) })
+      .catch(error => { groupsError.value = '视频分组加载失败，请点击刷新重试'; showToast(groupsError.value, 'error') }),
+    getProducts().then(prods => { products.value = prods.filter(p => p.enabled) })
+      .catch(() => showToast('商品加载失败，请点击刷新重试', 'error')),
+  ]).finally(() => { groupsRefreshing.value = false; groupsLoadPromise = null })
+  return groupsLoadPromise
 }
 
 async function selectTask(t) {
@@ -1322,7 +1387,8 @@ async function doReclip() {
   }
 }
 
-async function generateMeta() {
+async function generateMeta() { return publishSelection.runEditing(generateMetaForCurrent) }
+async function generateMetaForCurrent() {
   if (!newTask.value.group_id) return
   generating.value = true
   metaSchemes.value = []
@@ -1364,16 +1430,16 @@ function toggleAllProducts() {
   }
 }
 
-async function autoMatchProduct() {
+async function autoMatchProduct() { return publishSelection.runEditing(autoMatchProductForCurrent) }
+async function autoMatchProductForCurrent() {
   if (!newTask.value.group_id) return
   try {
-    const result = await matchGroupProduct(newTask.value.group_id)
-    if (result.product) {
-      matchedProduct.value = result.product
-      if (!newTask.value.product_ids.includes(result.product.id)) {
-        newTask.value.product_ids.push(result.product.id)
-      }
-      showToast(`自动匹配: ${result.product.product_name}`, 'success')
+    const result = await matchGroupProduct(newTask.value.group_id, cartSearch.value)
+    if (result.products?.length || result.product) {
+      const matches = result.products || [result.product]
+      matchedProduct.value = matches[0]
+      newTask.value.product_ids = matches.map(p => p.id)
+      showToast(`已匹配 ${matches.length} 件商品${matches.length > 10 ? '，本系统最多选择10件，请减少选择后创建' : ''}`, matches.length > 10 ? 'info' : 'success')
     } else {
       showToast('未找到匹配商品', 'info')
     }
@@ -1382,47 +1448,7 @@ async function autoMatchProduct() {
   }
 }
 
-async function submitCreate() {
-  const body = {
-    group_id: newTask.value.group_id,
-    platform: newTask.value.platform,
-    account_id: newTask.value.account_id || null,
-    scheduled_at: scheduleMode.value === 'later' ? computeScheduledAt() : null,
-    title: newTask.value.title || null,
-    description: newTask.value.description || null,
-    tags: newTask.value.tags || null,
-    product_ids: newTask.value.product_ids.length ? newTask.value.product_ids : null,
-    publish_version: selectedPublishVersion.value,
-    auto_meta: !(newTask.value.title || '').trim() || !(newTask.value.description || '').trim(),
-    no_cart: newTask.value.no_cart,
-  }
-  try {
-    try {
-      await createPublishTask(body)
-    } catch (e) {
-      if (e.message?.includes('duplicate')) {
-        const go = confirm(`该分组已存在 ${body.platform} 发布任务（可能已发布或排队中）。\n确认要再次发布吗？\n如需重复发布，请先在任务列表删除旧任务。`)
-        if (go) showToast('请先在发布列表删除旧任务，再重新创建', 'info')
-        return
-      }
-      throw e
-    }
-    // Advance schedule time by interval for next task
-    if (scheduleMode.value === 'later' && scheduleInterval.value) {
-      const [h, m] = scheduleTime.value.split(':').map(Number)
-      const next = new Date(0, 0, 0, h, m + scheduleInterval.value)
-      scheduleTime.value = `${String(next.getHours()).padStart(2,'0')}:${String(next.getMinutes()).padStart(2,'0')}`
-    }
-    showCreateModal.value = false
-    const defaultAcc = accounts.value.find(a => a.account_name === '颜遇生活')
-    newTask.value = { group_id: '', platform: 'douyin', account_id: defaultAcc?.id || '', title: '', description: '', tags: '', product_ids: [], no_cart: false }
-    matchedProduct.value = null
-    await loadTasks()
-    showToast('任务已创建', 'success')
-  } catch (e) {
-    showToast('创建失败: ' + e.message, 'error')
-  }
-}
+async function submitCreate() { await publishSelection.submit() }
 
 async function addAccount() {
   if (!newAccount.value.account_name) return
@@ -1460,14 +1486,14 @@ async function loginAccount(id) {
 }
 
 onMounted(async () => {
-  await loadTasks()
-  const [groups, roomList] = await Promise.all([getGroups(), getRooms()])
-  mergedGroups.value = groups.filter(isPublishableGroup)
-  rooms.value = roomList
-  accounts.value = await getPublishAccounts()
-  const defaultAccount = accounts.value.find(a => a.account_name === '颜遇生活')
-  if (defaultAccount) newTask.value.account_id = defaultAccount.id
-  products.value = (await getProducts()).filter(p => p.enabled)
+  await Promise.allSettled([
+    loadTasks(), refreshGroups(),
+    getPublishAccounts().then(list => {
+      accounts.value = list
+      const defaultAccount = list.find(a => a.account_name === '颜遇生活')
+      if (defaultAccount) newTask.value.account_id = defaultAccount.id
+    }).catch(() => showToast('发布账号加载失败，请重试', 'error')),
+  ])
   wsCleanup = createWS((msg) => {
     if (msg.type === 'publish_task_update') {
       loadTasks()
@@ -1729,4 +1755,6 @@ label { display: block; font-size: 12px; color: #888; margin: 12px 0 4px; }
 .btn-mark-manual { background: rgba(96,165,250,0.12); color: #60a5fa; border: 1px solid rgba(96,165,250,0.3); border-radius: 8px; padding: 8px 20px; cursor: pointer; font-size: 13px; font-weight: 500; transition: all 0.15s; }
 .btn-mark-manual:hover { background: rgba(96,165,250,0.2); }
 .manual-hint { font-size: 11px; color: #666; margin-top: 6px; line-height: 1.4; }
+.group-item-custom.group-item-selected .group-item-name { color: #fff; }
+.group-item-custom.group-item-selected .group-item-sub { color: #ddd; }
 </style>

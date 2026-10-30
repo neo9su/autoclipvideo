@@ -90,7 +90,14 @@ class RoomRecorder:
     async def _finalize_segment(self, filepath: str, segment_index: int) -> bool:
         """Probe, retain, and dispatch a completed segment exactly once."""
         duration = await probe_duration(filepath)
-        if classify_duration(duration) != "accepted":
+        status = classify_duration(duration)
+        if status == "duration_unavailable":
+            logger.warning(
+                "[%s] Preserving recording with unavailable duration: %s",
+                self.room_name, filepath,
+            )
+            return False
+        if status != "accepted":
             logger.info(f"[{self.room_name}] Discarding short recording {os.path.basename(filepath)} ({duration!r}s)")
             try:
                 os.unlink(filepath)

@@ -82,42 +82,18 @@ def resolve_artifact_path(value: object, version: str) -> tuple[Optional[str], s
 def resolve_publish_video(
     group: Mapping[str, object], requested_version: object = "both"
 ) -> tuple[Optional[str], Optional[str], list[str], list[str]]:
-    """Resolve the file to store in a publish task.
-
-    ``both`` (and an empty selection) means the default publishing policy:
-    qianchuan, creative, director, then classic.  An explicit version is
-    strict: it is never silently replaced by another version.  The returned
-    candidate descriptions and available version names are intended for the
-    API's actionable 409 response.
-    """
+    """An explicit version never borrows another version's artifact."""
     requested = str(requested_version or "both").strip().lower()
-    if requested in ("", "default", "both"):
-        versions = ["qianchuan", "realistic", "conservative", "creative", "director", "classic"]
-    elif requested in _VERSION_FIELDS:
-        versions = [requested]
-    else:
-        versions = []
-
+    versions = list(_VERSION_FIELDS) if requested in ("", "default", "both") else [requested] if requested in _VERSION_FIELDS else []
     checked: list[str] = []
     available: list[str] = []
     resolved: dict[str, str] = {}
-    for version in ("qianchuan", "realistic", "conservative", "creative", "director", "classic"):
-        field = _VERSION_FIELDS[version]
-        value = group.get(field)
-        if not value:
-            checked.append(f"{version}: 未设置")
-            continue
-        candidates = _candidate_paths(value)
-        found = None
-        for candidate in candidates:
-            checked.append(f"{version}: {candidate}")
-            if candidate.is_file():
-                found = str(candidate)
-                break
-        if found:
-            resolved[version] = found
+    for version, field in _VERSION_FIELDS.items():
+        path, status = resolve_artifact_path(group.get(field), version)
+        checked.append(f"{version}: {status}")
+        if path:
+            resolved[version] = path
             available.append(version)
-
     for version in versions:
         if version in resolved:
             return resolved[version], version, checked, available
@@ -125,29 +101,40 @@ def resolve_publish_video(
 
 
 def resolve_video_path(video_path: object, group: Optional[Mapping[str, object]] = None) -> tuple[Optional[str], str]:
-    """Return a local existing path and reason, preferring current group artifacts."""
-    values: list[object] = []
-    if group:
-        for field in ("qianchuan_final_video", "realistic_final_video", "conservative_final_video", "creative_final_video", "director_final_video"):
-            if group.get(field):
-                values.append(group[field])
-        if group.get("merged_filename"):
-            values.append(group["merged_filename"])
-    values.append(video_path)
-
-    seen: set[str] = set()
-    for value in values:
-        for candidate in _candidate_paths(value):
-            key = str(candidate)
-            if key in seen:
-                continue
-            seen.add(key)
-            if candidate.is_file():
-                return str(candidate), "resolved_current_or_migrated_path"
-
-    if video_path:
-        return None, "stale_path"
-    return None, "not_generated"
+    """Preserve the task's chosen artifact; migrate only the same filename."""
+    raw = str(video_path or "").strip()
+    if not raw:
+        if group:
+            path, _, _, _ = resolve_publish_video(group)
+            if path:
+                return path, "resolved_default_version"
+        return None, "not_generated"
+    # Old tasks sometimes stored a version name in place of a filename.
+    if raw in _VERSION_FIELDS:
+        return resolve_artifact_path((group or {}).get(_VERSION_FIELDS[raw]), raw)
+    candidates = _candidate_paths(raw)
+    # A still-existing selected file always wins over every group artifact.
+    normalized = str(Path(raw.replace("\\", "/")))
+    for candidate in candidates:
+        if str(candidate) == normalized and candidate.is_file():
+            return str(candidate), "resolved_selected_path"
+    basename = path_basename(raw)
+    matching = list(dict.fromkeys(
+        str(value) for field in _VERSION_FIELDS.values()
+        if (value := (group or {}).get(field)) and path_basename(value) == basename
+    ))
+    if len(matching) > 1:
+        return None, "ambiguous_path"
+    # Only the selected filename can be recovered from historical roots or a
+    # matching group path. Never replace it with a different version/file.
+    if matching:
+        candidates.extend(_candidate_paths(matching[0]))
+    found = list(dict.fromkeys(str(p) for p in candidates if p.is_file()))
+    if len(found) > 1:
+        return None, "ambiguous_path"
+    if found:
+        return found[0], "resolved_same_filename_migration"
+    return None, "stale_path"
 
 
 def describe_missing(video_path: object, reason: str) -> str:

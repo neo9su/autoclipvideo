@@ -8,20 +8,10 @@ $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $backendProcessPattern = "uvicorn main:app.*$Port"
 
 function Get-ActiveSession {
-    $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name.Split("\\")[-1]
-    $lines = @(quser 2>$null)
-    foreach ($line in $lines | Select-Object -Skip 1) {
-        $fields = ($line -replace "^>\s*", "").Trim() -split "\s+"
-        $idIndex = -1
-        for ($index = 0; $index -lt [Math]::Min(4, $fields.Count); $index++) {
-            if ($fields[$index] -match "^\d+$") { $idIndex = $index; break }
-        }
-        if ($idIndex -ge 0 -and $fields.Count -gt ($idIndex + 1) -and
-            $fields[$idIndex + 1] -match "^(Active|运行中)$" -and
-            $fields[0] -ieq $currentUser) {
-            return [int]$fields[$idIndex]
-        }
-    }
+    # InteractiveToken already places this supervisor in its user's desktop.
+    # A disconnected RDP session remains valid and must still recover children.
+    $sessionId = (Get-Process -Id $PID).SessionId
+    if ($sessionId -gt 0) { return [int]$sessionId }
     return $null
 }
 
@@ -41,7 +31,13 @@ while ($true) {
         continue
     }
 
-    $conflictingProcesses = Get-BackendFromOtherSession -SessionId $sessionId
+    # Check the socket too: another account's command line may be inaccessible.
+    $listeners = @(Get-NetTCPConnection -State Listen -ErrorAction Stop | Where-Object { $_.LocalPort -eq $Port })
+    if ($listeners.Count -gt 0) {
+        Start-Sleep -Seconds 15
+        continue
+    }
+    $conflictingProcesses = @(Get-BackendFromOtherSession -SessionId $sessionId)
     if ($conflictingProcesses.Count -gt 0) {
         Write-Warning "Backend listener conflict detected on port $Port; an existing backend process is active. No process was stopped."
         Start-Sleep -Seconds 15
@@ -50,17 +46,12 @@ while ($true) {
     Push-Location $scriptRoot
     try {
         Write-Host "Starting backend in interactive Windows session $sessionId"
-        $backend = Start-Process -FilePath $Python `
+        $backend = Start-Process -FilePath $Python -WindowStyle Hidden `
             -ArgumentList @("-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "$Port") `
             -WorkingDirectory $scriptRoot -PassThru
         while (-not $backend.HasExited) {
+            # Session discovery must never terminate in-flight backend work.
             Start-Sleep -Seconds 10
-            $activeSessionId = Get-ActiveSession
-            if ($null -eq $activeSessionId -or $activeSessionId -ne $backend.SessionId) {
-                Write-Host "Interactive session changed; restarting backend in the active session"
-                Stop-Process -Id $backend.Id -Force -ErrorAction SilentlyContinue
-                break
-            }
             $backend.Refresh()
         }
         if ($backend.ExitCode -ne 0) {

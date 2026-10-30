@@ -148,3 +148,17 @@ def test_conservative_keyword_sound_cues_are_timed_and_idempotent():
     assert [cue["time"] for cue in cues] == [0.05, 0.05]
     assert len({cue["idempotency_key"] for cue in cues}) == len(cues)
     assert all(cue["reason"] == "conservative_keyword" for cue in cues)
+
+
+def test_incoming_fade_rebases_cues_at_clip_start_not_previous_end():
+    selected = [
+        Seg(idx=1, start=10, end=14, text='first', transition='cut:0'),
+        Seg(idx=2, start=30, end=34, text='second', transition='fade:0.35'),
+        Seg(idx=3, start=50, end=54, text='third', transition='cut:0'),
+    ]
+    cues = [Seg(idx=1, start=10, end=11, text='第一句'),
+            Seg(idx=2, start=30, end=31, text='第二句'),
+            Seg(idx=3, start=50, end=51, text='第三句')]
+    ass = build_ass(selected, cues)
+    assert '0:00:03.65,0:00:04.65' in ass
+    assert '0:00:07.65,0:00:08.65' in ass

@@ -1,0 +1,16 @@
+{
+  "profiles": {
+    "qianchuan-render-203": {
+      "runCommand": [
+        "C:\\Python313\\python.exe",
+        "C:\\ProgramData\\AIDGpuScheduler\\adapters\\qianchuan-render-203\\gpu_qianchuan_render_worker.py",
+        "{job_file}"
+      ],
+      "resultRequired": true,
+      "allowedProcessPatterns": [
+        "(?i)qianchuan-render-203[\\\\/]+gpu_qianchuan_render_worker\\.py",
+        "(?i)ffmpeg\\.exe.*AIDGpuScheduler[\\\\/]+spool[\\\\/]"
+      ]
+    }
+  }
+}

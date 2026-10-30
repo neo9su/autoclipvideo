@@ -1,0 +1,31 @@
+{
+  "recording_id": 45409,
+  "name": "秋日奶咖",
+  "catalog_record_id": 823,
+  "sku_verified": false,
+  "has_product_url": false,
+  "spoken_name_seconds": [
+    1452.45,
+    1453.83
+  ],
+  "source_windows": [
+    [
+      1451.97,
+      1486.75
+    ],
+    [
+      1488.39,
+      1496.41
+    ],
+    [
+      1526.79,
+      1530.19
+    ]
+  ],
+  "planned_final_duration": 46.2,
+  "notes": [
+    "保留需要醒发的原声说明",
+    "最终剪去历史价格、库存、已发货提示",
+    "当前产物是2K中间素材，不是发布成片"
+  ]
+}

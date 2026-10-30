@@ -220,11 +220,15 @@
                 📤 学习素材
               </button>
               <button
-                v-if="g.qianchuan_status !== 2"
+                v-if="g.qianchuan_status !== 2 && Number(g.qianchuan_status) !== -5"
                 class="btn-qianchuan"
                 :disabled="qianchuanBusy[g.id] || g.qianchuan_status === 1"
                 @click="generateQianchuan(g)">
                 {{ qianchuanBusy[g.id] || g.qianchuan_status === 1 ? '生成中…' : (isQianchuanFailure(g.qianchuan_status) ? '↺ 重试千川版' : '生成千川版') }}
+              </button>
+              <button v-if="Number(g.qianchuan_status) === -5" class="btn-action orange"
+                :disabled="qianchuanBusy[g.id]" @click="recheckWigIdentity(g)">
+                {{ qianchuanBusy[g.id] ? '重新检查中…' : '修正素材后重新检查' }}
               </button>
               <template v-if="g.qianchuan_status === 2 && g.qianchuan_available">
                 <button class="btn-action cyan" @click="openQianchuanPreview(g)">▶ 预览</button>
@@ -241,6 +245,9 @@
           <div class="qianchuan-hint">{{ qianchuanStatusMeta(g).hint }}</div>
           <div v-if="g.qianchuan_status === 2 && g.qianchuan_file_status !== 'ready'" class="qianchuan-error">⚠ 千川结果文件缺失（stale_path），请重新生成</div>
           <div v-if="g.qianchuan_error" class="qianchuan-error">⚠ {{ summarizeQianchuanError(g.qianchuan_error) }}</div>
+          <ul v-if="Number(g.qianchuan_status) === -5" class="qianchuan-error">
+            <li v-for="(item, index) in identityReviewItems(g)" :key="index">{{ item }}</li>
+          </ul>
         </div>
 
         <!-- 封面生成面板 -->
@@ -774,6 +781,8 @@ import { REMOTE_API_BASE } from '../remoteApi.js'
 import { getGroups, getGroup, getRooms, mergeGroup, retryModes, retryDirector, retryStyles, retryQianchuan, createGroup, updateGroup, reassignRecording, importGroupVideos, createWS, getThumbnailUrl, createCustomGroup, uploadCustomGroupVideo, deleteGroup, getProcessingProgress, reclipRecording, reclipGroupAll, generateQianchuanGroup } from '../api.js'
 import QianchuanUpload from '../components/QianchuanUpload.vue'
 import { useToast } from '../composables/toast.js'
+import { qianchuanStatusMap, identityReviewItems } from '../qianchuan-review.js'
+import { recheckQianchuanIdentity } from '../api.js'
 
 const groups = ref([])
 const loading = ref(true)
@@ -1058,23 +1067,13 @@ const vibeHints = {
   creative:  '自由创作·编造卖点·催单节奏',
 }
 
-const qianchuanStatusMap = {
-  0: { label: '未生成', className: 'idle', hint: '千川结果尚未生成，请先生成/重试千川版。' },
-  1: { label: '生成中', className: 'running', hint: '正在生成千川投流版，请勿重复提交。' },
-  2: { label: '已完成', className: 'done', hint: '千川投流版已生成，可预览或下载。' },
-  '-1': { label: '普通失败', className: 'failed', hint: '生成失败，可查看错误摘要后重试。' },
-  '-2': { label: '商品不匹配', className: 'blocked', hint: '商品/颜色/镜头匹配不足，已拒绝生成。' },
-  '-3': { label: '质量失败', className: 'failed', hint: '质量检测不通过，请调整素材后重试。' },
-  '-4': { label: '编码/探测失败', className: 'failed', hint: '视频编码或质量探测失败，可重试或检查素材。' },
-}
-
 function qianchuanStatusMeta(group) {
   const status = group.qianchuan_status ?? 0
   return qianchuanStatusMap[status] || { label: `状态 ${status}`, className: 'failed', hint: '千川投流版状态异常，请查看错误摘要。' }
 }
 
 function isQianchuanFailure(status) {
-  return Number(status) < 0
+  return Number(status) < 0 && Number(status) !== -5
 }
 
 function formatQianchuanScore(score) {
@@ -1512,6 +1511,14 @@ async function generateQianchuan(group, cardOnly = false) {
   group.qianchuan_status = 1
   try {
     const result = await generateQianchuanGroup(group.id)
+    if (Number(result.status) === -5) {
+      group.qianchuan_status = -5
+      group.qianchuan_error = result.error
+      group.qianchuan_review = result.review
+      show('款式一致性待审核，请先核实录像与目标商品', 'info')
+      await load()
+      return
+    }
     if (!result.success && result.status !== 1) {
       group.qianchuan_status = result.status
       group.qianchuan_score = result.score
@@ -1527,6 +1534,19 @@ async function generateQianchuan(group, cardOnly = false) {
     show(group.qianchuan_error, 'error')
     if (cardOnly) await refreshGroupCard(group).catch(() => {})
     else await load().catch(() => {})
+  } finally {
+    qianchuanBusy.value[group.id] = false
+  }
+}
+
+async function recheckWigIdentity(group) {
+  qianchuanBusy.value[group.id] = true
+  try {
+    const result = await recheckQianchuanIdentity(group.id)
+    show(result.review_required ? '证据仍不足或存在冲突，请修正素材后再检查' : '元数据检查通过；画面与商品仍需审核', 'info')
+    await load()
+  } catch (error) {
+    show(error.message || '重新检查失败', 'error')
   } finally {
     qianchuanBusy.value[group.id] = false
   }

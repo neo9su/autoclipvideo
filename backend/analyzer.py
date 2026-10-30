@@ -63,29 +63,46 @@ async def _call_bedrock(text: str) -> Optional[dict]:
 
 
 def _srt_to_text(srt_path: str, max_chars: int = 4000) -> str:
-    """Extract plain text from SRT, truncated to max_chars."""
-    try:
-        with open(srt_path, encoding="utf-8") as f:
-            content = f.read()
-        lines = []
-        for line in content.splitlines():
-            line = line.strip()
-            if not line or re.match(r"^\d+$", line) or re.match(r"^\d{2}:\d{2}:\d{2}", line):
-                continue
-            lines.append(line)
-        text = " ".join(lines)
-        if len(text) > max_chars:
-            # Sample evenly to preserve coverage
-            step = len(text) // max_chars
-            text = text[::max(1, step)][:max_chars]
+    """Keep intact, contiguous subtitle passages distributed over the source.
+
+    These are explicit excerpts, not a continuous conversation or SKU evidence.
+    Product retrieval must independently examine every original cue.
+    """
+    import re
+    from pathlib import Path
+    content = Path(srt_path).read_text(encoding='utf-8-sig')
+    lines = [line.strip() for line in content.splitlines()
+             if line.strip() and not re.match(r'^\d+$|^\d{2,3}:\d{2}:\d{2}', line.strip())]
+    text = ' '.join(lines)
+    if len(text) <= max_chars:
         return text
-    except Exception as e:
-        logger.error(f"SRT read error {srt_path}: {e}")
-        return ""
+    if max_chars < 32:
+        return ''
+    # Whole cues, including adjacent context; never decimate individual characters.
+    count = min(8, len(lines), max(1, max_chars // 160))
+    separator = '\n[中间字幕省略，以下为另一时间段]\n'
+    budget = max(1, (max_chars - (count-1)*len(separator)) // count)
+    passages = []
+    used = set()
+    for k in range(count):
+        anchor = round(k*(len(lines)-1)/max(1,count-1))
+        indices = range(anchor, len(lines)) if k < count-1 else range(anchor, -1, -1)
+        chosen = []
+        size = 0
+        for i in indices:
+            if i in used or size + len(lines[i]) + bool(chosen) > budget:
+                break
+            chosen.append(i)
+            size += len(lines[i]) + (len(chosen)>1)
+        if chosen:
+            used.update(chosen)
+            passages.append(' '.join(lines[i] for i in sorted(chosen)))
+    return separator.join(passages)
 
 
 async def _get_or_create_group(room_id: int, wig_model: Optional[str], wig_color: Optional[str]) -> int:
     # Convert lists to strings (LLM may return lists)
+    from group_lifecycle import OPEN_GROUP_SQL
     if isinstance(wig_model, list):
         wig_model = ", ".join(str(x) for x in wig_model)
     if isinstance(wig_color, list):
@@ -95,8 +112,8 @@ async def _get_or_create_group(room_id: int, wig_model: Optional[str], wig_color
     async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            """SELECT id FROM clip_groups
-               WHERE room_id = ? AND (wig_model IS ? OR (wig_model IS NULL AND ? IS NULL))
+            f"""SELECT id FROM clip_groups
+               WHERE ({OPEN_GROUP_SQL}) AND room_id = ? AND (wig_model IS ? OR (wig_model IS NULL AND ? IS NULL))
                                  AND (wig_color IS ? OR (wig_color IS NULL AND ? IS NULL))""",
             (room_id, wig_model, wig_model, wig_color, wig_color),
         ) as cur:
@@ -111,6 +128,7 @@ async def _get_or_create_group(room_id: int, wig_model: Optional[str], wig_color
         return cur.lastrowid
 
 
+
 async def analyze_recording(recording_id: int, filename: str, room_id: int):
     """Analyze SRT with LLM and assign recording to a clip group."""
     srt_path = resolve_srt_path(os.path.join(RECORDINGS_DIR, filename))
@@ -122,6 +140,14 @@ async def analyze_recording(recording_id: int, filename: str, room_id: int):
     if not text:
         return
 
+    product_match_text = text  # Model hints must never become observed speech.
+    # Retrieve names from every original cue before bounded LLM analysis.
+    # Saved candidates remain unverified; this does not authorize a cart.
+    try:
+        from wig_name_recall import enrich
+        text = await enrich(srt_path, recording_id, room_id, text)
+    except Exception as exc:
+        logger.warning("Full-cue name recall failed for %s: %s", recording_id, type(exc).__name__)
     result = await _call_bedrock(text)
     if not result:
         async with aio_connect() as db:

@@ -13,6 +13,7 @@
           <button :class="['nav-btn', page === 'queue' && 'active']" @click="page = 'queue'">作业队列</button>
           <button :class="['nav-btn', page === 'groups' && 'active']" @click="page = 'groups'">分组管理</button>
           <button :class="['nav-btn', page === 'clips' && 'active']" @click="page = 'clips'">剪辑文件</button>
+          <button :class="['nav-btn', page === 'library' && 'active']" @click="page = 'library'">历史素材库</button>
           <button :class="['nav-btn', page === 'products' && 'active']" @click="page = 'products'">商品库</button>
           <button :class="['nav-btn', page === 'publish' && 'active']" @click="page = 'publish'">发布</button>
         </nav>
@@ -66,6 +67,7 @@
       <Groups v-else-if="page === 'groups'" />
       <Clips v-else-if="page === 'clips'" />
       <Upload v-else-if="page === 'upload'" />
+      <HistoryLibrary v-else-if="page === 'library'" />
       <Products v-else-if="page === 'products'" />
       <Publish v-else-if="page === 'publish'" />
       <ClipQueue v-else-if="page === 'queue'" />
@@ -84,6 +86,7 @@ import Groups from './views/Groups.vue'
 import Clips from './views/Clips.vue'
 import Upload from './views/Upload.vue'
 import Products from './views/Products.vue'
+import HistoryLibrary from './views/HistoryLibrary.vue'
 import Publish from './views/Publish.vue'
 import ClipQueue from './views/ClipQueue.vue'
 import GpuBanner from './components/GpuBanner.vue'
@@ -212,7 +215,7 @@ nav { display: flex; gap: 8px; }
 .global-loading > span:last-child { background:rgba(20,20,20,.92); color:#ddd; border:1px solid #444; border-radius:8px; padding:8px 14px 8px 8px; font-size:13px; box-shadow:0 4px 20px rgba(0,0,0,.35); }
 .global-spinner { width:18px; height:18px; margin:8px 8px 0 0; border:2px solid #555; border-top-color:#fe2c55; border-radius:50%; animation:spin .8s linear infinite; }
 @keyframes spin { to { transform:rotate(360deg); } }
-.toast-container { position: fixed; bottom: 24px; right: 24px; display: flex; flex-direction: column; gap: 8px; z-index: 200; }
+.toast-container { position: fixed; top: 72px; right: 24px; display: flex; flex-direction: column; gap: 8px; z-index: 10020; }
 .toast { padding: 10px 18px; border-radius: 8px; font-size: 13px; color: #fff; max-width: 320px; animation: toast-in 0.2s ease; }
 .toast.info    { background: #2a2a2a; border: 1px solid #444; }
 .toast.success { background: rgba(52,211,153,0.2); border: 1px solid rgba(52,211,153,0.4); color: #34d399; }

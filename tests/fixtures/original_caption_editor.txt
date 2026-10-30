@@ -1,0 +1,139 @@
+# Minimal production regression fixture for the original caption bug.
+
+def _gpu_xfade_overlap(seg: "Seg") -> float:
+    """Mirror the GPU-side xfade overlap for a segment's transition.
+
+    Must stay in sync with ``_merge2`` in gpu_service/main.py:
+      - "cut" (or duration 0) → hard cut, no overlap
+      - otherwise fade = clamp(transition_duration, 0.1, 1.0)
+    """
+    tr = (seg.transition or "").split(":")
+    name = (tr[0] or "").strip()
+    if name == "cut":
+        return 0.0
+    try:
+        tr_dur = float(tr[1]) if len(tr) > 1 else 0.35
+    except (ValueError, IndexError):
+        tr_dur = 0.35
+    return max(0.1, min(tr_dur, 1.0))
+
+def build_ass(selected: List[Seg], all_segs: List[Seg], realistic: bool = False) -> str:
+    """
+    Generate ASS subtitle string with 3-layer gradient border.
+
+    Each SRT line becomes 3 stacked Dialogue events:
+      Layer 0: blue  outer ring (bord=7, transparent fill)
+      Layer 1: purple inner ring (bord=4, transparent fill)
+      Layer 2: white text       (bord=2, thin dark outline)
+
+    Highlight keywords on Layer 2 are coloured warm-gold + bold.
+    """
+    MAX_SUB_CHARS = 14  # 每行最多14字；超长按标点断句，避免话说到一半被腰斩
+
+    def _truncate(text: str) -> str:
+        """Keep at most MAX_SUB_CHARS characters, cutting at punctuation first."""
+        text = text.strip()
+        if len(text) <= MAX_SUB_CHARS:
+            return text
+        cut = text[:MAX_SUB_CHARS]
+        # Prefer breaking at a natural pause so the caption never ends mid-word.
+        for marker in ("。", "！", "？", "，", "、", "；", " ", "…"):
+            idx = cut.rfind(marker)
+            if idx >= MAX_SUB_CHARS // 2:
+                return cut[:idx + (1 if marker in "。！？；…" else 0)]
+        return cut
+
+    header = _make_ass_header(_get_style_profile())
+    dialogue: list[str] = []
+    cursor = 0.0
+    line_idx = 0
+    rendered_srt_ids: set = set()   # track (srt.idx, sel_seg_idx) to avoid duplicates
+    rendered_intervals: list[tuple[float, float]] = []
+    kw_pop_count: dict = {}
+    kw_last_pop: dict = {}
+    for sel_idx, sel_seg in enumerate(selected):
+        offset = cursor
+        # Account for xfade overlap: each segment after the first overlaps
+        # with the previous one in the final video timeline.  The overlap
+        # duration must mirror the GPU merge exactly:
+        #   transition_duration is clamped to [0.1, 1.0] and "cut" still
+        #   collapses to a near-zero (0.1s) crossfade on the GPU side.
+        # (Previously hardcoded FADE_DUR=1.5 here while the GPU used 0.35
+        #  → subtitles drifted ~1.15s per segment.)
+        if sel_idx == 0:
+            cursor += sel_seg.duration
+        else:
+            overlap = _gpu_xfade_overlap(sel_seg)
+            cursor += sel_seg.duration - overlap
+        for srt in all_segs:
+            ov_start = max(srt.start, sel_seg.start)
+            ov_end   = min(srt.end,   sel_seg.end)
+            if ov_end - ov_start < 0.15:  # require at least 150ms overlap
+                continue
+            # A source SRT can overlap several neighbouring lines.  Keep at
+            # most two semantic subtitle events visible at any instant (the
+            # decorative keyword layer does not count as another caption).
+            t0_candidate = offset + (ov_start - sel_seg.start)
+            t1_candidate = offset + (ov_end - sel_seg.start)
+            if sum(a < t1_candidate and t0_candidate < b for a, b in rendered_intervals) >= 3:
+                continue
+            dedup_key = (srt.idx, sel_idx)
+            if dedup_key in rendered_srt_ids:
+                continue
+            rendered_srt_ids.add(dedup_key)
+            t0 = t0_candidate
+            t1 = t1_candidate
+            rendered_intervals.append((t0, t1))
+            raw_text = _truncate(srt.text)
+            full_text = srt.text
+            dyn_kws = _dynamic_keywords(all_segs)
+            if realistic:
+                # Keep the subtitle text clean (no inline highlight colours) but
+                # still emit the KWPOP big-word sticker + sound effect layer.
+                annotated = raw_text
+                has_kw = _kw_match(full_text, dyn_kws) is not None
+            else:
+                annotated, has_kw = _annotate_text(raw_text)
+                if not has_kw and _kw_match(full_text, dyn_kws):
+                    has_kw = True
+            anim = _ANIM_KW if has_kw else _ANIM_STYLES[line_idx % len(_ANIM_STYLES)]
+            line_idx += 1
+            ts0, ts1 = _sec_to_ass(t0), _sec_to_ass(t1)
+            # Layer 0: white text + keyword highlights (半透明深色描边，无蓝/紫色)
+            dialogue.append(f"Dialogue: 0,{ts0},{ts1},XQN,,{_ASS_SUBTITLE_MARGIN},{_ASS_SUBTITLE_MARGIN},0,,{anim}{_BORDER_TEXT}{annotated}")
+            # Layer 3: 顶部中央关键词大贴纸字（含动态高频词的句子）
+            if has_kw:
+                kw_word = _kw_match(full_text, dyn_kws)
+                # Frequency cap: each keyword pops at most 2× per clip, with
+                # >=5s between pops — sticker barrage hurts watchability.
+                if kw_word:
+                    last_t = kw_last_pop.get(kw_word, -99.0)
+                    pop_n = kw_pop_count.get(kw_word, 0)
+                    if pop_n >= 2 or (t0 - last_t) < 5.0:
+                        kw_word = None
+                    else:
+                        kw_pop_count[kw_word] = pop_n + 1
+                        kw_last_pop[kw_word] = t0
+                if kw_word:
+                    kw_anim = (r"{\fad(0,200)"
+                               r"\t(0,150,\fscx130\fscy130)"
+                               r"\t(150,300,\fscx95\fscy95)"
+                               r"\t(300,450,\fscx108\fscy108)"
+                               r"\t(450,600,\fscx100\fscy100)}")
+                    dialogue.append(
+                        f"Dialogue: 3,{ts0},{ts1},KWPOP,,0,0,0,,{kw_anim}{kw_word}"
+                    )
+    return header + "\n".join(dialogue) + "\n"
+
+async def edit_recording():
+    segs = parse_srt(srt_path)
+    return await _edit_via_gpu(mp4_filename, room_id, selected, segs, out_path)
+
+async def edit_recording_multi():
+    segs = parse_srt(srt_path)
+    return await _edit_via_gpu(mp4_filename, _room_id_v, selected, segs, out_path)
+
+async def _edit_via_gpu():
+    payload = {
+        "idempotency_key": f"clip:{room_id}:{mp4_filename}:{'realistic' if realistic else 'stylized'}:{segment_fingerprint}",
+    }

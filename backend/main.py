@@ -28,6 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from backend_instance_lock import single_backend_instance
 from db import init_db, DB_PATH, aio_connect
 from models import RoomCreate, Room, Recording, ProductCreate, ProductUpdate, PublishAccountCreate, PublishTaskCreate, BatchScheduleCreate
 from monitor import MonitorManager
@@ -95,7 +96,10 @@ def _recording_file_path(filename: str | None) -> str | None:
 def _recording_file_exists(filename: str | None) -> bool:
     """Return True when the recording source file is present locally."""
     path = _recording_file_path(filename)
-    return bool(path and os.path.exists(path))
+    if path and os.path.exists(path):
+        return True
+    legacy = os.path.join(os.path.dirname(__file__), "..", "recordings", filename) if filename else None
+    return bool(legacy and os.path.exists(legacy))
 
 
 def _parse_recording_time(value: str | None) -> datetime | None:
@@ -211,8 +215,8 @@ async def _reset_stuck_clip_tasks():
 
         missing = [
             r["id"] for r in done_rows
-            if not os.path.exists(os.path.join(recordings_dir, r["clip_filename"]))
-            and os.path.exists(os.path.join(recordings_dir, r["filename"]))
+            if not _recording_file_exists(r["clip_filename"])
+            and _recording_file_exists(r["filename"])
         ]
         if missing:
             placeholders = ",".join("?" * len(missing))
@@ -627,6 +631,7 @@ async def _periodic_cleanup():
             logger.debug(f"Periodic cleanup error: {e}")
 
 
+@single_backend_instance(Path(DB_PATH).resolve().with_suffix(".backend.lock"))
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Deployment role is validated at module load (see _DEPLOYMENT_ROLE above)
@@ -716,6 +721,10 @@ _qianchuan_api_error = None
 _qianchuan_upload_loaded = False
 
 app = FastAPI(title="Douyin Recorder", lifespan=lifespan)
+from publish_review import router as publish_review_router
+app.include_router(publish_review_router)
+from history_library_routes import router as history_library_router
+app.include_router(history_library_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -771,7 +780,7 @@ async def health():
         try:
             async with aio_connect() as db:
                 db.row_factory = aiosqlite.Row
-                for status_code, label in [(0, "pending"), (1, "running"), (2, "done"), (-1, "failed"), (-2, "permanent_fail"), (-3, "quality_fail"), (-4, "probe_fail")]:
+                for status_code, label in [(0, "pending"), (1, "running"), (2, "done"), (-1, "failed"), (-2, "permanent_fail"), (-3, "quality_fail"), (-4, "probe_fail"), (-5, "review_required")]:
                     async with db.execute(
                         "SELECT COUNT(*) as cnt FROM clip_groups WHERE qianchuan_status = ?", (status_code,)
                     ) as cur:
@@ -1331,7 +1340,9 @@ async def download_clip(recording_id: int):
         raise HTTPException(status_code=404, detail="Recording not found")
     if rec["clipped"] != 2 or not rec["clip_filename"]:
         raise HTTPException(status_code=404, detail="Clip not ready")
-    clip_path = os.path.join(os.path.dirname(__file__), "..", "recordings", rec["clip_filename"])
+    clip_path = _recording_file_path(rec["clip_filename"])
+    if not clip_path or not os.path.isfile(clip_path):
+        clip_path = os.path.join(os.path.dirname(__file__), "..", "recordings", rec["clip_filename"])
     if not os.path.exists(clip_path):
         raise HTTPException(status_code=404, detail="Clip file missing")
     return FileResponse(clip_path, media_type="video/mp4", filename=os.path.basename(rec["clip_filename"]))
@@ -1357,7 +1368,9 @@ async def download_recording_clip(clip_id: int):
             clip = await cur.fetchone()
     if not clip:
         raise HTTPException(status_code=404, detail="Clip not found")
-    clip_path = os.path.join(os.path.dirname(__file__), "..", "recordings", clip["clip_filename"])
+    clip_path = _recording_file_path(clip["clip_filename"])
+    if not clip_path or not os.path.isfile(clip_path):
+        clip_path = os.path.join(os.path.dirname(__file__), "..", "recordings", clip["clip_filename"])
     if not os.path.exists(clip_path):
         raise HTTPException(status_code=404, detail="Clip file missing")
     return FileResponse(clip_path, media_type="video/mp4", filename=os.path.basename(clip["clip_filename"]))
@@ -4647,14 +4660,24 @@ async def get_group_cover(group_id: int, filename: str):
 # ── Product matching ──────────────────────────────────────────────────────────
 
 @app.post("/api/groups/{group_id}/match-product")
-async def match_group_product(group_id: int):
+async def match_group_product(group_id: int, q: str = ""):
+    from publish_catalog_match import match_candidates, search_term
     async with aio_connect() as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT id FROM clip_groups WHERE id = ?", (group_id,)) as cur:
-            if not await cur.fetchone():
-                raise HTTPException(status_code=404, detail="Group not found")
-    product = await match_product(group_id)
-    return {"group_id": group_id, "product": product}
+        async with db.execute("SELECT * FROM clip_groups WHERE id = ?", (group_id,)) as cur:
+            group = await cur.fetchone()
+        if not group:
+            raise HTTPException(status_code=404, detail="Group not found")
+        async with db.execute("SELECT * FROM products WHERE enabled=1") as cur:
+            products = [dict(row) for row in await cur.fetchall()]
+    term = search_term(dict(group), q)
+    matched = match_candidates(dict(group), products, q)
+    if not term:
+        product = await match_product(group_id)
+        matched = [product] if product and product.get("product_url") else []
+    return {"group_id": group_id, "product": matched[0] if matched else None,
+            "products": matched, "query": term, "max_products": 5, "overflow": len(matched)>5}
+
 
 
 
@@ -4867,6 +4890,10 @@ async def stream_login_refresh():
 
 
 # ── Static frontend ───────────────────────────────────────────────────────────
+
+history_library_dist = os.path.join(os.path.dirname(__file__), "..", "frontend", "history-library-dist")
+if os.path.isdir(history_library_dist):
+    app.mount("/history-library", StaticFiles(directory=history_library_dist, html=True), name="history-library")
 
 frontend_dist = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
 if os.path.exists(frontend_dist):

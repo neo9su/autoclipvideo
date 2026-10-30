@@ -1,0 +1,285 @@
+"""Explicit 203 administrative maintenance: preserve work, activate staged code.
+
+No new media jobs are submitted. Existing backend startup recovery requeues interrupted
+control-plane tasks. Persistent worker queues and recent director jobs must drain first.
+"""
+from pathlib import Path
+import datetime
+import hashlib
+import json
+import re
+import sqlite3
+import subprocess
+import time
+import urllib.error
+import urllib.request
+
+ROOT = Path(r'C:\Users\neo\douyin_backend')
+WORKER = Path(r'C:\Users\neo\douyin_processor')
+EXPECTED = {
+    ROOT / 'backend' / 'voice_director.py': 'e80730f31d11120b819b85082e3c226b1e1496898b8c1a85e4807a1eee19e632',
+    ROOT / 'gpu_service' / 'main.py': '7254dd1b8ccfbf8903845a148315882d1c8abdabb639e216399c49a53a74c18a',
+    WORKER / 'gpu_service' / 'main.py': '7254dd1b8ccfbf8903845a148315882d1c8abdabb639e216399c49a53a74c18a',
+}
+
+
+def request(port, path, method='GET', timeout=15):
+    req = urllib.request.Request(f'http://127.0.0.1:{port}{path}',
+                                 data=b'' if method == 'POST' else None, method=method)
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        return json.load(response)
+
+
+def director_ids():
+    ids = set()
+    for filename in [WORKER / 'gpu_service_stdout.log', WORKER / 'gpu_service_stderr.log',
+                     Path(r'C:\douyin_login\_uv3.log')]:
+        with filename.open('rb') as stream:
+            stream.seek(max(0, filename.stat().st_size - 1000000))
+            ids.update(re.findall(rb'dir_[0-9a-f]{12}', stream.read()))
+    return {value.decode() for value in ids}
+
+
+def assert_worker_idle(ids):
+    health = request(8877, '/health')
+    fields = ['gpu_busy', 'queue_depth', 'clip_jobs_running', 'clip_jobs_pending',
+              'concat_jobs_active', 'classic_concat_jobs_active']
+    if any(k not in health or health[k] for k in fields):
+        raise RuntimeError('Worker health counters not idle')
+    if any(health.get('media_jobs_active', {}).values()):
+        raise RuntimeError('Worker complete media counters not idle')
+    with sqlite3.connect(r'F:\douyin_recordings\jobs.db') as db:
+        for table in ['jobs', 'clip_jobs', 'tts_jobs', 'concat_jobs']:
+            n = db.execute("select count(*) from " + table +
+                           " where status is null or status not in ('done','error','cancelled','canceled')").fetchone()[0]
+            if n:
+                raise RuntimeError('Worker queue active: ' + table)
+    for job_id in ids:
+        try:
+            job = request(8877, '/director-jobs/' + job_id, timeout=5)
+        except urllib.error.HTTPError as error:
+            if error.code == 404:
+                continue
+            raise
+        if job.get('status') not in ('done', 'error', 'cancelled', 'canceled'):
+            raise RuntimeError('Director task still active')
+    return health
+
+
+def backend_pids():
+    cmd = "Get-NetTCPConnection -LocalPort 8899 -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique"
+    result = subprocess.run(['powershell', '-NoProfile', '-Command', cmd], capture_output=True, text=True)
+    return {int(value) for value in result.stdout.split() if value.isdigit()}
+
+
+BACKEND_TASKS = (
+    'Uvicorn8899', 'DouyinBackend8899SusunInteractive',
+    'DouyinBackend8899System', 'DouyinRemoteBackend8899',
+    'DouyinRemoteBackend8899Interactive',
+)
+GUARD_TASK = 'Wd8899Sys'
+
+
+def backend_task_plan(preferred_owner=None):
+    # Emit only task identity/state, never action arguments or environment values.
+    names = ','.join("'" + name + "'" for name in (*BACKEND_TASKS, GUARD_TASK))
+    command = ("$names=@(" + names + "); @(Get-ScheduledTask -ErrorAction Stop | "
+               "Where-Object {$_.TaskPath -eq '\\' -and $_.TaskName -in $names} | "
+               "ForEach-Object { [pscustomobject]@{name=$_.TaskName; "
+               "enabled=[bool]$_.Settings.Enabled; running=([int]$_.State -eq 4)} }) | ConvertTo-Json -Compress")
+    result = subprocess.run(['powershell', '-NoProfile', '-Command', command],
+                            capture_output=True, check=True)
+    tasks = json.loads(result.stdout.decode('utf-8-sig'))
+    if isinstance(tasks, dict):
+        tasks = [tasks]
+    by_name = {task['name']: task for task in tasks}
+    if GUARD_TASK not in by_name or 'Uvicorn8899' not in by_name:
+        raise RuntimeError('Known backend/guard task inventory incomplete; no maintenance')
+    if any(task['name'] not in (*BACKEND_TASKS, GUARD_TASK) for task in tasks):
+        raise RuntimeError('Unexpected task inventory')
+    owners = [task['name'] for task in tasks if task['name'] != GUARD_TASK and task['running']]
+    if preferred_owner is not None:
+        allowed_pair = {'Uvicorn8899', 'DouyinBackend8899SusunInteractive'}
+        if set(owners) != allowed_pair or preferred_owner not in owners:
+            raise RuntimeError('Explicit owner requires the verified System/interactive task pair')
+        owner = preferred_owner
+    elif len(owners) == 1:
+        owner = owners[0]
+    else:
+        raise RuntimeError('Expected exactly one running backend owner task; no maintenance')
+    if not by_name[owner]['enabled']:
+        raise RuntimeError('Running backend owner is disabled; preserve existing state')
+    return dict(tasks=tasks, restart_task=owner)
+
+
+def task_action(action, name):
+    if name not in (*BACKEND_TASKS, GUARD_TASK):
+        raise RuntimeError('Unknown maintenance task')
+    if action in ('Enable', 'Disable'):
+        args = ['schtasks', '/Change', '/TN', name, '/' + action.upper()]
+    else:
+        args = ['schtasks', '/' + action, '/TN', name]
+    subprocess.run(args, capture_output=True, check=True)
+
+
+def pause_backend_tasks(plan, changed):
+    # Disable triggers first; the independent two-minute guard must not undo maintenance.
+    for task in plan['tasks']:
+        if task['enabled']:
+            task_action('Disable', task['name'])
+            changed.append(task['name'])
+    for task in plan['tasks']:
+        if task['running']:
+            task_action('End', task['name'])
+
+
+def restore_backend_tasks(plan, changed):
+    # Keep the guard disabled until the original owner has started and passed readiness.
+    owner = plan['restart_task']
+    for name in changed:
+        if name != GUARD_TASK:
+            task_action('Enable', name)
+    task_action('Run', owner)
+    wait_health(8899)
+    for task in plan['tasks']:
+        if task['running'] and task['name'] not in (owner, GUARD_TASK):
+            task_action('Run', task['name'])
+    if GUARD_TASK in changed:
+        task_action('Enable', GUARD_TASK)
+
+
+def wait_health(port, required=None, seconds=90):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            health = request(port, '/health', timeout=3)
+            if required is None or required(health):
+                return health
+        except (OSError, ValueError):
+            pass
+        time.sleep(3)
+    raise RuntimeError(f'Service readiness timeout: {port}')
+
+
+TASK_RECOVERY = """from pathlib import Path
+import json,subprocess,time,urllib.request
+plan=json.loads((Path(__file__).parent/'task-state.json').read_text())
+def action(verb,name):
+    args=['schtasks','/Change','/TN',name,'/ENABLE'] if verb=='Enable' else ['schtasks','/Run','/TN',name]
+    subprocess.run(args,capture_output=True,check=True)
+for task in plan['tasks']:
+    if task['enabled'] and task['name']!='Wd8899Sys':action('Enable',task['name'])
+action('Run',plan['restart_task'])
+for attempt in range(30):
+    try:
+        with urllib.request.urlopen('http://127.0.0.1:8899/health',timeout=3) as response:
+            assert response.status==200
+        break
+    except (OSError,AssertionError):
+        if attempt==29:raise RuntimeError('Backend not ready; guard remains paused. Inspect service before retry.')
+        time.sleep(3)
+for task in plan['tasks']:
+    if task['running'] and task['name'] not in (plan['restart_task'],'Wd8899Sys'):action('Run',task['name'])
+for task in plan['tasks']:
+    if task['enabled'] and task['name']=='Wd8899Sys':action('Enable',task['name'])
+print('Original task owner restored; database and recordings unchanged.')
+"""
+
+
+def main(expected=None, rollback_order=None, label='audio-activation', restart_worker=True, backend_owner=None):
+    for path, digest in (EXPECTED if expected is None else expected).items():
+        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise RuntimeError('Source drift; no maintenance action')
+    if request(8899, '/api/gpu/status').get('maintenance') is not False:
+        raise RuntimeError('Existing maintenance state must be preserved; no action')
+    task_plan = backend_task_plan(backend_owner) if backend_owner is not None else backend_task_plan()
+    before_gpu = request(8877, '/health')
+    backup = ROOT / 'codex_rollbacks' / (label + '-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
+    backup.mkdir()
+    with sqlite3.connect(ROOT / 'douyin.db') as db:
+        db.row_factory = sqlite3.Row
+        active = [dict(row) for row in db.execute('select id,director_status,creative_status,qianchuan_status,classic_status from clip_groups where director_status=1 or creative_status=1 or qianchuan_status=1 or classic_status=1')]
+        with sqlite3.connect(backup / 'douyin.db.snapshot') as snapshot:
+            db.backup(snapshot)
+    journal = dict(backup=str(backup), gpu_pid_before=before_gpu['pid'],
+                   interrupted_control_plane_groups=active, backend_task_plan=task_plan, phase='backed_up',
+                   database_restore='never automatic', rollback_order=rollback_order if rollback_order is not None else ['remote-audio-20261018-162521', 'remote-audio-20261018-162339'])
+    def record(phase):
+        journal['phase'] = phase
+        (backup / 'activation.json').write_text(json.dumps(journal, indent=2), encoding='utf-8')
+        print(json.dumps({'phase': phase, 'backup': str(backup)}), flush=True)
+    (backup / 'task-state.json').write_text(json.dumps(task_plan, indent=2), encoding='utf-8')
+    (backup / 'restore_tasks.py').write_text(TASK_RECOVERY, encoding='utf-8')
+    record('backed_up')
+    stopped = False
+    changed_tasks = []
+    maintenance = False
+    worker_restarted = False
+    try:
+        request(8899, '/api/gpu/maintenance', 'POST')
+        maintenance = True
+        pids = backend_pids()
+        if len(pids) != 1:
+            raise RuntimeError('Expected exactly one backend listener')
+        stopped = True  # Ensure startup recovery also runs if stopping fails part-way.
+        pause_backend_tasks(task_plan, changed_tasks)
+        for pid in pids & backend_pids():
+            subprocess.run(['taskkill', '/PID', str(pid), '/F'], capture_output=True, check=True)
+        if backend_pids():
+            raise RuntimeError('Backend listener survived task pause; no worker maintenance')
+        record('backend_paused')
+        # A last submission may have raced the maintenance flag. Drain it instead of killing it.
+        record('draining_worker')
+        deadline = time.monotonic() + 120
+        while True:
+            try:
+                assert_worker_idle(director_ids())
+                break
+            except RuntimeError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(5)
+        record('worker_drained')
+        if restart_worker:
+            result = request(8878, '/restart/gpu', 'POST', timeout=20)
+            if result.get('ok') is not True:
+                raise RuntimeError('Watchdog did not confirm restart')
+            worker_restarted = True
+            health = wait_health(8877, lambda value: value.get('pid') != before_gpu['pid'] and 'media_jobs_active' in value)
+        else:
+            health = request(8877, '/health')
+        journal['gpu_pid_after'] = health['pid']
+        schema = request(8877, '/openapi.json')
+        ref = schema['paths']['/audio-concat-jobs']['post']['requestBody']['content']['multipart/form-data']['schema']['$ref'].split('/')[-1]
+        speed = schema['components']['schemas'][ref]['properties']['speed_ratio']
+        if speed.get('minimum') != 0.5 or speed.get('maximum') != 2.0:
+            raise RuntimeError('New audio API speed constraints not loaded')
+        record('worker_updated' if restart_worker else 'worker_unchanged')
+    finally:
+        if stopped:
+            try:
+                restore_backend_tasks(task_plan, changed_tasks)
+            except Exception as error:
+                journal['recovery_error'] = type(error).__name__
+                record('backend_restore_failed')
+                raise
+            record('backend_restored' if not worker_restarted else 'services_started')
+        elif maintenance:
+            request(8899, '/api/gpu/maintenance', 'DELETE')
+    # Maintenance is memory-local and resets at restart; preserve the normal operational state.
+    status = request(8899, '/api/gpu/status')
+    if status.get('maintenance') is True:
+        request(8899, '/api/gpu/maintenance', 'DELETE')
+    record('complete')
+    print(json.dumps({'complete': True, 'gpu_pid': journal['gpu_pid_after'],
+                      'interrupted_control_plane_groups': len(active)}), flush=True)
+
+
+if __name__ == '__main__':
+    import sys
+    if sys.argv[1:] == ['--plan']:
+        print(json.dumps(backend_task_plan()))
+    elif sys.argv[1:]:
+        raise SystemExit('Usage: activate_remote_audio.py [--plan]')
+    else:
+        main()

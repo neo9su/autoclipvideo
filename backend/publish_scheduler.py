@@ -13,6 +13,7 @@ import aiosqlite
 
 from db import DB_PATH, aio_connect
 from notifier import notify
+from publish_product_links import ProductLinkUnavailable, resolve_publish_products
 from publish_policy import (
     validate_publish_duration,
 )
@@ -127,6 +128,17 @@ async def _execute_task(task: dict, broadcast_fn: Optional[Callable] = None):
                     await broadcast_fn({"type": "publish_task_update", "task_id": task_id, "status": "done", "skipped": True})
                 return
 
+        resolved_products = {"links": [], "names": []}
+        if platform == "douyin":
+            if task.get("no_cart") in (True, 1, "1"):
+                resolved_products = resolve_publish_products(task, [])
+            else:
+                async with aio_connect() as product_db:
+                    product_db.row_factory = aiosqlite.Row
+                    async with product_db.execute("SELECT id, product_id, product_name, product_url FROM products") as cur:
+                        catalogue = [dict(row) for row in await cur.fetchall()]
+                resolved_products = resolve_publish_products(task, catalogue)
+
         publisher = _get_publisher(platform)
 
         # Resolve current group artifacts and migrated paths before publishing.
@@ -166,6 +178,7 @@ async def _execute_task(task: dict, broadcast_fn: Optional[Callable] = None):
         # Content gate: require title and description before publishing
         title = task.get("title")
         description = task.get("description")
+        tags = task.get("tags")
         if not title:
             # Try to generate meta on-the-fly if we have a group_id
             if task.get("group_id"):
@@ -197,6 +210,7 @@ async def _execute_task(task: dict, broadcast_fn: Optional[Callable] = None):
 
         # Build task context
         task_ctx = dict(task)
+        task_ctx.update(title=title, description=description, tags=tags)
         if task.get("cookie_file"):
             task_ctx["_cookie_file"] = task["cookie_file"]
 
@@ -205,46 +219,30 @@ async def _execute_task(task: dict, broadcast_fn: Optional[Callable] = None):
                 await broadcast_fn({"type": "publish_progress", "task_id": task_id, "message": message})
         task_ctx["_progress_fn"] = _progress
 
-        # Resolve product links (product_url preferred, fallback to product_id)
-        product_links: list[str] = []
-        product_names: list[str] = []
-        product_ids_str = task.get("product_ids")
-        if product_ids_str:
-            ids = [int(x) for x in str(product_ids_str).split(",") if x.strip()]
-            if ids:
-                placeholders = ",".join("?" * len(ids))
-                async with aio_connect() as pdb:
-                    pdb.row_factory = aiosqlite.Row
-                    async with pdb.execute(
-                        f"SELECT product_url, product_id, product_name FROM products WHERE id IN ({placeholders})", ids
-                    ) as cur:
-                        for r in await cur.fetchall():
-                            link = r["product_url"] or r["product_id"]
-                            if link:
-                                product_links.append(link)
-                                product_names.append(r["product_name"] or "")
-        elif task.get("product_douyin_id"):
-            product_links = [task["product_douyin_id"]]
-            product_names = [""]
-        if product_links and not task.get("no_cart"):
-            task_ctx["_product_douyin_ids"] = product_links
-            task_ctx["_product_names"] = product_names
+        if platform == "douyin" and resolved_products["links"]:
+            task_ctx["_product_douyin_ids"] = resolved_products["links"]
+            task_ctx["_product_names"] = resolved_products["names"]
 
         url = await publisher.publish(task_ctx, video_path)
         published_at = datetime.now(timezone.utc).isoformat()
         await _set_status("done", published_at=published_at)
         logger.info(f"Task {task_id} published: {url}")
-        title = task.get("title") or f"任务#{task_id}"
+        title = task_ctx.get("title") or f"任务#{task_id}"
         asyncio.create_task(notify(f"✅ 抖音发布成功：{title}"))
 
     except Exception as e:
         err_msg = str(e)
+        from publish_cart_input import needs_cart_input
+        if needs_cart_input(e):
+            await _set_status("waiting_input", error_msg="等待补充挂车商品：" + err_msg[:400] + "；请打开 /publish-cart-input 修改商品后继续原任务")
+            logger.warning("Task %s waiting for cart input: %s", task_id, err_msg)
+            return
         logger.error(f"Task {task_id} failed: {err_msg}")
         # 不可重试的错误类型
         non_retryable = ["视频质量不达标", "Video file not found", "video file not found",
                           "Not logged in", "login QR code", "Cookie may have expired",
                           "Re-login timed out"]  # 扫码等待超时，不重试（需要手动处理）
-        is_retryable = not any(kw in err_msg for kw in non_retryable)
+        is_retryable = not isinstance(e, ProductLinkUnavailable) and not any(kw in err_msg for kw in non_retryable)
         retry_count = task.get("retry_count", 0) or 0
         if is_retryable and retry_count < 2:
             new_retry = retry_count + 1

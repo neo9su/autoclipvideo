@@ -578,7 +578,7 @@ class DirectorVideoComposer:
                 "total_tts_duration": total_tts_duration,
                 "mode": config.get("mode", "director"),
                 "qianchuan_sound_cues": config.get("qianchuan_sound_cues", []),
-                "qianchuan_output_spec": config.get("qianchuan_output_spec"),
+                "qianchuan_output_spec": config.get("qianchuan_output_spec") or {},
             }
 
             logger.info(f"[DIRECTOR] compose_final_video: submitting to {self._GPU_SERVICE_URL}/director-jobs, clips={len(clips_payload)}, ass_len={len(ass_content)}, tts_b64_len={len(tts_b64)}, total_tts_dur={total_tts_duration:.1f}s")

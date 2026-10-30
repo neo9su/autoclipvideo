@@ -20,3 +20,5 @@ gpu_service/jobs.db
 *.db.backup.*
 *.backup.*
 gpu_storage/
+
+/frontend/history-library-dist/

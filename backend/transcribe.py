@@ -287,7 +287,7 @@ async def _try_dispatch():
         while _pending_heap and len(_running_ids) < MAX_CONCURRENT_CLIPS and not _memory_pressure:
             entry = heapq.heappop(_pending_heap)
             recording_id = entry[2]
-            if recording_id in _paused_ids:
+            if recording_id in _paused_ids or recording_id in _running_ids:
                 skipped.append(entry)
                 continue
             meta = _pending_meta.pop(recording_id, None)
@@ -408,44 +408,8 @@ async def resume_clip_job(recording_id: int) -> bool:
 
 
 async def _validate_mp4(filepath: str) -> tuple[bool, str]:
-    """Validate media on the remote GPU; never invoke local ffprobe."""
-    # Local validation is acceptable for sync recovery on the main backend
-    try:
-        if os.path.getsize(filepath) <= 0:
-            return False, "invalid mp4: file is empty"
-    except OSError as exc:
-        return False, f"invalid mp4: cannot read file ({type(exc).__name__})"
-    cmd = [
-        "ffprobe", "-v", "error",
-        "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        filepath,
-    ]
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=3.0)
-        if proc.returncode != 0:
-            err = stderr.decode(errors="replace").strip()[-200:]
-            return False, f"invalid mp4: {err}"
-        duration_str = stdout.decode().strip()
-        try:
-            if float(duration_str) <= 0:
-                return False, "invalid mp4: duration is 0"
-        except ValueError:
-            return False, f"invalid mp4: bad duration '{duration_str}'"
-        return True, ""
-    except asyncio.TimeoutError:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        return False, "invalid mp4: ffprobe timeout (>3s)"
-    except Exception as e:
-        return False, f"invalid mp4: {e}"
+    from media_probe import validate_mp4
+    return await validate_mp4(filepath)
 
 
 async def flush_poll() -> None:
@@ -664,6 +628,9 @@ async def poll_transcriptions(broadcast_fn=None):
                     upload_path, primary_id = result
                     valid, err_msg = await _validate_mp4(upload_path)
                     if not valid:
+                        if err_msg.startswith('media probe pending:'):
+                            logger.warning("Deferring media check for %s: %s", primary_id, err_msg)
+                            continue
                         logger.warning(f"Skipping corrupt file {os.path.basename(upload_path)}: {err_msg}")
                         async with aio_connect() as db:
                             await db.execute(
@@ -921,7 +888,27 @@ async def _fetch_srt(recording_id: int, job_id: str, filename: str, clip_count: 
         logger.error(f"SRT fetch error for {job_id}: {e}")
 
 
+_enqueuing_ids: set = set()
+
+
 async def _run_editor(recording_id: int, mp4_path: str, srt_path: str, clip_duration: Optional[float] = None, clip_count: int = 1, broadcast_fn=None, feedback: Optional[str] = None):
+    """Admit one request per recording across validation, queuing and execution."""
+    async with _dispatch_lk():
+        if recording_id in _enqueuing_ids or recording_id in _pending_meta or recording_id in _running_ids:
+            logger.info("Clip request already queued/running for recording %s; skipping duplicate", recording_id)
+            return
+        _enqueuing_ids.add(recording_id)
+    try:
+        return await _enqueue_editor(
+            recording_id, mp4_path, srt_path, clip_duration=clip_duration,
+            clip_count=clip_count, broadcast_fn=broadcast_fn, feedback=feedback,
+        )
+    finally:
+        async with _dispatch_lk():
+            _enqueuing_ids.discard(recording_id)
+
+
+async def _enqueue_editor(recording_id: int, mp4_path: str, srt_path: str, clip_duration: Optional[float] = None, clip_count: int = 1, broadcast_fn=None, feedback: Optional[str] = None):
     """Enqueue a clip job into the priority queue and dispatch if a slot is free."""
     global _job_seq
 
