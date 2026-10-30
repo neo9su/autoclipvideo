@@ -30,3 +30,13 @@ Backup and candidate files:
 The directory contains full original editor/transcribe sources, patched candidates, SHA256 manifest and guarded rollback.py. Neither production source nor the running backend has been replaced. Activation is deliberately guarded against active publishing, clip jobs, realistic/conservative jobs and other rendering statuses; older stale statuses need diagnosis rather than blindly clearing them.
 
 Publication 12421 and new style generation were active during investigation. Finish publication and inspect/drain active editing before running the staged activate_original_caption_sync.py with the backup path. It preserves the existing susun desktop launcher and does not restart GPU services or alter media/database rows. Activation still needs live HTTP checks, followed by one scheduler-supported real video regeneration and complete audio/subtitle playback review before any historical batch rerender. Existing 203 AID renderer's rich subtitle capability was not established by merely listing profiles; do not bypass the scheduler through the legacy private worker ports.
+
+## Activation follow-up
+
+After the user completed publication, a finite drain check waited for active styles and other editing to finish. The first wait expired without changing production; a subsequent idle check passed and the prepared repair was activated. Only the susun desktop backend restarted (new PID 22400, Session 2). Editor and transcribe hashes match the staged candidates. GPU process PID 12684 was unchanged.
+
+Post-activation HTTP checks passed: rooms 5 (0.05s), products 409 (0.08s), groups 1312 (15.57s). These counts advanced naturally since the earlier checks; no business rows were explicitly edited by the deployment.
+
+An isolated CPU-only validation loaded the deployed editor and the reported source recording 45497 SRT (1838 original cues). Two cut windows produced exactly 16 expected original subtitle events (16 actual), without selection-scene text. The ASS and validation JSON are stored under the operation stage. This confirms deployed caption mapping, not complete audible playback of a remade video. Existing finished artifacts remain unchanged and still need scheduler-compatible regeneration and full review.
+
+GPU diagnosis: AID reported gpu-203 ONLINE; the same legacy GPU service process remained alive. Health requests intermittently timed out (5s and 8s), but subsequent calls returned healthy/CUDA available in 0.18s and 0.05s. Worker logs and read-only process inspection showed ongoing/completed editing and TTS. No GPU restart was performed. The cause of intermittent timeouts has not been conclusively isolated; do not claim it is permanently fixed.
