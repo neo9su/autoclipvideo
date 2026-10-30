@@ -140,6 +140,14 @@ async def analyze_recording(recording_id: int, filename: str, room_id: int):
     if not text:
         return
 
+    product_match_text = text  # Model hints must never become observed speech.
+    # Retrieve names from every original cue before bounded LLM analysis.
+    # Saved candidates remain unverified; this does not authorize a cart.
+    try:
+        from wig_name_recall import enrich
+        text = await enrich(srt_path, recording_id, room_id, text)
+    except Exception as exc:
+        logger.warning("Full-cue name recall failed for %s: %s", recording_id, type(exc).__name__)
     result = await _call_bedrock(text)
     if not result:
         async with aio_connect() as db:
