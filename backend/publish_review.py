@@ -18,6 +18,8 @@ def confirmation_sent(task_id):
 
 
 router = APIRouter()
+from publish_cart_input import router as cart_input_router
+router.include_router(cart_input_router)
 SESSIONS = {}
 
 

@@ -80,6 +80,7 @@
             <button v-if="selectedTask.status === 'done'" class="btn-secondary" @click="repeatTask(selectedTask)" title="以相同配置再次发布">🔁 重复发布</button>
           </div>
         </div>
+        <a v-if="selectedTask.status === 'waiting_input'" href="/publish-cart-input" target="_blank">补充挂车商品并继续</a>
         <div v-if="selectedTask.error_msg" class="error-box">{{ selectedTask.error_msg }}</div>
         <div v-if="progressLog[selectedTask.id]?.length" class="progress-log">
           <div class="progress-log-title">发布进度</div>
@@ -1021,10 +1022,10 @@ function isPublishableGroup(group) {
 }
 
 function statusLabel(s) {
-  return { pending: '待发布', scheduled: '定时', publishing: '发布中', done: '已完成', failed: '失败' }[s] || s
+  return { pending: '待发布', scheduled: '定时', publishing: '发布中', done: '已完成', waiting_input: '等待补充商品', failed: '失败' }[s] || s
 }
 function statusClass(s) {
-  return { pending: 'badge-yellow', scheduled: 'badge-blue', publishing: 'badge-orange', done: 'badge-green', failed: 'badge-red' }[s] || ''
+  return { pending: 'badge-yellow', scheduled: 'badge-blue', publishing: 'badge-orange', done: 'badge-green', waiting_input: 'badge-yellow', failed: 'badge-red' }[s] || ''
 }
 function splitTags(tags) {
   if (!tags) return []
