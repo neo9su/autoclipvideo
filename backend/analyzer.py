@@ -63,25 +63,41 @@ async def _call_bedrock(text: str) -> Optional[dict]:
 
 
 def _srt_to_text(srt_path: str, max_chars: int = 4000) -> str:
-    """Extract plain text from SRT, truncated to max_chars."""
-    try:
-        with open(srt_path, encoding="utf-8") as f:
-            content = f.read()
-        lines = []
-        for line in content.splitlines():
-            line = line.strip()
-            if not line or re.match(r"^\d+$", line) or re.match(r"^\d{2}:\d{2}:\d{2}", line):
-                continue
-            lines.append(line)
-        text = " ".join(lines)
-        if len(text) > max_chars:
-            # Sample evenly to preserve coverage
-            step = len(text) // max_chars
-            text = text[::max(1, step)][:max_chars]
+    """Keep intact, contiguous subtitle passages distributed over the source.
+
+    These are explicit excerpts, not a continuous conversation or SKU evidence.
+    Product retrieval must independently examine every original cue.
+    """
+    import re
+    from pathlib import Path
+    content = Path(srt_path).read_text(encoding='utf-8-sig')
+    lines = [line.strip() for line in content.splitlines()
+             if line.strip() and not re.match(r'^\d+$|^\d{2,3}:\d{2}:\d{2}', line.strip())]
+    text = ' '.join(lines)
+    if len(text) <= max_chars:
         return text
-    except Exception as e:
-        logger.error(f"SRT read error {srt_path}: {e}")
-        return ""
+    if max_chars < 32:
+        return ''
+    # Whole cues, including adjacent context; never decimate individual characters.
+    count = min(8, len(lines), max(1, max_chars // 160))
+    separator = '\n[中间字幕省略，以下为另一时间段]\n'
+    budget = max(1, (max_chars - (count-1)*len(separator)) // count)
+    passages = []
+    used = set()
+    for k in range(count):
+        anchor = round(k*(len(lines)-1)/max(1,count-1))
+        indices = range(anchor, len(lines)) if k < count-1 else range(anchor, -1, -1)
+        chosen = []
+        size = 0
+        for i in indices:
+            if i in used or size + len(lines[i]) + bool(chosen) > budget:
+                break
+            chosen.append(i)
+            size += len(lines[i]) + (len(chosen)>1)
+        if chosen:
+            used.update(chosen)
+            passages.append(' '.join(lines[i] for i in sorted(chosen)))
+    return separator.join(passages)
 
 
 async def _get_or_create_group(room_id: int, wig_model: Optional[str], wig_color: Optional[str]) -> int:
