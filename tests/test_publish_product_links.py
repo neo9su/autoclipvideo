@@ -39,3 +39,11 @@ def test_duplicate_url_is_not_added_twice_and_invalid_url_is_rejected():
     extra=PRODUCTS+[dict(PRODUCTS[0],id=5),dict(PRODUCTS[0],id=6,product_url='dom_bad')]
     assert resolve_publish_products({'product_ids':[1,5]},extra)['links']==['https://example.invalid/a']
     with pytest.raises(ProductLinkUnavailable):resolve_publish_products({'product_id':6},extra)
+
+
+def test_ten_distinct_products_allowed_eleven_rejected():
+    products=[{'id':i,'product_name':str(i),'product_url':f'https://example.invalid/{i}'} for i in range(1,12)]
+    result=resolve_publish_products({'product_ids':list(range(1,11))},products)
+    assert len(result['links'])==10
+    with pytest.raises(ProductLinkUnavailable,match='最多挂车10个'):
+        resolve_publish_products({'product_ids':list(range(1,12))},products)

@@ -299,11 +299,11 @@ class DouyinPublisher(BasePublisher):
                     except Exception as e:
                         raise RuntimeError("发布描述或话题填写失败，请检查发布页面后重试") from e
 
-                # 6. Attach products via 购物车 → 粘贴商品链接 (max 5)
+                # 6. Attach products via 购物车 → 粘贴商品链接 (max 10)
                 #    Skipped for "无车发布" tasks (no_cart=True)
                 product_ids = task.get("_product_douyin_ids") or []
-                if len(product_ids) > 5 and not task.get("no_cart"):
-                    raise ProductLinkUnavailable("一次最多挂车5个商品，请减少商品选择后重试")
+                if len(product_ids) > 10 and not task.get("no_cart"):
+                    raise ProductLinkUnavailable("一次最多挂车10个商品，请减少商品选择后重试")
                 product_names = (task.get("_product_names") or [])
                 if product_ids and not task.get("no_cart"):
                     await progress(f"正在添加购物车商品链接（共 {len(product_ids)} 件）...")

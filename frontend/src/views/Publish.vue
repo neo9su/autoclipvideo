@@ -1438,7 +1438,7 @@ async function autoMatchProductForCurrent() {
       const matches = result.products || [result.product]
       matchedProduct.value = matches[0]
       newTask.value.product_ids = matches.map(p => p.id)
-      showToast(`已匹配 ${matches.length} 件商品${matches.length > 5 ? '，平台最多挂5件，请减少选择后创建' : ''}`, matches.length > 5 ? 'info' : 'success')
+      showToast(`已匹配 ${matches.length} 件商品${matches.length > 10 ? '，本系统最多选择10件，请减少选择后创建' : ''}`, matches.length > 10 ? 'info' : 'success')
     } else {
       showToast('未找到匹配商品', 'info')
     }

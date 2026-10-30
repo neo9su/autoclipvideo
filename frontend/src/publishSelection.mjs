@@ -78,7 +78,7 @@ export function codexCreatePublishSelection(options) {
       options.toast(message, 'error')
     }
     if (!sharedCart.no_cart && !sharedCart.product_ids.length) { reject('请为本批视频选择共同挂车商品'); return }
-    if (!sharedCart.no_cart && sharedCart.product_ids.length > 5) { reject('本批视频最多选择5件共同挂车商品'); return }
+    if (!sharedCart.no_cart && sharedCart.product_ids.length > 10) { reject('本批视频最多选择10件共同挂车商品'); return }
     const pending = ids.value.map(id => ({ id, draft: clone(drafts.get(id)) }))
     if (shared.scheduled_at && !Number.isFinite(Date.parse(/[zZ]|[+-]\d{2}:\d{2}$/.test(shared.scheduled_at) ? shared.scheduled_at : shared.scheduled_at + 'Z'))) {
       reject('请选择有效的发布时间'); return

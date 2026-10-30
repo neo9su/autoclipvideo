@@ -97,8 +97,8 @@ console.log('publish selection: search, isolated drafts, per-video tasks, partia
   assert(f.calls.every(x => x.description === '最终共同描述' && x.tags === '#最终标签'))
 }
 {
- const f=fixture();f.batch.focus(f.groups[0]);f.form().product_ids=[1,2,3,4,5,6]
+ const f=fixture();f.batch.focus(f.groups[0]);f.form().product_ids=Array.from({length:11},(_,i)=>i+1)
  await f.batch.submit();assert.equal(f.calls.length,0)
- assert.match(f.batch.errors.value[0].message,/最多选择5件/)
- f.form().product_ids=[1];await f.batch.submit();assert.equal(f.calls.length,1);assert.equal(f.batch.errors.value.length,0)
+ assert.match(f.batch.errors.value[0].message,/最多选择10件/)
+ f.form().product_ids=Array.from({length:10},(_,i)=>i+1);await f.batch.submit();assert.equal(f.calls.length,1);assert.equal(f.calls[0].product_ids.length,10);assert.equal(f.batch.errors.value.length,0)
 }

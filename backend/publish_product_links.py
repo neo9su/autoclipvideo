@@ -60,6 +60,6 @@ def resolve_publish_products(task, products):
                 raise ProductLinkUnavailable('旧发布任务无法确定商品链接，请在发布页面重新选择商品')
             link=options.pop();links=[link];names=[next(p.get('product_name') or '' for p in matches if _url(p.get('product_url'))==link)]
         else:raise ProductLinkUnavailable('请选择需要挂车的商品，或明确选择无车发布')
-    if len(links)>5:
-        raise ProductLinkUnavailable('一次最多挂车5个商品，请减少商品选择后重试')
+    if len(links)>10:
+        raise ProductLinkUnavailable('一次最多挂车10个商品，请减少商品选择后重试')
     return {'links':links,'names':names}
